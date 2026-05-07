@@ -34,7 +34,7 @@ void EOSHybrid<LogPolicy>::ReadTableFromFile(std::string fname) {
       abort();
     }
     // Make sure table has correct dimensions
-    assert(table.GetNDimensions()==1);
+    assert(table.GetNDimensions()==2);
     // TODO(PH) check that required fields are present?
 
     // Read baryon (neutron) mass
@@ -44,14 +44,17 @@ void EOSHybrid<LogPolicy>::ReadTableFromFile(std::string fname) {
     // Get table dimensions
     auto& point_info = table.GetPointInfo();
     m_nn = point_info[0].second;
+    m_ny = point_info[1].second;
 
     // (Re)Allocate device storage
     Kokkos::realloc(m_log_nb, m_nn);
-    Kokkos::realloc(m_table, ECNVARS, m_nn);
+    Kokkos::realloc(m_yq,     m_ny);
+    Kokkos::realloc(m_table, ECNVARS, m_nn, m_ny);
 
     // Create host storage to read into
     HostArray1D<Real>::HostMirror host_log_nb = create_mirror_view(m_log_nb);
-    HostArray2D<Real>::HostMirror host_table =  create_mirror_view(m_table);
+    HostArray1D<Real>::HostMirror host_yq =     create_mirror_view(m_yq);
+    HostArray3D<Real>::HostMirror host_table =  create_mirror_view(m_table);
 
     { // read nb
       Real * table_nb = table["nb"];
@@ -65,59 +68,91 @@ void EOSHybrid<LogPolicy>::ReadTableFromFile(std::string fname) {
       max_n = table_nb[m_nn-1]*(1 - 1e-15);
     }
 
+    { // read yq
+      Real * table_yq = table["yq"];
+      for (size_t iy=0; iy<m_ny; ++iy) {
+        host_yq(iy) = table_yq[iy];
+      }
+      m_id_yq = 1.0/(host_yq(1) - host_yq(0));
+      min_Y[0] = table_yq[0];
+      max_Y[0] = table_yq[m_ny-1];
+    }
+
     { // Read Q1 -> log(P)
       Real * table_Q1 = table["Q1"];
       for (size_t in=0; in<m_nn; ++in) {
-        Real p_current = table_Q1[in]*exp2_(host_log_nb(in));
-        host_table(ECLOGP,in) = log2_(p_current);
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          Real p_current = table_Q1[iflat]*exp2_(host_log_nb(in));
+          host_table(ECLOGP,in,iy) = log2_(p_current);
+        }
       }
     }
 
     { // Read Q2 -> S
       Real * table_Q2 = table["Q2"];
       for (size_t in=0; in<m_nn; ++in) {
-        host_table(ECENT,in) = table_Q2[in];
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          host_table(ECENT,in,iy) = table_Q2[iflat];
+        }
       }
     }
 
     { // Read Q3-> mu_b
       Real * table_Q3 = table["Q3"];
       for (size_t in=0; in<m_nn; ++in) {
-        host_table(ECMUB,in) = (table_Q3[in]+1)*mb;
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          host_table(ECMUB,in,iy) = (table_Q3[iflat]+1)*mb;
+        }
       }
     }
 
     { // Read Q4-> mu_q
       Real * table_Q4 = table["Q4"];
       for (size_t in=0; in<m_nn; ++in) {
-        host_table(ECMUQ,in) = table_Q4[in]*mb;
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          host_table(ECMUQ,in,iy) = table_Q4[iflat]*mb;
+        }
       }
     }
 
     { // Read Q5-> mu_le
       Real * table_Q5 = table["Q5"];
       for (size_t in=0; in<m_nn; ++in) {
-        host_table(ECMUL,in) = table_Q5[in]*mb;
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          host_table(ECMUL,in,iy) = table_Q5[iflat]*mb;
+        }
       }
     }
 
     { // Read Q7-> log(e)
       Real * table_Q7 = table["Q7"];
       for (size_t in=0; in<m_nn; ++in) {
-        Real e_current = mb*(table_Q7[in] + 1)*exp2_(host_log_nb(in));
-        host_table(ECLOGE,in) = log2_(e_current);
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          Real e_current = mb*(table_Q7[iflat] + 1)*exp2_(host_log_nb(in));
+          host_table(ECLOGE,in,iy) = log2_(e_current);
+        }
       }
     }
 
     { // Read cs2-> cs
       Real * table_cs2 = table["cs2"];
       for (size_t in=0; in<m_nn; ++in) {
-        host_table(ECCS,in) = sqrt(table_cs2[in]);
+        for (size_t iy=0; iy<m_ny; ++iy) {
+          size_t iflat = iy + m_ny*in;
+          host_table(ECCS,in,iy) = sqrt(table_cs2[iflat]);
+        }
       }
     }
 
     // Copy from host to device
     Kokkos::deep_copy(m_log_nb, host_log_nb);
+    Kokkos::deep_copy(m_yq,     host_yq);
     Kokkos::deep_copy(m_table,  host_table);
 
     m_initialized = true;
@@ -126,12 +161,14 @@ void EOSHybrid<LogPolicy>::ReadTableFromFile(std::string fname) {
     // Compute minimum enthalpy
     for (int in = 0; in < m_nn; ++in) {
       Real const nb = exp2_(host_log_nb(in));
-      // This would use GPU memory, and we are currently on the CPU, so Enthalpy is
-      // hardcoded
-      Real e = exp2_(host_table(ECLOGE,in));
-      Real p = exp2_(host_table(ECLOGP,in));
-      Real h = (e + p) / nb;
-      m_min_h = fmin(m_min_h, h);
+      for (int iy = 0; iy < m_ny; ++iy) {
+        // This would use GPU memory, and we are currently on the CPU, so Enthalpy is
+        // hardcoded
+        Real e = exp2_(host_table(ECLOGE,in,iy));
+        Real p = exp2_(host_table(ECLOGP,in,iy));
+        Real h = (e + p) / nb;
+        m_min_h = fmin(m_min_h, h);
+      }
     }
   } // if (m_initialized==false)
 }

@@ -50,14 +50,17 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
   /// Constructor
   EOSHybrid() :
       m_log_nb("log nb",1),
-      m_table("EoS table",1,1) {
-    n_species = 0;
+      m_yq("yq",1),
+      m_table("EoS table",1,1,1) {
+    n_species = 1;
     eos_units = MakeNuclear();
     m_initialized = false;
 
     // These will be set properly when the table is read
     m_id_log_nb = std::numeric_limits<Real>::quiet_NaN();
+    m_id_yq = std::numeric_limits<Real>::quiet_NaN();
     m_nn = std::numeric_limits<int>::quiet_NaN();
+    m_ny = std::numeric_limits<int>::quiet_NaN();
     m_min_h = std::numeric_limits<Real>::max();
     mb =    std::numeric_limits<Real>::quiet_NaN();
 
@@ -87,7 +90,7 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
       return min_T;
     }
 
-    Real e_cold = ColdEnergy(n);
+    Real e_cold = ColdEnergy(n, Y[0]);
     Real T = gamma_th_m1*(e-e_cold)/n;
     return Kokkos::fmax(T,min_T);
   }
@@ -103,21 +106,21 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
       return min_T;
     }
 
-    Real p_cold = ColdPressure(n);
+    Real p_cold = ColdPressure(n, Y);
     Real T = (p-p_cold)/n;
     return Kokkos::fmax(T,min_T);
   }
 
   /// Calculate the energy density using.
   KOKKOS_INLINE_FUNCTION Real Energy(Real n, Real T, const Real *Y) const {
-    Real e_cold = ColdEnergy(n);
+    Real e_cold = ColdEnergy(n, Y[0]);
     Real e_th   = n*T/gamma_th_m1;
     return e_cold + e_th;
   }
 
   /// Calculate the pressure using.
   KOKKOS_INLINE_FUNCTION Real Pressure(Real n, Real T, Real *Y) const {
-    Real p_cold = ColdPressure(n);
+    Real p_cold = ColdPressure(n, Y);
     Real p_th   = n*T;
     return p_cold + p_th;
   }
@@ -131,10 +134,10 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
 
   /// Calculate the sound speed.
   KOKKOS_INLINE_FUNCTION Real SoundSpeed(Real n, Real T, Real *Y) const {
-    Real H_cold = ColdEnthalpy(n);
+    Real H_cold = ColdEnthalpy(n, Y);
     Real H_th   = (gamma_th*T)/(gamma_th_m1);
 
-    Real Hcs2_cold = pow(ColdSoundSpeed(n),2.0)*H_cold;
+    Real Hcs2_cold = pow(ColdSoundSpeed(n, Y),2.0)*H_cold;
     Real Hcs2_th   = gamma_th*T;
 
     return sqrt((Hcs2_cold + Hcs2_th)/(H_cold + H_th));
@@ -146,29 +149,29 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
   }
 
   /// Calculate energy for the cold part.
-  KOKKOS_INLINE_FUNCTION Real ColdEnergy(Real n) const {
+  KOKKOS_INLINE_FUNCTION Real ColdEnergy(Real n, Real Yq) const {
     assert (m_initialized);
-    return exp2_(eval_at_n(ECLOGE, n));
+    return exp2_(eval_at_ny(ECLOGE, n, Yq));
   }
 
   /// Calculate pressure for the cold part.
-  KOKKOS_INLINE_FUNCTION Real ColdPressure(Real n) const {
+  KOKKOS_INLINE_FUNCTION Real ColdPressure(Real n, Real *Y) const {
     assert (m_initialized);
-    return exp2_(eval_at_n(ECLOGP, n));
+    return exp2_(eval_at_ny(ECLOGP, n, Y[0]));
   }
 
   /// Calculate enthalpy for the cold part.
-  KOKKOS_INLINE_FUNCTION Real ColdEnthalpy(Real n) const {
+  KOKKOS_INLINE_FUNCTION Real ColdEnthalpy(Real n, Real *Y) const {
     assert (m_initialized);
-    Real const p_cold = ColdPressure(n);
-    Real const e_cold = ColdEnergy(n);
+    Real const p_cold = ColdPressure(n, Y);
+    Real const e_cold = ColdEnergy(n, Y[0]);
     return (p_cold + e_cold)/n;
   }
 
   /// Calculate sound speed for the cold part.
-  KOKKOS_INLINE_FUNCTION Real ColdSoundSpeed(Real n) const {
+  KOKKOS_INLINE_FUNCTION Real ColdSoundSpeed(Real n, Real *Y) const {
     assert (m_initialized);
-    return eval_at_n(ECCS, n);
+    return eval_at_ny(ECCS, n, Y[0]);
   }
 
   /// Get the minimum enthalpy per baryon.
@@ -208,8 +211,12 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
     return m_log_nb;
   }
 
+  /// Get the raw charge fraction
+  KOKKOS_INLINE_FUNCTION DvceArray1D<Real> const GetRawYq() const {
+    return m_yq;
+  }
   /// Get the raw table data.
-  KOKKOS_INLINE_FUNCTION DvceArray2D<Real> const GetRawTable() const {
+  KOKKOS_INLINE_FUNCTION DvceArray3D<Real> const GetRawTable() const {
     return m_table;
   }
 
@@ -251,23 +258,25 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
   }
 
  private:
-  /// Low level evaluation function, not intended for outside use.
-  KOKKOS_INLINE_FUNCTION Real eval_at_n(int vi, Real n) const {
+  /// Low level evaluation function, not intended for outside use
+  KOKKOS_INLINE_FUNCTION Real eval_at_ny(int vi, Real n, Real Yq) const {
     Real log_n = log2_(n);
-    return eval_at_ln(vi, log_n);
+    return eval_at_lny(vi, log_n, Yq);
   }
-
-  /// Low level evaluation function, not intended for outside use.
-  KOKKOS_INLINE_FUNCTION Real eval_at_ln(int iv, Real log_n)
+  /// Low level evaluation function, not intended for outside use
+  KOKKOS_INLINE_FUNCTION Real eval_at_lny(int iv, Real log_n, Real yq)
       const {
-    int in;
-    Real wn0, wn1;
+    int in, iy;
+    Real wn0, wn1, wy0, wy1;
 
     weight_idx_ln(&wn0, &wn1, &in, log_n);
+    weight_idx_yq(&wy0, &wy1, &iy, yq);
 
     return
-      wn0 * m_table(iv, in+0) +
-      wn1 * m_table(iv, in+1);
+      wn0 * (wy0 * m_table(iv, in+0, iy+0)   +
+             wy1 * m_table(iv, in+0, iy+1))  +
+      wn1 * (wy0 * m_table(iv, in+1, iy+0)   +
+             wy1 * m_table(iv, in+1, iy+1));
   }
 
   /// Evaluate interpolation weight for density.
@@ -278,12 +287,25 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
     *w0 = 1.0 - (*w1);
     return;
   }
+  /// Evaluate interpolation weight for composition
+  KOKKOS_INLINE_FUNCTION void weight_idx_yq(Real *w0, Real *w1, int *iy, Real yq) const {
+    *iy = (yq - m_yq(0))*m_id_yq;
+    // Clamp iy. See weight_idx_ln.
+    if (*iy < 0) {
+      *iy = 0;
+    } else if (*iy > m_ny - 2) {
+      *iy = m_ny - 2;
+    }
+    *w1 = (yq - m_yq(*iy))*m_id_yq;
+    *w0 = 1.0 - (*w1);
+    return;
+  }
 
  private:
   // Inverse of table spacing
-  Real m_id_log_nb;
+  Real m_id_log_nb, m_id_yq;
   // Table size
-  int m_nn;
+  int m_nn, m_ny;
   // Minimum enthalpy per baryon
   Real m_min_h;
 
@@ -293,7 +315,8 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
 
   // Table storage on DEVICE.
   DvceArray1D<Real> m_log_nb;
-  DvceArray2D<Real> m_table;
+  DvceArray1D<Real> m_yq;
+  DvceArray3D<Real> m_table;
 
   // Thermal Gamma
   Real gamma_th;

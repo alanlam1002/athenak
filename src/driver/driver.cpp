@@ -601,6 +601,9 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
   mhd::MHD *pmhd = pm->pmb_pack->pmhd;
   dyngr::DynGRMHD *pdyngr = pm->pmb_pack->pdyngr;
   if (pmhd != nullptr) {
+    if (pdyngr != nullptr) {
+      (void) pdyngr->SetScalars(this, 0);
+    }
     (void) pmhd->RestrictU(this, 0);
     (void) pmhd->RestrictB(this, 0);
     (void) pmhd->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv
@@ -621,6 +624,7 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     if (pdyngr == nullptr) {
       (void) pmhd->ConToPrim(this, 0);
     } else {
+      //(void) pdyngr->SetScalars(this, 0);
       if (pz4c != nullptr) {
         (void) pz4c->ConvertZ4cToADM(this, 0);
       }

@@ -225,6 +225,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   //pnr->QueueTask(&DynGRMHD::ApplyPhysicalBCs, this, MHD_BCS, "MHD_BCS", Task_Run,
   //                 {MHD_RecvB});
   pnr->QueueTask(&MHD::Prolongate, pmhd, MHD_Prolong, "MHD_Prolong", Task_Run, {MHD_BCS});
+  pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::SetScalars, this, MHD_SetScal,
+                 "MHD_SetScal", Task_Run, {MHD_Prolong});
   if (pz4c == nullptr && padm->is_dynamic == true) {
     pnr->QueueTask(&DynGRMHD::SetADMVariables, this, MHD_SetADM, "MHD_SetADM", Task_Run,
                     {MHD_ExplRK});
@@ -479,6 +481,112 @@ TaskStatus DynGRMHD::SetTmunu(Driver *pdrive, int stage) {
 
 TaskStatus DynGRMHD::SetADMVariables(Driver *pdrive, int stage) {
   pmy_pack->padm->SetADMVariables(pmy_pack);
+  return TaskStatus::complete;
+}
+
+template<class EOSPolicy, class ErrorPolicy>
+TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::SetScalars(Driver *pdrive, int stage) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1/2 + ng;
+  int n2 = (indcs.nx2 > 1)? (indcs.nx2/2 + ng) : 1;
+  int n3 = (indcs.nx3 > 1)? (indcs.nx3/2 + ng) : 1;
+
+  int nmb = pmy_pack->nmb_thispack;
+
+  const bool multi_d = pmy_pack->pmesh->multi_d;
+  const bool three_d = pmy_pack->pmesh->three_d;
+
+  auto &cons = pmy_pack->pmhd->u0;
+  auto &eos_ = eos.ps.GetEOS();
+
+  auto &nhyd = pmy_pack->pmhd->nmhd;
+  auto &nscal = pmy_pack->pmhd->nscalars;
+  if ( nscal == 0 ) {
+    return TaskStatus::complete;
+  }
+  par_for("dyngr_resetscal_loop",DevExeSpace(),0,nmb-1,0,n3-1,0,n2-1,0,n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    int fi = 2*i;
+    int fj = 2*j;
+    int fk = 2*k;
+    Real sum_dens = 0.0;
+    bool is_sum_dens = false;
+    for (int n=0; n < nscal; ++n) {
+      bool reset_flag = false;
+      Real min_Y_ = eos_.GetMinimumSpeciesFraction(n);
+      Real max_Y_ = eos_.GetMaximumSpeciesFraction(n);
+      if (cons(m, nhyd+n, fk,fj,fi  ) < min_Y_ * cons(m, IDN, fk,fj,fi  ) ||
+          cons(m, nhyd+n, fk,fj,fi  ) > max_Y_ * cons(m, IDN, fk,fj,fi  ) ||
+          cons(m, nhyd+n, fk,fj,fi+1) < min_Y_ * cons(m, IDN, fk,fj,fi+1) ||
+          cons(m, nhyd+n, fk,fj,fi+1) > max_Y_ * cons(m, IDN, fk,fj,fi+1)) {
+        reset_flag = true;
+      }
+      if (multi_d) {
+        if (cons(m, nhyd+n, fk,fj+1,fi  ) < min_Y_ * cons(m, IDN, fk,fj+1,fi  ) ||
+            cons(m, nhyd+n, fk,fj+1,fi  ) > max_Y_ * cons(m, IDN, fk,fj+1,fi  ) ||
+            cons(m, nhyd+n, fk,fj+1,fi+1) < min_Y_ * cons(m, IDN, fk,fj+1,fi+1) ||
+            cons(m, nhyd+n, fk,fj+1,fi+1) > max_Y_ * cons(m, IDN, fk,fj+1,fi+1)) {
+          reset_flag = true;
+        }
+      }
+      if (three_d) {
+        if (cons(m, nhyd+n, fk+1,fj  ,fi  ) < min_Y_ * cons(m, IDN, fk+1,fj  ,fi  ) ||
+            cons(m, nhyd+n, fk+1,fj  ,fi  ) > max_Y_ * cons(m, IDN, fk+1,fj  ,fi  ) ||
+            cons(m, nhyd+n, fk+1,fj  ,fi+1) < min_Y_ * cons(m, IDN, fk+1,fj  ,fi+1) ||
+            cons(m, nhyd+n, fk+1,fj  ,fi+1) > max_Y_ * cons(m, IDN, fk+1,fj  ,fi+1) ||
+            cons(m, nhyd+n, fk+1,fj+1,fi  ) < min_Y_ * cons(m, IDN, fk+1,fj+1,fi  ) ||
+            cons(m, nhyd+n, fk+1,fj+1,fi  ) > max_Y_ * cons(m, IDN, fk+1,fj+1,fi  ) ||
+            cons(m, nhyd+n, fk+1,fj+1,fi+1) < min_Y_ * cons(m, IDN, fk+1,fj+1,fi+1) ||
+            cons(m, nhyd+n, fk+1,fj+1,fi+1) > max_Y_ * cons(m, IDN, fk+1,fj+1,fi+1)) {
+          reset_flag = true;
+        }
+      }
+      if (reset_flag) {
+        Real sum_scal = 0.0;
+        sum_scal += cons(m, nhyd+n, fk,fj,fi  )
+                  + cons(m, nhyd+n, fk,fj,fi+1);
+        if (!is_sum_dens) {
+          sum_dens += cons(m, IDN, fk,fj,fi  )
+                    + cons(m, IDN, fk,fj,fi+1);
+        }
+        if (multi_d) {
+          sum_scal += cons(m, nhyd+n, fk,fj+1,fi  )
+                    + cons(m, nhyd+n, fk,fj+1,fi+1);
+          if (!is_sum_dens) {
+            sum_dens += cons(m, IDN, fk,fj+1,fi  )
+                      + cons(m, IDN, fk,fj+1,fi+1);
+          }
+        }
+        if (three_d) {
+          sum_scal += cons(m, nhyd+n, fk+1,fj  ,fi  )
+                    + cons(m, nhyd+n, fk+1,fj  ,fi+1)
+                    + cons(m, nhyd+n, fk+1,fj+1,fi  )
+                    + cons(m, nhyd+n, fk+1,fj+1,fi+1);
+          if (!is_sum_dens) {
+            sum_dens += cons(m, IDN, fk+1,fj  ,fi  )
+                      + cons(m, IDN, fk+1,fj  ,fi+1)
+                      + cons(m, IDN, fk+1,fj+1,fi  )
+                      + cons(m, IDN, fk+1,fj+1,fi+1);
+          }
+        }
+        Real coarse_Y = sum_scal / sum_dens;
+        cons(m, nhyd+n, fk,fj,fi  ) = cons(m, IDN, fk,fj,fi  ) * coarse_Y;
+        cons(m, nhyd+n, fk,fj,fi+1) = cons(m, IDN, fk,fj,fi+1) * coarse_Y;
+        if (multi_d) {
+          cons(m, nhyd+n, fk,fj+1,fi  ) = cons(m, IDN, fk,fj+1,fi  ) * coarse_Y;
+          cons(m, nhyd+n, fk,fj+1,fi+1) = cons(m, IDN, fk,fj+1,fi+1) * coarse_Y;
+        }
+        if (three_d) {
+          cons(m, nhyd+n, fk+1,fj  ,fi  ) = cons(m, IDN, fk+1,fj  ,fi  ) * coarse_Y;
+          cons(m, nhyd+n, fk+1,fj  ,fi+1) = cons(m, IDN, fk+1,fj  ,fi+1) * coarse_Y;
+          cons(m, nhyd+n, fk+1,fj+1,fi  ) = cons(m, IDN, fk+1,fj+1,fi  ) * coarse_Y;
+          cons(m, nhyd+n, fk+1,fj+1,fi+1) = cons(m, IDN, fk+1,fj+1,fi+1) * coarse_Y;
+        }
+        is_sum_dens = true;
+      }
+    }
+  });
   return TaskStatus::complete;
 }
 

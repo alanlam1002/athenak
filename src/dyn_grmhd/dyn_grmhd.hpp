@@ -94,6 +94,8 @@ class DynGRMHD {
   virtual void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                              const Real dt, DvceArray5D<Real> &u0, int nghost) = 0;
 
+  virtual TaskStatus SetScalars(Driver *pdrive, int stage) = 0;
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;
@@ -140,6 +142,8 @@ class DynGRMHDPS : public DynGRMHD {
 
   virtual void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                              const Real dt, DvceArray5D<Real> &u0, int nghost);
+
+  virtual TaskStatus SetScalars(Driver *pdrive, int stage);
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,

@@ -50,6 +50,7 @@ enum TaskName {
   MHD_BCS,
   MHD_Prolong,
   MHD_SetADM,
+  MHD_SetScal,
   MHD_Excise,
   MHD_C2P,
   MHD_Newdt,

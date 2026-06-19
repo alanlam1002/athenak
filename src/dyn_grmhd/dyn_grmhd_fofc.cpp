@@ -141,33 +141,74 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           for (int n = 0; n < nscal_; ++n) {
             Real varmax = eos_min_Y(n);
             Real varmin = eos_max_Y(n);
-            for (int kt = k - kadd; kt <= k + kadd; kt++) {
-              for (int jt = j - jadd; jt <= j + jadd; jt++) {
-                for (int it = i-1; it <= i+1; it++) {
-                  varmax = fmax(varmax, u1_(m,nmhd_+n,kt,jt,it));
-                  varmin = fmin(varmin, u1_(m,nmhd_+n,kt,jt,it));
+            if ( varmin >= 0.0 ) {
+              for (int kt = k - kadd; kt <= k + kadd; kt++) {
+                for (int jt = j - jadd; jt <= j + jadd; jt++) {
+                  for (int it = i-1; it <= i+1; it++) {
+                    varmax = fmax(varmax, u1_(m,nmhd_+n,kt,jt,it));
+                    varmin = fmin(varmin, u1_(m,nmhd_+n,kt,jt,it));
+                  }
                 }
               }
-            }
-            if (utest_(m,nmhd_+n,k,j,i) > dmp_M_*varmax ||
-                utest_(m,nmhd_+n,k,j,i) < varmin/dmp_M_) {
-              fofc_scal_(m,n,k,j,i) = true;
+              if (utest_(m,nmhd_+n,k,j,i) > dmp_M_*varmax ||
+                  utest_(m,nmhd_+n,k,j,i) < varmin/dmp_M_) {
+                fofc_scal_(m,n,k,j,i) = true;
+              }
             }
           }
         }
       }
 
       if ( nscal_ > 0 ) {
-        for (int n=0; n<nscal_; ++n) {
-          if ( utest_(m,IDN,k,j,i) > 0 ) {
-            Real min_Y_ = eos_min_Y(n);
-            Real max_Y_ = eos_max_Y(n);
-            if ( utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_+n,k,j,i) ||
-                 utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_+n,k,j,i) ) {
+        if constexpr (
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+          // Hierarchy of FOFC for ZLA Bag EOS
+          Real min_Y_ = eos_min_Y(0);
+          Real max_Y_ = eos_max_Y(0);
+          if ( utest_(m,IDN,k,j,i) <= 0 ||
+               utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_,k,j,i) ||
+               utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_,k,j,i) ) {
+            for (int n=0; n<nscal_; ++n) {
               fofc_scal_(m,n,k,j,i) = true;
             }
           } else {
-            fofc_scal_(m,n,k,j,i) = true;
+            min_Y_ = eos_min_Y(1);
+            max_Y_ = eos_max_Y(1);
+            if ( utest_(m,nmhd_,k,j,i) * min_Y_ > utest_(m,nmhd_+1,k,j,i) ||
+                 utest_(m,nmhd_,k,j,i) * max_Y_ < utest_(m,nmhd_+1,k,j,i) ) {
+              for (int n=1; n<nscal_; ++n) {
+                fofc_scal_(m,n,k,j,i) = true;
+              }
+            } else {
+              Real nb = utest_(m,nmhd_+1,k,j,i);
+              min_Y_ = eos_min_Y(2);
+              max_Y_ = eos_max_Y(2);
+              if ( nb * min_Y_ > utest_(m,nmhd_+2,k,j,i) ||
+                   nb * max_Y_ < utest_(m,nmhd_+2,k,j,i) ) {
+                fofc_scal_(m,2,k,j,i) = true;
+              }
+              nb = utest_(m,IDN,k,j,i) - utest_(m,nmhd_+1,k,j,i);
+              min_Y_ = eos_min_Y(3);
+              max_Y_ = eos_max_Y(3);
+              if ( nb * min_Y_ > utest_(m,nmhd_+3,k,j,i) ||
+                   nb * max_Y_ < utest_(m,nmhd_+3,k,j,i) ) {
+                fofc_scal_(m,3,k,j,i) = true;
+              }
+            }
+          }
+        } else {
+          for (int n=0; n<nscal_; ++n) {
+            if ( utest_(m,IDN,k,j,i) > 0 ) {
+              Real min_Y_ = eos_min_Y(n);
+              Real max_Y_ = eos_max_Y(n);
+              if ( utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_+n,k,j,i) ||
+                   utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_+n,k,j,i) ) {
+                fofc_scal_(m,n,k,j,i) = true;
+              }
+            } else {
+              fofc_scal_(m,n,k,j,i) = true;
+            }
           }
         }
       }
@@ -322,7 +363,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       if (three_d) {
         Real wmk[NPRIM], *wpk;
-        Real bmk[NPRIM], bpk[NMAG];
+        Real bmk[NMAG], bpk[NMAG];
         // Reconstruct states
         ExtractPrimitives(wmk, w0_, eos_, nmhd_, nscal_, m, k-1, j, i);
         wpk = &wri[0];
@@ -473,7 +514,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       if (three_d) {
         Real *wmk, wpk[NPRIM];
-        Real bmk[NPRIM], bpk[NMAG];
+        Real bmk[NMAG], bpk[NMAG];
         // Reconstruct states
         wmk = &wli[0];
         ExtractPrimitives(wpk, w0_, eos_, nmhd_, nscal_, m, k+1, j, i);
@@ -567,43 +608,185 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       // Estimate density D^- at boundary from i-1
       Real uD = utest_(m,IDN,k,j,i-1) - bet_pp * flx1(m,IDN,k,j,i);
-      if ( uD > 0.0 ) {
-        for (int n=0; n < nscal_; ++n) {
-          Real uY_m = utest_(m,nmhd_+n,k,j,i-1) - bet_pp * flx1(m,nmhd_+n,k,j,i);
-          Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-          Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+      if constexpr (
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+        if ( uD > 0.0 ) {
+          Real uY_m = utest_(m,nmhd_,k,j,i-1) - bet_pp * flx1(m,nmhd_,k,j,i);
+          Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+          Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
           if ( uY_m < min_DY_ ) {
-            wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j,i-1) - min_DY_ ) * bet_ppi
-              - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
+            wthe_m[0] = ( ( utest_(m,nmhd_,k,j,i-1) - min_DY_ ) * bet_ppi
+              - flx_llf[0] ) / ( flx1(m,nmhd_,k,j,i) - flx_llf[0] );
           } else if ( uY_m > max_DY_ ) {
-            wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i-1) ) * bet_ppi
-              + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
+            wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i-1) ) * bet_ppi
+              + flx_llf[0] ) / ( flx_llf[0] - flx1(m,nmhd_,k,j,i) );
           } else {
-            wthe_m[n] = 1.0;
+            wthe_m[0] = 1.0;
           }
+          // Estimated Volume Fraction
+          Real uD0 = utest_(m,nmhd_,k,j,i-1) - bet_pp * ( flx_llf[0]
+            + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx1(m,nmhd_,k,j,i) - flx_llf[0]) );
+          if ( uD0 >= 0.0 && uD0 <= uD ) {
+            uY_m = utest_(m,nmhd_+1,k,j,i-1) - bet_pp * flx1(m,nmhd_+1,k,j,i);
+            min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+            max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+            if ( uY_m < min_DY_ ) {
+              wthe_m[1] = ( ( utest_(m,nmhd_+1,k,j,i-1) - min_DY_ ) * bet_ppi
+                - flx_llf[1] ) / ( flx1(m,nmhd_+1,k,j,i) - flx_llf[1] );
+            } else if ( uY_m > max_DY_ ) {
+              wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i-1) ) * bet_ppi
+                + flx_llf[1] ) / ( flx_llf[1] - flx1(m,nmhd_+1,k,j,i) );
+            } else {
+              wthe_m[1] = 1.0;
+            }
+            // Estimated Nucleons Fraction
+            Real uDN = utest_(m,nmhd_+1,k,j,i-1) - bet_pp * ( flx_llf[1]
+              + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx1(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+            if ( uDN >= 0.0 && uDN <= uD0 ) {
+              uY_m = utest_(m,nmhd_+2,k,j,i-1) - bet_pp * flx1(m,nmhd_+2,k,j,i);
+              min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+              max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+              if ( uY_m < min_DY_ ) {
+                wthe_m[2] = ( ( utest_(m,nmhd_+2,k,j,i-1) - min_DY_ ) * bet_ppi
+                  - flx_llf[2] ) / ( flx1(m,nmhd_+2,k,j,i) - flx_llf[2] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i-1) ) * bet_ppi
+                  + flx_llf[2] ) / ( flx_llf[2] - flx1(m,nmhd_+2,k,j,i) );
+              } else {
+                wthe_m[2] = 1.0;
+              }
+              uY_m = utest_(m,nmhd_+3,k,j,i-1) - bet_pp * flx1(m,nmhd_+3,k,j,i);
+              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+              if ( uY_m < min_DY_ ) {
+                wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j,i-1) - min_DY_ ) * bet_ppi
+                  - flx_llf[3] ) / ( flx1(m,nmhd_+3,k,j,i) - flx_llf[3] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i-1) ) * bet_ppi
+                  + flx_llf[3] ) / ( flx_llf[3] - flx1(m,nmhd_+3,k,j,i) );
+              } else {
+                wthe_m[3] = 1.0;
+              }
+            } else {
+              for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          }
+        } else {
+          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
         }
       } else {
-        for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_m = utest_(m,nmhd_+n,k,j,i-1) - bet_pp * flx1(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+            if ( uY_m < min_DY_ ) {
+              wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j,i-1) - min_DY_ ) * bet_ppi
+                - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
+            } else if ( uY_m > max_DY_ ) {
+              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i-1) ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
+            } else {
+              wthe_m[n] = 1.0;
+            }
+          }
+        } else {
+          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+        }
       }
       // Estimate density D^+ at boundary from i
       uD = utest_(m,IDN,k,j,i) + bet_pp * flx1(m,IDN,k,j,i);
-      if ( uD > 0.0 ) {
-        for (int n=0; n < nscal_; ++n) {
-          Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx1(m,nmhd_+n,k,j,i);
-          Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-          Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+      if constexpr (
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+        if ( uD > 0.0 ) {
+          Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx1(m,nmhd_,k,j,i);
+          Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+          Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
           if ( uY_p < min_DY_ ) {
-            wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-              + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
+            wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
+              + flx_llf[0] ) / ( flx_llf[0] - flx1(m,nmhd_,k,j,i) );
           } else if ( uY_p > max_DY_ ) {
-            wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-              - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
+            wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
+              - flx_llf[0] ) / ( flx1(m,nmhd_,k,j,i) - flx_llf[0] );
           } else {
-            wthe_p[n] = 1.0;
+            wthe_p[0] = 1.0;
           }
+          // Estimated Volume Fraction
+          Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
+            + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx1(m,nmhd_,k,j,i) - flx_llf[0]) );
+          if ( uD0 >= 0.0 && uD0 <= uD ) {
+            uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx1(m,nmhd_+1,k,j,i);
+            min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+            max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+            if ( uY_p < min_DY_ ) {
+              wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[1] ) / ( flx_llf[1] - flx1(m,nmhd_+1,k,j,i) );
+            } else if ( uY_p > max_DY_ ) {
+              wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
+                - flx_llf[1] ) / ( flx1(m,nmhd_+1,k,j,i) - flx_llf[1] );
+            } else {
+              wthe_p[1] = 1.0;
+            }
+            // Estimated Nucleons Fraction
+            Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
+              + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx1(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+            if ( uDN >= 0.0 && uDN <= uD0 ) {
+              uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx1(m,nmhd_+2,k,j,i);
+              min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+              max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+              if ( uY_p < min_DY_ ) {
+                wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[2] ) / ( flx_llf[2] - flx1(m,nmhd_+2,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
+                  - flx_llf[2] ) / ( flx1(m,nmhd_+2,k,j,i) - flx_llf[2] );
+              } else {
+                wthe_p[2] = 1.0;
+              }
+              uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx1(m,nmhd_+3,k,j,i);
+              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+              if ( uY_p < min_DY_ ) {
+                wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[3] ) / ( flx_llf[3] - flx1(m,nmhd_+3,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
+                  - flx_llf[3] ) / ( flx1(m,nmhd_+3,k,j,i) - flx_llf[3] );
+              } else {
+                wthe_p[3] = 1.0;
+              }
+            } else {
+              for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          }
+        } else {
+          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
         }
       } else {
-        for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx1(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+            if ( uY_p < min_DY_ ) {
+              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
+            } else if ( uY_p > max_DY_ ) {
+              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+                - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
+            } else {
+              wthe_p[n] = 1.0;
+            }
+          }
+        } else {
+          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+        }
       }
       for (int n=0; n < nscal_; ++n) {
         wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
@@ -627,42 +810,184 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
 
         uD = utest_(m,IDN,k,j-1,i) - bet_pp * flx2(m,IDN,k,j,i);
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_m = utest_(m,nmhd_+n,k,j-1,i) - bet_pp * flx2(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+        if constexpr (
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+          if ( uD > 0.0 ) {
+            Real uY_m = utest_(m,nmhd_,k,j-1,i) - bet_pp * flx2(m,nmhd_,k,j,i);
+            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
             if ( uY_m < min_DY_ ) {
-              wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j-1,i) - min_DY_ ) * bet_ppi
-                - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              wthe_m[0] = ( ( utest_(m,nmhd_,k,j-1,i) - min_DY_ ) * bet_ppi
+                - flx_llf[0] ) / ( flx2(m,nmhd_,k,j,i) - flx_llf[0] );
             } else if ( uY_m > max_DY_ ) {
-              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j-1,i) ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
+              wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j-1,i) ) * bet_ppi
+                + flx_llf[0] ) / ( flx_llf[0] - flx2(m,nmhd_,k,j,i) );
             } else {
-              wthe_m[n] = 1.0;
+              wthe_m[0] = 1.0;
             }
+            // Estimated Volume Fraction
+            Real uD0 = utest_(m,nmhd_,k,j-1,i) - bet_pp * ( flx_llf[0]
+              + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx2(m,nmhd_,k,j,i) - flx_llf[0]) );
+            if ( uD0 >= 0.0 && uD0 <= uD ) {
+              uY_m = utest_(m,nmhd_+1,k,j-1,i) - bet_pp * flx2(m,nmhd_+1,k,j,i);
+              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+              if ( uY_m < min_DY_ ) {
+                wthe_m[1] = ( ( utest_(m,nmhd_+1,k,j-1,i) - min_DY_ ) * bet_ppi
+                  - flx_llf[1] ) / ( flx2(m,nmhd_+1,k,j,i) - flx_llf[1] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j-1,i) ) * bet_ppi
+                  + flx_llf[1] ) / ( flx_llf[1] - flx2(m,nmhd_+1,k,j,i) );
+              } else {
+                wthe_m[1] = 1.0;
+              }
+              // Estimated Nucleons Fraction
+              Real uDN = utest_(m,nmhd_+1,k,j-1,i) - bet_pp * ( flx_llf[1]
+                + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+              if ( uDN >= 0.0 && uDN <= uD0 ) {
+                uY_m = utest_(m,nmhd_+2,k,j-1,i) - bet_pp * flx2(m,nmhd_+2,k,j,i);
+                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+                if ( uY_m < min_DY_ ) {
+                  wthe_m[2] = ( ( utest_(m,nmhd_+2,k,j-1,i) - min_DY_ ) * bet_ppi
+                    - flx_llf[2] ) / ( flx2(m,nmhd_+2,k,j,i) - flx_llf[2] );
+                } else if ( uY_m > max_DY_ ) {
+                  wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j-1,i) ) * bet_ppi
+                    + flx_llf[2] ) / ( flx_llf[2] - flx2(m,nmhd_+2,k,j,i) );
+                } else {
+                  wthe_m[2] = 1.0;
+                }
+                uY_m = utest_(m,nmhd_+3,k,j-1,i) - bet_pp * flx2(m,nmhd_+3,k,j,i);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                if ( uY_m < min_DY_ ) {
+                  wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j-1,i) - min_DY_ ) * bet_ppi
+                    - flx_llf[3] ) / ( flx2(m,nmhd_+3,k,j,i) - flx_llf[3] );
+                } else if ( uY_m > max_DY_ ) {
+                  wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j-1,i) ) * bet_ppi
+                    + flx_llf[3] ) / ( flx_llf[3] - flx2(m,nmhd_+3,k,j,i) );
+                } else {
+                  wthe_m[3] = 1.0;
+                }
+              } else {
+                for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+              }
+            } else {
+              for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          if ( uD > 0.0 ) {
+            for (int n=0; n < nscal_; ++n) {
+              Real uY_m = utest_(m,nmhd_+n,k,j-1,i) - bet_pp * flx2(m,nmhd_+n,k,j,i);
+              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+              if ( uY_m < min_DY_ ) {
+                wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j-1,i) - min_DY_ ) * bet_ppi
+                  - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j-1,i) ) * bet_ppi
+                  + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
+              } else {
+                wthe_m[n] = 1.0;
+              }
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          }
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx2(m,IDN,k,j,i);
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx2(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+        if constexpr (
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+          if ( uD > 0.0 ) {
+            Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx2(m,nmhd_,k,j,i);
+            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
             if ( uY_p < min_DY_ ) {
-              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
+              wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[0] ) / ( flx_llf[0] - flx2(m,nmhd_,k,j,i) );
             } else if ( uY_p > max_DY_ ) {
-              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-                - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
+                - flx_llf[0] ) / ( flx2(m,nmhd_,k,j,i) - flx_llf[0] );
             } else {
-              wthe_p[n] = 1.0;
+              wthe_p[0] = 1.0;
             }
+            // Estimated Volume Fraction
+            Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
+              + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx2(m,nmhd_,k,j,i) - flx_llf[0]) );
+            if ( uD0 >= 0.0 && uD0 <= uD ) {
+              uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx2(m,nmhd_+1,k,j,i);
+              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+              if ( uY_p < min_DY_ ) {
+                wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[1] ) / ( flx_llf[1] - flx2(m,nmhd_+1,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
+                  - flx_llf[1] ) / ( flx2(m,nmhd_+1,k,j,i) - flx_llf[1] );
+              } else {
+                wthe_p[1] = 1.0;
+              }
+              // Estimated Nucleons Fraction
+              Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
+                + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+              if ( uDN >= 0.0 && uDN <= uD0 ) {
+                uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx2(m,nmhd_+2,k,j,i);
+                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+                if ( uY_p < min_DY_ ) {
+                  wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
+                    + flx_llf[2] ) / ( flx_llf[2] - flx2(m,nmhd_+2,k,j,i) );
+                } else if ( uY_p > max_DY_ ) {
+                  wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
+                    - flx_llf[2] ) / ( flx2(m,nmhd_+2,k,j,i) - flx_llf[2] );
+                } else {
+                  wthe_p[2] = 1.0;
+                }
+                uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx2(m,nmhd_+3,k,j,i);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                if ( uY_p < min_DY_ ) {
+                  wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
+                    + flx_llf[3] ) / ( flx_llf[3] - flx2(m,nmhd_+3,k,j,i) );
+                } else if ( uY_p > max_DY_ ) {
+                  wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
+                    - flx_llf[3] ) / ( flx2(m,nmhd_+3,k,j,i) - flx_llf[3] );
+                } else {
+                  wthe_p[3] = 1.0;
+                }
+              } else {
+                for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+              }
+            } else {
+              for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          if ( uD > 0.0 ) {
+            for (int n=0; n < nscal_; ++n) {
+              Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx2(m,nmhd_+n,k,j,i);
+              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+              if ( uY_p < min_DY_ ) {
+                wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+                  - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              } else {
+                wthe_p[n] = 1.0;
+              }
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          }
         }
         for (int n=0; n < nscal_; ++n) {
           wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
@@ -684,46 +1009,187 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           for (int n=0; n < nscal_; ++n) {
             flx_llf[n] = w0_(m,nmhd_+n,k,j,i) * flx3(m,IDN,k,j,i);
           }
-          bet_pp = - utest_(m,IDN,k,j,i) / flx3(m,IDN,k,j,i);
         }
 
         uD = utest_(m,IDN,k-1,j,i) - bet_pp * flx3(m,IDN,k,j,i);
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_m = utest_(m,nmhd_+n,k-1,j,i) - bet_pp * flx3(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+        if constexpr (
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+          if ( uD > 0.0 ) {
+            Real uY_m = utest_(m,nmhd_,k-1,j,i) - bet_pp * flx3(m,nmhd_,k,j,i);
+            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
             if ( uY_m < min_DY_ ) {
-              wthe_m[n] = ( ( utest_(m,nmhd_+n,k-1,j,i) - min_DY_ ) * bet_ppi
-                - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              wthe_m[0] = ( ( utest_(m,nmhd_,k-1,j,i) - min_DY_ ) * bet_ppi
+                - flx_llf[0] ) / ( flx3(m,nmhd_,k,j,i) - flx_llf[0] );
             } else if ( uY_m > max_DY_ ) {
-              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k-1,j,i) ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
+              wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k-1,j,i) ) * bet_ppi
+                + flx_llf[0] ) / ( flx_llf[0] - flx3(m,nmhd_,k,j,i) );
             } else {
-              wthe_m[n] = 1.0;
+              wthe_m[0] = 1.0;
             }
+            // Estimated Volume Fraction
+            Real uD0 = utest_(m,nmhd_,k-1,j,i) - bet_pp * ( flx_llf[0]
+              + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx3(m,nmhd_,k,j,i) - flx_llf[0]) );
+            if ( uD0 >= 0.0 && uD0 <= uD ) {
+              uY_m = utest_(m,nmhd_+1,k-1,j,i) - bet_pp * flx3(m,nmhd_+1,k,j,i);
+              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+              if ( uY_m < min_DY_ ) {
+                wthe_m[1] = ( ( utest_(m,nmhd_+1,k-1,j,i) - min_DY_ ) * bet_ppi
+                  - flx_llf[1] ) / ( flx3(m,nmhd_+1,k,j,i) - flx_llf[1] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k-1,j,i) ) * bet_ppi
+                  + flx_llf[1] ) / ( flx_llf[1] - flx3(m,nmhd_+1,k,j,i) );
+              } else {
+                wthe_m[1] = 1.0;
+              }
+              // Estimated Nucleons Fraction
+              Real uDN = utest_(m,nmhd_+1,k-1,j,i) - bet_pp * ( flx_llf[1]
+                + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+              if ( uDN >= 0.0 && uDN <= uD0 ) {
+                uY_m = utest_(m,nmhd_+2,k-1,j,i) - bet_pp * flx3(m,nmhd_+2,k,j,i);
+                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+                if ( uY_m < min_DY_ ) {
+                  wthe_m[2] = ( ( utest_(m,nmhd_+2,k-1,j,i) - min_DY_ ) * bet_ppi
+                    - flx_llf[2] ) / ( flx3(m,nmhd_+2,k,j,i) - flx_llf[2] );
+                } else if ( uY_m > max_DY_ ) {
+                  wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k-1,j,i) ) * bet_ppi
+                    + flx_llf[2] ) / ( flx_llf[2] - flx3(m,nmhd_+2,k,j,i) );
+                } else {
+                  wthe_m[2] = 1.0;
+                }
+                uY_m = utest_(m,nmhd_+3,k-1,j,i) - bet_pp * flx3(m,nmhd_+3,k,j,i);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                if ( uY_m < min_DY_ ) {
+                  wthe_m[3] = ( ( utest_(m,nmhd_+3,k-1,j,i) - min_DY_ ) * bet_ppi
+                    - flx_llf[3] ) / ( flx3(m,nmhd_+3,k,j,i) - flx_llf[3] );
+                } else if ( uY_m > max_DY_ ) {
+                  wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k-1,j,i) ) * bet_ppi
+                    + flx_llf[3] ) / ( flx_llf[3] - flx3(m,nmhd_+3,k,j,i) );
+                } else {
+                  wthe_m[3] = 1.0;
+                }
+              } else {
+                for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+              }
+            } else {
+              for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          if ( uD > 0.0 ) {
+            for (int n=0; n < nscal_; ++n) {
+              Real uY_m = utest_(m,nmhd_+n,k-1,j,i) - bet_pp * flx3(m,nmhd_+n,k,j,i);
+              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+              if ( uY_m < min_DY_ ) {
+                wthe_m[n] = ( ( utest_(m,nmhd_+n,k-1,j,i) - min_DY_ ) * bet_ppi
+                  - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              } else if ( uY_m > max_DY_ ) {
+                wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k-1,j,i) ) * bet_ppi
+                  + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
+              } else {
+                wthe_m[n] = 1.0;
+              }
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          }
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx3(m,IDN,k,j,i);
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx3(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+        if constexpr (
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+          if ( uD > 0.0 ) {
+            Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx3(m,nmhd_,k,j,i);
+            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
             if ( uY_p < min_DY_ ) {
-              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
+              wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[0] ) / ( flx_llf[0] - flx3(m,nmhd_,k,j,i) );
             } else if ( uY_p > max_DY_ ) {
-              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-                - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
+                - flx_llf[0] ) / ( flx3(m,nmhd_,k,j,i) - flx_llf[0] );
             } else {
-              wthe_p[n] = 1.0;
+              wthe_p[0] = 1.0;
             }
+            // Estimated Volume Fraction
+            Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
+              + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx3(m,nmhd_,k,j,i) - flx_llf[0]) );
+            if ( uD0 >= 0.0 && uD0 <= uD ) {
+              uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx3(m,nmhd_+1,k,j,i);
+              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
+              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
+              if ( uY_p < min_DY_ ) {
+                wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[1] ) / ( flx_llf[1] - flx3(m,nmhd_+1,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
+                  - flx_llf[1] ) / ( flx3(m,nmhd_+1,k,j,i) - flx_llf[1] );
+              } else {
+                wthe_p[1] = 1.0;
+              }
+              // Estimated Nucleons Fraction
+              Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
+                + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+              if ( uDN >= 0.0 && uDN <= uD0 ) {
+                uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx3(m,nmhd_+2,k,j,i);
+                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
+                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
+                if ( uY_p < min_DY_ ) {
+                  wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
+                    + flx_llf[2] ) / ( flx_llf[2] - flx3(m,nmhd_+2,k,j,i) );
+                } else if ( uY_p > max_DY_ ) {
+                  wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
+                    - flx_llf[2] ) / ( flx3(m,nmhd_+2,k,j,i) - flx_llf[2] );
+                } else {
+                  wthe_p[2] = 1.0;
+                }
+                uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx3(m,nmhd_+3,k,j,i);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                if ( uY_p < min_DY_ ) {
+                  wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
+                    + flx_llf[3] ) / ( flx_llf[3] - flx3(m,nmhd_+3,k,j,i) );
+                } else if ( uY_p > max_DY_ ) {
+                  wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
+                    - flx_llf[3] ) / ( flx3(m,nmhd_+3,k,j,i) - flx_llf[3] );
+                } else {
+                  wthe_p[3] = 1.0;
+                }
+              } else {
+                for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+              }
+            } else {
+              for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          if ( uD > 0.0 ) {
+            for (int n=0; n < nscal_; ++n) {
+              Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx3(m,nmhd_+n,k,j,i);
+              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
+              if ( uY_p < min_DY_ ) {
+                wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+                  + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
+              } else if ( uY_p > max_DY_ ) {
+                wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+                  - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
+              } else {
+                wthe_p[n] = 1.0;
+              }
+            }
+          } else {
+            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          }
         }
         for (int n=0; n < nscal_; ++n) {
           wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
@@ -758,4 +1224,6 @@ INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NormalLogs>, Primitive::ResetF
 INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NormalLogs>, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloor)
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>, Primitive::ResetFloor)
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>, Primitive::ResetFloor)
 } // namespace dyngr

@@ -14,7 +14,7 @@
 
 #include "athena.hpp"
 
-#define MAX_SPECIES 3
+#define MAX_SPECIES 4
 #define NHYDRO ((5) + (MAX_SPECIES))
 
 enum ConsIndex {CDN=0, CSX=1, CSY=2, CSZ=3, CTA=4, CYD=5, NCONS=(NHYDRO)};

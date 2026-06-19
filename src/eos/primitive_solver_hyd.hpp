@@ -27,6 +27,7 @@
 #include "eos/primitive-solver/piecewise_polytrope.hpp"
 #include "eos/primitive-solver/eos_compose.hpp"
 #include "eos/primitive-solver/eos_hybrid.hpp"
+#include "eos/primitive-solver/eos_zla_bag.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
 #include "eos/primitive-solver/logs.hpp"
 
@@ -113,6 +114,28 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
 
+      // Get table filename, then read the table,
+      std::string fname = pin->GetString(block, "table");
+      ps.GetEOSMutable().ReadTableFromFile(fname);
+
+      // Ensure table was read properly
+      assert(ps.GetEOSMutable().IsInitialized());
+    }
+    // Parameters for ZLA BAG EoS
+    if constexpr (
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+        std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
+      // Get and set number of scalars in table. This will currently fail if not 0.
+      ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal",
+                                         5.0/3.0));
+      ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 4));
+      bool result = ps.GetEOSMutable().ReadParametersFromInput(block, pin);
+      if (!result) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "There was an error while constructing the EOS."
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
       // Get table filename, then read the table,
       std::string fname = pin->GetString(block, "table");
       ps.GetEOSMutable().ReadTableFromFile(fname);

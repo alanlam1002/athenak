@@ -29,6 +29,7 @@
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
 #include "utils/tov/tov_piecewise_poly.hpp"
+#include "utils/tov/tov_zla_bag.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -83,7 +84,7 @@ void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 template<class TOVEOS>
 void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   Real v_pert = pin->GetOrAddReal("problem", "v_pert", 0.0);
-  Real p_pert = pin->GetOrAddReal("problem", "p_pert", 0.0);
+  Real p_pert_amp = pin->GetOrAddReal("problem", "p_pert", 0.0);
   bool isotropic = pin->GetOrAddBoolean("problem", "isotropic", false);
 
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
@@ -96,7 +97,18 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 
 
   constexpr bool use_ye = tov::UsesYe<TOVEOS>;
+  constexpr bool use_fvol = tov::UsesFvol<TOVEOS>;
   Real ye_atmo = pin->GetOrAddReal("mhd", "s0_atmosphere", 0.5);
+  Real y0_atmo = 1.0;
+  Real y1_atmo = 1.0;
+  Real y2_atmo = 0.0;
+  Real y3_atmo = 0.0;
+  if constexpr (use_fvol) {
+    y0_atmo = pin->GetOrAddReal("mhd", "s0_atmosphere", 1.0);
+    y1_atmo = pin->GetOrAddReal("mhd", "s1_atmosphere", 1.0);
+    y2_atmo = pin->GetOrAddReal("mhd", "s2_atmosphere", 0.0);
+    y3_atmo = pin->GetOrAddReal("mhd", "s3_atmosphere", 0.0);
+  }
 
   //auto& u0_ = pmbp->pmhd->u0;
   auto& w0_ = pmbp->pmhd->w0;
@@ -144,6 +156,10 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     Real vr = 0.;
     Real p_pert = 0.;
     Real ye = ye_atmo;
+    Real y0 = y0_atmo;
+    Real y1 = y1_atmo;
+    Real y2 = y2_atmo;
+    Real y3 = y3_atmo;
     auto &use_ye_ = use_ye;
     if (!isotropic) {
       tov_.GetPrimitivesAtPoint(eos_, r, rho, p, mass, alp);
@@ -151,10 +167,17 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
         Real x = r/tov_.R_edge;
         vr = 0.5*v_pert*(3.0*x - x*x*x);
         auto rand_gen = rand_pool64.get_state();
-        p_pert = 2.0*p_pert*(rand_gen.frand() - 0.5);
+        p_pert = 2.0*p_pert_amp*(rand_gen.frand() - 0.5);
         rand_pool64.free_state(rand_gen);
         if constexpr (use_ye) {
           ye = eos_.template GetYeFromRho<tov::LocationTag::Device>(rho);
+        }
+        if constexpr (use_fvol) {
+          y0 = eos_.template GetFvolFromRho<tov::LocationTag::Device>(rho);
+          y1 = eos_.template GetYnFromRho<tov::LocationTag::Device>(rho);
+          y2 = eos_.template GetYlnFromRho<tov::LocationTag::Device>(rho);
+          y3 = eos_.template GetYlqFromRho<tov::LocationTag::Device>(rho);
+          y1 = fmin(y0, y1);
         }
       }
     } else {
@@ -164,10 +187,17 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
         Real x = r_schw/tov_.R_edge;
         vr = 0.5*v_pert*(3.0*x - x*x*x);
         auto rand_gen = rand_pool64.get_state();
-        p_pert = 2.0*p_pert*(rand_gen.frand() - 0.5);
+        p_pert = 2.0*p_pert_amp*(rand_gen.frand() - 0.5);
         rand_pool64.free_state(rand_gen);
         if constexpr (use_ye) {
           ye = eos_.template GetYeFromRho<tov::LocationTag::Device>(rho);
+        }
+        if constexpr (use_fvol) {
+          y0 = eos_.template GetFvolFromRho<tov::LocationTag::Device>(rho);
+          y1 = eos_.template GetYnFromRho<tov::LocationTag::Device>(rho);
+          y2 = eos_.template GetYlnFromRho<tov::LocationTag::Device>(rho);
+          y3 = eos_.template GetYlqFromRho<tov::LocationTag::Device>(rho);
+          y1 = fmin(y0, y1);
         }
       }
     }
@@ -184,6 +214,12 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     auto &nscal = nscal_;
     if (use_ye && nscal >= 1) {
       w0_(m,nvars,k,j,i) = ye;
+    }
+    if (use_fvol && nscal == 4) {
+      w0_(m,nvars  ,k,j,i) = y0;
+      w0_(m,nvars+1,k,j,i) = y1;
+      w0_(m,nvars+2,k,j,i) = y2 * y1;
+      w0_(m,nvars+3,k,j,i) = y3 * (1.0-y1);
     }
 
     // Set ADM variables
@@ -426,6 +462,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       SolveTOV<tov::TabulatedEOS>(pin, pmy_mesh_);
     } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_piecewise_poly) {
       SolveTOV<tov::PiecewisePolytropeEOS>(pin, pmy_mesh_);
+    } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_zla_bag) {
+      SolveTOV<tov::ZlaBagEOS>(pin, pmy_mesh_);
     }
     return;
   }
@@ -439,6 +477,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     SetupTOV<tov::TabulatedEOS>(pin, pmy_mesh_);
   } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_piecewise_poly) {
     SetupTOV<tov::PiecewisePolytropeEOS>(pin, pmy_mesh_);
+  } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_zla_bag) {
+    SetupTOV<tov::ZlaBagEOS>(pin, pmy_mesh_);
   } else {
     std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Unknown EOS requested for TOV star problem" << std::endl

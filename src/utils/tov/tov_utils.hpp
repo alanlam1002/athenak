@@ -47,6 +47,18 @@ constexpr bool UsesYe<
   >
 > = true;
 
+template<class TOVEOS, class = void>
+constexpr bool UsesFvol = false;
+
+template<class TOVEOS>
+constexpr bool UsesFvol<
+  TOVEOS,
+  std::void_t<
+    decltype(std::declval<TOVEOS>().
+             template GetFvolFromRho<LocationTag::Host>(std::declval<Real>()))
+  >
+> = true;
+
 
 } // namespace tov
 

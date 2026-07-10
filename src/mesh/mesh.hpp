@@ -137,7 +137,7 @@ class Mesh {
   // following 1x arrays allocated with length [nranks] in AddCoordinatesAndPhysics()
   int *nprtcl_eachrank;    // number of particles on each rank
 
-  Real time, dt, dtold, cfl_no;
+  Real time, dt, dtold, dt_last_completed, cfl_no;
   int ncycle;
   EventCounters ecounter;
 
@@ -172,9 +172,15 @@ class Mesh {
   int NumberOfMeshBlockCells() const {
     return (mb_indcs.nx1)*(mb_indcs.nx2)*(mb_indcs.nx3);
   }
+  bool IsMeshUpdated() const { return mesh_updated_; }
+  void MarkMeshUpdated() {mesh_updated_ = true; ++amr_lb_seq_;}
+  void ClearMeshUpdated() { mesh_updated_ = false; }
+  int GetAMRLoadBalanceUpdateSeq() const { return amr_lb_seq_; }
 
  private:
   std::unique_ptr<MeshBlockTree> ptree;  // pointer to root node in binary/quad/oct-tree
   void LoadBalance(float *clist, int *rlist, int *slist, int *nlist, int nb);
+  bool mesh_updated_ = false;
+  int amr_lb_seq_ = 0;
 };
 #endif  // MESH_MESH_HPP_

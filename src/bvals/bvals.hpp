@@ -10,7 +10,7 @@
 //! types of Mesh variables. For Mesh variables, methods for cell-centered and
 //! face-centered fields are currently implemented, based on derived classes from the
 //! generic MeshBoundaryValue class.  A separate ParticlesBoundaryValues class is
-//! implemented for partciles.
+//! implemented for particles.
 
 // identifiers for all 6 faces of a MeshBlock
 enum BoundaryFace {undef=-1, inner_x1, outer_x1, inner_x2, outer_x2, inner_x3, outer_x3};
@@ -42,7 +42,7 @@ class Particles;
 //! \brief calculate an MPI tag for boundary buffer communications.  Note maximum size of
 //! lid that can be encoded is set by (NUM_BITS_LID) macro defined in athena.hpp.
 //! The convention in AthenaK is lid and bufid are both for the *receiving* process.
-static int CreateBvals_MPI_Tag(int lid, int bufid) {
+inline int CreateBvals_MPI_Tag(int lid, int bufid) {
   return (bufid << (NUM_BITS_LID)) | lid;
 }
 
@@ -104,6 +104,32 @@ struct MeshBoundaryBuffer {
   }
 };
 
+//----------------------------------------------------------------------------------------
+//! \struct RankPackedVarEntry
+//! \brief metadata for one (MeshBlock,neighbor) var-payload in a rank-packed message
+
+struct RankPackedVarEntry {
+  int m;
+  int n;
+  int lid;
+  int dn;
+  int data_size;
+  int offset;
+};
+
+//----------------------------------------------------------------------------------------
+//! \struct RankPackedVarMessage
+//! \brief metadata for one aggregated MPI vars message between ranks
+
+struct RankPackedVarMessage {
+  int rank;
+  int nentries;
+  int entry_offset;
+  int hdr_offset;
+  int offset;
+  int data_size;
+};
+
 // Forward declarations
 class MeshBlockPack;
 
@@ -114,7 +140,7 @@ class MeshBlockPack;
 class MeshBoundaryValues {
  public:
   MeshBoundaryValues(MeshBlockPack *ppack, ParameterInput *pin, bool z4c);
-  ~MeshBoundaryValues();
+  virtual ~MeshBoundaryValues();
 
   // data for all 56 buffers in most general 3D case. Not all elements used in most cases.
   // However each MeshBoundaryBuffer is lightweight, so the convenience of fixed array
@@ -127,6 +153,31 @@ class MeshBoundaryValues {
 #if MPI_PARALLEL_ENABLED
   // unique MPI communicators for each case (variables/fluxes)
   MPI_Comm comm_vars, comm_flux;
+
+  // rank-packed vars communication path
+  int rank_packed_bvals_nvars_;
+  int rank_packed_mesh_seq_;
+  std::vector<RankPackedVarEntry> send_var_entries_, recv_var_entries_;
+  std::vector<RankPackedVarMessage> send_var_msgs_, recv_var_msgs_;
+  std::vector<MPI_Request> send_var_reqs_, recv_var_reqs_;
+  std::vector<MPI_Request> send_var_hdr_reqs_, recv_var_hdr_reqs_;
+  DvceArray1D<Real> rank_sendbuf_vars_, rank_recvbuf_vars_;
+  HostArray1D<int> rank_sendhdr_vars_, rank_recvhdr_vars_;
+  // Device-resident mirrors of the entry tables, used by fused pack/unpack
+  // kernels (one launch per direction per call) instead of N small
+  // Kokkos::deep_copy calls. Rebuilt by BuildRankPackedVarMetadata.
+  DvceArray1D<RankPackedVarEntry> send_var_entries_d_, recv_var_entries_d_;
+  // Cached unpack-task table for the recv-side scatter kernel. Built once in
+  // BuildRankPackedVarMetadata from the headers received from each peer.
+  DvceArray1D<RankPackedVarEntry> unpack_tasks_d_;
+  // Per-(MeshBlock,neighbour) base offsets into the rank-packed aggregate
+  // buffers, dimensioned (nmb*nnghbr). For off-rank neighbours these hold the
+  // entry's offset in rank_{send,recv}buf_vars_; on-rank/non-existent entries
+  // are -1. Built once in BuildRankPackedVarMetadata so the pack/unpack kernels
+  // read/write the aggregate buffer directly (fusing the former
+  // RankPackAgg/RankUnpackScatter kernels into SendBuff/RecvBuff).
+  DvceArray1D<int> send_agg_offset_, recv_agg_offset_;
+  void InvalidateRankPackedVarMetadata() { rank_packed_bvals_nvars_ = -1; }
 #endif
 
   //functions
@@ -153,6 +204,11 @@ class MeshBoundaryValues {
   // many types (Hydro, MHD, Radiation, Z4c, etc.)
   MeshBlockPack* pmy_pack;
   bool is_z4c_;   // flag to denote if this BoundaryValues is for Z4c module
+
+#if MPI_PARALLEL_ENABLED
+  int GetVarDataSize(const MeshBoundaryBuffer &buf, int m, int n, int nvars) const;
+  void BuildRankPackedVarMetadata(const int nvars);
+#endif
 };
 
 //----------------------------------------------------------------------------------------

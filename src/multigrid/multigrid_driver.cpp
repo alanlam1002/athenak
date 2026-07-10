@@ -10,7 +10,6 @@
 
 // C++ headers
 #include <algorithm>
-#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -20,6 +19,7 @@
 #include <sstream>    // sstream
 #include <stdexcept>  // runtime_error
 #include <string>     // c_str()
+#include <unordered_map>
 #include <vector>
 
 // Athena++ headers
@@ -36,12 +36,16 @@
 MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     nranks_(global_variable::nranks), nthreads_(1), nbtotal_(pmbp->pmesh->nmb_total),
     nvar_(invar),
-    maxreflevel_(pmbp->pmesh->multilevel?pmbp->pmesh->max_level-pmbp->pmesh->root_level:0),
-    nrbx1_(pmbp->pmesh->nmb_rootx1), nrbx2_(pmbp->pmesh->nmb_rootx2), nrbx3_(pmbp->pmesh->nmb_rootx3),
+    maxreflevel_(pmbp->pmesh->multilevel ?
+        pmbp->pmesh->max_level - pmbp->pmesh->root_level : 0),
+    nrbx1_(pmbp->pmesh->nmb_rootx1),
+    nrbx2_(pmbp->pmesh->nmb_rootx2),
+    nrbx3_(pmbp->pmesh->nmb_rootx3),
     pmy_pack_(pmbp),
     pmy_mesh_(pmbp->pmesh),
     needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
-    niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0), fprolongation_(0),
+    niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0),
+    fprolongation_(0), mg_verbose_(0),
     nb_rank_(0), ncoeff_(0),
     octets_(nullptr), octetmap_(nullptr), octetbflag_(nullptr), noctets_(nullptr),
     oct_u_buf_(nullptr), oct_def_buf_(nullptr),
@@ -89,7 +93,8 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
   // Allocate octet arrays for max possible refinement levels
   if (maxreflevel_ > 0) {
     octets_ = new std::vector<MGOctet>[maxreflevel_];
-    octetmap_ = new std::unordered_map<LogicalLocation, int, LogicalLocationHash>[maxreflevel_];
+    octetmap_ = new std::unordered_map<
+        LogicalLocation, int, LogicalLocationHash>[maxreflevel_];
     octetbflag_ = new std::vector<bool>[maxreflevel_];
     noctets_ = new int[maxreflevel_]();
     oct_u_buf_    = new std::vector<Real>[maxreflevel_];
@@ -176,8 +181,7 @@ void MultigridDriver::SubtractAverage(MGVariable type) {
 void MultigridDriver::PrepareForAMR() {
   locrootlevel_ = pmy_mesh_->root_level;
 
-  // Detect if mesh has changed (AMR or load balancing).
-  // Athena++ uses pmy_mesh_->amr_updated; AthenaK tracks cumulative AMR events instead.
+  // Detect if mesh has changed (AMR and resulting load balancing).
   int new_nbtotal = pmy_mesh_->nmb_total;
   if (new_nbtotal != nbtotal_) {
     nbtotal_ = new_nbtotal;
@@ -188,12 +192,8 @@ void MultigridDriver::PrepareForAMR() {
     needinit_ = true;
   }
 
-  if (pmy_mesh_->pmr != nullptr) {
-    int new_seq = pmy_mesh_->pmr->nmb_created + pmy_mesh_->pmr->nmb_deleted;
-    if (new_seq != amr_seq_) {
-      amr_seq_ = new_seq;
-      needinit_ = true;
-    }
+  if (pmy_mesh_->IsMeshUpdated()) {
+    needinit_ = true;
   }
 
   // Calculate number of refinement levels present in mesh
@@ -204,7 +204,7 @@ void MultigridDriver::PrepareForAMR() {
       int lev = pmy_mesh_->lloc_eachmb[n].level - locrootlevel_;
       nreflevel_ = std::max(nreflevel_, lev);
     }
-    if (nreflevel_ != old_nreflevel) {
+    if (nreflevel_ != old_nreflevel && global_variable::my_rank == 0 && mg_verbose_) {
       std::cout << "MultigridDriver::SetupMultigrid: Number of refinement levels = "
                 << nreflevel_ << std::endl;
     }
@@ -363,34 +363,40 @@ void MultigridDriver::InitializeOctets() {
             if (nloc.lx1 < 0) {
               if (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::periodic)
                 nloc.lx1 = maxlx1 - 1;
-              else outside = true;
+              else
+                outside = true;
             }
             if (nloc.lx1 >= maxlx1) {
               if (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::periodic)
                 nloc.lx1 = 0;
-              else outside = true;
+              else
+                outside = true;
             }
             nloc.lx2 = oloc.lx2 + ox2;
             if (nloc.lx2 < 0) {
               if (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::periodic)
                 nloc.lx2 = maxlx2 - 1;
-              else outside = true;
+              else
+                outside = true;
             }
             if (nloc.lx2 >= maxlx2) {
               if (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::periodic)
                 nloc.lx2 = 0;
-              else outside = true;
+              else
+                outside = true;
             }
             nloc.lx3 = oloc.lx3 + ox3;
             if (nloc.lx3 < 0) {
               if (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::periodic)
                 nloc.lx3 = maxlx3 - 1;
-              else outside = true;
+              else
+                outside = true;
             }
             if (nloc.lx3 >= maxlx3) {
               if (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::periodic)
                 nloc.lx3 = 0;
-              else outside = true;
+              else
+                outside = true;
             }
             if (outside) {
               oct.neighbors[dir] = {-2, -2};
@@ -428,8 +434,10 @@ void MultigridDriver::InitializeOctets() {
   cbufold_.assign(nv * cbnc * cbnc * cbnc, 0.0);
   ncoarse_.assign(3 * 3 * 3, false);
 
-  for (int l = 0; l < nreflevel_; ++l) {
-    std::cout << "  Octet level " << l << ": " << noctets_[l] << " octets" << std::endl;
+  if (mg_verbose_ && global_variable::my_rank == 0) {
+    for (int l = 0; l < nreflevel_; ++l) {
+      std::cout << "  Octet level " << l << ": " << noctets_[l] << " octets" << std::endl;
+    }
   }
 }
 
@@ -486,8 +494,11 @@ void MultigridDriver::TransferFromBlocksToRoot(bool initflag) {
 #if MPI_PARALLEL_ENABLED
   int ncomm = initflag ? nv : 2*nv;
   for (int v = 0; v < ncomm; ++v) {
-    MPI_Allgatherv(MPI_IN_PLACE, nblist_[global_variable::my_rank], MPI_ATHENA_REAL,
-                   &rootbuf.h_view(v,0), nblist_, nslist_, MPI_ATHENA_REAL, MPI_COMM_WORLD);
+    MPI_Allgatherv(MPI_IN_PLACE,
+        nblist_[global_variable::my_rank],
+        MPI_ATHENA_REAL, &rootbuf.h_view(v,0),
+        nblist_, nslist_, MPI_ATHENA_REAL,
+        MPI_COMM_WORLD);
   }
 #endif
 
@@ -597,7 +608,7 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
     int flag = 0;
     // flag = 1: first time on meshblock levels
     if (current_level_ == nrootlevel_ + nreflevel_ - 1) flag = 1;
-    
+
     if (current_level_ == ntotallevel_ - 2) flag = 2;
     SetMGTaskListToFiner(nsmooth, ngh, flag);
     pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_finer", 0);
@@ -690,14 +701,13 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
 //! \brief Solve the V-cycle starting from the current level
 
 void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmooth) {
-  int startlevel=current_level_;
+  int startlevel = current_level_;
   coffset_ ^= 1;
-  while (current_level_ > 0){
+  while (current_level_ > 0) {
     OneStepToCoarser(pdriver, npresmooth);
   }
   SolveCoarsestGrid();
-  while (current_level_ < startlevel)
-  {
+  while (current_level_ < startlevel) {
     OneStepToFiner(pdriver, npostsmooth);
   }
   return;
@@ -773,7 +783,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   for (int v = 0; v < nvar_; ++v) {
     def += CalculateDefectNorm(MGNormType::l2, v);
   }
-  if (fshowdef_) {
+  if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
     std::cout << "MG initial defect = " << def << std::endl;
   }
   int n = 0;
@@ -784,21 +794,23 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     for (int v = 0; v < nvar_; ++v) {
       def += CalculateDefectNorm(MGNormType::l2, v);
     }
-    if (fshowdef_) {
-      std::cout << "  MG iteration " << n << ": defect = " << def << std::endl;
+    if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
+      std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
     if (def/olddef > 0.9) {
       if (eps_ == 0.0) break;
-      if (fshowdef_) {
+      if (fshowdef_ >= 1 && global_variable::my_rank == 0) {
         std::cout << "### WARNING in MultigridDriver::SolveIterative" << std::endl
                   << "Slow convergence: defect ratio = " << def/olddef << std::endl;
       }
     }
     ++n;
     if (n >= 40) {
-      std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
-                << "Failed to converge after " << n << " iterations (defect = "
-                << def << ", threshold = " << eps_ << ")" << std::endl;
+      if (global_variable::my_rank == 0) {
+        std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
+                  << "Failed to converge after " << n << " iterations (defect = "
+                  << def << ", threshold = " << eps_ << ")" << std::endl;
+      }
       pdriver->nlim = pmy_mesh_->ncycle;
       break;
     }
@@ -813,15 +825,25 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
 //! \brief Solve iteratively niter_ times (fixed count)
 
 void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
-  if (fshowdef_) {
-    Real norm = CalculateDefectNorm(MGNormType::l2, 0);
-    std::cout << "MG initial defect = " << norm << std::endl;
+  if (fshowdef_ >= 2) {
+    Real def = 0.0;
+    for (int v = 0; v < nvar_; ++v) {
+      def += CalculateDefectNorm(MGNormType::l2, v);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "MG initial defect = " << def << std::endl;
+    }
   }
   for (int n = 0; n < niter_; ++n) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
-    if (fshowdef_) {
-      Real norm = CalculateDefectNorm(MGNormType::l2, 0);
-      std::cout << "MG iteration " << n << ": defect = " << norm << std::endl;
+    if (fshowdef_ >= 2) {
+      Real def = 0.0;
+      for (int v = 0; v < nvar_; ++v) {
+        def += CalculateDefectNorm(MGNormType::l2, v);
+      }
+      if (global_variable::my_rank == 0) {
+        std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
+      }
     }
   }
   Kokkos::fence();
@@ -2289,19 +2311,22 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
 //! \brief Apply normalization to raw multipole moments
 
 void MultigridDriver::ScaleMultipoleCoefficients() {
-  constexpr Real c0  = -0.25 / M_PI;
-  constexpr Real c1  = -0.25 / M_PI;
-  constexpr Real c2  = -0.0625 / M_PI;
-  constexpr Real c2a = -0.75 / M_PI;
-  constexpr Real c30 = -0.0625 / M_PI;
-  constexpr Real c31 = -0.0625 * 1.5 / M_PI;
-  constexpr Real c32 = -0.25 * 15.0 / M_PI;
-  constexpr Real c33 = -0.0625 * 2.5 / M_PI;
-  constexpr Real c40 = -0.0625 * 0.0625 / M_PI;
-  constexpr Real c41 = -0.0625 * 2.5 / M_PI;
-  constexpr Real c42 = -0.0625 * 5.0 / M_PI;
-  constexpr Real c43 = -0.0625 * 17.5 / M_PI;
-  constexpr Real c44 = -0.25 * 35.0 / M_PI;
+  // AthenaK convention: multigrid solves -nabla^2 phi = src, with src = -4*pi*G*rho.
+  // Multipole moments are computed from src (negative density), so the scaling constants
+  // must have POSITIVE sign to produce the correct (negative) gravitational potential.
+  constexpr Real c0  = 0.25 / M_PI;
+  constexpr Real c1  = 0.25 / M_PI;
+  constexpr Real c2  = 0.0625 / M_PI;
+  constexpr Real c2a = 0.75 / M_PI;
+  constexpr Real c30 = 0.0625 / M_PI;
+  constexpr Real c31 = 0.0625 * 1.5 / M_PI;
+  constexpr Real c32 = 0.25 * 15.0 / M_PI;
+  constexpr Real c33 = 0.0625 * 2.5 / M_PI;
+  constexpr Real c40 = 0.0625 * 0.0625 / M_PI;
+  constexpr Real c41 = 0.0625 * 2.5 / M_PI;
+  constexpr Real c42 = 0.0625 * 5.0 / M_PI;
+  constexpr Real c43 = 0.0625 * 17.5 / M_PI;
+  constexpr Real c44 = 0.25 * 35.0 / M_PI;
 
   mpcoeff_[0] *= c0;
   mpcoeff_[1] *= c1;

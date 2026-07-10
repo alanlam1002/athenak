@@ -15,6 +15,9 @@
 #include <cstdio> // std::size_t
 #include <cstring> // memcpy
 #include <iostream>
+#include <map>
+#include <memory>
+#include <string>
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
@@ -174,6 +177,51 @@ struct MultigridTaskIDs {
       TaskID fc_ghostsR2;
       TaskID fc_ghostsB2;
       TaskID fc_ghosts_prol;
+      TaskID fill_coarse0;
+      TaskID fill_coarse1;
+      TaskID fill_coarseR;
+      TaskID fill_coarseB;
+      TaskID fill_coarseR2;
+      TaskID fill_coarseB2;
+};
+
+struct MGTimers {
+  using Clock = std::chrono::high_resolution_clock;
+  double pack_send_sec     = 0.0;
+  double recv_unpack_sec   = 0.0;
+  double allreduce_sec     = 0.0;
+  double vcycle_sec        = 0.0;
+  double smooth_sec        = 0.0;
+  double restrict_sec      = 0.0;
+  double prolongate_sec    = 0.0;
+  double prolongate_fc_sec = 0.0;
+  double fillfc_sec        = 0.0;
+  int    msg_count         = 0;
+  int64_t bytes_sent       = 0;
+  int    vcycle_count      = 0;
+
+  void Reset() {
+    pack_send_sec = recv_unpack_sec = allreduce_sec = 0.0;
+    vcycle_sec = smooth_sec = restrict_sec = prolongate_sec = 0.0;
+    prolongate_fc_sec = fillfc_sec = 0.0;
+    msg_count = 0; bytes_sent = 0; vcycle_count = 0;
+  }
+  void Print(int rank) {
+    std::cout << "[Rank " << rank << "] MG timers:"
+              << " vcycles=" << vcycle_count
+              << " vcycle=" << vcycle_sec << "s"
+              << " pack_send=" << pack_send_sec << "s"
+              << " recv_unpack=" << recv_unpack_sec << "s"
+              << " allreduce=" << allreduce_sec << "s"
+              << " smooth=" << smooth_sec << "s"
+              << " restrict=" << restrict_sec << "s"
+              << " prolongate=" << prolongate_sec << "s"
+              << " prolongate_fc=" << prolongate_fc_sec << "s"
+              << " fillfc=" << fillfc_sec << "s"
+              << " msgs=" << msg_count
+              << " bytes=" << bytes_sent
+              << std::endl;
+  }
 };
 
 //! \class Multigrid
@@ -323,7 +371,7 @@ class Multigrid {
       src(m,0,k,j,i) += stencil.Apply(u, coeff, m, 0, k, j, i) * idx2;
     });
   }
-  
+
   friend class MultigridDriver;
   friend class MultigridBoundaryValues;
 
@@ -448,6 +496,8 @@ class MultigridDriver {
   TaskStatus ProlongateBoundary(Driver *pdrive, int stag);
   TaskStatus ProlongateBoundaryForProlongation(Driver *pdrive, int stag);
   TaskStatus FillFCBoundary(Driver *pdrive, int stag);
+  TaskStatus FillCoarseBoundary(Driver *pdrive, int stag);
+  TaskStatus ProlongateFCBoundary(Driver *pdrive, int stag);
   TaskStatus CalculateFASRHS(Driver *pdrive, int stag);
   TaskStatus StoreOldData(Driver *pdrive, int stag);
   TaskStatus ClearRecv(Driver *pdrive, int stag);
@@ -488,9 +538,15 @@ class MultigridDriver {
   int coffset_;
   int fprolongation_;
   int fshowdef_;
+  int mg_verbose_;
+
   bool full_multigrid_;
   int fmg_ncycle_;
 
+ public:
+  MGTimers mg_timers_;
+
+ protected:
   // Source masking (zero source outside mask_radius_)
   Real mask_radius_;
   Real mask_origin_[3];
@@ -533,21 +589,98 @@ class MultigridDriver {
   int nb_rank_;
 };
 
+struct MGPerLevelIndcs {
+  MeshBufferIndcs isame, icoar, ifine;
+  int isame_ndat, icoar_ndat, ifine_ndat;
+};
+
 class MultigridBoundaryValues : public MeshBoundaryValuesCC {
  public:
-  MultigridBoundaryValues(MeshBlockPack *pmbp, ParameterInput *pin, bool coarse, Multigrid *pmg);
+  static constexpr int kMaxMGLevels = 20;
+
+  MultigridBoundaryValues(MeshBlockPack *pmbp, ParameterInput *pin,
+                          bool coarse, Multigrid *pmg);
   ~MultigridBoundaryValues();
 
   void RemapIndicesForMG();
+  void ComputePerLevelIndices();
 
   // pack/restrict fluxes at fine/coarse boundaries into boundary buffers and send
   TaskStatus PackAndSendMG(const DvceArray5D<Real> &u);
   TaskStatus RecvAndUnpackMG(DvceArray5D<Real> &u);
   TaskStatus InitRecvMG(const int nvars);
+  TaskStatus ClearSendMG();
+  TaskStatus ClearRecvMG();
   TaskStatus FillFineCoarseMGGhosts(DvceArray5D<Real> &u);
+
+  // New FC communication via pack/send/recv/unpack infrastructure
+  void FillCoarseMG(const DvceArray5D<Real> &u);
+  TaskStatus ProlongateFCMG(DvceArray5D<Real> &u);
+
+  DvceArray5D<Real> coarse_buf_;
+
+  MGPerLevelIndcs send_mg_indcs_[56][kMaxMGLevels];
+  MGPerLevelIndcs recv_mg_indcs_[56][kMaxMGLevels];
 
  private:
   Multigrid *pmy_mg;
+  std::vector<RankPackedVarEntry> mg_send_var_entries_;
+  std::vector<RankPackedVarEntry> mg_recv_var_entries_;
+  std::vector<RankPackedVarMessage> mg_send_var_msgs_;
+  std::vector<RankPackedVarMessage> mg_recv_var_msgs_;
+#if MPI_PARALLEL_ENABLED
+  std::vector<MPI_Request> mg_send_var_reqs_;
+  std::vector<MPI_Request> mg_recv_var_reqs_;
+  std::vector<MPI_Request> mg_send_var_hdr_reqs_;
+  std::vector<MPI_Request> mg_recv_var_hdr_reqs_;
+#endif
+  DvceArray1D<Real> mg_rank_sendbuf_vars_;
+  DvceArray1D<Real> mg_rank_recvbuf_vars_;
+  DvceArray1D<int> mg_rank_sendhdr_vars_;
+  DvceArray1D<int> mg_rank_recvhdr_vars_;
+  // Per-(MeshBlock,neighbour) base offsets into the rank-packed aggregate
+  // buffers, dimensioned (nmb*nnghbr). For off-rank neighbours these hold the
+  // entry's offset in mg_rank_{send,recv}buf_vars_; on-rank/non-existent/skipped
+  // entries are -1. Built in BuildRankPackedMGMetadata so PackMG/UnpackMG can
+  // read/write the aggregate buffer directly (fusing the former MGRankPackAgg /
+  // MGRankUnpackScatter kernels). Send/recv entries are sorted so both ranks of
+  // a pair agree on payload order with no header exchange (recv (m,n) == send
+  // (lid,dn) for the same face exchange).
+  DvceArray1D<int> mg_send_agg_offset_;
+  DvceArray1D<int> mg_recv_agg_offset_;
+  // Device-resident mirrors of the entry tables, used by fused pack/unpack kernels
+  // to avoid issuing one Kokkos::deep_copy per entry. Rebuilt alongside the buffer
+  // allocations in BuildRankPackedMGMetadata.
+  DvceArray1D<RankPackedVarEntry> mg_send_var_entries_d_;
+  DvceArray1D<RankPackedVarEntry> mg_recv_var_entries_d_;
+  int mg_rankpack_level_cache_ = -1;
+  int mg_rankpack_nvars_cache_ = -1;
+  bool mg_rankpack_skipfc_cache_ = false;
+  int mg_rankpack_mesh_seq_cache_ = -1;
+
+#if MPI_PARALLEL_ENABLED
+  void BuildRankPackedMGMetadata(const int nvars, const int lev, const bool skip_fc);
+  // Per-level cache of rank-packed comm state. The single-slot cache (the
+  // mg_rankpack_*_cache_ ints above) rebuilt metadata on every MG level
+  // transition (~85x/cycle at 1 mb/GPU), each rebuild doing several device
+  // allocations + H2D deep_copies that dominate when the payload is tiny. This
+  // caches each level's state, built once and persisted across the many level
+  // revisits in a V-cycle via write-back on level switch.
+  struct MGRankPackLevelState {
+    bool built = false;
+    int nvars = -1;
+    bool skip_fc = false;
+    std::vector<RankPackedVarMessage> send_msgs, recv_msgs;
+    std::vector<MPI_Request> send_reqs, recv_reqs;
+    DvceArray1D<Real> sendbuf, recvbuf;
+    DvceArray1D<int> send_off, recv_off;
+  };
+  std::vector<MGRankPackLevelState> mg_rp_cache_;
+  int mg_rp_cache_seq_ = -1;     // mesh_seq the cache was built for (AMR invalidation)
+  int mg_rp_active_level_ = -1;  // level whose state currently lives in the bare members
+  void SaveRankPackState(MGRankPackLevelState &s);
+  void LoadRankPackState(const MGRankPackLevelState &s);
+#endif
 };
 
 inline Real RestrictOne(const MGOctet &oct, int v, int fi, int fj, int fk) {

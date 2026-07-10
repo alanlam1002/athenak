@@ -16,7 +16,8 @@
 #include <sstream>    // stringstream
 #include <stdexcept>  // runtime_error
 #include <string>     // c_str()
-#include <iomanip>    // setprecision 
+#include <iomanip>    // setprecision
+#include <vector>
 
 // Athena++ headers
 #include "../athena.hpp"
@@ -35,25 +36,28 @@
 Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
                      bool on_host):
   pmy_driver_(pmd), pmy_pack_(pmbp), pmy_mesh_(pmd->pmy_mesh_), ngh_(nghost),
-  nvar_(pmd->nvar_), defscale_(1.0), on_host_(on_host)  {
-  if(pmy_pack_ != nullptr) {
+  nvar_(pmd->nvar_), defscale_(1.0), on_host_(on_host) {
+  if (pmy_pack_ != nullptr) {
     //Meshblock levels
     indcs_ = pmy_mesh_->mb_indcs;
     nmmb_  = pmy_pack_->nmb_thispack;
     nmmbx1_ = pmy_mesh_->nmb_rootx1;
     nmmbx2_ = pmy_mesh_->nmb_rootx2;
     nmmbx3_ = pmy_mesh_->nmb_rootx3;
-    std::cout<< "Number of MeshBlocks in the pack: " << nmmb_ << std::endl;
-    std::cout<< "MeshBlock size: "
-             << indcs_.nx1 << " x " << indcs_.nx2 << " x " << indcs_.nx3 << std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout << "Number of MeshBlocks in the pack: " << nmmb_ << std::endl;
+      std::cout << "MeshBlock size: "
+               << indcs_.nx1 << " x " << indcs_.nx2 << " x " << indcs_.nx3 << std::endl;
+    }
     if (indcs_.nx1 != indcs_.nx2 || indcs_.nx1 != indcs_.nx3) {
       std::cout << "### FATAL ERROR in Multigrid::Multigrid" << std::endl
          << "The Multigrid solver requires logically cubic MeshBlock." << std::endl;
       std::exit(EXIT_FAILURE);
       return;
      }
-    
-     // initialize loc/size from the first meshblock in the pack (needs to be addpated for AMR)
+
+     // initialize loc/size from the first meshblock
+     // in the pack (needs to be adapted for AMR)
     loc_ = pmy_pack_->pmesh->lloc_eachmb[0];
     size_ = pmy_pack_->pmb->mb_size.h_view(0);
   } else {
@@ -93,7 +97,7 @@ Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
   }
 
   nlevel_ = 0;
-  if (pmy_pack_ == nullptr) { 
+  if (pmy_pack_ == nullptr) {
     // Root grid levels
     int nbx = 0, nby = 0, nbz = 0;
     for (int l = 0; l < 20; l++) {
@@ -103,7 +107,9 @@ Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
       }
     }
     int nmaxr = std::max(nbx, std::max(nby, nbz));
-    std::cout<< "Multigrid root grid levels: " << nlevel_ << std::endl;
+    if (global_variable::my_rank == 0) {
+      std::cout << "Multigrid root grid levels: " << nlevel_ << std::endl;
+    }
     // int nminr=std::min(nbx, std::min(nby, nbz)); // unused variable
     if (nmaxr != 1 && global_variable::my_rank == 0) {
       std::cout
@@ -116,7 +122,8 @@ Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
     if (nbx*nby*nbz>100 && global_variable::my_rank==0) {
       std::cout << "### Warning in Multigrid::Multigrid" << std::endl
                 << "The degrees of freedom on the coarsest level is very large: "
-                << nbx << " x " << nby << " x " << nbz << " = " << nbx*nby*nbz<< std::endl
+                << nbx << " x " << nby << " x " << nbz
+                << " = " << nbx*nby*nbz << std::endl
                 << "Multigrid should still work, but this is not efficient configuration "
                 << "as the coarsest level solver costs considerably." << std::endl
                 << "We recommend to reconsider grid configuration." << std::endl;
@@ -162,9 +169,7 @@ Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
     ncx=(indcs_.nx1>>(ll+1))+2*ngh_;
     ncy=(indcs_.nx2>>(ll+1))+2*ngh_;
     ncz=(indcs_.nx3>>(ll+1))+2*ngh_;
-
   }
-
 }
 
 
@@ -182,7 +187,6 @@ Multigrid::~Multigrid() {
   delete [] coord_;
   delete [] ccoord_;
 }
-
 
 
 //----------------------------------------------------------------------------------------
@@ -248,7 +252,6 @@ void Multigrid::ReallocateForAMR() {
     if (l != nlevel_ - 1)
       Kokkos::realloc(uold_[l], nmmb_, nvar_, ncz, ncy, ncx);
   }
-
 }
 
 
@@ -325,7 +328,9 @@ void Multigrid::LoadCoefficients(const DvceArray5D<Real> &coeff, int ngh) {
   auto &cm = coeff_[nlevel_-1].d_view;
   int is, ie, js, je, ks, ke;
   is = js = ks = 0;
-  ie = indcs_.nx1 + 2*ngh_ - 1; je = indcs_.nx2 + 2*ngh_ - 1; ke = indcs_.nx3 + 2*ngh_ - 1;
+  ie = indcs_.nx1 + 2*ngh_ - 1;
+  je = indcs_.nx2 + 2*ngh_ - 1;
+  ke = indcs_.nx3 + 2*ngh_ - 1;
 
   // copy locals for device lambda capture
   const int coeff_off = ngh - ngh_;
@@ -346,7 +351,6 @@ void Multigrid::LoadCoefficients(const DvceArray5D<Real> &coeff, int ngh) {
 
   return;
 }
-
 
 
 //----------------------------------------------------------------------------------------
@@ -813,32 +817,6 @@ Real Multigrid::CalculateAverage(MGVariable type) {
   return (volume > 0.0) ? (sum / volume) : 0.0;
 }
 
-
-//----------------------------------------------------------------------------------------
-//! \fn Real Multigrid::CalculateTotal(MGVariable type, int n)
-//! \brief calculate the sum of the array (type: 0=src, 1=u)
-
-Real Multigrid::CalculateTotal(MGVariable type, int n) {
-  //DvceArray5D<Real> &src =
-  //                  (type == MGVariable::src) ? src_[current_level_] : u_[current_level_];
-  //int ll = nlevel_ - 1 - current_level_;
-  //Real s=0.0;
-  //int is, ie, js, je, ks, ke;
-  //is=js=ks=ngh_;
-  //ie=is+(indcs_.nx1>>ll)-1, je=js+(indcs_.nx2>>ll)-1, ke=ks+(indcs_.nx3>>ll)-1;
-  //Real dx=rdx_*static_cast<Real>(1<<ll), dy=rdy_*static_cast<Real>(1<<ll),
-  //     dz=rdz_*static_cast<Real>(1<<ll);
-  //for (int k=ks; k<=ke; ++k) {
-  //  for (int j=js; j<=je; ++j) {
-  //    for (int i=is; i<=ie; ++i)
-  //      s+=src(n,k,j,i);
-  //  }
-  //}
-  //return s*dx*dy*dz;
-  return 0.0;
-}
-
-
 //----------------------------------------------------------------------------------------
 //! \fn Real Multigrid::SubtractAverage(MGVariable type, int v, Real ave)
 //! \brief subtract the average value (type: 0=src, 1=u)
@@ -895,12 +873,11 @@ void Multigrid::StoreOldData() {
 template <typename ViewType>
 void Multigrid::Restrict(ViewType &dst, const ViewType &src,
                 int nvar, int i0, int i1, int j0, int j1, int k0, int k1, bool th) {
-
   using ExeSpace = typename ViewType::execution_space;
   const int m0 = 0, m1 = nmmb_ - 1;
   const int v0 = 0, v1 = nvar - 1;
   const int ngh = ngh_;
-                
+
   par_for("Multigrid::Restrict", ExeSpace(),
           m0, m1, v0, v1, k0, k1, j0, j1, i0, i1,
   KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
@@ -924,9 +901,9 @@ void Multigrid::ComputeCorrection() {
   const int m0 = 0, m1 = nmmb_ - 1;
   const int v0 = 0, v1 = nvar_ - 1;
   int ll = nlevel_ - 1 - current_level_;
-  int is = 0, ie = is + (indcs_.nx1 >> ll) + 2*ngh_ -1;
-  int js = 0, je = js + (indcs_.nx2 >> ll) + 2*ngh_ -1;
-  int ks = 0, ke = ks + (indcs_.nx3 >> ll) + 2*ngh_ -1;
+  int is = 0, ie = is + (indcs_.nx1 >> ll) + 2*ngh_ - 1;
+  int js = 0, je = js + (indcs_.nx2 >> ll) + 2*ngh_ - 1;
+  int ks = 0, ke = ks + (indcs_.nx3 >> ll) + 2*ngh_ - 1;
 
   if (on_host_) {
     auto u = u_[current_level_].h_view;
@@ -954,7 +931,6 @@ void Multigrid::ComputeCorrection() {
 template <typename ViewType>
 void Multigrid::ProlongateAndCorrect(ViewType &dst, const ViewType &src,
      int il, int iu, int jl, int ju, int kl, int ku, int fil, int fjl, int fkl, bool th) {
-
   using ExeSpace = typename ViewType::execution_space;
   const int m0 = 0, m1 = nmmb_ - 1;
   const int v0 = 0, v1 = nvar_ - 1;
@@ -978,100 +954,100 @@ void Multigrid::ProlongateAndCorrect(ViewType &dst, const ViewType &src,
       // For brevity: local references to src entries
       // compute and add to 8 target cells as in original implementation
       dst_(m,v,fk  ,fj  ,fi  ) += (
-        + 125.*src_(m,v,k-1,j-1,i-1)+  750.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-        + 750.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-        -  75.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-        + 750.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-        +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-        - 450.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )+ 270.*src_(m,v,k,  j+1,i+1)
-        -  75.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-        - 450.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )+ 270.*src_(m,v,k+1,j,  i+1)
-        +  45.*src_(m,v,k+1,j+1,i-1)+  270.*src_(m,v,k+1,j+1,i  )-  27.*src_(m,v,k+1,j+1,i+1)
+      +125.*src_(m,v,k-1,j-1,i-1)+750.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+      +750.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+      -75.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+      +750.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+      +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+      -450.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)+270.*src_(m,v,k,j+1,i+1)
+      -75.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+      -450.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)+270.*src_(m,v,k+1,j,i+1)
+      +45.*src_(m,v,k+1,j+1,i-1)+270.*src_(m,v,k+1,j+1,i)-27.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk,  fj,  fi+1) += (
-        -  75.*src_(m,v,k-1,j-1,i-1)+  750.*src_(m,v,k-1,j-1,i  )+ 125.*src_(m,v,k-1,j-1,i+1)
-        - 450.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )+ 750.*src_(m,v,k-1,j,  i+1)
-        +  45.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-        - 450.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )+ 750.*src_(m,v,k,  j-1,i+1)
-        -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-        + 270.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-        +  45.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-        + 270.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-        -  27.*src_(m,v,k+1,j+1,i-1)+  270.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+      -75.*src_(m,v,k-1,j-1,i-1)+750.*src_(m,v,k-1,j-1,i)+125.*src_(m,v,k-1,j-1,i+1)
+      -450.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)+750.*src_(m,v,k-1,j,i+1)
+      +45.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+      -450.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)+750.*src_(m,v,k,j-1,i+1)
+      -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+      +270.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+      +45.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+      +270.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+      -27.*src_(m,v,k+1,j+1,i-1)+270.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk  ,fj+1,fi  ) += (
-        -  75.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-        + 750.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-        + 125.*src_(m,v,k-1,j+1,i-1)+  750.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-        - 450.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )+ 270.*src_(m,v,k,  j-1,i+1)
-        +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-        + 750.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-        +  45.*src_(m,v,k+1,j-1,i-1)+  270.*src_(m,v,k+1,j-1,i  )-  27.*src_(m,v,k+1,j-1,i+1)
-        - 450.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )+ 270.*src_(m,v,k+1,j,  i+1)
-        -  75.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+      -75.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+      +750.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+      +125.*src_(m,v,k-1,j+1,i-1)+750.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+      -450.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)+270.*src_(m,v,k,j-1,i+1)
+      +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+      +750.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+      +45.*src_(m,v,k+1,j-1,i-1)+270.*src_(m,v,k+1,j-1,i)-27.*src_(m,v,k+1,j-1,i+1)
+      -450.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)+270.*src_(m,v,k+1,j,i+1)
+      -75.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk,  fj+1,fi+1) += (
-        +  45.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-        - 450.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )+ 750.*src_(m,v,k-1,j,  i+1)
-        -  75.*src_(m,v,k-1,j+1,i-1)+  750.*src_(m,v,k-1,j+1,i  )+ 125.*src_(m,v,k-1,j+1,i+1)
-        + 270.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-        -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-        - 450.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )+ 750.*src_(m,v,k,  j+1,i+1)
-        -  27.*src_(m,v,k+1,j-1,i-1)+  270.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-        + 270.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-        +  45.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+      +45.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+      -450.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)+750.*src_(m,v,k-1,j,i+1)
+      -75.*src_(m,v,k-1,j+1,i-1)+750.*src_(m,v,k-1,j+1,i)+125.*src_(m,v,k-1,j+1,i+1)
+      +270.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+      -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+      -450.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)+750.*src_(m,v,k,j+1,i+1)
+      -27.*src_(m,v,k+1,j-1,i-1)+270.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+      +270.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+      +45.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk+1,fj,  fi  ) += (
-        -  75.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-        - 450.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )+ 270.*src_(m,v,k-1,j,  i+1)
-        +  45.*src_(m,v,k-1,j+1,i-1)+  270.*src_(m,v,k-1,j+1,i  )-  27.*src_(m,v,k-1,j+1,i+1)
-        + 750.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-        +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-        - 450.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )+ 270.*src_(m,v,k,  j+1,i+1)
-        + 125.*src_(m,v,k+1,j-1,i-1)+  750.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-        + 750.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-        -  75.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+      -75.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+      -450.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)+270.*src_(m,v,k-1,j,i+1)
+      +45.*src_(m,v,k-1,j+1,i-1)+270.*src_(m,v,k-1,j+1,i)-27.*src_(m,v,k-1,j+1,i+1)
+      +750.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+      +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+      -450.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)+270.*src_(m,v,k,j+1,i+1)
+      +125.*src_(m,v,k+1,j-1,i-1)+750.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+      +750.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+      -75.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk+1,fj,  fi+1) += (
-        +  45.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-        + 270.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-        -  27.*src_(m,v,k-1,j+1,i-1)+  270.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-        - 450.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )+ 750.*src_(m,v,k,  j-1,i+1)
-        -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-        + 270.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-        -  75.*src_(m,v,k+1,j-1,i-1)+  750.*src_(m,v,k+1,j-1,i  )+ 125.*src_(m,v,k+1,j-1,i+1)
-        - 450.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )+ 750.*src_(m,v,k+1,j,  i+1)
-        +  45.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+      +45.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+      +270.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+      -27.*src_(m,v,k-1,j+1,i-1)+270.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+      -450.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)+750.*src_(m,v,k,j-1,i+1)
+      -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+      +270.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+      -75.*src_(m,v,k+1,j-1,i-1)+750.*src_(m,v,k+1,j-1,i)+125.*src_(m,v,k+1,j-1,i+1)
+      -450.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)+750.*src_(m,v,k+1,j,i+1)
+      +45.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk+1,fj+1,fi  ) += (
-        +  45.*src_(m,v,k-1,j-1,i-1)+  270.*src_(m,v,k-1,j-1,i  )-  27.*src_(m,v,k-1,j-1,i+1)
-        - 450.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )+ 270.*src_(m,v,k-1,j,  i+1)
-        -  75.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-        - 450.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )+ 270.*src_(m,v,k,  j-1,i+1)
-        +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-        + 750.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-        -  75.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-        + 750.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-        + 125.*src_(m,v,k+1,j+1,i-1)+  750.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+      +45.*src_(m,v,k-1,j-1,i-1)+270.*src_(m,v,k-1,j-1,i)-27.*src_(m,v,k-1,j-1,i+1)
+      -450.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)+270.*src_(m,v,k-1,j,i+1)
+      -75.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+      -450.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)+270.*src_(m,v,k,j-1,i+1)
+      +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+      +750.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+      -75.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+      +750.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+      +125.*src_(m,v,k+1,j+1,i-1)+750.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
       ) / 32768.0;
 
       dst_(m,v,fk+1,fj+1,fi+1) += (
-        -  27.*src_(m,v,k-1,j-1,i-1)+  270.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-        + 270.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-        +  45.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-        + 270.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-        -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-        - 450.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )+ 750.*src_(m,v,k,  j+1,i+1)
-        +  45.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-        - 450.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )+ 750.*src_(m,v,k+1,j,  i+1)
-        -  75.*src_(m,v,k+1,j+1,i-1)+  750.*src_(m,v,k+1,j+1,i  )+ 125.*src_(m,v,k+1,j+1,i+1)
-      ) / 32768.0;  
+      -27.*src_(m,v,k-1,j-1,i-1)+270.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+      +270.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+      +45.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+      +270.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+      -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+      -450.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)+750.*src_(m,v,k,j+1,i+1)
+      +45.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+      -450.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)+750.*src_(m,v,k+1,j,i+1)
+      -75.*src_(m,v,k+1,j+1,i-1)+750.*src_(m,v,k+1,j+1,i)+125.*src_(m,v,k+1,j+1,i+1)
+      ) / 32768.0;
     });
   } else { // trilinear
     par_for("Multigrid::ProlongateAndCorrect_trilinear", ExeSpace(),
@@ -1127,7 +1103,6 @@ void Multigrid::ProlongateAndCorrect(ViewType &dst, const ViewType &src,
 template <typename ViewType>
 void Multigrid::FMGProlongate(ViewType &dst, const ViewType &src,
      int il, int iu, int jl, int ju, int kl, int ku, int fil, int fjl, int fkl) {
-
   using ExeSpace = typename ViewType::execution_space;
   const int m0 = 0, m1 = nmmb_ - 1;
   const int v0 = 0, v1 = nvar_ - 1;
@@ -1146,840 +1121,100 @@ void Multigrid::FMGProlongate(ViewType &dst, const ViewType &src,
     const int fi = 2*(i-il) + fil;
 
     dst_(m,v,fk  ,fj  ,fi  ) = (
-      + 125.*src_(m,v,k-1,j-1,i-1)+  750.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-      + 750.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-      -  75.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-      + 750.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-      +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-      - 450.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )+ 270.*src_(m,v,k,  j+1,i+1)
-      -  75.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-      - 450.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )+ 270.*src_(m,v,k+1,j,  i+1)
-      +  45.*src_(m,v,k+1,j+1,i-1)+  270.*src_(m,v,k+1,j+1,i  )-  27.*src_(m,v,k+1,j+1,i+1)
+    +125.*src_(m,v,k-1,j-1,i-1)+750.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+    +750.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+    -75.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+    +750.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+    +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+    -450.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)+270.*src_(m,v,k,j+1,i+1)
+    -75.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+    -450.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)+270.*src_(m,v,k+1,j,i+1)
+    +45.*src_(m,v,k+1,j+1,i-1)+270.*src_(m,v,k+1,j+1,i)-27.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk,  fj,  fi+1) = (
-      -  75.*src_(m,v,k-1,j-1,i-1)+  750.*src_(m,v,k-1,j-1,i  )+ 125.*src_(m,v,k-1,j-1,i+1)
-      - 450.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )+ 750.*src_(m,v,k-1,j,  i+1)
-      +  45.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-      - 450.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )+ 750.*src_(m,v,k,  j-1,i+1)
-      -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-      + 270.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-      +  45.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-      + 270.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-      -  27.*src_(m,v,k+1,j+1,i-1)+  270.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+    -75.*src_(m,v,k-1,j-1,i-1)+750.*src_(m,v,k-1,j-1,i)+125.*src_(m,v,k-1,j-1,i+1)
+    -450.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)+750.*src_(m,v,k-1,j,i+1)
+    +45.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+    -450.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)+750.*src_(m,v,k,j-1,i+1)
+    -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+    +270.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+    +45.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+    +270.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+    -27.*src_(m,v,k+1,j+1,i-1)+270.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk  ,fj+1,fi  ) = (
-      -  75.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-      + 750.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-      + 125.*src_(m,v,k-1,j+1,i-1)+  750.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-      - 450.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )+ 270.*src_(m,v,k,  j-1,i+1)
-      +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-      + 750.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-      +  45.*src_(m,v,k+1,j-1,i-1)+  270.*src_(m,v,k+1,j-1,i  )-  27.*src_(m,v,k+1,j-1,i+1)
-      - 450.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )+ 270.*src_(m,v,k+1,j,  i+1)
-      -  75.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+    -75.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+    +750.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+    +125.*src_(m,v,k-1,j+1,i-1)+750.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+    -450.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)+270.*src_(m,v,k,j-1,i+1)
+    +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+    +750.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+    +45.*src_(m,v,k+1,j-1,i-1)+270.*src_(m,v,k+1,j-1,i)-27.*src_(m,v,k+1,j-1,i+1)
+    -450.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)+270.*src_(m,v,k+1,j,i+1)
+    -75.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk,  fj+1,fi+1) = (
-      +  45.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-      - 450.*src_(m,v,k-1,j,  i-1)+ 4500.*src_(m,v,k-1,j,  i  )+ 750.*src_(m,v,k-1,j,  i+1)
-      -  75.*src_(m,v,k-1,j+1,i-1)+  750.*src_(m,v,k-1,j+1,i  )+ 125.*src_(m,v,k-1,j+1,i+1)
-      + 270.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-      -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-      - 450.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )+ 750.*src_(m,v,k,  j+1,i+1)
-      -  27.*src_(m,v,k+1,j-1,i-1)+  270.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-      + 270.*src_(m,v,k+1,j,  i-1)- 2700.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-      +  45.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+    +45.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+    -450.*src_(m,v,k-1,j,i-1)+4500.*src_(m,v,k-1,j,i)+750.*src_(m,v,k-1,j,i+1)
+    -75.*src_(m,v,k-1,j+1,i-1)+750.*src_(m,v,k-1,j+1,i)+125.*src_(m,v,k-1,j+1,i+1)
+    +270.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+    -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+    -450.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)+750.*src_(m,v,k,j+1,i+1)
+    -27.*src_(m,v,k+1,j-1,i-1)+270.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+    +270.*src_(m,v,k+1,j,i-1)-2700.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+    +45.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk+1,fj,  fi  ) = (
-      -  75.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-      - 450.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )+ 270.*src_(m,v,k-1,j,  i+1)
-      +  45.*src_(m,v,k-1,j+1,i-1)+  270.*src_(m,v,k-1,j+1,i  )-  27.*src_(m,v,k-1,j+1,i+1)
-      + 750.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-      +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-      - 450.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )+ 270.*src_(m,v,k,  j+1,i+1)
-      + 125.*src_(m,v,k+1,j-1,i-1)+  750.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-      + 750.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-      -  75.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )+  45.*src_(m,v,k+1,j+1,i+1)
+    -75.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+    -450.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)+270.*src_(m,v,k-1,j,i+1)
+    +45.*src_(m,v,k-1,j+1,i-1)+270.*src_(m,v,k-1,j+1,i)-27.*src_(m,v,k-1,j+1,i+1)
+    +750.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+    +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+    -450.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)+270.*src_(m,v,k,j+1,i+1)
+    +125.*src_(m,v,k+1,j-1,i-1)+750.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+    +750.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+    -75.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)+45.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk+1,fj,  fi+1) = (
-      +  45.*src_(m,v,k-1,j-1,i-1)-  450.*src_(m,v,k-1,j-1,i  )-  75.*src_(m,v,k-1,j-1,i+1)
-      + 270.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-      -  27.*src_(m,v,k-1,j+1,i-1)+  270.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-      - 450.*src_(m,v,k,  j-1,i-1)+ 4500.*src_(m,v,k,  j-1,i  )+ 750.*src_(m,v,k,  j-1,i+1)
-      -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-      + 270.*src_(m,v,k,  j+1,i-1)- 2700.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-      -  75.*src_(m,v,k+1,j-1,i-1)+  750.*src_(m,v,k+1,j-1,i  )+ 125.*src_(m,v,k+1,j-1,i+1)
-      - 450.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )+ 750.*src_(m,v,k+1,j,  i+1)
-      +  45.*src_(m,v,k+1,j+1,i-1)-  450.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+    +45.*src_(m,v,k-1,j-1,i-1)-450.*src_(m,v,k-1,j-1,i)-75.*src_(m,v,k-1,j-1,i+1)
+    +270.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+    -27.*src_(m,v,k-1,j+1,i-1)+270.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+    -450.*src_(m,v,k,j-1,i-1)+4500.*src_(m,v,k,j-1,i)+750.*src_(m,v,k,j-1,i+1)
+    -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+    +270.*src_(m,v,k,j+1,i-1)-2700.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+    -75.*src_(m,v,k+1,j-1,i-1)+750.*src_(m,v,k+1,j-1,i)+125.*src_(m,v,k+1,j-1,i+1)
+    -450.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)+750.*src_(m,v,k+1,j,i+1)
+    +45.*src_(m,v,k+1,j+1,i-1)-450.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk+1,fj+1,fi  ) = (
-      +  45.*src_(m,v,k-1,j-1,i-1)+  270.*src_(m,v,k-1,j-1,i  )-  27.*src_(m,v,k-1,j-1,i+1)
-      - 450.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )+ 270.*src_(m,v,k-1,j,  i+1)
-      -  75.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )+  45.*src_(m,v,k-1,j+1,i+1)
-      - 450.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )+ 270.*src_(m,v,k,  j-1,i+1)
-      +4500.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )-2700.*src_(m,v,k,  j,  i+1)
-      + 750.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )- 450.*src_(m,v,k,  j+1,i+1)
-      -  75.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )+  45.*src_(m,v,k+1,j-1,i+1)
-      + 750.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )- 450.*src_(m,v,k+1,j,  i+1)
-      + 125.*src_(m,v,k+1,j+1,i-1)+  750.*src_(m,v,k+1,j+1,i  )-  75.*src_(m,v,k+1,j+1,i+1)
+    +45.*src_(m,v,k-1,j-1,i-1)+270.*src_(m,v,k-1,j-1,i)-27.*src_(m,v,k-1,j-1,i+1)
+    -450.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)+270.*src_(m,v,k-1,j,i+1)
+    -75.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)+45.*src_(m,v,k-1,j+1,i+1)
+    -450.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)+270.*src_(m,v,k,j-1,i+1)
+    +4500.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)-2700.*src_(m,v,k,j,i+1)
+    +750.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)-450.*src_(m,v,k,j+1,i+1)
+    -75.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)+45.*src_(m,v,k+1,j-1,i+1)
+    +750.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)-450.*src_(m,v,k+1,j,i+1)
+    +125.*src_(m,v,k+1,j+1,i-1)+750.*src_(m,v,k+1,j+1,i)-75.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
 
     dst_(m,v,fk+1,fj+1,fi+1) = (
-      -  27.*src_(m,v,k-1,j-1,i-1)+  270.*src_(m,v,k-1,j-1,i  )+  45.*src_(m,v,k-1,j-1,i+1)
-      + 270.*src_(m,v,k-1,j,  i-1)- 2700.*src_(m,v,k-1,j,  i  )- 450.*src_(m,v,k-1,j,  i+1)
-      +  45.*src_(m,v,k-1,j+1,i-1)-  450.*src_(m,v,k-1,j+1,i  )-  75.*src_(m,v,k-1,j+1,i+1)
-      + 270.*src_(m,v,k,  j-1,i-1)- 2700.*src_(m,v,k,  j-1,i  )- 450.*src_(m,v,k,  j-1,i+1)
-      -2700.*src_(m,v,k,  j,  i-1)+27000.*src_(m,v,k,  j,  i  )+4500.*src_(m,v,k,  j,  i+1)
-      - 450.*src_(m,v,k,  j+1,i-1)+ 4500.*src_(m,v,k,  j+1,i  )+ 750.*src_(m,v,k,  j+1,i+1)
-      +  45.*src_(m,v,k+1,j-1,i-1)-  450.*src_(m,v,k+1,j-1,i  )-  75.*src_(m,v,k+1,j-1,i+1)
-      - 450.*src_(m,v,k+1,j,  i-1)+ 4500.*src_(m,v,k+1,j,  i  )+ 750.*src_(m,v,k+1,j,  i+1)
-      -  75.*src_(m,v,k+1,j+1,i-1)+  750.*src_(m,v,k+1,j+1,i  )+ 125.*src_(m,v,k+1,j+1,i+1)
+    -27.*src_(m,v,k-1,j-1,i-1)+270.*src_(m,v,k-1,j-1,i)+45.*src_(m,v,k-1,j-1,i+1)
+    +270.*src_(m,v,k-1,j,i-1)-2700.*src_(m,v,k-1,j,i)-450.*src_(m,v,k-1,j,i+1)
+    +45.*src_(m,v,k-1,j+1,i-1)-450.*src_(m,v,k-1,j+1,i)-75.*src_(m,v,k-1,j+1,i+1)
+    +270.*src_(m,v,k,j-1,i-1)-2700.*src_(m,v,k,j-1,i)-450.*src_(m,v,k,j-1,i+1)
+    -2700.*src_(m,v,k,j,i-1)+27000.*src_(m,v,k,j,i)+4500.*src_(m,v,k,j,i+1)
+    -450.*src_(m,v,k,j+1,i-1)+4500.*src_(m,v,k,j+1,i)+750.*src_(m,v,k,j+1,i+1)
+    +45.*src_(m,v,k+1,j-1,i-1)-450.*src_(m,v,k+1,j-1,i)-75.*src_(m,v,k+1,j-1,i+1)
+    -450.*src_(m,v,k+1,j,i-1)+4500.*src_(m,v,k+1,j,i)+750.*src_(m,v,k+1,j,i+1)
+    -75.*src_(m,v,k+1,j+1,i-1)+750.*src_(m,v,k+1,j+1,i)+125.*src_(m,v,k+1,j+1,i+1)
     ) / 32768.0;
   });
-  return;
-}
-
-
-//----------------------------------------------------------------------------------------
-//! \fn MultigridBoundaryValues::MultigridBoundaryValues()
-//! \brief Constructor for multigrid boundary values object
-//----------------------------------------------------------------------------------------
-
-MultigridBoundaryValues::MultigridBoundaryValues(MeshBlockPack *pmbp, ParameterInput *pin, bool coarse, Multigrid *pmg) 
-  :
-   MeshBoundaryValuesCC(pmbp, pin, coarse), pmy_mg(pmg) {
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn void MultigridBoundaryValues::RemapIndicesForMG()
-//! \brief Remap isame indices from hydro coordinates (ng ghost cells) to MG coordinates
-//! (ngh_ ghost cells). Must be called AFTER InitializeBuffers.
-
-void MultigridBoundaryValues::RemapIndicesForMG() {
-  int ng  = pmy_pack->pmesh->mb_indcs.ng;
-  int ngh = pmy_mg->GetGhostCells();
-  if (ng != ngh) {
-    int nx1 = pmy_pack->pmesh->mb_indcs.nx1;
-    int nx2 = pmy_pack->pmesh->mb_indcs.nx2;
-    int nx3 = pmy_pack->pmesh->mb_indcs.nx3;
-    int is_h = ng, ie_h = ng + nx1 - 1;
-    int js_h = ng, je_h = ng + nx2 - 1;
-    int ks_h = ng, ke_h = ng + nx3 - 1;
-    int is_m = ngh, ie_m = ngh + nx1 - 1;
-    int js_m = ngh, je_m = ngh + nx2 - 1;
-    int ks_m = ngh, ke_m = ngh + nx3 - 1;
-    int ng1_m = ngh - 1;
-    int nnghbr = pmy_pack->pmb->nnghbr;
-
-    auto remap_send = [](int &lo, int &hi,
-                         int s_h, int e_h, int s_m, int e_m, int ng1) {
-      if (lo == s_h && hi == e_h) { lo = s_m; hi = e_m; }
-      else if (lo > s_h)          { lo = e_m - ng1; hi = e_m; }
-      else                        { lo = s_m; hi = s_m + ng1; }
-    };
-    auto remap_recv = [](int &lo, int &hi,
-                         int s_h, int e_h, int s_m, int e_m, int ng_m) {
-      if (lo >= s_h && hi <= e_h) { lo = s_m; hi = e_m; }
-      else if (lo > e_h)          { lo = e_m + 1; hi = e_m + ng_m; }
-      else                        { lo = s_m - ng_m; hi = s_m - 1; }
-    };
-
-    for (int n = 0; n < nnghbr; ++n) {
-      auto &si = sendbuf[n].isame[0];
-      remap_send(si.bis, si.bie, is_h, ie_h, is_m, ie_m, ng1_m);
-      remap_send(si.bjs, si.bje, js_h, je_h, js_m, je_m, ng1_m);
-      remap_send(si.bks, si.bke, ks_h, ke_h, ks_m, ke_m, ng1_m);
-      sendbuf[n].isame_ndat = (si.bie-si.bis+1)*(si.bje-si.bjs+1)*(si.bke-si.bks+1);
-
-      auto &ri = recvbuf[n].isame[0];
-      remap_recv(ri.bis, ri.bie, is_h, ie_h, is_m, ie_m, ngh);
-      remap_recv(ri.bjs, ri.bje, js_h, je_h, js_m, je_m, ngh);
-      remap_recv(ri.bks, ri.bke, ks_h, ke_h, ks_m, ke_m, ngh);
-      recvbuf[n].isame_ndat = (ri.bie-ri.bis+1)*(ri.bje-ri.bjs+1)*(ri.bke-ri.bks+1);
-    }
-  }
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus MultigridBoundaryValues::FillFineCoarseMGGhosts()
-//! \brief Fill ghost cells at fine-coarse boundaries.
-//! Faces use flux-conserving prolongation/restriction matching Athena++ formulas.
-//! Edges and corners use simple injection/restriction. Same-rank only.
-
-TaskStatus MultigridBoundaryValues::FillFineCoarseMGGhosts(DvceArray5D<Real> &u) {
-  if (pmy_mg == nullptr) return TaskStatus::complete;
-
-  int nvar = u.extent_int(1);
-  int shift = pmy_mg->GetLevelShift();
-  int ngh = pmy_mg->GetGhostCells();
-  int nx = pmy_mg->GetSize();
-  int ncells = nx >> shift;
-
-  if (ncells < 1) return TaskStatus::complete;
-
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  int my_rank = global_variable::my_rank;
-  auto nghbr_d = pmy_pack->pmb->nghbr.d_view;
-  auto mblev_d = pmy_pack->pmb->mb_lev.d_view;
-  auto mbgid_d = pmy_pack->pmb->mb_gid.d_view;
-  auto fc_cx = pmy_mg->fc_childx_;
-  auto fc_cy = pmy_mg->fc_childy_;
-  auto fc_cz = pmy_mg->fc_childz_;
-
-  int nmb_l = nmb;
-  int nnghbr_l = nnghbr;
-  int my_rank_l = my_rank;
-  int nvar_l = nvar;
-  int ngh_l = ngh;
-  int ncells_l = ncells;
-  constexpr Real ot = 1.0/3.0;
-
-  Kokkos::parallel_for("FillFCMGGhosts",
-    Kokkos::RangePolicy<DevExeSpace>(0, nmb),
-    KOKKOS_LAMBDA(const int m) {
-      int m_lev = mblev_d(m);
-      int child_x = fc_cx(m);
-      int child_y = fc_cy(m);
-      int child_z = fc_cz(m);
-      int half = ncells_l / 2;
-
-      for (int ox3 = -1; ox3 <= 1; ++ox3) {
-        for (int ox2 = -1; ox2 <= 1; ++ox2) {
-          for (int ox1 = -1; ox1 <= 1; ++ox1) {
-            if (ox1 == 0 && ox2 == 0 && ox3 == 0) continue;
-            int nface = (ox1!=0?1:0) + (ox2!=0?1:0) + (ox3!=0?1:0);
-
-            for (int f2 = 0; f2 <= 1; ++f2) {
-              for (int f1 = 0; f1 <= 1; ++f1) {
-                int n = NeighborIndex(ox1, ox2, ox3, f1, f2);
-                if (n < 0 || n >= nnghbr_l) continue;
-                if (nghbr_d(m, n).gid < 0) continue;
-
-                int nlev = nghbr_d(m, n).lev;
-                if (nlev == m_lev) continue;
-                if (nghbr_d(m, n).rank != my_rank_l) continue;
-
-                int dm = nghbr_d(m, n).gid - mbgid_d(0);
-                if (dm < 0 || dm >= nmb_l) continue;
-
-                if (nlev < m_lev && nface == 1) {
-                  // Coarser neighbor, face: flux-conserving prolongation
-                  if (ox1 != 0) {
-                    int fig = (ox1 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fi  = (ox1 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int si  = (ox1 < 0) ? ngh_l + ncells_l - 1 : ngh_l;
-                    int sj0 = ngh_l + child_y * half;
-                    int sk0 = ngh_l + child_z * half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sk = sk0; sk < sk0 + half; ++sk) {
-                        for (int sj = sj0; sj < sj0 + half; ++sj) {
-                          int fj = ngh_l + 2*(sj - sj0);
-                          int fk = ngh_l + 2*(sk - sk0);
-                          Real cc = u(dm,v,sk,sj,si);
-                          int sjm = (sj > ngh_l) ? sj-1 : sj;
-                          int sjp = (sj < ngh_l+ncells_l-1) ? sj+1 : sj;
-                          int skm = (sk > ngh_l) ? sk-1 : sk;
-                          int skp = (sk < ngh_l+ncells_l-1) ? sk+1 : sk;
-                          Real gy = 0.125*(u(dm,v,sk,sjp,si)-u(dm,v,sk,sjm,si));
-                          Real gz = 0.125*(u(dm,v,skp,sj,si)-u(dm,v,skm,sj,si));
-                          u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
-                          u(m,v,fk  ,fj+1,fig)=ot*(2.0*(cc+gy-gz)+u(m,v,fk  ,fj+1,fi));
-                          u(m,v,fk+1,fj  ,fig)=ot*(2.0*(cc-gy+gz)+u(m,v,fk+1,fj  ,fi));
-                          u(m,v,fk+1,fj+1,fig)=ot*(2.0*(cc+gy+gz)+u(m,v,fk+1,fj+1,fi));
-                        }
-                      }
-                    }
-                  } else if (ox2 != 0) {
-                    int fjg = (ox2 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fj  = (ox2 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int sj  = (ox2 < 0) ? ngh_l + ncells_l - 1 : ngh_l;
-                    int si0 = ngh_l + child_x * half;
-                    int sk0 = ngh_l + child_z * half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sk = sk0; sk < sk0 + half; ++sk) {
-                        for (int si = si0; si < si0 + half; ++si) {
-                          int fi = ngh_l + 2*(si - si0);
-                          int fk = ngh_l + 2*(sk - sk0);
-                          Real cc = u(dm,v,sk,sj,si);
-                          int sim = (si > ngh_l) ? si-1 : si;
-                          int sip = (si < ngh_l+ncells_l-1) ? si+1 : si;
-                          int skm = (sk > ngh_l) ? sk-1 : sk;
-                          int skp = (sk < ngh_l+ncells_l-1) ? sk+1 : sk;
-                          Real gx = 0.125*(u(dm,v,sk,sj,sip)-u(dm,v,sk,sj,sim));
-                          Real gz = 0.125*(u(dm,v,skp,sj,si)-u(dm,v,skm,sj,si));
-                          u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
-                          u(m,v,fk  ,fjg,fi+1)=ot*(2.0*(cc+gx-gz)+u(m,v,fk  ,fj,fi+1));
-                          u(m,v,fk+1,fjg,fi  )=ot*(2.0*(cc-gx+gz)+u(m,v,fk+1,fj,fi  ));
-                          u(m,v,fk+1,fjg,fi+1)=ot*(2.0*(cc+gx+gz)+u(m,v,fk+1,fj,fi+1));
-                        }
-                      }
-                    }
-                  } else {
-                    int fkg = (ox3 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fk  = (ox3 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int sk  = (ox3 < 0) ? ngh_l + ncells_l - 1 : ngh_l;
-                    int si0 = ngh_l + child_x * half;
-                    int sj0 = ngh_l + child_y * half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sj = sj0; sj < sj0 + half; ++sj) {
-                        for (int si = si0; si < si0 + half; ++si) {
-                          int fi = ngh_l + 2*(si - si0);
-                          int fj = ngh_l + 2*(sj - sj0);
-                          Real cc = u(dm,v,sk,sj,si);
-                          int sim = (si > ngh_l) ? si-1 : si;
-                          int sip = (si < ngh_l+ncells_l-1) ? si+1 : si;
-                          int sjm = (sj > ngh_l) ? sj-1 : sj;
-                          int sjp = (sj < ngh_l+ncells_l-1) ? sj+1 : sj;
-                          Real gx = 0.125*(u(dm,v,sk,sj,sip)-u(dm,v,sk,sj,sim));
-                          Real gy = 0.125*(u(dm,v,sk,sjp,si)-u(dm,v,sk,sjm,si));
-                          u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));
-                          u(m,v,fkg,fj  ,fi+1)=ot*(2.0*(cc+gx-gy)+u(m,v,fk,fj  ,fi+1));
-                          u(m,v,fkg,fj+1,fi  )=ot*(2.0*(cc-gx+gy)+u(m,v,fk,fj+1,fi  ));
-                          u(m,v,fkg,fj+1,fi+1)=ot*(2.0*(cc+gx+gy)+u(m,v,fk,fj+1,fi+1));
-                        }
-                      }
-                    }
-                  }
-
-                } else if (nlev > m_lev && nface == 1) {
-                  // Finer neighbor, face: flux-conserving restriction
-                  int sub_x = 0, sub_y = 0, sub_z = 0;
-                  if (ox1 != 0) { sub_y = f1; sub_z = f2; }
-                  if (ox2 != 0) { sub_x = f1; sub_z = f2; }
-                  if (ox3 != 0) { sub_x = f1; sub_y = f2; }
-
-                  int gis, gie, gjs, gje, gks, gke;
-                  if (ox1 < 0)      { gis = 0;             gie = ngh_l - 1; }
-                  else if (ox1 > 0) { gis = ngh_l+ncells_l; gie = ngh_l+ncells_l+ngh_l-1; }
-                  else { gis = ngh_l+sub_x*half; gie = ngh_l+sub_x*half+half-1; }
-                  if (ox2 < 0)      { gjs = 0;             gje = ngh_l - 1; }
-                  else if (ox2 > 0) { gjs = ngh_l+ncells_l; gje = ngh_l+ncells_l+ngh_l-1; }
-                  else { gjs = ngh_l+sub_y*half; gje = ngh_l+sub_y*half+half-1; }
-                  if (ox3 < 0)      { gks = 0;             gke = ngh_l - 1; }
-                  else if (ox3 > 0) { gks = ngh_l+ncells_l; gke = ngh_l+ncells_l+ngh_l-1; }
-                  else { gks = ngh_l+sub_z*half; gke = ngh_l+sub_z*half+half-1; }
-
-                  int oi = (ox1 < 0) ? 1 : (ox1 > 0) ? -1 : 0;
-                  int oj = (ox2 < 0) ? 1 : (ox2 > 0) ? -1 : 0;
-                  int ok = (ox3 < 0) ? 1 : (ox3 > 0) ? -1 : 0;
-
-                  if (ox1 != 0) {
-                    int fi = (ox1 > 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int gk = gks; gk <= gke; ++gk) {
-                        for (int gj = gjs; gj <= gje; ++gj) {
-                          int fj0 = ngh_l + 2*(gj - (ngh_l + sub_y*half));
-                          int fk0 = ngh_l + 2*(gk - (ngh_l + sub_z*half));
-                          Real favg = 0.25*(u(dm,v,fk0,fj0,fi)+u(dm,v,fk0,fj0+1,fi)
-                                           +u(dm,v,fk0+1,fj0,fi)+u(dm,v,fk0+1,fj0+1,fi));
-                          u(m,v,gk,gj,gis) = ot*(4.0*favg - u(m,v,gk+ok,gj+oj,gis+oi));
-                        }
-                      }
-                    }
-                  } else if (ox2 != 0) {
-                    int fj = (ox2 > 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int gk = gks; gk <= gke; ++gk) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          int fi0 = ngh_l + 2*(gi - (ngh_l + sub_x*half));
-                          int fk0 = ngh_l + 2*(gk - (ngh_l + sub_z*half));
-                          Real favg = 0.25*(u(dm,v,fk0,fj,fi0)+u(dm,v,fk0,fj,fi0+1)
-                                           +u(dm,v,fk0+1,fj,fi0)+u(dm,v,fk0+1,fj,fi0+1));
-                          u(m,v,gk,gjs,gi) = ot*(4.0*favg - u(m,v,gk+ok,gjs+oj,gi+oi));
-                        }
-                      }
-                    }
-                  } else {
-                    int fk = (ox3 > 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int gj = gjs; gj <= gje; ++gj) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          int fi0 = ngh_l + 2*(gi - (ngh_l + sub_x*half));
-                          int fj0 = ngh_l + 2*(gj - (ngh_l + sub_y*half));
-                          Real favg = 0.25*(u(dm,v,fk,fj0,fi0)+u(dm,v,fk,fj0,fi0+1)
-                                           +u(dm,v,fk,fj0+1,fi0)+u(dm,v,fk,fj0+1,fi0+1));
-                          u(m,v,gks,gj,gi) = ot*(4.0*favg - u(m,v,gks+ok,gj+oj,gi+oi));
-                        }
-                      }
-                    }
-                  }
-
-                } else if (nlev < m_lev) {
-                  // Coarser neighbor, edge/corner: simple injection
-                  int gis, gie, gjs, gje, gks, gke;
-                  if (ox1 < 0)      { gis = 0;             gie = ngh_l - 1; }
-                  else if (ox1 > 0) { gis = ngh_l+ncells_l; gie = ngh_l+ncells_l+ngh_l-1; }
-                  else              { gis = ngh_l;           gie = ngh_l + ncells_l - 1; }
-                  if (ox2 < 0)      { gjs = 0;             gje = ngh_l - 1; }
-                  else if (ox2 > 0) { gjs = ngh_l+ncells_l; gje = ngh_l+ncells_l+ngh_l-1; }
-                  else              { gjs = ngh_l;           gje = ngh_l + ncells_l - 1; }
-                  if (ox3 < 0)      { gks = 0;             gke = ngh_l - 1; }
-                  else if (ox3 > 0) { gks = ngh_l+ncells_l; gke = ngh_l+ncells_l+ngh_l-1; }
-                  else              { gks = ngh_l;           gke = ngh_l + ncells_l - 1; }
-
-                  for (int v = 0; v < nvar_l; ++v) {
-                    for (int gk = gks; gk <= gke; ++gk) {
-                      for (int gj = gjs; gj <= gje; ++gj) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          int si, sj, sk;
-                          if (ox1 < 0)      si = ngh_l + ncells_l - 1;
-                          else if (ox1 > 0) si = ngh_l;
-                          else si = ngh_l + child_x*half + (gi - ngh_l)/2;
-                          if (ox2 < 0)      sj = ngh_l + ncells_l - 1;
-                          else if (ox2 > 0) sj = ngh_l;
-                          else sj = ngh_l + child_y*half + (gj - ngh_l)/2;
-                          if (ox3 < 0)      sk = ngh_l + ncells_l - 1;
-                          else if (ox3 > 0) sk = ngh_l;
-                          else sk = ngh_l + child_z*half + (gk - ngh_l)/2;
-
-                          u(m, v, gk, gj, gi) = u(dm, v, sk, sj, si);
-                        }
-                      }
-                    }
-                  }
-
-                } else {
-                  // Finer neighbor, edge/corner: simple restriction
-                  int sub_x = 0, sub_y = 0, sub_z = 0;
-                  if (nface == 2) {
-                    if (ox1 == 0) sub_x = f1;
-                    if (ox2 == 0) sub_y = f1;
-                    if (ox3 == 0) sub_z = f1;
-                  }
-                  int gis, gie, gjs, gje, gks, gke;
-                  if (ox1 < 0)      { gis = 0;             gie = ngh_l - 1; }
-                  else if (ox1 > 0) { gis = ngh_l+ncells_l; gie = ngh_l+ncells_l+ngh_l-1; }
-                  else { gis = ngh_l+sub_x*half; gie = ngh_l+sub_x*half+half-1; }
-                  if (ox2 < 0)      { gjs = 0;             gje = ngh_l - 1; }
-                  else if (ox2 > 0) { gjs = ngh_l+ncells_l; gje = ngh_l+ncells_l+ngh_l-1; }
-                  else { gjs = ngh_l+sub_y*half; gje = ngh_l+sub_y*half+half-1; }
-                  if (ox3 < 0)      { gks = 0;             gke = ngh_l - 1; }
-                  else if (ox3 > 0) { gks = ngh_l+ncells_l; gke = ngh_l+ncells_l+ngh_l-1; }
-                  else { gks = ngh_l+sub_z*half; gke = ngh_l+sub_z*half+half-1; }
-
-                  for (int v = 0; v < nvar_l; ++v) {
-                    for (int gk = gks; gk <= gke; ++gk) {
-                      for (int gj = gjs; gj <= gje; ++gj) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          int fi0, fi1, fj0, fj1, fk0, fk1;
-                          if (ox1 < 0) {
-                            fi0 = ngh_l+ncells_l-2; fi1 = ngh_l+ncells_l-1;
-                          } else if (ox1 > 0) {
-                            fi0 = ngh_l; fi1 = ngh_l + 1;
-                          } else {
-                            fi0 = ngh_l+2*(gi-(ngh_l+sub_x*half)); fi1 = fi0+1;
-                          }
-                          if (ox2 < 0) {
-                            fj0 = ngh_l+ncells_l-2; fj1 = ngh_l+ncells_l-1;
-                          } else if (ox2 > 0) {
-                            fj0 = ngh_l; fj1 = ngh_l + 1;
-                          } else {
-                            fj0 = ngh_l+2*(gj-(ngh_l+sub_y*half)); fj1 = fj0+1;
-                          }
-                          if (ox3 < 0) {
-                            fk0 = ngh_l+ncells_l-2; fk1 = ngh_l+ncells_l-1;
-                          } else if (ox3 > 0) {
-                            fk0 = ngh_l; fk1 = ngh_l + 1;
-                          } else {
-                            fk0 = ngh_l+2*(gk-(ngh_l+sub_z*half)); fk1 = fk0+1;
-                          }
-                          u(m, v, gk, gj, gi) = 0.125 * (
-                            u(dm,v,fk0,fj0,fi0) + u(dm,v,fk0,fj0,fi1) +
-                            u(dm,v,fk0,fj1,fi0) + u(dm,v,fk0,fj1,fi1) +
-                            u(dm,v,fk1,fj0,fi0) + u(dm,v,fk1,fj0,fi1) +
-                            u(dm,v,fk1,fj1,fi0) + u(dm,v,fk1,fj1,fi1));
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-  });
-
-  return TaskStatus::complete;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus MultigridBoundaryValues::PackAndSend()
-//! \brief Pack restricted fluxes of multigrid variables at fine/coarse boundaries
-//! into boundary buffers and send to neighbors. Adapts to different block sizes per level.
-
-TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
-  if (pmy_mg == nullptr) return TaskStatus::complete;
-
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  int nvar = u.extent_int(1);
-
-  int my_rank = global_variable::my_rank;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mbgid = pmy_pack->pmb->mb_gid;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &sbuf = sendbuf;
-  auto &rbuf = recvbuf;
-
-  int shift_ = pmy_mg->GetLevelShift();
-  int nx1_ = pmy_mg->GetSize();
-
-  {
-  int nmnv = nmb * nnghbr * nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
-  Kokkos::parallel_for("PackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
-    const int m = tmember.league_rank() / (nnghbr * nvar);
-    const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;
-    const int v = tmember.league_rank() - m * nnghbr * nvar - n * nvar;
-
-    if (nghbr.d_view(m, n).gid >= 0 &&
-        nghbr.d_view(m, n).lev == mblev.d_view(m)) {
-      int il = sbuf[n].isame[0].bis;
-      int iu = sbuf[n].isame[0].bie;
-      int jl = sbuf[n].isame[0].bjs;
-      int ju = sbuf[n].isame[0].bje;
-      int kl = sbuf[n].isame[0].bks;
-      int ku = sbuf[n].isame[0].bke;
-
-      int sh = shift_;
-      int nx = nx1_;
-    
-      while (sh > 0) {
-        if (sbuf[n].faces.d_view(0) && (il == nx)) {
-          int d = iu - il; il = il >> 1; iu = il + d;
-        } else if (!sbuf[n].faces.d_view(0)) {
-          iu = ((iu - il) >> 1) + il;
-        }
-        if (sbuf[n].faces.d_view(1) && (jl == nx)) {
-          int d = ju - jl; jl = jl >> 1; ju = jl + d;
-        } else if (!sbuf[n].faces.d_view(1)) {
-          ju = ((ju - jl) >> 1) + jl;
-        }
-        if (sbuf[n].faces.d_view(2) && (kl == nx)) {
-          int d = ku - kl; kl = kl >> 1; ku = kl + d;
-        } else if (!sbuf[n].faces.d_view(2)) {
-          ku = ((ku - kl) >> 1) + kl;
-        }
-        sh--;
-        nx = nx >> 1;
-      }
-
-      int ni = iu - il + 1;
-      int nj = ju - jl + 1;
-      int nk = ku - kl + 1;
-      int nkj = nk * nj;
-
-      int dm = nghbr.d_view(m, n).gid - mbgid.d_view(0);
-      int dn = nghbr.d_view(m, n).dest;
-
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-
-        if (nghbr.d_view(m, n).rank == my_rank) {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            rbuf[dn].vars(dm, (i-il + ni*(j-jl + nj*(k-kl + nk*v))))
-                = u(m, v, k, j, i);
-          });
-        } else {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            sbuf[n].vars(m, (i-il + ni*(j-jl + nj*(k-kl + nk*v))))
-                = u(m, v, k, j, i);
-          });
-        }
-      });
-    }
-    tmember.team_barrier();
-  });
-  }
-
-  #if MPI_PARALLEL_ENABLED
-  // Send boundary buffer to neighboring MeshBlocks using MPI
-  Kokkos::fence();
-  bool no_errors=true;
-  for (int m=0; m<nmb; ++m) {
-    for (int n=0; n<nnghbr; ++n) {
-      if (nghbr.h_view(m,n).gid >= 0
-          && nghbr.h_view(m,n).lev == pmy_pack->pmb->mb_lev.h_view(m)) {
-        int dn = nghbr.h_view(m,n).dest;
-        int drank = nghbr.h_view(m,n).rank;
-        if (drank != my_rank) {
-          // create tag using local ID and buffer index of *receiving* MeshBlock
-          int lid = nghbr.h_view(m,n).gid - pmy_pack->pmesh->gids_eachrank[drank];
-          int tag = CreateBvals_MPI_Tag(lid, dn);
-
-          // get ptr to send buffer when neighbor is at coarser/same/fine level
-          int data_size = nvar;
-          data_size *= sendbuf[n].isame_ndat;
-          
-          if (not(sendbuf[n].faces.h_view(0)))
-            data_size >>= shift_;
-          if (not(sendbuf[n].faces.h_view(1)))
-            data_size >>= shift_;
-          if (not(sendbuf[n].faces.h_view(2)))
-            data_size >>= shift_;
-
-          auto send_ptr = Kokkos::subview(sendbuf[n].vars, m, Kokkos::ALL);
-          int ierr = MPI_Isend(send_ptr.data(), data_size, MPI_ATHENA_REAL, drank, tag,
-                               comm_vars, &(sendbuf[n].vars_req[m]));
-          if (ierr != MPI_SUCCESS) {no_errors=false;}
-        }
-      }
-    }
-  }
-  // Quit if MPI error detected
-  if (!(no_errors)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-       << std::endl << "MPI error in posting sends" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-#endif
-  return TaskStatus::complete;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus MultigridBoundaryValuesCC::RecvAndUnpackMG()
-//! \brief Receive and unpack cell-centered multigrid variables.
-//! Handles ghost-cell filling at each multigrid level independently.
-
-TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
-  if (pmy_mg == nullptr) return TaskStatus::complete;
-  // create local references for variables in kernel
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &rbuf = recvbuf;
-  int shift_ = pmy_mg->GetLevelShift();
-  #if MPI_PARALLEL_ENABLED
-  //----- STEP 1: check that recv boundary buffer communications have all completed
-  bool bflag = false;
-  bool no_errors=true;
-  for (int m=0; m<nmb; ++m) {
-    for (int n=0; n<nnghbr; ++n) {
-      if (nghbr.h_view(m,n).gid >= 0
-          && nghbr.h_view(m,n).lev == mblev.h_view(m)) {
-        if (nghbr.h_view(m,n).rank != global_variable::my_rank) {
-          int test;
-          int ierr = MPI_Test(&(rbuf[n].vars_req[m]), &test, MPI_STATUS_IGNORE);
-          if (ierr != MPI_SUCCESS) {no_errors=false;}
-          if (!(static_cast<bool>(test))) {
-            bflag = true;
-          }
-        }
-      }
-    }
-  }
-  // Quit if MPI error detected
-  if (!(no_errors)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-              << std::endl << "MPI error in testing non-blocking receives"
-              << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  // exit if recv boundary buffer communications have not completed
-  if (bflag) {return TaskStatus::incomplete;}
-  MPI_Barrier(comm_vars);
-#endif
-
-  //----- STEP 2: buffers have all completed, so unpack
-  int nvar = u.extent_int(1);
-  int ngh = pmy_mg->GetGhostCells();
-
-  {
-  int nmnv = nmb * nnghbr * nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
-  Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
-    const int m = tmember.league_rank() / (nnghbr * nvar);
-    const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;
-    const int v = tmember.league_rank() - m * nnghbr * nvar - n * nvar;
-
-    if (nghbr.d_view(m, n).gid >= 0 &&
-        nghbr.d_view(m, n).lev == mblev.d_view(m)) {
-      int il = rbuf[n].isame[0].bis;
-      int iu = rbuf[n].isame[0].bie;
-      int jl = rbuf[n].isame[0].bjs;
-      int ju = rbuf[n].isame[0].bje;
-      int kl = rbuf[n].isame[0].bks;
-      int ku = rbuf[n].isame[0].bke;
-
-      int sh = shift_;
-      while (sh > 0) {
-        if (rbuf[n].faces.d_view(0) && il > 1) {
-          int d = iu - il; il = (il + ngh) >> 1; iu = il + d;
-        } else if (!rbuf[n].faces.d_view(0)) {
-          iu = ((iu - il) >> 1) + il;
-        }
-        if (rbuf[n].faces.d_view(1) && jl > 1) {
-          int d = ju - jl; jl = (jl + ngh) >> 1; ju = jl + d;
-        } else if (!rbuf[n].faces.d_view(1)) {
-          ju = ((ju - jl) >> 1) + jl;
-        }
-        if (rbuf[n].faces.d_view(2) && kl > 1) {
-          int d = ku - kl; kl = (kl + ngh) >> 1; ku = kl + d;
-        } else if (!rbuf[n].faces.d_view(2)) {
-          ku = ((ku - kl) >> 1) + kl;
-        }
-        sh--;
-      }
-
-      int ni = iu - il + 1;
-      int nj = ju - jl + 1;
-      int nk = ku - kl + 1;
-      int nkj = nk * nj;
-
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-
-        Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-        [&](const int i) {
-          u(m, v, k, j, i) = rbuf[n].vars(m,
-              (i-il + ni*(j-jl + nj*(k-kl + nk*v))));
-        });
-      });
-    }
-    tmember.team_barrier();
-  });
-  }
-
-  return TaskStatus::complete;
-}
-
-//----------------------------------------------------------------------------------------
-//! \fn  void MeshBoundaryValues::InitRecv
-//! \brief Posts non-blocking receives (with MPI) for boundary communications of vars.
-
-TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
-#if MPI_PARALLEL_ENABLED
-  int &nmb = pmy_pack->nmb_thispack;
-  int &nnghbr = pmy_pack->pmb->nnghbr;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  int shift_ = pmy_mg->GetLevelShift();
-
-  // Initialize communications of variables
-  bool no_errors=true;
-  for (int m=0; m<nmb; ++m) {
-    for (int n=0; n<nnghbr; ++n) {
-      if (nghbr.h_view(m,n).gid >= 0
-          && nghbr.h_view(m,n).lev == mblev.h_view(m)) {
-        // rank of destination buffer
-        int drank = nghbr.h_view(m,n).rank;
-
-        // post non-blocking receive if neighboring MeshBlock on a different rank
-        if (drank != global_variable::my_rank) {
-          // create tag using local ID and buffer index of *receiving* MeshBlock
-          int tag = CreateBvals_MPI_Tag(m, n);
-
-          // calculate amount of data to be passed, get pointer to variables
-          int data_size = nvars;
-          data_size *= sendbuf[n].isame_ndat;
-          
-          if (not(recvbuf[n].faces.h_view(0)))
-            data_size >>= shift_;
-          if (not(recvbuf[n].faces.h_view(1)))
-            data_size >>= shift_;
-          if (not(recvbuf[n].faces.h_view(2)))
-            data_size >>= shift_;
-
-          auto recv_ptr = Kokkos::subview(recvbuf[n].vars, m, Kokkos::ALL);
-
-          // Post non-blocking receive for this buffer on this MeshBlock
-          int ierr = MPI_Irecv(recv_ptr.data(), data_size, MPI_ATHENA_REAL, drank, tag,
-                               comm_vars, &(recvbuf[n].vars_req[m]));
-          if (ierr != MPI_SUCCESS) {no_errors=false;}
-        }
-      }
-    }
-  }
-  // Quit if MPI error detected
-  if (!(no_errors)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-       << std::endl << "MPI error in posting non-blocking receives" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-#endif
-  return TaskStatus::complete;
-}
-
-void Multigrid::PrintActiveRegion(const DvceArray5D<Real> &u_in) {
-  auto u_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), u_in);
-  int ll = nlevel_ - 1 - current_level_;
-  int ngh = ngh_;  // number of ghost cells
-  
-  int is = ngh, ie = is + (indcs_.nx1 >> ll) - 1;
-  int js = ngh, je = js + (indcs_.nx2 >> ll) - 1;
-  int ks = ngh, ke = ks + (indcs_.nx3 >> ll) - 1;
-  std::cout<<"nrbx1="<<nmmbx1_<<", nrbx2="<<nmmbx2_<<", nrbx3="<<nmmbx3_<<std::endl;  
-  std::cout << "Active region at level " << current_level_ << " (nx=" << (indcs_.nx1 >> ll) << ")\n";
-  std::cout << "Range: i=[" << is << "," << ie << "], j=[" << js << "," << je 
-            << "], k=[" << ks << "," << ke << "]\n";
-  std::cout << "[";
-  for (int mz = 0; mz < nmmbx3_/global_variable::nranks; ++mz) {
-  for (int k = ks; k <= ks+((ke-ks)/(3-global_variable::nranks)); ++k) {
-        std::cout << "[";
-        for (int my=0; my < nmmbx2_; ++my) {
-          for (int j = js; j <= je; ++j) {
-            std::cout << "[";
-            for (int mx= 0; mx < nmmbx1_; ++mx) {
-              for (int i = is; i <= ie; ++i){
-                std::cout << std::setprecision(3) << u_h(mx+my*2+mz*4, 0, k, j, i) << ", ";
-              }
-            }
-            std::cout << "],";
-            std::cout << "\n";
-          }
-        }
-        std::cout << "],";
-        std::cout << "\n";
-    }
-  }
-  std::cout << "]";
-  return;
-}
-
-void Multigrid::PrintAll(const DvceArray5D<Real> &u_in) {
-  auto u_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), u_in);
-  int ll = nlevel_ - 1 - current_level_;
-  int ngh = ngh_;  // number of ghost cells
-  
-  int is = 2, ie = is + (indcs_.nx1 >> ll) +2 *ngh - 5;
-  int js = 2, je = js + (indcs_.nx2 >> ll) +2 *ngh - 5;
-  int ks = 2, ke = ks + (indcs_.nx3 >> ll) +2 *ngh - 5;
-  //std::cout<<"nrbx1="<<nmmbx1_<<", nrbx2="<<nmmbx2_<<", nrbx3="<<nmmbx3_<<std::endl;  
-  //std::cout << "Whole domain at level " << current_level_ << " (nx=" << (indcs_.nx1 >> ll) << ")\n";
-  //std::cout << "Range: i=[" << is << "," << ie << "], j=[" << js << "," << je 
-  //          << "], k=[" << ks << "," << ke << "]\n";
-  for (int mz = 0; mz < nmmbx3_; ++mz) {
-  for (int k = ks+mz; k <= ke+(1-nmmbx3_)+mz; ++k) {
-        for (int my=0; my < nmmbx2_; ++my) {
-          for (int j = js+my; j <= je+(1-nmmbx2_)+my; ++j) {
-            for (int mx= 0; mx < nmmbx1_; ++mx) {
-              for (int i = is+mx; i <= ie+(1-nmmbx1_)+mx; ++i){
-                std::cout << std::setprecision(3) << u_h(mx+my*2+mz*4, 0, k, j, i) << ", ";
-              }
-            }
-            std::cout << "],";
-            std::cout << "\n";
-          }
-        }
-        std::cout << "],";
-        std::cout << "\n";
-    }
-  }
   return;
 }

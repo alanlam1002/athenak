@@ -25,6 +25,7 @@
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
+#include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -403,6 +404,11 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         // with the current density (required for 2nd-order accuracy)
         if (pmesh->pmb_pack->pgrav != nullptr)
             {pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);}
+        // solve the CFC metric at each RK stage, using the matter stress-energy
+        // tensor (ptmunu) computed at the end of the previous stage; the result is
+        // written into padm->u_adm before "stagen" (flux calc, ConToPrim, ...) runs
+        if (pmesh->pmb_pack->pcfc != nullptr)
+            {pmesh->pmb_pack->pcfc->Solve(this, stage);}
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
       }

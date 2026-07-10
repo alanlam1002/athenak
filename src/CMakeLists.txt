@@ -27,6 +27,12 @@ add_executable(
         bvals/physics/radiation_bcs.cpp
         bvals/physics/z4c_bcs.cpp
 
+        cfc/cfc.cpp
+        cfc/cfc_reconstruct.cpp
+        cfc/mg_cfc_conformal_factor.cpp
+        cfc/mg_cfc_lapse.cpp
+        cfc/mg_cfc_vector_poisson.cpp
+
         coordinates/adm.cpp
         coordinates/coordinates.cpp
         coordinates/excision.cpp

@@ -120,11 +120,21 @@ class CFC {
   // Step 2: Adual^ij from X^i (eq. 76), then Ahat^2 (cfc_reconstruct.hpp).
   void ComputeADual();
 
-  // Step 3: solve eq. 73 for psi (nonlinear).
+  // Step 3: solve eq. 73 for psi (nonlinear), then immediately write psi4/g_dd into
+  // pmy_pack->padm->u_adm via cfc::AssembleConformalMetric -- RescaleMatterSources()'s
+  // con2prim call needs a valid g_dd to invert conserved to primitive variables.
   void SolveConformalFactor(Driver *pdriver, int stage);
 
-  // Step 4: rescale Ũ, S-tilde, S-tilde_i using the newly solved psi^6.
-  void RescaleMatterSources();
+  // Step 4: recover primitives (density, pressure, velocity) via
+  // pmy_pack->pdyngr->ConToPrim(pdriver, stage) -- reusing dyn_grmhd's own con2prim
+  // (src/eos/primitive-solver), now that psi/g_dd is known -- then build S-tilde
+  // (trace of S_ij, needed by the lapse equation) from the recovered primitives and
+  // EOS enthalpy. Ũ and S-tilde_i do NOT need recomputing here: they were already
+  // built directly from the psi^6-densitized evolved conserved state
+  // (pmy_pack->pmhd->u0: D, S_i, tau) in steps 1 and 3, since sqrt(gamma) = psi^6 is
+  // already baked into those conserved variables -- only the trace source requires
+  // primitives that aren't otherwise available.
+  void RescaleMatterSources(Driver *pdriver, int stage);
 
   // Step 5: solve eq. 74 for alpha*psi (nonlinear); extract alpha = (alpha*psi)/psi.
   void SolveLapse(Driver *pdriver, int stage);
@@ -134,7 +144,9 @@ class CFC {
   // (cfc_reconstruct.hpp).
   void SolveShift(Driver *pdriver, int stage);
 
-  // Final assembly: psi4, g_dd, vK_dd, alpha, beta_u -> pmy_pack->padm->u_adm.
+  // Final assembly: vK_dd, alpha, beta_u -> pmy_pack->padm->u_adm (via
+  // cfc::AssembleLapseShiftK). psi4/g_dd were already written by
+  // SolveConformalFactor(), right after step 3.
   void AssembleADM();
 };
 

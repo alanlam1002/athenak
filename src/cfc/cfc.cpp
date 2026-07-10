@@ -85,10 +85,11 @@ void CFC::Solve(Driver *pdriver, int stage) {
   SolveVectorPotential(pdriver, stage);
   // Step 2: Adual^ij, Ahat^2 (Gmunu eq. 76)
   ComputeADual();
-  // Step 3: psi (Gmunu eq. 73, nonlinear)
+  // Step 3: psi (Gmunu eq. 73, nonlinear); also writes psi4/g_dd into padm->u_adm
   SolveConformalFactor(pdriver, stage);
-  // Step 4: rescale Ũ, S-tilde, S-tilde_i with the new psi
-  RescaleMatterSources();
+  // Step 4: recover primitives via con2prim (now that psi/g_dd is known) and build
+  // the trace matter source S-tilde needed by the lapse equation
+  RescaleMatterSources(pdriver, stage);
   // Step 5: alpha*psi (Gmunu eq. 74, nonlinear)
   SolveLapse(pdriver, stage);
   // Step 6: beta^i (Gmunu eq. 75)
@@ -140,18 +141,43 @@ void CFC::ComputeADual() {
 void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
   // TODO(cfc): pmgd_psi->LoadMatterSource(u_tilde), pmgd_psi->LoadNonlinearCoefficient
   // (a_sq), pmgd_psi->Solve(pdriver, stage), pmgd_psi->RetrieveSolution(...) into psi
-  // (adding back the +1 offset from the delta_psi convention).
+  // (adding back the +1 offset from the delta_psi convention). Then
+  // cfc::AssembleConformalMetric(pmy_pack, psi) to write psi4/g_dd into
+  // pmy_pack->padm->u_adm -- RescaleMatterSources()'s con2prim call right after this
+  // reads padm->adm.g_dd directly (PrimitiveSolverHydro::ConsToPrim), so this write
+  // cannot be deferred to the final AssembleADM() step.
   return;
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::RescaleMatterSources()
+//! \fn void CFC::RescaleMatterSources(Driver *pdriver, int stage)
 
-void CFC::RescaleMatterSources() {
-  // TODO(cfc): u_tilde = psi^6 * pmy_pack->ptmunu->tmunu.E, s_tilde_d = psi^6 *
-  // tmunu.S_d, s_tilde = psi^6 * (flat-metric trace of tmunu.S_dd). No con2prim call
-  // needed -- Tmunu's E/S_d/S_dd are already the physical (psi-independent)
-  // projections.
+void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
+  // TODO(cfc): pmy_pack->pdyngr->ConToPrim(pdriver, stage) -- the same virtual,
+  // EOS-policy-agnostic entry point dyn_grmhd's own MHD_C2P task uses (see
+  // dyn_grmhd.hpp's DynGRMHD::ConToPrim / dyn_grmhd.cpp's
+  // DynGRMHDPS<...>::ConToPrim), which internally calls
+  // eos.ConsToPrim(pmhd->u0, pmhd->b0, pmhd->bcc0, pmhd->w0, temperature, ...) and
+  // reads pmy_pack->padm->adm.g_dd to do the inversion -- valid now that
+  // SolveConformalFactor() has already written psi4/g_dd for this stage. This fills
+  // pmy_pack->pmhd->w0 with density/pressure/velocity.
+  //
+  // u_tilde (psi^6 U) and s_tilde_d (psi^6 S_i) do NOT need primitives: per
+  // dyn_grmhd.cpp's DynGRMHD::SetTmunu (lines 461/463), ptmunu->tmunu.E and
+  // .S_d are algebraically exact functions of the conserved state alone
+  // (E = (tau+D)/sqrt(gamma), S_i = cons_momentum_i/sqrt(gamma)), so u_tilde/
+  // s_tilde_d can be built directly from ptmunu->tmunu.E/.S_d (or equivalently
+  // straight from pmy_pack->pmhd->u0) multiplied by the newly-solved psi^6, same
+  // as steps 1/3 already do -- no con2prim involved.
+  //
+  // s_tilde (trace of S_ij, needed by the lapse equation in step 5) is different:
+  // SetTmunu's tmunu.S_dd (dyn_grmhd.cpp lines 464-468) is built from prim/w0
+  // (velocity, pressure) evaluated with whatever g_dd was current when SetTmunu
+  // last ran -- i.e. the *previous* stage's psi, not the one just solved in step 3.
+  // So ptmunu->tmunu.S_dd's trace is stale here and must NOT be reused directly.
+  // Instead, recompute the trace here using the freshly recovered w0 (density,
+  // pressure, velocity) and the new g_dd: s_tilde = psi^6 * (rho*h*W^2*v^2 + 3*P),
+  // mirroring SetTmunu's own S_dd formula but evaluated post-con2prim, post-new-psi.
   return;
 }
 

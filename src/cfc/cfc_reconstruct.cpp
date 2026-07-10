@@ -38,13 +38,24 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void AssembleADMFromCFC(...)
+//! \fn void AssembleConformalMetric(...)
 
-void AssembleADMFromCFC(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-                         const DvceArray5D<Real> &alpha_psi,
-                         const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                         const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u) {
-  // TODO(cfc): write psi4, g_dd, vK_dd, alpha, beta_u into pmbp->padm->u_adm.
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi) {
+  // TODO(cfc): write psi4 = psi^4, g_dd = psi^4 * delta_ij into pmbp->padm->u_adm.
+  // Must run before RescaleMatterSources()'s con2prim call (padm->adm.g_dd is read
+  // directly by PrimitiveSolverHydro::ConsToPrim).
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void AssembleLapseShiftK(...)
+
+void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
+                          const DvceArray5D<Real> &alpha_psi,
+                          const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u) {
+  // TODO(cfc): write vK_dd = psi^-2 * Adual_ij, alpha = (alpha*psi)/psi, beta_u into
+  // pmbp->padm->u_adm. psi4/g_dd already written by AssembleConformalMetric().
   return;
 }
 

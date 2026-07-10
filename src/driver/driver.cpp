@@ -25,7 +25,6 @@
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
-#include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -404,11 +403,11 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         // with the current density (required for 2nd-order accuracy)
         if (pmesh->pmb_pack->pgrav != nullptr)
             {pmesh->pmb_pack->pgrav->pmgd->Solve(this, stage);}
-        // solve the CFC metric at each RK stage, using the matter stress-energy
-        // tensor (ptmunu) computed at the end of the previous stage; the result is
-        // written into padm->u_adm before "stagen" (flux calc, ConToPrim, ...) runs
-        if (pmesh->pmb_pack->pcfc != nullptr)
-            {pmesh->pmb_pack->pcfc->Solve(this, stage);}
+        // the CFC metric solve runs *inside* "stagen" now, not here: its steps must
+        // interleave with dyn_grmhd's own hydro/con2prim tasks (single con2prim
+        // shared between them), which is only possible via the NumericalRelativity
+        // task graph (see cfc::CFC::QueueCFCTasks(), tasklist/numerical_relativity.
+        // hpp's CFC_* tasks, and dyn_grmhd.cpp's MHD_C2P/MHD_Newdt optional deps).
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
       }

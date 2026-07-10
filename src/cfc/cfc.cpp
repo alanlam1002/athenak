@@ -14,8 +14,9 @@
 #include "mesh/meshblock_pack.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/adm.hpp"
-#include "z4c/tmunu.hpp"
+#include "mhd/mhd.hpp"
 #include "driver/driver.hpp"
+#include "tasklist/numerical_relativity.hpp"
 #include "cfc.hpp"
 #include "cfc_reconstruct.hpp"
 
@@ -76,27 +77,86 @@ CFC::~CFC() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::Solve(Driver *pdriver, int stage)
-//! \brief runs the 6-step XCFC solve (Gmunu sec. 2.6) and writes the result into
-//! pmy_pack->padm->u_adm.
+//! \fn void CFC::QueueCFCTasks()
+//! \brief queues CFC's tasks into the shared NumericalRelativity task graph, interleaved
+//! with dyn_grmhd's hydro/con2prim tasks (see cfc.hpp's QueueCFCTasks doc comment for
+//! the full dependency rationale).
 
-void CFC::Solve(Driver *pdriver, int stage) {
-  // Step 1: X^i (Gmunu eq. 72)
-  SolveVectorPotential(pdriver, stage);
-  // Step 2: Adual^ij, Ahat^2 (Gmunu eq. 76)
-  ComputeADual();
-  // Step 3: psi (Gmunu eq. 73, nonlinear); also writes psi4/g_dd into padm->u_adm
-  SolveConformalFactor(pdriver, stage);
-  // Step 4: recover primitives via con2prim (now that psi/g_dd is known) and build
-  // the trace matter source S-tilde needed by the lapse equation
-  RescaleMatterSources(pdriver, stage);
-  // Step 5: alpha*psi (Gmunu eq. 74, nonlinear)
-  SolveLapse(pdriver, stage);
-  // Step 6: beta^i (Gmunu eq. 75)
-  SolveShift(pdriver, stage);
-  // Final: assemble psi4, g_dd, vK_dd, alpha, beta_u into padm->u_adm
-  AssembleADM();
+void CFC::QueueCFCTasks() {
+  using namespace numrel;  // NOLINT(build/namespaces)
+  NumericalRelativity *pnr = pmy_pack->pnr;
+
+  pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_SolveVecX, "CFC_SolveVecX",
+                 Task_Run, {MHD_AddSrc});
+  pnr->QueueTask(&CFC::SolvePsiTask, this, CFC_SolvePsi, "CFC_SolvePsi",
+                 Task_Run, {CFC_SolveVecX});
+  pnr->QueueTask(&CFC::RescaleSrcTask, this, CFC_RescaleSrc, "CFC_RescaleSrc",
+                 Task_Run, {MHD_C2P});
+  pnr->QueueTask(&CFC::SolveLapseTask, this, CFC_SolveLapse, "CFC_SolveLapse",
+                 Task_Run, {CFC_RescaleSrc});
+  pnr->QueueTask(&CFC::SolveShiftTask, this, CFC_SolveShift, "CFC_SolveShift",
+                 Task_Run, {CFC_SolveLapse});
+  pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
+                 Task_Run, {CFC_SolveShift});
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage)
+//! \brief steps 1-2: X^i vector potential (eq. 72) and Adual^ij/Ahat^2 (eq. 76). Runs
+//! after MHD_AddSrc, i.e. once this stage's hydro flux+source update has produced the
+//! conserved state AssembleVectorSource reads from.
+
+TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
+  SolveVectorPotential(pdriver, stage);
+  ComputeADual();
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage)
+//! \brief step 3: psi (nonlinear), then the early psi4/g_dd write MHD_C2P depends on.
+
+TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
+  SolveConformalFactor(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage)
+//! \brief step 4: rebuild S-tilde from the primitives MHD_C2P (this task's dependency)
+//! just recovered -- no con2prim call here, see RescaleMatterSources.
+
+TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
+  RescaleMatterSources(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage)
+//! \brief step 5: alpha*psi (nonlinear).
+
+TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
+  SolveLapse(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage)
+//! \brief step 6: beta^i.
+
+TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
+  SolveShift(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage)
+//! \brief final step: vK_dd/alpha/beta_u -> padm->u_adm.
+
+TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
+  AssembleADM();
+  return TaskStatus::complete;
 }
 
 //----------------------------------------------------------------------------------------
@@ -104,9 +164,16 @@ void CFC::Solve(Driver *pdriver, int stage) {
 
 void CFC::AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
                                DvceArray5D<Real> &eta_src, bool for_shift) {
-  // TODO(cfc): if (!for_shift): p_src = 8*pi*S-tilde_i (Gmunu eq. 72 rhs);
+  // TODO(cfc): if (!for_shift): build S-tilde_i = psi^6 * S_i directly from
+  // pmy_pack->pmhd->u0's momentum components (IM1..IM3) divided by sqrt(detg) of the
+  // *current* (not-yet-updated-by-this-solve) padm->adm.g_dd -- mirrors
+  // dyn_grmhd.cpp's DynGRMHD::SetTmunu (S_d(m,a,...) = cons(IM1+a,...)*ivol), but
+  // computed inline here rather than read from ptmunu (which may not even be
+  // populated -- see cfc.hpp's u_tilde comment); then p_src = 8*pi*S-tilde_i
+  // (Gmunu eq. 72 rhs).
   // if (for_shift): p_src = 16*pi*alpha*psi^-6*S-tilde_i + 2*Adual^ij*D_j(alpha*psi^-6)
-  // (Gmunu eq. 75 rhs); then eta_src = -p_src_i * x^i (Shibata eq. 3.11) in both cases.
+  // (Gmunu eq. 75 rhs), reusing s_tilde_d already built for the X^i solve.
+  // In both cases: eta_src = -p_src_i * x^i (Shibata eq. 3.11).
   return;
 }
 
@@ -114,9 +181,10 @@ void CFC::AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src
 //! \fn void CFC::SolveVectorPotential(Driver *pdriver, int stage)
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
-  // TODO(cfc): AssembleVectorSource(p_src, eta_src, /*for_shift=*/false) using
-  // S-tilde_i (from pmy_pack->ptmunu->tmunu.S_d) to build both right-hand sides.
-  // Then, in order (P_i first, since P_x/P_y/P_z/eta are all independent of each
+  // TODO(cfc): AssembleVectorSource(p_src, eta_src, /*for_shift=*/false), built
+  // directly from pmy_pack->pmhd->u0 (post MHD_AddSrc, this task's dependency -- see
+  // QueueCFCTasks), to build both right-hand sides. Then, in order (P_i first, since
+  // P_x/P_y/P_z/eta are all independent of each
   // other but eta's source was built from the same S_i used for P_i):
   //   1. pmgd_px->LoadPoissonSource(p_src); pmgd_px->Solve(pdriver, stage);
   //      pmgd_px->RetrieveSolution(p_x);
@@ -143,9 +211,10 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
   // (a_sq), pmgd_psi->Solve(pdriver, stage), pmgd_psi->RetrieveSolution(...) into psi
   // (adding back the +1 offset from the delta_psi convention). Then
   // cfc::AssembleConformalMetric(pmy_pack, psi) to write psi4/g_dd into
-  // pmy_pack->padm->u_adm -- RescaleMatterSources()'s con2prim call right after this
-  // reads padm->adm.g_dd directly (PrimitiveSolverHydro::ConsToPrim), so this write
-  // cannot be deferred to the final AssembleADM() step.
+  // pmy_pack->padm->u_adm -- MHD_C2P (the single con2prim shared with dyn_grmhd,
+  // queued to depend on CFC_SolvePsi -- see QueueCFCTasks/dyn_grmhd.cpp) reads
+  // padm->adm.g_dd directly (PrimitiveSolverHydro::ConsToPrim), so this write cannot
+  // be deferred to the final AssembleADM() step.
   return;
 }
 
@@ -153,31 +222,23 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
 //! \fn void CFC::RescaleMatterSources(Driver *pdriver, int stage)
 
 void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
-  // TODO(cfc): pmy_pack->pdyngr->ConToPrim(pdriver, stage) -- the same virtual,
-  // EOS-policy-agnostic entry point dyn_grmhd's own MHD_C2P task uses (see
-  // dyn_grmhd.hpp's DynGRMHD::ConToPrim / dyn_grmhd.cpp's
-  // DynGRMHDPS<...>::ConToPrim), which internally calls
-  // eos.ConsToPrim(pmhd->u0, pmhd->b0, pmhd->bcc0, pmhd->w0, temperature, ...) and
-  // reads pmy_pack->padm->adm.g_dd to do the inversion -- valid now that
-  // SolveConformalFactor() has already written psi4/g_dd for this stage. This fills
-  // pmy_pack->pmhd->w0 with density/pressure/velocity.
+  // TODO(cfc): No con2prim call here -- RescaleSrcTask depends on MHD_C2P (dyn_grmhd's
+  // own per-stage con2prim, queued to depend on CFC_SolvePsi so it inverts against
+  // this stage's new g_dd -- see QueueCFCTasks/dyn_grmhd.cpp's MHD_C2P task), so
+  // pmy_pack->pmhd->w0 (density, pressure, velocity) is already fresh by the time
+  // this task runs. This is the fix for the double con2prim call: CFC used to run
+  // its own ConToPrim here, duplicating dyn_grmhd's; now there is exactly one
+  // con2prim per stage, shared by both.
   //
-  // u_tilde (psi^6 U) and s_tilde_d (psi^6 S_i) do NOT need primitives: per
-  // dyn_grmhd.cpp's DynGRMHD::SetTmunu (lines 461/463), ptmunu->tmunu.E and
-  // .S_d are algebraically exact functions of the conserved state alone
-  // (E = (tau+D)/sqrt(gamma), S_i = cons_momentum_i/sqrt(gamma)), so u_tilde/
-  // s_tilde_d can be built directly from ptmunu->tmunu.E/.S_d (or equivalently
-  // straight from pmy_pack->pmhd->u0) multiplied by the newly-solved psi^6, same
-  // as steps 1/3 already do -- no con2prim involved.
+  // u_tilde (psi^6 U) and s_tilde_d (psi^6 S_i) do NOT need primitives at all: build
+  // them directly from pmy_pack->pmhd->u0 (D, S_i, tau -- see AssembleVectorSource),
+  // the same way steps 1/3 already do -- no con2prim involved either way.
   //
-  // s_tilde (trace of S_ij, needed by the lapse equation in step 5) is different:
-  // SetTmunu's tmunu.S_dd (dyn_grmhd.cpp lines 464-468) is built from prim/w0
-  // (velocity, pressure) evaluated with whatever g_dd was current when SetTmunu
-  // last ran -- i.e. the *previous* stage's psi, not the one just solved in step 3.
-  // So ptmunu->tmunu.S_dd's trace is stale here and must NOT be reused directly.
-  // Instead, recompute the trace here using the freshly recovered w0 (density,
-  // pressure, velocity) and the new g_dd: s_tilde = psi^6 * (rho*h*W^2*v^2 + 3*P),
-  // mirroring SetTmunu's own S_dd formula but evaluated post-con2prim, post-new-psi.
+  // s_tilde (trace of S_ij, needed by the lapse equation in step 5) is different: it
+  // needs primitives (velocity, pressure), which is exactly why this task waits for
+  // MHD_C2P. Mirror dyn_grmhd.cpp's DynGRMHD::SetTmunu's S_dd formula (lines
+  // 464-468), computing s_tilde = psi^6 * (rho*h*W^2*v^2 + 3*P) directly from the
+  // fresh w0/g_dd this task now has (no ptmunu involved).
   return;
 }
 
@@ -210,7 +271,7 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
 //! \fn void CFC::AssembleADM()
 
 void CFC::AssembleADM() {
-  // TODO(cfc): cfc::AssembleADMFromCFC(pmy_pack, psi, alpha_psi, a_dd, beta_u);
+  // TODO(cfc): cfc::AssembleLapseShiftK(pmy_pack, psi, alpha_psi, a_dd, beta_u);
   return;
 }
 

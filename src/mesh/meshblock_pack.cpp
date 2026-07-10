@@ -228,6 +228,28 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     ptmunu = new Tmunu(this, pin);
   }
 
+  // CFC (conformally flat condition metric solver). Must be constructed here, before
+  // NumericalRelativity assembles the task graph below: cfc::CFC::QueueCFCTasks()
+  // queues its tasks into that graph, so pcfc has to already exist by the time
+  // AssembleNumericalRelativityTasks() runs. Requires the ADM metric container (padm,
+  // from a "z4c" or "adm" input block) and the matter stress-energy tensor (ptmunu,
+  // from a "z4c"/"adm" block combined with "mhd") to already have been constructed
+  // above.
+  if (pin->DoesBlockExist("cfc")) {
+    if (padm == nullptr || ptmunu == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "The <cfc> block requires both a <z4c> or <adm> block "
+          << "and an <mhd> block (for the ADM metric container and matter "
+          << "stress-energy tensor) to be present in the input file." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // CFC module uses Multigrid module (like gravity)
+    pcfc = new cfc::CFC(this, pin);
+    nphysics++;
+  } else {
+    pcfc = nullptr;
+  }
+
   if (pz4c != nullptr || padm != nullptr) {
     pnr = new numrel::NumericalRelativity(this, pin);
     pnr->AssembleNumericalRelativityTasks(tl_map);
@@ -253,25 +275,6 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   }
   else {
     pgrav = nullptr;
-  }
-
-  // (10) CFC (conformally flat condition metric solver)
-  // Create CFC physics module. Requires the ADM metric container (padm, from a "z4c"
-  // or "adm" input block) and the matter stress-energy tensor (ptmunu, from a
-  // "z4c"/"adm" block combined with "mhd") to already have been constructed above.
-  if (pin->DoesBlockExist("cfc")) {
-    if (padm == nullptr || ptmunu == nullptr) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-          << std::endl << "The <cfc> block requires both a <z4c> or <adm> block "
-          << "and an <mhd> block (for the ADM metric container and matter "
-          << "stress-energy tensor) to be present in the input file." << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-    // CFC module uses Multigrid module (like gravity)
-    pcfc = new cfc::CFC(this, pin);
-    nphysics++;
-  } else {
-    pcfc = nullptr;
   }
 
   // Check that at least ONE is requested and initialized.

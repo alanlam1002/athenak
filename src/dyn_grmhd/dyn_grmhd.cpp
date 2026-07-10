@@ -227,15 +227,24 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   if (pz4c == nullptr && padm->is_dynamic == true) {
     pnr->QueueTask(&DynGRMHD::SetADMVariables, this, MHD_SetADM, "MHD_SetADM", Task_Run,
                     {MHD_ExplRK});
+    // CFC_SolvePsi is optional: when a <cfc> block is present, con2prim must wait for
+    // the freshly-solved psi/g_dd (see cfc::CFC::QueueCFCTasks) so it inverts against
+    // the current stage's metric rather than the previous one; a no-cfc run is
+    // unaffected since AddExtraDependencies() only promotes optional deps whose
+    // physics module actually exists.
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
-                   "MHD_C2P", Task_Run, {MHD_Prolong, MHD_SetADM}, {Z4c_Excise});
+                   "MHD_C2P", Task_Run, {MHD_Prolong, MHD_SetADM},
+                   {Z4c_Excise, CFC_SolvePsi});
     pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
                    Task_Run, {MHD_SetADM});
   } else {
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
-                   "MHD_C2P", Task_Run, {MHD_Prolong}, {Z4c_Excise});
+                   "MHD_C2P", Task_Run, {MHD_Prolong}, {Z4c_Excise, CFC_SolvePsi});
   }
-  pnr->QueueTask(&MHD::NewTimeStep, pmhd, MHD_Newdt, "MHD_Newdt", Task_Run, {MHD_C2P});
+  // CFC_AssembleFinal is optional for the same reason: MHD_Newdt should see the final
+  // lapse/shift when cfc is active, but is unaffected when it isn't.
+  pnr->QueueTask(&MHD::NewTimeStep, pmhd, MHD_Newdt, "MHD_Newdt", Task_Run, {MHD_C2P},
+                 {CFC_AssembleFinal});
 
   // End task list
   pnr->QueueTask(&MHD::ClearSend, pmhd, MHD_ClearS, "MHD_ClearS", Task_End);

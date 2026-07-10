@@ -22,6 +22,7 @@
 // Forward declarations
 namespace z4c {class Z4c;}
 namespace dyngr {class DynGRMHD;}
+namespace cfc {class CFC;}
 class ADM;
 class Tmunu;
 class MeshBlockPack;
@@ -86,13 +87,22 @@ enum TaskName {
   Z4c_PT,
   Z4c_CCE,
   Z4c_DumpHorizon,
-  Z4c_NTASKS
+  Z4c_NTASKS,
+
+  CFC_SolveVecX,
+  CFC_SolvePsi,
+  CFC_RescaleSrc,
+  CFC_SolveLapse,
+  CFC_SolveShift,
+  CFC_AssembleFinal,
+  CFC_NTASKS
 };
 
 enum PhysicsDependency {
   Phys_None,
   Phys_MHD,
-  Phys_Z4c
+  Phys_Z4c,
+  Phys_CFC
 };
 
 enum TaskLocation {

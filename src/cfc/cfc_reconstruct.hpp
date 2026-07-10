@@ -10,8 +10,12 @@
 //! algebraic reconstruction of Adual^ij from a vector potential, reconstruction of a
 //! vector field from the Shibata (1999) 4-scalar decomposition, and final assembly of
 //! the XCFC solution into the ADM variables consumed by dyn_grmhd.
+//!
+//! Vector/tensor arguments use AthenaTensor views (as in the z4c/adm modules); genuine
+//! scalars (eta, psi, alpha_psi) remain plain DvceArray5D<Real>.
 
 #include "athena.hpp"
+#include "athena_tensor.hpp"
 
 // forward declarations
 class MeshBlockPack;
@@ -19,39 +23,45 @@ class MeshBlockPack;
 namespace cfc {
 
 //----------------------------------------------------------------------------------------
-//! \fn void ComputeADualFromX(MeshBlockPack *pmbp, const DvceArray5D<Real> &x_u,
-//!                             DvceArray5D<Real> &a_dd)
+//! \fn void ComputeADualFromX(MeshBlockPack *pmbp,
+//!                             const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
+//!                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd)
 //! \brief Gmunu (2021) eq. 76: Adual^ij ~= D^i X^j + D^j X^i - (2/3) D_k X^k f^ij,
 //! evaluated with flat-space finite differences (f_ij = delta_ij in Cartesian).
-//! x_u: X^i, 3 components. a_dd: Adual^ij, 6 independent (symmetric) components.
-void ComputeADualFromX(MeshBlockPack *pmbp, const DvceArray5D<Real> &x_u,
-                        DvceArray5D<Real> &a_dd);
+//! x_u: X^i. a_dd: Adual^ij (symmetric).
+void ComputeADualFromX(MeshBlockPack *pmbp,
+                        const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
+                        AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
-//!                                          const DvceArray5D<Real> &p_eta,
-//!                                          DvceArray5D<Real> &v_u)
+//!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
+//!            const DvceArray5D<Real> &eta,
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u)
 //! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k),
-//! reconstructing a vector field from the 4 decomposed scalar potentials (P_x, P_y,
-//! P_z, eta). Used for both X^i (internal, feeds ComputeADualFromX) and beta^i
-//! (written to the ADM shift).
-//! p_eta: 4 components (P_x, P_y, P_z, eta). v_u: reconstructed vector, 3 components.
+//! reconstructing a vector field from the decomposed vector potential P_i (solved
+//! first, see mg_cfc_vector_poisson.hpp) and scalar potential eta (solved second,
+//! see mg_cfc_scalar_poisson.hpp). Used for both X^i (internal, feeds
+//! ComputeADualFromX) and beta^i (written to the ADM shift).
+//! p_i: P_i (vector). eta: eta (scalar). v_u: reconstructed vector, e.g. X^i/beta^i.
 void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
-                                      const DvceArray5D<Real> &p_eta,
-                                      DvceArray5D<Real> &v_u);
+                                      const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
+                                          &p_i,
+                                      const DvceArray5D<Real> &eta,
+                                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleADMFromCFC(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-//!                             const DvceArray5D<Real> &alpha_psi,
-//!                             const DvceArray5D<Real> &a_dd,
-//!                             const DvceArray5D<Real> &beta_u)
+//!            const DvceArray5D<Real> &alpha_psi,
+//!            const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+//!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u)
 //! \brief Final step of the XCFC solve: writes psi4 = psi^4, g_dd = psi^4 * delta_ij,
 //! vK_dd = psi^-2 * Adual_ij (maximal slicing, K=0), alpha = (alpha*psi)/psi, and
 //! beta_u into pmbp->padm->u_adm, matching the layout of adm::ADM::ADM_vars.
 void AssembleADMFromCFC(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
                          const DvceArray5D<Real> &alpha_psi,
-                         const DvceArray5D<Real> &a_dd,
-                         const DvceArray5D<Real> &beta_u);
+                         const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                         const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u);
 
 }  // namespace cfc
 

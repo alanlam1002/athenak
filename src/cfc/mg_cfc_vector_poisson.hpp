@@ -7,23 +7,25 @@
 //========================================================================================
 //! \file mg_cfc_vector_poisson.hpp
 //! \brief defines MGCFCVectorPoisson[Driver], the multigrid solver shared by both CFC
-//! vector-elliptic equations (the vector potential X^i, Gmunu eq. 72, and the shift
-//! beta^i, Gmunu eq. 75). Both equations have the form
-//!   Delta V^i + (1/3) D^i(D_j V^j) = Source^i,
-//! which per Shibata (1999) sec. 3 decomposes into 4 *independent* flat scalar Poisson
-//! equations for (P_x, P_y, P_z, eta): Delta P_i = S_i, Delta eta = -S_i x^i. This class
-//! solves exactly those 4 decoupled scalar equations (nvar_ = 4) with a plain flat
-//! 7-point Laplacian stencil, reusing the generic templated Smooth/CalculateDefect/
-//! CalculateFASRHS helpers in Multigrid (unlike the conformal-factor/lapse solvers,
-//! this operator is linear, so no Newton-Gauss-Seidel override is needed).
-//! One instance is used to solve for X^i's potentials, a second (separate) instance is
-//! used to solve for beta^i's potentials; cfc::CFC owns both instances and reloads the
-//! source/retrieves the result for each equation in turn (see cfc.hpp).
+//! vector-potential equations (Shibata 1999 eq. 3.10): Delta P_i = S_i, one of the two
+//! pieces the Shibata decomposition splits each CFC vector equation (X^i, Gmunu eq.
+//! 72; beta^i, Gmunu eq. 75) into. The 3 components P_x, P_y, P_z are fully
+//! independent of each other (and of eta) -- nvar_ = 3, plain flat 7-point Laplacian,
+//! reusing the generic templated Smooth/CalculateDefect/CalculateFASRHS helpers in
+//! Multigrid (unlike the conformal-factor/lapse solvers, this operator is linear, so
+//! no Newton-Gauss-Seidel override is needed).
+//!
+//! cfc::CFC solves P_i here *first* (LoadPoissonSource/Solve/RetrieveSolution), then
+//! builds and solves eta's scalar equation (Shibata eq. 3.11, see
+//! mg_cfc_scalar_poisson.hpp) using the same known source S_i. One instance of this
+//! class is used for X^i's P_i, a second (separate) instance is used for beta^i's
+//! P_i; cfc::CFC owns both (see cfc.hpp).
 
 #include <vector>
 
 // Athenak headers
 #include "../athena.hpp"
+#include "../athena_tensor.hpp"
 #include "../multigrid/multigrid.hpp"
 
 class MeshBlockPack;
@@ -33,8 +35,8 @@ class MultigridDriver;
 
 //----------------------------------------------------------------------------------------
 //! \struct CFCVectorPoissonStencil
-//! \brief flat 7-point Laplacian stencil, decoupled across the 4 potential channels
-//! (P_x, P_y, P_z, eta); identical in form to gravity::GravityStencil.
+//! \brief flat 7-point Laplacian stencil, decoupled across the 3 vector components;
+//! identical in form to gravity::GravityStencil.
 
 struct CFCVectorPoissonStencil {
   Real omega_over_diag;
@@ -50,7 +52,7 @@ struct CFCVectorPoissonStencil {
 };
 
 //! \class MGCFCVectorPoisson
-//! \brief Multigrid object for one set of 4 decomposed vector-Poisson scalars
+//! \brief Multigrid object for the 3-component vector potential P_i
 
 class MGCFCVectorPoisson : public Multigrid {
  public:
@@ -65,27 +67,29 @@ class MGCFCVectorPoisson : public Multigrid {
 
 
 //! \class MGCFCVectorPoissonDriver
-//! \brief Multigrid driver shared by the X^i and beta^i vector-Poisson solves.
-//! Unlike gravity::MGGravityDriver::Solve() (which loads its own source from the
-//! Gravity object and retrieves its own result), this driver exposes a lower-level API
-//! (LoadPoissonSource/RetrieveSolution) so cfc::CFC can reuse one class for two
-//! physically distinct equations with different sources.
+//! \brief Multigrid driver shared by the X^i and beta^i vector-potential (P_i)
+//! solves. Unlike gravity::MGGravityDriver::Solve() (which loads its own source from
+//! the Gravity object and retrieves its own result), this driver exposes a
+//! lower-level API (LoadPoissonSource/RetrieveSolution) so cfc::CFC can reuse one
+//! class for two physically distinct equations with different sources.
 
 class MGCFCVectorPoissonDriver : public MultigridDriver {
   public:
     MGCFCVectorPoissonDriver(MeshBlockPack *pmbp, ParameterInput *pin);
     ~MGCFCVectorPoissonDriver();
 
-    // load the (4-component) right-hand side S_i, -S_i x^i and run the V-cycle/FMG
-    // solve; assumes LoadPoissonSource() was already called for this cycle.
+    // run the V-cycle/FMG solve on P_i's right-hand side; assumes LoadPoissonSource()
+    // was already called for this cycle.
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // load the 4-component source (P_x, P_y, P_z, eta right-hand sides) computed by
-    // cfc::CFC::AssembleVectorSource() onto the finest grid.
-    void LoadPoissonSource(const DvceArray5D<Real> &src);
+    // load P_i's vector right-hand side S_i (Shibata eq. 3.10), computed by
+    // cfc::CFC::AssembleVectorSource(), onto the finest grid.
+    void LoadPoissonSource(const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src);
 
-    // retrieve the converged (P_x, P_y, P_z, eta) solution after Solve() completes.
-    void RetrieveSolution(DvceArray5D<Real> &dst);
+    // retrieve the converged P_i solution after Solve() completes. cfc::CFC then uses
+    // both P_i and the original source S_i to build and solve eta's scalar equation
+    // (see mg_cfc_scalar_poisson.hpp) before reconstructing the physical vector.
+    void RetrieveSolution(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_dst);
 
     // octet-level (AMR) physics, mirroring gravity::MGGravityDriver
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;

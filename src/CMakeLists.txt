@@ -31,6 +31,7 @@ add_executable(
         cfc/cfc_reconstruct.cpp
         cfc/mg_cfc_conformal_factor.cpp
         cfc/mg_cfc_lapse.cpp
+        cfc/mg_cfc_scalar_poisson.cpp
         cfc/mg_cfc_vector_poisson.cpp
 
         coordinates/adm.cpp

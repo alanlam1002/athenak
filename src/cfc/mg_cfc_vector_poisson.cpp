@@ -28,7 +28,7 @@ MGCFCVectorPoisson::~MGCFCVectorPoisson() {
 
 void MGCFCVectorPoisson::SmoothPack(int color) {
   // TODO(cfc): call the generic templated Smooth<CFCVectorPoissonStencil> helper on
-  // all 4 channels (P_x, P_y, P_z, eta), mirroring MGGravity::SmoothPack.
+  // all 3 components (P_x, P_y, P_z), mirroring MGGravity::SmoothPack.
   return;
 }
 
@@ -45,13 +45,14 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(...)
-//! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 4
-//! and Dirichlet-zero (mg_zerofixed) boundary conditions on all non-periodic faces,
-//! per Gmunu eq. 80 (X^i|_rmax = 0) / eq. 79 (beta^i|_rmax = 0).
+//! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 3
+//! and Dirichlet-zero (mg_zerofixed) boundary conditions on all non-periodic faces
+//! (P_i inherits the zero falloff of X^i|_rmax = 0, Gmunu eq. 80 / beta^i|_rmax = 0,
+//! eq. 79).
 
 MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
-    : MultigridDriver(pmbp, 4) {
+    : MultigridDriver(pmbp, 3) {
   // TODO(cfc): set mg_mesh_bcs_[f] = BoundaryFlag::mg_zerofixed for all non-periodic
   // faces; allocate mgroot_/mglevels_ as new MGCFCVectorPoisson(...); allocate
   // mglevels_->pbval boundary buffers, mirroring MGGravityDriver::MGGravityDriver.
@@ -67,13 +68,17 @@ void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
   return;
 }
 
-void MGCFCVectorPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &src) {
-  // TODO(cfc): mglevels_->LoadSource(src, /*ns=*/0, /*ngh=*/..., /*fac=*/1.0).
+void MGCFCVectorPoissonDriver::LoadPoissonSource(
+    const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src) {
+  // TODO(cfc): mglevels_->LoadSource(..., /*ns=*/0, /*ngh=*/..., /*fac=*/1.0), reading
+  // the 3 components out of p_src's underlying storage.
   return;
 }
 
-void MGCFCVectorPoissonDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  // TODO(cfc): mglevels_->RetrieveResult(dst, /*ns=*/0, /*ngh=*/...).
+void MGCFCVectorPoissonDriver::RetrieveSolution(
+    AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_dst) {
+  // TODO(cfc): mglevels_->RetrieveResult(..., /*ns=*/0, /*ngh=*/...), writing into
+  // p_dst's underlying storage.
   return;
 }
 
@@ -94,9 +99,9 @@ void MGCFCVectorPoissonDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
 
 void MGCFCVectorPoissonDriver::ProlongateOctetBoundariesFluxCons(MGOctet &oct,
      std::vector<Real> &cbuf, const std::vector<bool> &ncoarse) {
-  // TODO(cfc): flux-conservative face prolongation for the 4-channel Laplacian
+  // TODO(cfc): flux-conservative face prolongation for the 3-component Laplacian
   // (same structure as MGGravityDriver::ProlongateOctetBoundariesFluxCons, but
-  // looped over 4 channels instead of 1); or fall back to the base-class default
+  // looped over 3 channels instead of 1); or fall back to the base-class default
   // (MultigridDriver::ProlongateOctetBoundariesFluxCons) if exact flux conservation
   // is not required for these auxiliary potentials.
   return;

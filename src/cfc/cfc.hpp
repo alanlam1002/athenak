@@ -10,8 +10,9 @@
 //!
 //! Mirrors gravity::Gravity: a thin physics-facing orchestrator that owns a set of
 //! Multigrid/MultigridDriver subclass pairs (see mg_cfc_vector_poisson.hpp,
-//! mg_cfc_conformal_factor.hpp, mg_cfc_lapse.hpp) and drives them through the 6-step
-//! XCFC algorithm (Cheong et al. 2021 [arXiv:2012.07322] sec. 2.6) each time Solve()
+//! mg_cfc_scalar_poisson.hpp, mg_cfc_conformal_factor.hpp, mg_cfc_lapse.hpp) and
+//! drives them through the 6-step XCFC algorithm (Cheong et al. 2021
+//! [arXiv:2012.07322] sec. 2.6) each time Solve()
 //! is called. Reads the matter stress-energy tensor from MeshBlockPack::ptmunu
 //! (populated by dyngr::DynGRMHD::SetTmunu) and writes the resulting metric into
 //! MeshBlockPack::padm->u_adm (consumed by dyn_grmhd's Riemann solver/ConToPrim).
@@ -21,9 +22,11 @@
 
 // Athenak headers
 #include "../athena.hpp"
+#include "../athena_tensor.hpp"
 #include "../mesh/meshblock_pack.hpp"
 #include "../parameter_input.hpp"
 #include "mg_cfc_vector_poisson.hpp"
+#include "mg_cfc_scalar_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
 
@@ -40,23 +43,57 @@ class CFC {
 
   MeshBlockPack *pmy_pack;
 
-  // intermediate fields (device arrays), all defined on the finest mesh grid
-  DvceArray5D<Real> x_u;         // X^i, vector potential for eq. 72 (3 components)
-  DvceArray5D<Real> a_dd;        // Adual^ij (Gmunu eq. 76), symmetric (6 components)
-  DvceArray5D<Real> a_sq;        // Ahat^2 = f_ik f_jl Adual^kl Adual^ij (1 component)
+  // intermediate fields, all defined on the finest mesh grid. Vector/tensor physical
+  // quantities are represented as AthenaTensor views (as in the z4c/adm modules,
+  // e.g. adm::ADM::ADM_vars), each shallow-sliced (InitWithShallowSlice) from an
+  // underlying flat "u_*" storage array; genuine scalars remain plain
+  // DvceArray5D<Real> (as gravity::Gravity::phi does).
+
+  DvceArray5D<Real> u_x;                              // storage backing x_u (3 comp.)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> x_u;      // X^i, vector potential (eq. 72)
+
+  DvceArray5D<Real> u_beta;                            // storage backing beta_u (3 comp.)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> beta_u;   // beta^i, shift vector
+
+  DvceArray5D<Real> u_adual;                           // storage backing a_dd (6 comp.)
+  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> a_dd;     // Adual^ij (Gmunu eq. 76)
+
+  DvceArray5D<Real> a_sq;        // Ahat^2 = f_ik f_jl Adual^kl Adual^ij, scalar
   DvceArray5D<Real> psi;         // psi (conformal factor), scalar
   DvceArray5D<Real> alpha_psi;   // alpha*psi (lapse times conformal factor), scalar
-  DvceArray5D<Real> beta_u;      // beta^i (shift vector), 3 components
 
   // matter source terms rescaled by the current psi^6 (Gmunu sec. 2.6, U-tilde etc.)
-  DvceArray5D<Real> u_tilde;       // Ũ = psi^6 U
-  DvceArray5D<Real> s_tilde_d;     // S-tilde_i = psi^6 S_i
-  DvceArray5D<Real> s_tilde;       // S-tilde = psi^6 S (trace of S_ij)
+  DvceArray5D<Real> u_tilde;       // Ũ = psi^6 U, scalar
 
-  // multigrid solvers, one per distinct elliptic equation (shared class for the two
-  // vector-Poisson solves -- see mg_cfc_vector_poisson.hpp)
-  MGCFCVectorPoissonDriver *pmgd_vecx;    // solves for X^i's 4 scalar potentials
-  MGCFCVectorPoissonDriver *pmgd_vecbeta; // solves for beta^i's 4 scalar potentials
+  DvceArray5D<Real> u_stilde;                            // storage backing s_tilde_d
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> s_tilde_d;  // S-tilde_i = psi^6 S_i
+
+  DvceArray5D<Real> s_tilde;       // S-tilde = psi^6 S (trace of S_ij), scalar
+
+  // Shibata (1999) sec. 3 decomposition: each vector equation (X^i, beta^i) reduces
+  // to one vector potential P_i (eq. 3.10: Delta P_i = S_i) plus one scalar
+  // potential eta (eq. 3.11: Delta eta = -S_i x^i) -- P_i is a genuine vector
+  // (AthenaTensor), eta is a genuine scalar (plain DvceArray5D<Real>, like
+  // psi/alpha_psi above). P_x, P_y, P_z, and eta are all mutually independent
+  // equations, but P_i is solved first (MGCFCVectorPoissonDriver) and eta is solved
+  // afterward (MGCFCScalarPoissonDriver), since eta's source is assembled from the
+  // same known vector source S_i used for P_i. Both are reconstructed into
+  // x_u/beta_u by cfc::ReconstructVectorFromPotentials.
+  DvceArray5D<Real> u_p_x;                            // storage backing p_x (3 comp.)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_x;     // P_i for the X^i decomposition
+  DvceArray5D<Real> eta_x;                            // eta for the X^i decomposition
+
+  DvceArray5D<Real> u_p_beta;                         // storage backing p_beta (3 comp.)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_beta;  // P_i for the beta^i decomposition
+  DvceArray5D<Real> eta_beta;                         // eta for the beta^i decomposition
+
+  // multigrid solvers, one per distinct elliptic equation (shared classes for the
+  // two vector solves and the two scalar solves -- see mg_cfc_vector_poisson.hpp /
+  // mg_cfc_scalar_poisson.hpp)
+  MGCFCVectorPoissonDriver *pmgd_px;      // solves for X^i's P_i (first)
+  MGCFCScalarPoissonDriver *pmgd_etax;    // solves for X^i's eta (second)
+  MGCFCVectorPoissonDriver *pmgd_pbeta;   // solves for beta^i's P_i (first)
+  MGCFCScalarPoissonDriver *pmgd_etabeta; // solves for beta^i's eta (second)
   MGCFCConformalFactorDriver *pmgd_psi;
   MGCFCLapseDriver *pmgd_alpha;
 
@@ -66,13 +103,18 @@ class CFC {
   void Solve(Driver *pdriver, int stage);
 
  private:
-  // shared helper: build the 4-component Poisson source (P_x, P_y, P_z, eta
-  // right-hand sides) for either the X^i solve (for_shift=false, source built from
-  // S-tilde_i per eq. 72) or the beta^i solve (for_shift=true, source built from
-  // alpha, psi, Adual^ij, S-tilde_i per eq. 75).
-  void AssembleVectorSource(DvceArray5D<Real> &src, bool for_shift);
+  // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources -- p_src (P_i's
+  // vector right-hand side S_i) and eta_src (eta's scalar right-hand side -S_i x^i,
+  // built from that same S_i) -- for either the X^i solve (for_shift=false, built
+  // from S-tilde_i per eq. 72) or the beta^i solve (for_shift=true, built from
+  // alpha, psi, Adual^ij, S-tilde_i per eq. 75). P_i and eta are independent
+  // equations; SolveVectorPotential/SolveShift solve P_i to completion first and
+  // eta second (see below), rather than solving them simultaneously.
+  void AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
+                            DvceArray5D<Real> &eta_src, bool for_shift);
 
-  // Step 1: build S-tilde_i as the eq. 72 source and solve for X^i's 4 potentials.
+  // Step 1: build the eq. 72 source, solve pmgd_px for P_i (p_x) first, then solve
+  // pmgd_etax for eta (eta_x).
   void SolveVectorPotential(Driver *pdriver, int stage);
 
   // Step 2: Adual^ij from X^i (eq. 76), then Ahat^2 (cfc_reconstruct.hpp).
@@ -87,8 +129,9 @@ class CFC {
   // Step 5: solve eq. 74 for alpha*psi (nonlinear); extract alpha = (alpha*psi)/psi.
   void SolveLapse(Driver *pdriver, int stage);
 
-  // Step 6: build the eq. 75 source and solve for beta^i's 4 scalar potentials, then
-  // reconstruct beta^i (cfc_reconstruct.hpp).
+  // Step 6: build the eq. 75 source, solve pmgd_pbeta for P_i (p_beta) first, then
+  // solve pmgd_etabeta for eta (eta_beta), then reconstruct beta^i
+  // (cfc_reconstruct.hpp).
   void SolveShift(Driver *pdriver, int stage);
 
   // Final assembly: psi4, g_dd, vK_dd, alpha, beta_u -> pmy_pack->padm->u_adm.

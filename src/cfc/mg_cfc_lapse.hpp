@@ -14,10 +14,19 @@
 //! Ahat^2 = f_ik f_jl Adual^kl Adual^ij (already computed from Adual^ij) are known,
 //! fixed fields for this solve, and Ũ, S̃ are the psi^6-rescaled matter source terms.
 //!
-//! As with the conformal factor, this operator is nonlinear in the unknown (self-
-//! coupled multiplicatively on the right-hand side): SmoothPack/CalculateDefectPack/
-//! CalculateFASRHSPack are overridden with hand-written Newton-Gauss-Seidel point
-//! relaxation rather than reusing the generic linear Smooth<StencilOp> template.
+//! Unlike eq. 73 (psi), this operator is NOT actually nonlinear: by the time this
+//! solve runs, psi and Ahat^2 are already converged, fixed fields (from the earlier
+//! X^i/psi steps), so the bracketed factor
+//!   K(x) := 2 pi (Ũ + 2 S̃) psi^-2 + (7/8) Ahat^2 psi^-8
+//! depends only on those known fields, not on the unknown alpha*psi itself. The
+//! equation is therefore an affine (screened/Helmholtz-type) equation in
+//! delta_(alpha psi) = alpha*psi - 1: Delta(u+1) - K(x)*(u+1) = 0. It still can't
+//! reuse the generic Smooth<StencilOp> template (that assumes a *constant* diagonal
+//! via omega_over_diag; here the diagonal 6 + dx^2*K(x) varies per point), so
+//! SmoothPack/CalculateDefectPack/CalculateFASRHSPack are still hand-written -- but
+//! since F(u) is affine in u, the per-point "Newton" step (u_new = u_old -
+//! F(u_old)/F'(u_old)) is an *exact* one-step Gauss-Seidel solve, not an approximate
+//! linearization, and needs no damping or positivity floor the way eq. 73's does.
 //! The solve is done for the deviation delta_(alpha psi) = alpha*psi - 1.
 
 // Athenak headers
@@ -41,6 +50,11 @@ class MGCFCLapse : public Multigrid {
   void SmoothPack(int color) final;
   void CalculateDefectPack() final;
   void CalculateFASRHSPack() final;
+
+  // See MGCFCConformalFactor::CoeffAtLevel's docstring: a public one-liner so
+  // MGCFCLapseDriver::TransferCoeffToRoot() can reach coeff_ without needing
+  // friendship of the base Multigrid class.
+  DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
 };
 
 
@@ -55,12 +69,22 @@ class MGCFCLapseDriver : public MultigridDriver {
 
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // load 2 pi (Ũ + 2 S̃), the linear-in-source part of the right-hand side.
+    // load (Ũ + 2 S̃) (raw, unscaled -- the 2*pi factor is applied inside the GS
+    // kernel itself, mg_cfc_lapse.cpp). Stored in coeff_ (channel 0), NOT via
+    // Multigrid::LoadSource()/src_: K(x) reads this field every time it's evaluated,
+    // including at every coarser V-cycle level, but src_ is exactly what the generic
+    // V-cycle machinery restricts *and* adds FAS tau-corrections into -- if this data
+    // lived in src_, those corrections would corrupt the physical field K(x) needs.
+    // See MGCFCConformalFactorDriver's equivalent LoadMatterSource for the identical
+    // reasoning (Finding B, plan addendum #3).
     void LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde);
 
-    // load the known fixed fields (psi, Ahat^2) this equation's nonlinear
-    // coefficients depend on; stored via the base class's coeff_/ncoeff_
-    // scaffolding (ncoeff_ = 2: channel 0 = psi, channel 1 = Ahat^2).
+    // load the other two known fixed fields K(x) depends on (psi, Ahat^2); together
+    // with LoadMatterSource's channel 0 this makes ncoeff_ = 3: channel 0 =
+    // Ũ+2S̃, channel 1 = psi, channel 2 = Ahat^2. Multigrid::LoadCoefficients() can't
+    // be reused for either load (it copies all ncoeff_ channels in one shot, no
+    // per-channel offset) -- both loaders do their own single/double-channel par_for
+    // via the CoeffAtLevel() accessor.
     void LoadKnownFields(const DvceArray5D<Real> &psi, const DvceArray5D<Real> &a_sq);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.
@@ -71,6 +95,13 @@ class MGCFCLapseDriver : public MultigridDriver {
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
 
     friend class MGCFCLapse;
+
+  private:
+    // Finding C (plan addendum #3): mgroot_ never receives coeff_ data via the
+    // generic TransferFromBlocksToRoot (src_/u_ only) -- duplicates the relevant
+    // slice of that logic locally rather than touching src/multigrid/. See
+    // MGCFCConformalFactorDriver::TransferCoeffToRoot for the full rationale.
+    void TransferCoeffToRoot();
 };
 
 #endif  // CFC_MG_CFC_LAPSE_HPP_

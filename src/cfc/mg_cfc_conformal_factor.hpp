@@ -25,7 +25,11 @@
 //! existing 1/r multipole falloff BC), not psi directly.
 //!
 //! Reuses the (otherwise-unused-by-gravity) Multigrid::coeff_/ncoeff_ scaffolding to
-//! carry the precomputed Ahat^2 field alongside the solution.
+//! carry both Ũ and the precomputed Ahat^2 field alongside the solution (ncoeff_=2):
+//! neither can live in the generic src_/LoadSource() path, because src_ is exactly
+//! what the V-cycle's FAS machinery restricts *and* corrects at coarser levels, which
+//! would corrupt these fields' physical values where RHS(u) needs them pristine (see
+//! mg_cfc_conformal_factor.cpp's file-level comment for the full derivation).
 
 // Athenak headers
 #include "../athena.hpp"
@@ -48,6 +52,16 @@ class MGCFCConformalFactor : public Multigrid {
   void SmoothPack(int color) final;
   void CalculateDefectPack() final;
   void CalculateFASRHSPack() final;
+
+  // Public accessor so MGCFCConformalFactorDriver::TransferCoeffToRoot() (see .cpp)
+  // can reach into an arbitrary level's coeff_ storage directly. Needed because
+  // coeff_/ncoeff_ are protected members declared on the *base* Multigrid class:
+  // a friend of this (derived) class is not automatically a friend of Multigrid,
+  // so MultigridDriver-derived callers can't reach coeff_ via friendship the way
+  // MGCFCConformalFactor itself can. Kept as a plain public one-liner (same shape
+  // as Multigrid's own GetCurrentData_h()-style accessors) rather than adding a
+  // new friend declaration or touching src/multigrid/ itself.
+  DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
 };
 
 
@@ -62,11 +76,17 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
 
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // load -2 pi Ũ (matter energy density source, see cfc::CFC::RescaleMatterSources)
+    // load Ũ (matter energy density source, raw/unscaled -- the 2*pi factor is
+    // applied inside the Newton kernel itself, mg_cfc_conformal_factor.cpp). Stored
+    // in coeff_ (channel 0), NOT via Multigrid::LoadSource()/src_ -- see this file's
+    // top docstring and the .cpp's file-level comment for why.
     void LoadMatterSource(const DvceArray5D<Real> &u_tilde);
 
     // load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromX), stored
-    // via the base class's under-used coeff_/ncoeff_ scaffolding (ncoeff_ = 1).
+    // in coeff_ channel 1 (ncoeff_ = 2 total). Multigrid::LoadCoefficients() can't be
+    // reused for either load (it copies all ncoeff_ channels in one shot, no
+    // per-channel offset) -- both loaders do their own single-channel par_for via
+    // the CoeffAtLevel() accessor.
     void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq);
 
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
@@ -77,6 +97,22 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
 
     friend class MGCFCConformalFactor;
+
+  private:
+    // Newton-relaxation controls (Gmunu sec. 2.7.2, eq. 94). mg_omega_psi_ damps
+    // the per-point Newton step (1.0 = undamped); psi_floor_ prevents psi = u+1
+    // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
+    Real mg_omega_psi_, psi_floor_;
+
+    // MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp) aggregates
+    // every rank's coarsest per-block cell into the distributed root grid (mgroot_)
+    // via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer runs
+    // for any multi-meshblock mesh (not just AMR), so mgroot_ needs its own coeff_
+    // (Ũ, Ahat^2) populated the same way before the V-cycle can reach the root level.
+    // Deliberately NOT a change to src/multigrid/: duplicates the relevant slice of
+    // TransferFromBlocksToRoot's logic locally, restricted to the non-refined
+    // (octet-free) case, since AMR+CFC is guarded against in Solve() (see .cpp).
+    void TransferCoeffToRoot();
 };
 
 #endif  // CFC_MG_CFC_CONFORMAL_FACTOR_HPP_

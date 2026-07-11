@@ -5,6 +5,28 @@
 //========================================================================================
 //! \file mg_cfc_lapse.cpp
 //! \brief implementation of MGCFCLapse[Driver]
+//!
+//! Sign/scaling convention (see mg_cfc_conformal_factor.cpp's file-level comment for
+//! the AthenaK stencil-sign derivation this reuses: real_Laplacian(u) = -lap(u)/dx^2,
+//! lap(u) = 6*u_c - sum(6 nbrs)). Eq. 74 (Gmunu 2021) is
+//!   Delta(alpha*psi) = (alpha*psi) * [2*pi*(Utilde+2*Stilde)*psi^-2
+//!                                     + (7/8)*Ahat^2*psi^-8] =: (alpha*psi)*K(x),
+//! with alpha*psi = u+1 (u = delta_(alpha*psi)). Substituting:
+//!   -lap(u)/dx^2 = (u+1)*K(x)
+//!   lap(u) + dx^2*K(x)*(u+1) = 0  =:  F(u) = 0
+//! K(x) depends only on already-fixed fields (psi, Ahat^2 from earlier steps;
+//! Utilde+2*Stilde is this equation's own known matter source) -- not on u at all --
+//! so F(u) is affine in u and F'(u) = 6 + dx^2*K(x) is u-independent: the "Newton"
+//! step below is an exact one-step Gauss-Seidel solve, matching mg_cfc_lapse.hpp's
+//! docstring. All three of K(x)'s ingredients live in coeff_ (ncoeff_=3: channel 0 =
+//! Utilde+2*Stilde, channel 1 = psi, channel 2 = Ahat^2), not src_, for the identical
+//! FAS-consistency reason documented in mg_cfc_conformal_factor.cpp (src_ is the FAS
+//! tau-correction accumulator; K(x)'s ingredients must stay pristine at every level).
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -13,91 +35,325 @@
 #include "multigrid/multigrid.hpp"
 #include "mg_cfc_lapse.hpp"
 
+namespace {
+
+// K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8, from the three fixed
+// coeff_ channels. u-independent (psi here is the *already-solved* conformal factor,
+// not this equation's own unknown), shared by all three Pack methods below.
+KOKKOS_INLINE_FUNCTION
+Real LapseReactionCoeff(Real u_plus_2s_tilde, Real psi_known, Real ahat_sq) {
+  Real psi_inv2 = 1.0 / (psi_known * psi_known);
+  Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
+  return 2.0*M_PI*u_plus_2s_tilde*psi_inv2 + 0.875*ahat_sq*psi_inv8;
+}
+
+template <typename ViewType>
+KOKKOS_INLINE_FUNCTION
+Real LapseLap(const ViewType &u, int m, int k, int j, int i) {
+  return 6.0*u(m,0,k,j,i) - u(m,0,k+1,j,i) - u(m,0,k,j+1,i) - u(m,0,k,j,i+1)
+         - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
+}
+
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapse::MGCFCLapse(...)
 
 MGCFCLapse::MGCFCLapse(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
                        bool on_host)
     : Multigrid(pmd, pmbp, nghost, on_host) {
+  // Finding B (plan addendum #3): see MGCFCConformalFactor's ctor -- coeff_/ncoeff_
+  // are never allocated by the base Multigrid ctor, so we do it ourselves.
+  ncoeff_ = 3;  // channel 0 = Utilde+2*Stilde, channel 1 = psi, channel 2 = Ahat^2
+  for (int l = 0; l < nlevel_; l++) {
+    int ll = nlevel_-1-l;
+    int ncx = (indcs_.nx1>>ll)+2*ngh_;
+    int ncy = (indcs_.nx2>>ll)+2*ngh_;
+    int ncz = (indcs_.nx3>>ll)+2*ngh_;
+    Kokkos::realloc(coeff_[l], nmmb_, ncoeff_, ncz, ncy, ncx);
+  }
 }
 
 MGCFCLapse::~MGCFCLapse() {
 }
 
 void MGCFCLapse::SmoothPack(int color) {
-  // TODO(cfc): Newton-Gauss-Seidel point relaxation for
-  // Delta(delta_ap+1) - (delta_ap+1)[2 pi(Ũ+2S̃)psi^-2 + (7/8)Ahat^2 psi^-8] = 0,
-  // i.e. u_new = u_old - Residual(u_old)/dResidual_du(u_old), red-black colored.
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  int lev = current_level_;
+  int rlev = -ll;
+  int c0 = color ^ pmy_driver_->GetCoffset();
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCLapse::SmoothPack", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
+  KOKKOS_LAMBDA(const int m, const int k, const int j) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real dx2 = dx * dx;
+    const int c = (c0 + k + j) & 1;
+    for (int i = is + c; i <= ie; i += 2) {
+      Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+      Real lap = LapseLap(u, m, k, j, i);
+      Real u_old = u(m,0,k,j,i);
+      Real fval = lap + dx2*kx*(u_old + 1.0);
+      Real fprime = 6.0 + dx2*kx;
+      u(m,0,k,j,i) = u_old - fval/fprime;
+    }
+  });
 }
 
 void MGCFCLapse::CalculateDefectPack() {
-  // TODO(cfc): evaluate the nonlinear residual of eq. 74 at the current delta_(alpha
-  // psi).
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  int lev = current_level_;
+  int rlev = -ll;
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto def = def_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCLapse::CalculateDefectPack", DevExeSpace(), 0, nmmb_-1,
+          ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real idx2 = 1.0 / (dx*dx);
+    Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+    Real lap = LapseLap(u, m, k, j, i);
+    // def = RHS(u) - lap(u)*idx2, RHS(u) = -kx*(u+1) (F(u) = lap(u) - dx^2*RHS(u)).
+    def(m,0,k,j,i) = -kx*(u(m,0,k,j,i) + 1.0) - lap*idx2;
+  });
 }
 
 void MGCFCLapse::CalculateFASRHSPack() {
-  // TODO(cfc): FAS coarse-grid right-hand-side correction (nonlinear operator
-  // evaluated at the restricted solution), mirroring MGCFCConformalFactor's version.
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  int lev = current_level_;
+  int rlev = -ll;
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto src = src_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCLapse::CalculateFASRHSPack", DevExeSpace(), 0, nmmb_-1,
+          ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real idx2 = 1.0 / (dx*dx);
+    Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+    Real lap = LapseLap(u, m, k, j, i);
+    // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + kx*(u+1).
+    src(m,0,k,j,i) += lap*idx2 + kx*(u(m,0,k,j,i) + 1.0);
+  });
 }
 
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 2 (carries psi, Ahat^2); mg_multipole boundary
-//! conditions (Gmunu eq. 78, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 3 (carries Utilde+2*Stilde, psi, Ahat^2); mg_multipole
+//! boundary conditions (Gmunu eq. 78, isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  // TODO(cfc): set ncoeff_ = 2; set mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole for
-  // all non-periodic faces; configure multipole order (mporder_) via
-  // AllocateMultipoleCoefficients(); allocate mgroot_/mglevels_ as
-  // new MGCFCLapse(...), mirroring MGGravityDriver::MGGravityDriver.
+  ncoeff_ = 3;
+  eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
+  fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
+  mg_verbose_ = fshowdef_;
+  full_multigrid_ = false;
+
+  // Isolated (1/r falloff) boundary conditions on every non-periodic face -- fixed by
+  // the physics (Gmunu eq. 78), no configurable mg_bc input the way gravity has.
+  for (int f = 0; f < 6; ++f) {
+    if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
+    }
+  }
+  mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);
+  autompo_ = pin->GetOrAddBoolean("cfc", "auto_mporigin", true);
+  nodipole_ = pin->GetOrAddBoolean("cfc", "nodipole", false);
+  if (mporder_ != 2 && mporder_ != 4) {
+    std::cout << "### FATAL ERROR in MGCFCLapseDriver" << std::endl
+              << "mporder must be 2 (quadrupole) or 4 (hexadecapole)." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (!autompo_) {
+    mpo_[0] = pin->GetOrAddReal("cfc", "mporigin_x1", 0.0);
+    mpo_[1] = pin->GetOrAddReal("cfc", "mporigin_x2", 0.0);
+    mpo_[2] = pin->GetOrAddReal("cfc", "mporigin_x3", 0.0);
+  }
+  AllocateMultipoleCoefficients();
+  fsubtract_average_ = false;
+
+  int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
+  bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);
+  mgroot_ = new MGCFCLapse(this, nullptr, nghost, root_on_host);
+  mglevels_ = new MGCFCLapse(this, pmbp, nghost);
+  mglevels_->pbval = new MultigridBoundaryValues(pmbp, pin, false, mglevels_);
+  mglevels_->pbval->InitializeBuffers(nvar_);
+  mglevels_->pbval->RemapIndicesForMG();
+  mglevels_->pbval->ComputePerLevelIndices();
 }
 
 MGCFCLapseDriver::~MGCFCLapseDriver() {
-  // TODO(cfc): delete mgroot_, mglevels_.
+  delete mgroot_;
+  delete mglevels_;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt)
+//! \brief run the V-cycle solve for delta_(alpha*psi). Assumes LoadMatterSource()/
+//! LoadKnownFields() were already called for this stage.
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
-  // TODO(cfc): CalculateMultipoleCoefficients() for the isolated BC, then
-  // SetupMultigrid(...) + SolveFMG(pdriver) or SolveMG(pdriver), assuming
-  // LoadMatterSource()/LoadKnownFields() were already called.
+  PrepareForAMR();
+  // Finding D: AMR octets carry no coeff_ storage at all -- guard rather than
+  // silently smooth against stale/garbage K(x) ingredients at refinement boundaries.
+  if (nreflevel_ > 0) {
+    std::cout << "### FATAL ERROR in MGCFCLapseDriver::Solve" << std::endl
+              << "CFC's nonlinear multigrid solvers do not yet support AMR-refined "
+              << "meshes (see src/cfc/DEVELOPMENT.md, open item 3b)." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  mglevels_->RestrictCoefficients();
+  TransferCoeffToRoot();
+
+  SetupMultigrid(dt, false);
+
+  if (mporder_ > 0) {
+    if (autompo_) CalculateCenterOfMass();
+    CalculateMultipoleCoefficients();
+    SyncMultipoleToDevice();
+  }
+
+  SolveMG(pdriver);
+  Kokkos::fence();
+
+  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s convention
+  // (item 2): the caller (cfc::CFC::SolveLapse) calls RetrieveSolution() separately
+  // once this returns.
   return;
 }
 
+// Both loaders assume u_plus_2s_tilde/psi/a_sq are sized with ngh_-deep (multigrid-
+// width, not mesh-NGHOST-deep) ghost padding, matching MGCFCConformalFactorDriver's
+// identical choice for Utilde/Ahat^2 (see that file's loader comment for why).
+
 void MGCFCLapseDriver::LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde) {
-  // TODO(cfc): mglevels_->LoadSource(u_plus_2s_tilde, /*ns=*/0, /*ngh=*/...,
-  // /*fac=*/2.0*M_PI).
-  return;
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCLapseDriver::LoadMatterSource", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cm_d(m, 0, k, j, i) = u_plus_2s_tilde(m, 0, k, j, i);
+  });
 }
 
 void MGCFCLapseDriver::LoadKnownFields(const DvceArray5D<Real> &psi,
                                        const DvceArray5D<Real> &a_sq) {
-  // TODO(cfc): mglevels_->LoadCoefficients(..., /*ngh=*/...) for both psi and Ahat^2
-  // channels.
-  return;
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCLapseDriver::LoadKnownFields", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cm_d(m, 1, k, j, i) = psi(m, 0, k, j, i);
+    cm_d(m, 2, k, j, i) = a_sq(m, 0, k, j, i);
+  });
 }
 
 void MGCFCLapseDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  // TODO(cfc): mglevels_->RetrieveResult(dst, /*ns=*/0, /*ngh=*/...).
+  mglevels_->RetrieveResult(dst, 0, mglevels_->GetGhostCells());
   return;
 }
 
-void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
-  // TODO(cfc): host-side Newton-Gauss-Seidel octet analogue of
-  // MGCFCLapse::SmoothPack.
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCLapseDriver::TransferCoeffToRoot()
+//! \brief Finding C: see MGCFCConformalFactorDriver::TransferCoeffToRoot for the full
+//! rationale -- duplicated here (not shared) since each driver owns a distinct
+//! mgroot_/mglevels_ pair of a different concrete Multigrid subclass.
+
+void MGCFCLapseDriver::TransferCoeffToRoot() {
+  const int nc = ncoeff_;
+  auto *mgc_lvl = static_cast<MGCFCLapse*>(mglevels_);
+  auto *mgc_root = static_cast<MGCFCLapse*>(mgroot_);
+  auto &coeff_lvl = mgc_lvl->CoeffAtLevel(0);
+  const int ngh_mb = mgc_lvl->GetGhostCells();
+  int nmmb = pmy_pack_->nmb_thispack - 1;
+  int padding = nslist_[global_variable::my_rank];
+
+  DualArray2D<Real> coeffbuf;
+  Kokkos::realloc(coeffbuf, nc, nbtotal_);
+  auto coeffbuf_d = coeffbuf.d_view;
+  auto coeff_lvl_d = coeff_lvl.d_view;
+  par_for("MGCFCLapseDriver::SaveCoeffToRoot", DevExeSpace(), 0, nmmb,
+  KOKKOS_LAMBDA(const int m) {
+    for (int v = 0; v < nc; ++v) {
+      coeffbuf_d(v, m+padding) = coeff_lvl_d(m, v, ngh_mb, ngh_mb, ngh_mb);
+    }
+  });
+  coeffbuf.template modify<DevExeSpace>();
+  coeffbuf.template sync<HostExeSpace>();
+#if MPI_PARALLEL_ENABLED
+  for (int v = 0; v < nc; ++v) {
+    MPI_Allgatherv(MPI_IN_PLACE, nblist_[global_variable::my_rank], MPI_ATHENA_REAL,
+        &coeffbuf.h_view(v,0), nblist_, nslist_, MPI_ATHENA_REAL, MPI_COMM_WORLD);
+  }
+#endif
+
+  const auto loc = pmy_mesh_->lloc_eachmb;
+  int ngh = mgc_root->GetGhostCells();
+  auto &coeff_root = mgc_root->CoeffAtLevel(mgc_root->GetNumberOfLevels()-1);
+  auto root_coeff_h = coeff_root.h_view;
+  for (int n = 0; n < nbtotal_; ++n) {
+    // nreflevel_ == 0 is already guaranteed by Solve()'s guard, so every block is
+    // at the root level here -- no octet-parented branch to handle.
+    int i = static_cast<int>(loc[n].lx1);
+    int j = static_cast<int>(loc[n].lx2);
+    int k = static_cast<int>(loc[n].lx3);
+    for (int v = 0; v < nc; ++v) {
+      root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+    }
+  }
+  if (!mgc_root->OnHost()) {
+    Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
+  }
   return;
 }
 
-void MGCFCLapseDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
-  // TODO(cfc): host-side octet analogue of MGCFCLapse::CalculateDefectPack.
-  return;
+void MGCFCLapseDriver::SmoothOctet(MGOctet & /*oct*/, int /*rlev*/, int /*color*/) {
+  std::cout << "### FATAL ERROR in MGCFCLapseDriver::SmoothOctet" << std::endl
+            << "AMR octets are not supported for CFC's nonlinear solvers "
+            << "(see DEVELOPMENT.md open item 3b); guarded in Solve()." << std::endl;
+  std::exit(EXIT_FAILURE);
 }
 
-void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
-  // TODO(cfc): host-side octet analogue of MGCFCLapse::CalculateFASRHSPack.
-  return;
+void MGCFCLapseDriver::CalculateDefectOctet(MGOctet & /*oct*/, int /*rlev*/) {
+  std::cout << "### FATAL ERROR in MGCFCLapseDriver::CalculateDefectOctet" << std::endl
+            << "AMR octets are not supported for CFC's nonlinear solvers "
+            << "(see DEVELOPMENT.md open item 3b)." << std::endl;
+  std::exit(EXIT_FAILURE);
+}
+
+void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet & /*oct*/, int /*rlev*/) {
+  std::cout << "### FATAL ERROR in MGCFCLapseDriver::CalculateFASRHSOctet" << std::endl
+            << "AMR octets are not supported for CFC's nonlinear solvers "
+            << "(see DEVELOPMENT.md open item 3b)." << std::endl;
+  std::exit(EXIT_FAILURE);
 }

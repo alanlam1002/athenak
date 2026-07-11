@@ -5,6 +5,44 @@
 //========================================================================================
 //! \file mg_cfc_conformal_factor.cpp
 //! \brief implementation of MGCFCConformalFactor[Driver]
+//!
+//! Sign/scaling convention, derived once here rather than re-derived at every call
+//! site: Multigrid::Smooth's stencil.Apply computes lap(u) = 6*u_c - sum(6 nbrs),
+//! and the generic linear solve converges when lap(u)/dx^2 = src, i.e.
+//! real_Laplacian(u) = -src (confirmed against gravity: LoadSource(u0, IDN, ng,
+//! -four_pi_G_) gives src=-4*pi*G*rho, converging to Delta(phi) = -src = 4*pi*G*rho,
+//! the standard Poisson equation). Eq. 73 (Gmunu 2021) is
+//!   Delta psi = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7,
+//! with psi = u+1 (u = delta_psi), so Delta(u) = Delta(psi). Substituting into the
+//! AthenaK convention above (real_Laplacian(u) = -lap(u)/dx^2):
+//!   -lap(u)/dx^2 = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7
+//!   lap(u) = dx^2 * [2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7] =: dx^2*RHS(u)
+//! i.e. F(u) := lap(u) - dx^2*RHS(u) = 0 is the discrete equation solved per point.
+//!
+//! Utilde and Ahat^2 are both fixed, externally-supplied fields (never depend on this
+//! equation's own unknown u) -- but they are loaded into coeff_ (channel 0 = Utilde,
+//! channel 1 = Ahat^2, ncoeff_=2), NOT into src_ via LoadSource. This is a deliberate,
+//! non-obvious choice: RHS(u) reads Utilde every time it's evaluated (including at
+//! every coarser V-cycle level), but src_ is exactly the array that
+//! MultigridDriver's generic (non-virtual) V-cycle machinery restricts *and* adds FAS
+//! tau-corrections into (via RestrictSourcePack + this file's CalculateFASRHSPack) --
+//! if Utilde lived in src_, those FAS corrections would silently corrupt the physical
+//! Utilde field that RHS(u) needs at coarser levels. Since this equation has no
+//! separate additive "given" term at all (F(u)=0 is fully homogeneous in u), src_'s
+//! entire role here is the FAS correction accumulator gravity's pattern already
+//! establishes (starts at zero -- Kokkos::realloc zero-initializes -- and is only
+//! ever touched by the generic machinery and by this file's CalculateFASRHSPack).
+//!
+//! Multigrid::LoadCoefficients() copies coeff channels 0..ncoeff_-1 in one shot (no
+//! per-channel "ns" offset the way LoadSource has), so it can't be called twice (once
+//! per physical field) without the second call clobbering the first. LoadMatterSource/
+//! LoadNonlinearCoefficient below therefore each do their own tiny single-channel
+//! par_for via the CoeffAtLevel() accessor instead of calling LoadCoefficients.
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <iostream>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -13,90 +51,348 @@
 #include "multigrid/multigrid.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 
+namespace {
+
+// Per-point RHS(u) = 2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7 and its derivative
+// w.r.t. u (psi = u+1), shared by SmoothPack/CalculateDefectPack/CalculateFASRHSPack
+// so the three can never drift out of sync with each other.
+KOKKOS_INLINE_FUNCTION
+void ConformalFactorRHS(Real u, Real u_tilde, Real ahat_sq, Real *rhs, Real *drhs_du) {
+  Real psi = u + 1.0;
+  Real psi_inv = 1.0 / psi;
+  Real psi_inv2 = psi_inv * psi_inv;
+  Real psi_inv7 = psi_inv2 * psi_inv2 * psi_inv2 * psi_inv;
+  Real psi_inv8 = psi_inv7 * psi_inv;
+  *rhs = 2.0 * M_PI * u_tilde * psi_inv + 0.125 * ahat_sq * psi_inv7;
+  *drhs_du = -2.0 * M_PI * u_tilde * psi_inv2 - 0.875 * ahat_sq * psi_inv8;
+}
+
+template <typename ViewType>
+KOKKOS_INLINE_FUNCTION
+Real ConformalFactorLap(const ViewType &u, int m, int k, int j, int i) {
+  return 6.0*u(m,0,k,j,i) - u(m,0,k+1,j,i) - u(m,0,k,j+1,i) - u(m,0,k,j,i+1)
+         - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
+}
+
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCConformalFactor::MGCFCConformalFactor(...)
 
 MGCFCConformalFactor::MGCFCConformalFactor(MultigridDriver *pmd, MeshBlockPack *pmbp,
                                            int nghost, bool on_host)
     : Multigrid(pmd, pmbp, nghost, on_host) {
+  // Finding B (plan addendum #3): the base Multigrid ctor allocates u_/src_/def_/
+  // uold_ per level but never coeff_/matrix_, and never sets ncoeff_ from the
+  // driver -- both are the responsibility of the first real user of coeff_, i.e. us.
+  ncoeff_ = 2;  // channel 0 = Utilde, channel 1 = Ahat^2
+  for (int l = 0; l < nlevel_; l++) {
+    int ll = nlevel_-1-l;
+    int ncx = (indcs_.nx1>>ll)+2*ngh_;
+    int ncy = (indcs_.nx2>>ll)+2*ngh_;
+    int ncz = (indcs_.nx3>>ll)+2*ngh_;
+    Kokkos::realloc(coeff_[l], nmmb_, ncoeff_, ncz, ncy, ncx);
+  }
 }
 
 MGCFCConformalFactor::~MGCFCConformalFactor() {
 }
 
 void MGCFCConformalFactor::SmoothPack(int color) {
-  // TODO(cfc): Newton-Gauss-Seidel point relaxation for
-  // Delta(delta_psi+1) + 2 pi Ũ (delta_psi+1)^-1 + (1/8) Ahat^2 (delta_psi+1)^-7 = 0,
-  // i.e. u_new = u_old - Residual(u_old)/dResidual_du(u_old), red-black colored.
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  Real omega = static_cast<MGCFCConformalFactorDriver*>(pmy_driver_)->mg_omega_psi_;
+  Real psi_floor = static_cast<MGCFCConformalFactorDriver*>(pmy_driver_)->psi_floor_;
+  int lev = current_level_;
+  int rlev = -ll;
+  int c0 = color ^ pmy_driver_->GetCoffset();
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCConformalFactor::SmoothPack", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
+  KOKKOS_LAMBDA(const int m, const int k, const int j) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real dx2 = dx * dx;
+    const int c = (c0 + k + j) & 1;
+    for (int i = is + c; i <= ie; i += 2) {
+      Real u_old = u(m,0,k,j,i);
+      Real rhs, drhs_du;
+      ConformalFactorRHS(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+      Real lap = ConformalFactorLap(u, m, k, j, i);
+      Real fprime = 6.0 - dx2*drhs_du;
+      Real u_new = u_old - omega*(lap - rhs*dx2)/fprime;
+      if (u_new + 1.0 < psi_floor) u_new = psi_floor - 1.0;
+      u(m,0,k,j,i) = u_new;
+    }
+  });
 }
 
 void MGCFCConformalFactor::CalculateDefectPack() {
-  // TODO(cfc): evaluate the nonlinear residual of eq. 73 at the current delta_psi.
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  int lev = current_level_;
+  int rlev = -ll;
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto def = def_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCConformalFactor::CalculateDefectPack", DevExeSpace(), 0, nmmb_-1,
+          ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real idx2 = 1.0 / (dx*dx);
+    Real rhs, drhs_du;
+    ConformalFactorRHS(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+    Real lap = ConformalFactorLap(u, m, k, j, i);
+    def(m,0,k,j,i) = rhs - lap*idx2;
+  });
 }
 
 void MGCFCConformalFactor::CalculateFASRHSPack() {
-  // TODO(cfc): FAS coarse-grid right-hand-side correction (nonlinear operator
-  // evaluated at the restricted solution), mirroring MGGravity::CalculateFASRHSPack
-  // but with the nonlinear source terms included.
-  return;
+  int ll = nlevel_-1-current_level_;
+  int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
+  int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
+  int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
+  int lev = current_level_;
+  int rlev = -ll;
+  auto brdx = block_rdx_.d_view;
+  auto u = u_[lev].d_view;
+  auto src = src_[lev].d_view;
+  auto coeff = coeff_[lev].d_view;
+  par_for("MGCFCConformalFactor::CalculateFASRHSPack", DevExeSpace(), 0, nmmb_-1,
+          ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
+                          : brdx(m) / static_cast<Real>(1<<rlev);
+    Real idx2 = 1.0 / (dx*dx);
+    Real rhs, drhs_du;
+    ConformalFactorRHS(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+    Real lap = ConformalFactorLap(u, m, k, j, i);
+    src(m,0,k,j,i) += lap*idx2 - rhs;
+  });
 }
 
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 1 (carries Ahat^2); mg_multipole boundary conditions
-//! (Gmunu eq. 77, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 2 (carries Utilde, Ahat^2); mg_multipole boundary
+//! conditions (Gmunu eq. 77, isolated/asymptotically-flat falloff).
 
 MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
                                                        ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  // TODO(cfc): set ncoeff_ = 1; set mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole for
-  // all non-periodic faces; configure multipole order (mporder_) via
-  // AllocateMultipoleCoefficients(); allocate mgroot_/mglevels_ as
-  // new MGCFCConformalFactor(...), mirroring MGGravityDriver::MGGravityDriver.
+  ncoeff_ = 2;
+  eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
+  fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
+  mg_verbose_ = fshowdef_;
+  full_multigrid_ = false;
+  mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
+  psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
+
+  // Isolated (1/r falloff) boundary conditions on every non-periodic face -- fixed by
+  // the physics (Gmunu eq. 77), no configurable mg_bc input the way gravity has.
+  for (int f = 0; f < 6; ++f) {
+    if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
+    }
+  }
+  mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);
+  autompo_ = pin->GetOrAddBoolean("cfc", "auto_mporigin", true);
+  nodipole_ = pin->GetOrAddBoolean("cfc", "nodipole", false);
+  if (mporder_ != 2 && mporder_ != 4) {
+    std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver" << std::endl
+              << "mporder must be 2 (quadrupole) or 4 (hexadecapole)." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (!autompo_) {
+    mpo_[0] = pin->GetOrAddReal("cfc", "mporigin_x1", 0.0);
+    mpo_[1] = pin->GetOrAddReal("cfc", "mporigin_x2", 0.0);
+    mpo_[2] = pin->GetOrAddReal("cfc", "mporigin_x3", 0.0);
+  }
+  AllocateMultipoleCoefficients();
+  fsubtract_average_ = false;
+
+  int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
+  bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);
+  mgroot_ = new MGCFCConformalFactor(this, nullptr, nghost, root_on_host);
+  mglevels_ = new MGCFCConformalFactor(this, pmbp, nghost);
+  mglevels_->pbval = new MultigridBoundaryValues(pmbp, pin, false, mglevels_);
+  mglevels_->pbval->InitializeBuffers(nvar_);
+  mglevels_->pbval->RemapIndicesForMG();
+  mglevels_->pbval->ComputePerLevelIndices();
 }
 
 MGCFCConformalFactorDriver::~MGCFCConformalFactorDriver() {
-  // TODO(cfc): delete mgroot_, mglevels_.
+  delete mgroot_;
+  delete mglevels_;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt)
+//! \brief run the FAS V-cycle solve for delta_psi. Assumes LoadMatterSource()/
+//! LoadNonlinearCoefficient() were already called for this stage.
 
 void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
-  // TODO(cfc): CalculateCenterOfMass()/CalculateMultipoleCoefficients() for the
-  // isolated BC, then SetupMultigrid(...) + SolveFMG(pdriver) or SolveMG(pdriver),
-  // assuming LoadMatterSource()/LoadNonlinearCoefficient() were already called.
+  PrepareForAMR();
+  // Finding D: AMR octets carry no coeff_ storage at all -- guard rather than
+  // silently smooth against stale/garbage Utilde/Ahat^2 at refinement boundaries.
+  if (nreflevel_ > 0) {
+    std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::Solve" << std::endl
+              << "CFC's nonlinear multigrid solvers do not yet support AMR-refined "
+              << "meshes (see src/cfc/DEVELOPMENT.md, open item 3b)." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  mglevels_->RestrictCoefficients();
+  TransferCoeffToRoot();
+
+  SetupMultigrid(dt, false);
+
+  if (mporder_ > 0) {
+    if (autompo_) CalculateCenterOfMass();
+    CalculateMultipoleCoefficients();
+    SyncMultipoleToDevice();
+  }
+
+  SolveMG(pdriver);
+  Kokkos::fence();
+
+  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s convention
+  // (item 2): the caller (cfc::CFC::SolveConformalFactor) calls RetrieveSolution()
+  // separately once this returns.
   return;
 }
 
+// Both loaders assume u_tilde/a_sq are sized with ngh_-deep (multigrid-width, not
+// mesh-NGHOST-deep) ghost padding -- matching item 2's choice for p_src/eta_src.
+// Neither field is ever finite-differenced (only read pointwise inside the Newton
+// kernels above and in the lapse equation's K(x)), so there's no reason to pay for
+// mesh-NGHOST-deep ghost exchange on them; cfc.cpp (item 4) should size u_tilde/
+// a_sq accordingly. This is why a single Multigrid::LoadCoefficients(coeff, ngh)
+// call can't be reused here anyway (Finding B) -- writing our own zero-offset
+// per-channel copy costs nothing extra beyond what LoadCoefficients would do.
+
 void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_tilde) {
-  // TODO(cfc): mglevels_->LoadSource(u_tilde, /*ns=*/0, /*ngh=*/..., /*fac=*/-2.0*M_PI).
-  return;
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCConformalFactorDriver::LoadMatterSource", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cm_d(m, 0, k, j, i) = u_tilde(m, 0, k, j, i);
+  });
 }
 
 void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
     const DvceArray5D<Real> &a_sq) {
-  // TODO(cfc): mglevels_->LoadCoefficients(a_sq, /*ngh=*/...).
-  return;
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCConformalFactorDriver::LoadNonlinearCoefficient", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cm_d(m, 1, k, j, i) = a_sq(m, 0, k, j, i);
+  });
 }
 
 void MGCFCConformalFactorDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  // TODO(cfc): mglevels_->RetrieveResult(dst, /*ns=*/0, /*ngh=*/...).
+  mglevels_->RetrieveResult(dst, 0, mglevels_->GetGhostCells());
   return;
 }
 
-void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
-  // TODO(cfc): host-side Newton-Gauss-Seidel octet analogue of
-  // MGCFCConformalFactor::SmoothPack.
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::TransferCoeffToRoot()
+//! \brief Finding C: MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp)
+//! aggregates every rank's coarsest per-block cell into the distributed root grid
+//! (mgroot_) via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer
+//! runs for any multi-meshblock mesh (not AMR-specific), so mgroot_ needs its own
+//! Utilde/Ahat^2 populated the same way before the V-cycle can reach the root level.
+//! Deliberately duplicates the relevant (non-refined-block) slice of that function's
+//! logic here rather than touching src/multigrid/ -- see plan addendum #3, Finding C.
+//! Guarded by Solve()'s nreflevel_==0 check, so every block here is at the root level
+//! (no octet-parented branch needed, unlike the original TransferFromBlocksToRoot).
+
+void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
+  const int nc = ncoeff_;
+  auto *mgc_lvl = static_cast<MGCFCConformalFactor*>(mglevels_);
+  auto *mgc_root = static_cast<MGCFCConformalFactor*>(mgroot_);
+  auto &coeff_lvl = mgc_lvl->CoeffAtLevel(0);
+  const int ngh_mb = mgc_lvl->GetGhostCells();
+  int nmmb = pmy_pack_->nmb_thispack - 1;
+  int padding = nslist_[global_variable::my_rank];
+
+  DualArray2D<Real> coeffbuf;
+  Kokkos::realloc(coeffbuf, nc, nbtotal_);
+  auto coeffbuf_d = coeffbuf.d_view;
+  auto coeff_lvl_d = coeff_lvl.d_view;
+  par_for("MGCFCConformalFactorDriver::SaveCoeffToRoot", DevExeSpace(), 0, nmmb,
+  KOKKOS_LAMBDA(const int m) {
+    for (int v = 0; v < nc; ++v) {
+      coeffbuf_d(v, m+padding) = coeff_lvl_d(m, v, ngh_mb, ngh_mb, ngh_mb);
+    }
+  });
+  coeffbuf.template modify<DevExeSpace>();
+  coeffbuf.template sync<HostExeSpace>();
+#if MPI_PARALLEL_ENABLED
+  for (int v = 0; v < nc; ++v) {
+    MPI_Allgatherv(MPI_IN_PLACE, nblist_[global_variable::my_rank], MPI_ATHENA_REAL,
+        &coeffbuf.h_view(v,0), nblist_, nslist_, MPI_ATHENA_REAL, MPI_COMM_WORLD);
+  }
+#endif
+
+  const auto loc = pmy_mesh_->lloc_eachmb;
+  int ngh = mgc_root->GetGhostCells();
+  auto &coeff_root = mgc_root->CoeffAtLevel(mgc_root->GetNumberOfLevels()-1);
+  auto root_coeff_h = coeff_root.h_view;
+  for (int n = 0; n < nbtotal_; ++n) {
+    // nreflevel_ == 0 is already guaranteed by Solve()'s guard, so every block is
+    // at the root level here -- no octet-parented branch to handle.
+    int i = static_cast<int>(loc[n].lx1);
+    int j = static_cast<int>(loc[n].lx2);
+    int k = static_cast<int>(loc[n].lx3);
+    for (int v = 0; v < nc; ++v) {
+      root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+    }
+  }
+  if (!mgc_root->OnHost()) {
+    Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
+  }
   return;
 }
 
-void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
-  // TODO(cfc): host-side octet analogue of MGCFCConformalFactor::CalculateDefectPack.
-  return;
+void MGCFCConformalFactorDriver::SmoothOctet(MGOctet & /*oct*/, int /*rlev*/,
+                                             int /*color*/) {
+  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::SmoothOctet" << std::endl
+            << "AMR octets are not supported for CFC's nonlinear solvers "
+            << "(see DEVELOPMENT.md open item 3b); guarded in Solve()." << std::endl;
+  std::exit(EXIT_FAILURE);
 }
 
-void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
-  // TODO(cfc): host-side octet analogue of MGCFCConformalFactor::CalculateFASRHSPack.
-  return;
+void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet & /*oct*/, int /*rlev*/) {
+  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::CalculateDefectOctet"
+            << std::endl << "AMR octets are not supported for CFC's nonlinear "
+            << "solvers (see DEVELOPMENT.md open item 3b)." << std::endl;
+  std::exit(EXIT_FAILURE);
+}
+
+void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet & /*oct*/, int /*rlev*/) {
+  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::CalculateFASRHSOctet"
+            << std::endl << "AMR octets are not supported for CFC's nonlinear "
+            << "solvers (see DEVELOPMENT.md open item 3b)." << std::endl;
+  std::exit(EXIT_FAILURE);
 }

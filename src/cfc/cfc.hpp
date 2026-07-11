@@ -96,6 +96,21 @@ class CFC {
   AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_beta;  // P_i for the beta^i decomposition
   DvceArray5D<Real> eta_beta;                         // eta for the beta^i decomposition
 
+  // P_i/eta's own right-hand sides (eq. 72/75's S_i, and -S_i.x^i), built by
+  // AssembleVectorSource() and consumed by LoadPoissonSource() on the two multigrid
+  // drivers below. p_src needs its own storage separate from x_u/p_x/etc. (rather
+  // than a local temporary inside AssembleVectorSource) because
+  // MGCFCVectorPoissonDriver::LoadPoissonSource() takes a raw DvceArray5D<Real>&, not
+  // an AthenaTensor -- an AthenaTensor's backing storage is a Kokkos::subview result,
+  // a different type that does not bind to Multigrid::LoadSource()'s (non-templated)
+  // parameter. eta_src is declared alongside it for the same persistent-storage
+  // reasoning (avoiding a per-stage Kokkos::realloc), even though its type was never
+  // mismatched. Both are shared sequentially by the X^i and beta^i solves (never
+  // needed simultaneously).
+  DvceArray5D<Real> u_p_src;                          // storage backing p_src (3 comp.)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_src;   // S_i, P_i's vector source
+  DvceArray5D<Real> eta_src;                          // -S_i.x^i, eta's scalar source
+
   // multigrid solvers, one per distinct elliptic equation (shared classes for the
   // two vector solves and the two scalar solves -- see mg_cfc_vector_poisson.hpp /
   // mg_cfc_scalar_poisson.hpp)
@@ -138,16 +153,15 @@ class CFC {
   TaskStatus AssembleFinalTask(Driver *pdriver, int stage);   // final assembly
 
  private:
-  // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources -- p_src (P_i's
-  // vector right-hand side S_i) and eta_src (eta's scalar right-hand side -S_i x^i,
-  // built from that same S_i) -- for either the X^i solve (for_shift=false, built
-  // directly from the post-source-update conserved momentum pmy_pack->pmhd->u0 per
-  // eq. 72) or the beta^i solve (for_shift=true, built from alpha, psi, Adual^ij,
-  // S-tilde_i per eq. 75). P_i and eta are independent equations;
-  // SolveVectorPotential/SolveShift solve P_i to completion first and eta second
-  // (see below), rather than solving them simultaneously.
-  void AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                            DvceArray5D<Real> &eta_src, bool for_shift);
+  // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources into the member
+  // arrays p_src (P_i's vector right-hand side S_i) and eta_src (eta's scalar
+  // right-hand side -S_i x^i, built from that same S_i) -- for either the X^i solve
+  // (for_shift=false, built directly from the post-source-update conserved momentum
+  // pmy_pack->pmhd->u0 per eq. 72) or the beta^i solve (for_shift=true, built from
+  // alpha, psi, Adual^ij, S-tilde_i per eq. 75). P_i and eta are independent
+  // equations; SolveVectorPotential/SolveShift solve P_i to completion first and eta
+  // second (see below), rather than solving them simultaneously.
+  void AssembleVectorSource(bool for_shift);
 
   // Step 1: build the eq. 72 source directly from pmy_pack->pmhd->u0 (the conserved
   // state right after this stage's hydro flux+source update -- see AssembleVectorSource),

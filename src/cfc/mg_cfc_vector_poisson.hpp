@@ -21,11 +21,8 @@
 //! class is used for X^i's P_i, a second (separate) instance is used for beta^i's
 //! P_i; cfc::CFC owns both (see cfc.hpp).
 
-#include <vector>
-
 // Athenak headers
 #include "../athena.hpp"
-#include "../athena_tensor.hpp"
 #include "../multigrid/multigrid.hpp"
 
 class MeshBlockPack;
@@ -83,20 +80,28 @@ class MGCFCVectorPoissonDriver : public MultigridDriver {
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
     // load P_i's vector right-hand side S_i (Shibata eq. 3.10), computed by
-    // cfc::CFC::AssembleVectorSource(), onto the finest grid.
-    void LoadPoissonSource(const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src);
+    // cfc::CFC::AssembleVectorSource(), onto the finest grid. Takes the raw backing
+    // storage (e.g. cfc::CFC::u_p_src), not the AthenaTensor view over it:
+    // Multigrid::LoadSource() requires a genuine DvceArray5D<Real>&, which an
+    // AthenaTensor's Kokkos::subview-backed storage does not type-check against.
+    void LoadPoissonSource(const DvceArray5D<Real> &p_src);
 
-    // retrieve the converged P_i solution after Solve() completes. cfc::CFC then uses
-    // both P_i and the original source S_i to build and solve eta's scalar equation
-    // (see mg_cfc_scalar_poisson.hpp) before reconstructing the physical vector.
-    void RetrieveSolution(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_dst);
+    // retrieve the converged P_i solution after Solve() completes into the raw
+    // backing storage (e.g. cfc::CFC::u_p_x) -- same reasoning as LoadPoissonSource.
+    // cfc::CFC then uses both P_i and the original source S_i to build and solve
+    // eta's scalar equation (see mg_cfc_scalar_poisson.hpp) before reconstructing
+    // the physical vector.
+    void RetrieveSolution(DvceArray5D<Real> &p_dst);
 
     // octet-level (AMR) physics, mirroring gravity::MGGravityDriver
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
-    void ProlongateOctetBoundariesFluxCons(MGOctet &oct,
-         std::vector<Real> &cbuf, const std::vector<bool> &ncoarse) final;
+    // ProlongateOctetBoundariesFluxCons is intentionally NOT overridden: the
+    // MultigridDriver base default (plain nvar_-generic trilinear prolongation) is
+    // sufficient here. Gravity overrides it for exact flux conservation, which
+    // matters for a conserved potential; P_i/eta are auxiliary elliptic potentials
+    // with no conservation law of their own, so the simpler base behavior applies.
 
     friend class MGCFCVectorPoisson;
   private:

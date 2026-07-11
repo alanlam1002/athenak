@@ -56,10 +56,11 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //! \fn void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi)
 //! \brief Writes psi4 = psi^4 and g_dd = psi^4 * delta_ij into pmbp->padm->u_adm.
 //! Called right after the conformal factor psi is solved (XCFC step 3), *before*
-//! RescaleMatterSources() -- primitive recovery (dyngr::DynGRMHD::ConToPrim, see
-//! PrimitiveSolverHydro::ConsToPrim in src/eos/primitive_solver_hyd.hpp) reads
-//! padm->adm.g_dd directly to invert conserved to primitive variables, so g_dd must
-//! already reflect the newly-solved psi by the time that con2prim call happens.
+//! MHD_C2P -- dyn_grmhd's own per-stage con2prim task, queued to depend on
+//! CFC_SolvePsi (see cfc::CFC::QueueCFCTasks()) -- runs: PrimitiveSolverHydro::
+//! ConsToPrim (src/eos/primitive_solver_hyd.hpp) reads padm->adm.g_dd directly to
+//! invert conserved to primitive variables, so g_dd must already reflect the
+//! newly-solved psi by the time that con2prim call happens.
 void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi);
 
 //----------------------------------------------------------------------------------------

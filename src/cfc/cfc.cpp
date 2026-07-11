@@ -41,6 +41,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     eta_x("cfc_eta_x", 1, 1, 1, 1, 1),
     u_p_beta("cfc_u_p_beta", 1, 1, 1, 1, 1),
     eta_beta("cfc_eta_beta", 1, 1, 1, 1, 1),
+    u_p_src("cfc_u_p_src", 1, 1, 1, 1, 1),
+    eta_src("cfc_eta_src", 1, 1, 1, 1, 1),
     pmgd_px(nullptr),
     pmgd_etax(nullptr),
     pmgd_pbeta(nullptr),
@@ -50,17 +52,18 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // TODO(cfc): require pmbp->padm != nullptr and pmbp->ptmunu != nullptr (fatal error
   // otherwise, mirroring the z4c||adm + mhd check in meshblock_pack.cpp); size all
   // intermediate DvceArray5D storage fields (u_x, u_beta, u_adual, a_sq, psi,
-  // alpha_psi, u_tilde, u_stilde, s_tilde, u_p_x, eta_x, u_p_beta, eta_beta) to
-  // (nmb, ncomponents, ncells3, ncells2, ncells1); then wire the AthenaTensor views
-  // into their backing storage, mirroring adm::ADM::ADM(...):
+  // alpha_psi, u_tilde, u_stilde, s_tilde, u_p_x, eta_x, u_p_beta, eta_beta, u_p_src,
+  // eta_src) to (nmb, ncomponents, ncells3, ncells2, ncells1); then wire the
+  // AthenaTensor views into their backing storage, mirroring adm::ADM::ADM(...):
   //   x_u.InitWithShallowSlice(u_x, 0, 2);
   //   beta_u.InitWithShallowSlice(u_beta, 0, 2);
   //   a_dd.InitWithShallowSlice(u_adual, 0, 5);
   //   s_tilde_d.InitWithShallowSlice(u_stilde, 0, 2);
   //   p_x.InitWithShallowSlice(u_p_x, 0, 2);
   //   p_beta.InitWithShallowSlice(u_p_beta, 0, 2);
-  // (eta_x, eta_beta are genuine scalars and stay plain DvceArray5D<Real> -- no
-  // AthenaTensor view needed.)
+  //   p_src.InitWithShallowSlice(u_p_src, 0, 2);
+  // (eta_x, eta_beta, eta_src are genuine scalars and stay plain DvceArray5D<Real> --
+  // no AthenaTensor view needed.)
   // construct pmgd_px/pmgd_etax/pmgd_pbeta/pmgd_etabeta/pmgd_psi/pmgd_alpha.
 }
 
@@ -162,8 +165,7 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::AssembleVectorSource(...)
 
-void CFC::AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                               DvceArray5D<Real> &eta_src, bool for_shift) {
+void CFC::AssembleVectorSource(bool for_shift) {
   // TODO(cfc): if (!for_shift): build S-tilde_i = psi^6 * S_i directly from
   // pmy_pack->pmhd->u0's momentum components (IM1..IM3) divided by sqrt(detg) of the
   // *current* (not-yet-updated-by-this-solve) padm->adm.g_dd -- mirrors
@@ -173,7 +175,10 @@ void CFC::AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src
   // (Gmunu eq. 72 rhs).
   // if (for_shift): p_src = 16*pi*alpha*psi^-6*S-tilde_i + 2*Adual^ij*D_j(alpha*psi^-6)
   // (Gmunu eq. 75 rhs), reusing s_tilde_d already built for the X^i solve.
-  // In both cases: eta_src = -p_src_i * x^i (Shibata eq. 3.11).
+  // In both cases: eta_src = -p_src_i * x^i (Shibata eq. 3.11). Write both into the
+  // member arrays p_src/eta_src (cfc.hpp) -- LoadPoissonSource() on the two multigrid
+  // drivers below needs their raw DvceArray5D<Real> backing storage (u_p_src for
+  // p_src; eta_src is already that type), not the AthenaTensor view.
   return;
 }
 
@@ -181,13 +186,14 @@ void CFC::AssembleVectorSource(AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src
 //! \fn void CFC::SolveVectorPotential(Driver *pdriver, int stage)
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
-  // TODO(cfc): AssembleVectorSource(p_src, eta_src, /*for_shift=*/false), built
-  // directly from pmy_pack->pmhd->u0 (post MHD_AddSrc, this task's dependency -- see
-  // QueueCFCTasks), to build both right-hand sides. Then, in order (P_i first, since
-  // P_x/P_y/P_z/eta are all independent of each
-  // other but eta's source was built from the same S_i used for P_i):
-  //   1. pmgd_px->LoadPoissonSource(p_src); pmgd_px->Solve(pdriver, stage);
-  //      pmgd_px->RetrieveSolution(p_x);
+  // TODO(cfc): AssembleVectorSource(/*for_shift=*/false), built directly from
+  // pmy_pack->pmhd->u0 (post MHD_AddSrc, this task's dependency -- see
+  // QueueCFCTasks), to fill the member arrays p_src/eta_src with both right-hand
+  // sides. Then, in order (P_i first, since P_x/P_y/P_z/eta are all independent of
+  // each other but eta's source was built from the same S_i used for P_i):
+  //   1. pmgd_px->LoadPoissonSource(u_p_src); pmgd_px->Solve(pdriver, stage);
+  //      pmgd_px->RetrieveSolution(u_p_x);  // p_x (the AthenaTensor view) now
+  //                                         // reflects the converged solution too.
   //   2. pmgd_etax->LoadPoissonSource(eta_src); pmgd_etax->Solve(pdriver, stage);
   //      pmgd_etax->RetrieveSolution(eta_x);
   // Finally cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, eta_x, x_u).
@@ -256,11 +262,11 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 //! \fn void CFC::SolveShift(Driver *pdriver, int stage)
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
-  // TODO(cfc): AssembleVectorSource(p_src, eta_src, /*for_shift=*/true) using
-  // alpha_psi, psi, a_dd, s_tilde_d (Gmunu eq. 75 rhs) to build both right-hand
-  // sides. Then, in order (P_i first, same reasoning as SolveVectorPotential):
-  //   1. pmgd_pbeta->LoadPoissonSource(p_src); pmgd_pbeta->Solve(pdriver, stage);
-  //      pmgd_pbeta->RetrieveSolution(p_beta);
+  // TODO(cfc): AssembleVectorSource(/*for_shift=*/true) using alpha_psi, psi, a_dd,
+  // s_tilde_d (Gmunu eq. 75 rhs) to fill the member arrays p_src/eta_src. Then, in
+  // order (P_i first, same reasoning as SolveVectorPotential):
+  //   1. pmgd_pbeta->LoadPoissonSource(u_p_src); pmgd_pbeta->Solve(pdriver, stage);
+  //      pmgd_pbeta->RetrieveSolution(u_p_beta);
   //   2. pmgd_etabeta->LoadPoissonSource(eta_src); pmgd_etabeta->Solve(pdriver, stage);
   //      pmgd_etabeta->RetrieveSolution(eta_beta);
   // Finally cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, eta_beta, beta_u).

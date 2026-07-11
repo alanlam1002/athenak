@@ -234,7 +234,13 @@ void MGCFCVectorPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &p_src)
 }
 
 void MGCFCVectorPoissonDriver::RetrieveSolution(DvceArray5D<Real> &p_dst) {
-  mglevels_->RetrieveResult(p_dst, 0, mglevels_->GetGhostCells());
+  // p_dst (cfc::CFC::u_p_x/u_p_beta) is sized at mesh-NGHOST depth, not this solver's
+  // own (generally shallower) ngh_ -- Multigrid::RetrieveResult's ngh argument is the
+  // depth p_dst itself is padded to, not the multigrid's, so it must be the mesh's
+  // ng here (see plan addendum #4, Finding F). RetrieveResult only ever fills the
+  // inner min(ngh_, ng) ring regardless; the outer ring is left for cfc::CFC's own
+  // post-retrieve MeshBoundaryValuesCC exchange to fill from neighboring blocks.
+  mglevels_->RetrieveResult(p_dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
 

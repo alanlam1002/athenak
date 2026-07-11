@@ -11,9 +11,13 @@
 #include "athena.hpp"
 #include "globals.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/mesh_refinement.hpp"
 #include "mesh/meshblock_pack.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/adm.hpp"
+#include "coordinates/cell_locations.hpp"
+#include "utils/finite_diff.hpp"
+#include "bvals/bvals.hpp"
 #include "mhd/mhd.hpp"
 #include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
@@ -22,9 +26,86 @@
 
 namespace cfc {
 
+namespace {
+
+//----------------------------------------------------------------------------------------
+//! \fn void BuildShiftSourceImpl<NGHOST>(...)
+//! \brief Gmunu eq. 75's derivative term, 2*Adual^ij*D_j(alpha*psi^-6), added onto an
+//! already-built p_src (16*pi*alpha*psi^-6*S-tilde_i, the pointwise part -- see
+//! CFC::AssembleVectorSource). Templated on NGHOST purely because Dx<NGHOST> is;
+//! mirrors cfc_reconstruct.cpp's ComputeADualFromXImpl/ReconstructVectorFromPotentials-
+//! Impl shape (file-local template + switch(indcs.ng) dispatch).
+
+template <int NGHOST>
+void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
+                          const DvceArray5D<Real> &alpha_psi,
+                          const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                          AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  auto &size = pmbp->pmb->mb_size;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmbp->nmb_thispack;
+  int ncells1 = indcs.nx1 + 2*indcs.ng;
+  int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+  int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+
+  // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). Built as a genuine
+  // scratch DvceArray5D over the FULL array extent (not just the interior) so
+  // Dx<NGHOST> below has valid neighbor data at every interior point -- both psi and
+  // alpha_psi are already ghost-exchanged by the time this runs (see
+  // CFC::QueueCFCTasks), so this pointwise pass is valid everywhere.
+  DvceArray5D<Real> ap6("cfc_alpha_psi6", nmb, 1, ncells3, ncells2, ncells1);
+  par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
+          0, ncells1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real psi_val = psi(m,0,k,j,i);
+    Real psi7 = psi_val*psi_val*psi_val*psi_val*psi_val*psi_val*psi_val;
+    ap6(m,0,k,j,i) = alpha_psi(m,0,k,j,i)/psi7;
+  });
+
+  AthenaTensor<Real, TensorSymm::NONE, 3, 0> ap6_view;
+  ap6_view.InitWithShallowSlice(ap6, 0);
+
+  par_for("cfc_build_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
+                  1.0/size.d_view(m).dx3};
+    Real dap6[3];
+    for (int b = 0; b < 3; ++b) {
+      dap6[b] = Dx<NGHOST>(b, idx, ap6_view, m, k, j, i);
+    }
+    for (int a = 0; a < 3; ++a) {
+      Real div = 0.0;
+      for (int b = 0; b < 3; ++b) {
+        div += a_dd(m,a,b,k,j,i)*dap6[b];
+      }
+      p_src(m,a,k,j,i) += 2.0*div;
+    }
+  });
+}
+
+void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
+                      const DvceArray5D<Real> &alpha_psi,
+                      const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  switch (indcs.ng) {
+    case 2: BuildShiftSourceImpl<2>(pmbp, psi, alpha_psi, a_dd, p_src); break;
+    case 3: BuildShiftSourceImpl<3>(pmbp, psi, alpha_psi, a_dd, p_src); break;
+    case 4: BuildShiftSourceImpl<4>(pmbp, psi, alpha_psi, a_dd, p_src); break;
+  }
+}
+
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 //! \fn CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin)
 //! \brief CFC constructor: allocates intermediate fields and the 6 multigrid solvers.
+//! pmbp->padm/pmbp->ptmunu are already guaranteed non-null by the caller
+//! (mesh/meshblock_pack.cpp only constructs a CFC when both exist -- see that file's
+//! <cfc> block comment), so no redundant check is repeated here.
 
 CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     pmy_pack(pmbp),
@@ -48,23 +129,115 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     pmgd_pbeta(nullptr),
     pmgd_etabeta(nullptr),
     pmgd_psi(nullptr),
-    pmgd_alpha(nullptr) {
-  // TODO(cfc): require pmbp->padm != nullptr and pmbp->ptmunu != nullptr (fatal error
-  // otherwise, mirroring the z4c||adm + mhd check in meshblock_pack.cpp); size all
-  // intermediate DvceArray5D storage fields (u_x, u_beta, u_adual, a_sq, psi,
-  // alpha_psi, u_tilde, u_stilde, s_tilde, u_p_x, eta_x, u_p_beta, eta_beta, u_p_src,
-  // eta_src) to (nmb, ncomponents, ncells3, ncells2, ncells1); then wire the
-  // AthenaTensor views into their backing storage, mirroring adm::ADM::ADM(...):
-  //   x_u.InitWithShallowSlice(u_x, 0, 2);
-  //   beta_u.InitWithShallowSlice(u_beta, 0, 2);
-  //   a_dd.InitWithShallowSlice(u_adual, 0, 5);
-  //   s_tilde_d.InitWithShallowSlice(u_stilde, 0, 2);
-  //   p_x.InitWithShallowSlice(u_p_x, 0, 2);
-  //   p_beta.InitWithShallowSlice(u_p_beta, 0, 2);
-  //   p_src.InitWithShallowSlice(u_p_src, 0, 2);
-  // (eta_x, eta_beta, eta_src are genuine scalars and stay plain DvceArray5D<Real> --
-  // no AthenaTensor view needed.)
-  // construct pmgd_px/pmgd_etax/pmgd_pbeta/pmgd_etabeta/pmgd_psi/pmgd_alpha.
+    pmgd_alpha(nullptr),
+    pbval_px(nullptr), pbval_etax(nullptr), pbval_x(nullptr),
+    pbval_psi(nullptr), pbval_alpha_psi(nullptr),
+    pbval_pbeta(nullptr), pbval_etabeta(nullptr),
+    coarse_u_px("cfc_coarse_u_px", 1, 1, 1, 1, 1),
+    coarse_eta_x("cfc_coarse_eta_x", 1, 1, 1, 1, 1),
+    coarse_u_x("cfc_coarse_u_x", 1, 1, 1, 1, 1),
+    coarse_psi("cfc_coarse_psi", 1, 1, 1, 1, 1),
+    coarse_alpha_psi("cfc_coarse_alpha_psi", 1, 1, 1, 1, 1),
+    coarse_u_pbeta("cfc_coarse_u_pbeta", 1, 1, 1, 1, 1),
+    coarse_eta_beta("cfc_coarse_eta_beta", 1, 1, 1, 1, 1) {
+  int nmb = pmy_pack->nmb_thispack;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+
+  // "Physical" CFC fields: every field that is either finite-differenced by
+  // cfc_reconstruct.cpp or ghost-exchanged (or both) is sized at mesh-NGHOST depth,
+  // matching gravity::Gravity::phi's own convention -- one sizing rule for all of
+  // them, not split by which multigrid solver happens to produce/consume them (plan
+  // addendum #4, Findings F/H).
+  int ncells1 = indcs.nx1 + 2*(indcs.ng);
+  int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*(indcs.ng)) : 1;
+  int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*(indcs.ng)) : 1;
+  Kokkos::realloc(u_x,      nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_beta,   nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_adual,  nmb, 6, ncells3, ncells2, ncells1);
+  Kokkos::realloc(a_sq,     nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(psi,      nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(alpha_psi, nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_tilde,  nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_stilde, nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(s_tilde,  nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_p_x,    nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(eta_x,    nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_p_beta, nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(eta_beta, nmb, 1, ncells3, ncells2, ncells1);
+
+  // psi = alpha*psi = 1 (flat space) is the correct initial value for the very first
+  // solve of a run: psi/alpha_psi represent physical psi/(alpha*psi) directly (not
+  // the delta_psi = psi-1 the multigrid solvers themselves iterate on internally),
+  // and step 1's matter-source build (AssembleVectorSource) reads this stage's psi
+  // *before* this stage's own conformal-factor solve has produced a better one (the
+  // standard XCFC lagged-coefficient structure -- see plan addendum #4). Without
+  // this, the first stage's psi^6 factor would silently be 0.
+  Kokkos::deep_copy(psi, 1.0);
+  Kokkos::deep_copy(alpha_psi, 1.0);
+
+  x_u.InitWithShallowSlice(u_x, 0, 2);
+  beta_u.InitWithShallowSlice(u_beta, 0, 2);
+  a_dd.InitWithShallowSlice(u_adual, 0, 5);
+  s_tilde_d.InitWithShallowSlice(u_stilde, 0, 2);
+  p_x.InitWithShallowSlice(u_p_x, 0, 2);
+  p_beta.InitWithShallowSlice(u_p_beta, 0, 2);
+
+  // u_p_src/eta_src: pure LoadPoissonSource inputs, read pointwise once, never
+  // differentiated or ghost-exchanged -- genuinely sized at this solver's own
+  // (generally shallower) multigrid ghost width, not mesh-NGHOST depth (plan
+  // addendum #4, Finding H's contrast). Read directly here (not via
+  // GetGhostCells(), since no driver exists yet at this point in the constructor)
+  // using the same "cfc"/"mg_nghost" input parameter every mg_cfc_* driver
+  // constructor reads independently with the same default, so this is guaranteed
+  // consistent with whatever ngh_ they end up with.
+  int mg_nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
+  int mncells1 = indcs.nx1 + 2*mg_nghost;
+  int mncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*mg_nghost) : 1;
+  int mncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*mg_nghost) : 1;
+  Kokkos::realloc(u_p_src, nmb, 3, mncells3, mncells2, mncells1);
+  Kokkos::realloc(eta_src, nmb, 1, mncells3, mncells2, mncells1);
+  p_src.InitWithShallowSlice(u_p_src, 0, 2);
+
+  // 6 multigrid solvers: one per distinct elliptic equation.
+  pmgd_px      = new MGCFCVectorPoissonDriver(pmbp, pin);
+  pmgd_etax    = new MGCFCScalarPoissonDriver(pmbp, pin);
+  pmgd_pbeta   = new MGCFCVectorPoissonDriver(pmbp, pin);
+  pmgd_etabeta = new MGCFCScalarPoissonDriver(pmbp, pin);
+  pmgd_psi     = new MGCFCConformalFactorDriver(pmbp, pin);
+  pmgd_alpha   = new MGCFCLapseDriver(pmbp, pin);
+
+  // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
+  // per field cfc_reconstruct.cpp later differentiates, mirroring
+  // z4c::Z4c::pbval_u/coarse_u0 exactly (is_z4c=false throughout -- see cfc.hpp).
+  pbval_px = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_px->InitializeBuffers(3);
+  pbval_etax = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_etax->InitializeBuffers(1);
+  pbval_x = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_x->InitializeBuffers(3);
+  pbval_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_psi->InitializeBuffers(1);
+  pbval_alpha_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_alpha_psi->InitializeBuffers(1);
+  pbval_pbeta = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_pbeta->InitializeBuffers(3);
+  pbval_etabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_etabeta->InitializeBuffers(1);
+
+  // coarse_* shadow arrays: only needed with SMR/AMR (RestrictCC/ProlongateCC are
+  // internal no-ops otherwise), matching z4c.cpp's identical multilevel guard.
+  if (pmy_pack->pmesh->multilevel) {
+    int nccells1 = indcs.cnx1 + 2*(indcs.ng);
+    int nccells2 = (indcs.cnx2 > 1) ? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+    int nccells3 = (indcs.cnx3 > 1) ? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(coarse_u_px,       nmb, 3, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_eta_x,      nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_x,        nmb, 3, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_psi,        nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_alpha_psi,  nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_pbeta,    nmb, 3, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_eta_beta,   nmb, 1, nccells3, nccells2, nccells1);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -77,41 +250,280 @@ CFC::~CFC() {
   delete pmgd_etabeta;
   delete pmgd_psi;
   delete pmgd_alpha;
+  delete pbval_px;
+  delete pbval_etax;
+  delete pbval_x;
+  delete pbval_psi;
+  delete pbval_alpha_psi;
+  delete pbval_pbeta;
+  delete pbval_etabeta;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::QueueCFCTasks()
-//! \brief queues CFC's tasks into the shared NumericalRelativity task graph, interleaved
-//! with dyn_grmhd's hydro/con2prim tasks (see cfc.hpp's QueueCFCTasks doc comment for
-//! the full dependency rationale).
+//! \brief queues CFC's tasks into the shared NumericalRelativity task graph. See
+//! cfc.hpp's doc comment for the full 32-node chain this builds.
 
 void CFC::QueueCFCTasks() {
   using namespace numrel;  // NOLINT(build/namespaces)
   NumericalRelativity *pnr = pmy_pack->pnr;
 
-  pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_SolveVecX, "CFC_SolveVecX",
+  pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_BuildSrcX, "CFC_BuildSrcX",
                  Task_Run, {MHD_AddSrc});
+
+  pnr->QueueTask(&CFC::RestPXTask, this, CFC_RestPX, "CFC_RestPX",
+                 Task_Run, {CFC_BuildSrcX});
+  pnr->QueueTask(&CFC::SendPXTask, this, CFC_SendPX, "CFC_SendPX",
+                 Task_Run, {CFC_RestPX});
+  pnr->QueueTask(&CFC::RecvPXTask, this, CFC_RecvPX, "CFC_RecvPX",
+                 Task_Run, {CFC_SendPX});
+  pnr->QueueTask(&CFC::ProlongPXTask, this, CFC_ProlongPX, "CFC_ProlongPX",
+                 Task_Run, {CFC_RecvPX});
+
+  pnr->QueueTask(&CFC::RestEtaXTask, this, CFC_RestEtaX, "CFC_RestEtaX",
+                 Task_Run, {CFC_BuildSrcX});
+  pnr->QueueTask(&CFC::SendEtaXTask, this, CFC_SendEtaX, "CFC_SendEtaX",
+                 Task_Run, {CFC_RestEtaX});
+  pnr->QueueTask(&CFC::RecvEtaXTask, this, CFC_RecvEtaX, "CFC_RecvEtaX",
+                 Task_Run, {CFC_SendEtaX});
+  pnr->QueueTask(&CFC::ProlongEtaXTask, this, CFC_ProlongEtaX, "CFC_ProlongEtaX",
+                 Task_Run, {CFC_RecvEtaX});
+
+  pnr->QueueTask(&CFC::ReconstructXTask, this, CFC_ReconstructX, "CFC_ReconstructX",
+                 Task_Run, {CFC_ProlongPX, CFC_ProlongEtaX});
+
+  pnr->QueueTask(&CFC::RestXTask, this, CFC_RestX, "CFC_RestX",
+                 Task_Run, {CFC_ReconstructX});
+  pnr->QueueTask(&CFC::SendXTask, this, CFC_SendX, "CFC_SendX",
+                 Task_Run, {CFC_RestX});
+  pnr->QueueTask(&CFC::RecvXTask, this, CFC_RecvX, "CFC_RecvX",
+                 Task_Run, {CFC_SendX});
+  pnr->QueueTask(&CFC::ProlongXTask, this, CFC_ProlongX, "CFC_ProlongX",
+                 Task_Run, {CFC_RecvX});
+
+  pnr->QueueTask(&CFC::ComputeADualTask, this, CFC_ComputeADual, "CFC_ComputeADual",
+                 Task_Run, {CFC_ProlongX});
+
   pnr->QueueTask(&CFC::SolvePsiTask, this, CFC_SolvePsi, "CFC_SolvePsi",
-                 Task_Run, {CFC_SolveVecX});
+                 Task_Run, {CFC_ComputeADual});
   pnr->QueueTask(&CFC::RescaleSrcTask, this, CFC_RescaleSrc, "CFC_RescaleSrc",
                  Task_Run, {MHD_C2P});
   pnr->QueueTask(&CFC::SolveLapseTask, this, CFC_SolveLapse, "CFC_SolveLapse",
                  Task_Run, {CFC_RescaleSrc});
-  pnr->QueueTask(&CFC::SolveShiftTask, this, CFC_SolveShift, "CFC_SolveShift",
+
+  pnr->QueueTask(&CFC::RestPsiTask, this, CFC_RestPsi, "CFC_RestPsi",
                  Task_Run, {CFC_SolveLapse});
+  pnr->QueueTask(&CFC::SendPsiTask, this, CFC_SendPsi, "CFC_SendPsi",
+                 Task_Run, {CFC_RestPsi});
+  pnr->QueueTask(&CFC::RecvPsiTask, this, CFC_RecvPsi, "CFC_RecvPsi",
+                 Task_Run, {CFC_SendPsi});
+  pnr->QueueTask(&CFC::ProlongPsiTask, this, CFC_ProlongPsi, "CFC_ProlongPsi",
+                 Task_Run, {CFC_RecvPsi});
+
+  pnr->QueueTask(&CFC::RestAlphaPsiTask, this, CFC_RestAlphaPsi, "CFC_RestAlphaPsi",
+                 Task_Run, {CFC_SolveLapse});
+  pnr->QueueTask(&CFC::SendAlphaPsiTask, this, CFC_SendAlphaPsi, "CFC_SendAlphaPsi",
+                 Task_Run, {CFC_RestAlphaPsi});
+  pnr->QueueTask(&CFC::RecvAlphaPsiTask, this, CFC_RecvAlphaPsi, "CFC_RecvAlphaPsi",
+                 Task_Run, {CFC_SendAlphaPsi});
+  pnr->QueueTask(&CFC::ProlongAlphaPsiTask, this, CFC_ProlongAlphaPsi,
+                 "CFC_ProlongAlphaPsi", Task_Run, {CFC_RecvAlphaPsi});
+
+  pnr->QueueTask(&CFC::SolveShiftTask, this, CFC_BuildSrcBeta, "CFC_BuildSrcBeta",
+                 Task_Run, {CFC_ProlongPsi, CFC_ProlongAlphaPsi});
+
+  pnr->QueueTask(&CFC::RestPBetaTask, this, CFC_RestPBeta, "CFC_RestPBeta",
+                 Task_Run, {CFC_BuildSrcBeta});
+  pnr->QueueTask(&CFC::SendPBetaTask, this, CFC_SendPBeta, "CFC_SendPBeta",
+                 Task_Run, {CFC_RestPBeta});
+  pnr->QueueTask(&CFC::RecvPBetaTask, this, CFC_RecvPBeta, "CFC_RecvPBeta",
+                 Task_Run, {CFC_SendPBeta});
+  pnr->QueueTask(&CFC::ProlongPBetaTask, this, CFC_ProlongPBeta, "CFC_ProlongPBeta",
+                 Task_Run, {CFC_RecvPBeta});
+
+  pnr->QueueTask(&CFC::RestEtaBetaTask, this, CFC_RestEtaBeta, "CFC_RestEtaBeta",
+                 Task_Run, {CFC_BuildSrcBeta});
+  pnr->QueueTask(&CFC::SendEtaBetaTask, this, CFC_SendEtaBeta, "CFC_SendEtaBeta",
+                 Task_Run, {CFC_RestEtaBeta});
+  pnr->QueueTask(&CFC::RecvEtaBetaTask, this, CFC_RecvEtaBeta, "CFC_RecvEtaBeta",
+                 Task_Run, {CFC_SendEtaBeta});
+  pnr->QueueTask(&CFC::ProlongEtaBetaTask, this, CFC_ProlongEtaBeta, "CFC_ProlongEtaBeta",
+                 Task_Run, {CFC_RecvEtaBeta});
+
+  pnr->QueueTask(&CFC::ReconstructBetaTask, this, CFC_ReconstructBeta,
+                 "CFC_ReconstructBeta", Task_Run, {CFC_ProlongPBeta, CFC_ProlongEtaBeta});
+
   pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
-                 Task_Run, {CFC_SolveShift});
+                 Task_Run, {CFC_ReconstructBeta});
   return;
 }
 
 //----------------------------------------------------------------------------------------
+// Ghost-exchange task-graph entry points: one Rest/Send/Recv/Prolong quartet per
+// field, mirroring z4c::Z4c::RestrictU/SendU/RecvU/Prolongate's exact one-line shape
+// (RestrictCC/ProlongateCC are internal no-ops without SMR/AMR; is_z4c=false
+// throughout since CFC is not z4c).
+
+TaskStatus CFC::RestPXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_px, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendPXTask(Driver *pdriver, int stage) {
+  return pbval_px->PackAndSendCC(u_p_x, coarse_u_px);
+}
+TaskStatus CFC::RecvPXTask(Driver *pdriver, int stage) {
+  return pbval_px->RecvAndUnpackCC(u_p_x, coarse_u_px);
+}
+TaskStatus CFC::ProlongPXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_px->ProlongateCC(u_p_x, coarse_u_px, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestEtaXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(eta_x, coarse_eta_x, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendEtaXTask(Driver *pdriver, int stage) {
+  return pbval_etax->PackAndSendCC(eta_x, coarse_eta_x);
+}
+TaskStatus CFC::RecvEtaXTask(Driver *pdriver, int stage) {
+  return pbval_etax->RecvAndUnpackCC(eta_x, coarse_eta_x);
+}
+TaskStatus CFC::ProlongEtaXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_etax->ProlongateCC(eta_x, coarse_eta_x, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(u_x, coarse_u_x, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendXTask(Driver *pdriver, int stage) {
+  return pbval_x->PackAndSendCC(u_x, coarse_u_x);
+}
+TaskStatus CFC::RecvXTask(Driver *pdriver, int stage) {
+  return pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
+}
+TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_x->ProlongateCC(u_x, coarse_u_x, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestPsiTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(psi, coarse_psi, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendPsiTask(Driver *pdriver, int stage) {
+  return pbval_psi->PackAndSendCC(psi, coarse_psi);
+}
+TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
+  return pbval_psi->RecvAndUnpackCC(psi, coarse_psi);
+}
+TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_psi->ProlongateCC(psi, coarse_psi, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestAlphaPsiTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(alpha_psi, coarse_alpha_psi, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendAlphaPsiTask(Driver *pdriver, int stage) {
+  return pbval_alpha_psi->PackAndSendCC(alpha_psi, coarse_alpha_psi);
+}
+TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
+  return pbval_alpha_psi->RecvAndUnpackCC(alpha_psi, coarse_alpha_psi);
+}
+TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_alpha_psi->ProlongateCC(alpha_psi, coarse_alpha_psi, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestPBetaTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pbeta, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendPBetaTask(Driver *pdriver, int stage) {
+  return pbval_pbeta->PackAndSendCC(u_p_beta, coarse_u_pbeta);
+}
+TaskStatus CFC::RecvPBetaTask(Driver *pdriver, int stage) {
+  return pbval_pbeta->RecvAndUnpackCC(u_p_beta, coarse_u_pbeta);
+}
+TaskStatus CFC::ProlongPBetaTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_pbeta->ProlongateCC(u_p_beta, coarse_u_pbeta, false);
+  }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::RestEtaBetaTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(eta_beta, coarse_eta_beta, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendEtaBetaTask(Driver *pdriver, int stage) {
+  return pbval_etabeta->PackAndSendCC(eta_beta, coarse_eta_beta);
+}
+TaskStatus CFC::RecvEtaBetaTask(Driver *pdriver, int stage) {
+  return pbval_etabeta->RecvAndUnpackCC(eta_beta, coarse_eta_beta);
+}
+TaskStatus CFC::ProlongEtaBetaTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_etabeta->ProlongateCC(eta_beta, coarse_eta_beta, false);
+  }
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage)
-//! \brief steps 1-2: X^i vector potential (eq. 72) and Adual^ij/Ahat^2 (eq. 76). Runs
-//! after MHD_AddSrc, i.e. once this stage's hydro flux+source update has produced the
-//! conserved state AssembleVectorSource reads from.
+//! \brief step 1: X^i's P_i/eta right-hand side, solved (not yet reconstructed into
+//! x_u -- needs p_x/eta_x's own ghost exchange first, see CFC_ReconstructX). Runs
+//! after MHD_AddSrc, i.e. once this stage's hydro flux+source update has produced
+//! the conserved state AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   SolveVectorPotential(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage)
+//! \brief CFC_ReconstructX: build x_u from p_x/eta_x once their ghost exchange has
+//! completed.
+
+TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage) {
+  ReconstructVectorPotential();
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage)
+//! \brief step 2: Adual^ij/Ahat^2 from x_u, once x_u's own ghost exchange completes.
+
+TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   ComputeADual();
   return TaskStatus::complete;
 }
@@ -146,10 +558,22 @@ TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage)
-//! \brief step 6: beta^i.
+//! \brief step 6: beta^i's P_i/eta right-hand side, solved (not yet reconstructed --
+//! needs p_beta/eta_beta's own ghost exchange first, see CFC_ReconstructBeta). Runs
+//! after psi/alpha_psi's own ghost exchange (both needed by the eq. 75 source term).
 
 TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
   SolveShift(pdriver, stage);
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage)
+//! \brief CFC_ReconstructBeta: build beta_u from p_beta/eta_beta once their ghost
+//! exchange has completed.
+
+TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
+  ReconstructShift();
   return TaskStatus::complete;
 }
 
@@ -163,22 +587,102 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::AssembleVectorSource(...)
+//! \fn void CFC::AssembleVectorSource(bool for_shift)
+//! \brief Gmunu eq. 72 (for_shift=false) / eq. 75 (for_shift=true) right-hand sides,
+//! plus Shibata eq. 3.11's eta source, built from the same S_i either way. See plan
+//! addendum #4's "Matter-source algebra" section for the full per-step derivation.
 
 void CFC::AssembleVectorSource(bool for_shift) {
-  // TODO(cfc): if (!for_shift): build S-tilde_i = psi^6 * S_i directly from
-  // pmy_pack->pmhd->u0's momentum components (IM1..IM3) divided by sqrt(detg) of the
-  // *current* (not-yet-updated-by-this-solve) padm->adm.g_dd -- mirrors
-  // dyn_grmhd.cpp's DynGRMHD::SetTmunu (S_d(m,a,...) = cons(IM1+a,...)*ivol), but
-  // computed inline here rather than read from ptmunu (which may not even be
-  // populated -- see cfc.hpp's u_tilde comment); then p_src = 8*pi*S-tilde_i
-  // (Gmunu eq. 72 rhs).
-  // if (for_shift): p_src = 16*pi*alpha*psi^-6*S-tilde_i + 2*Adual^ij*D_j(alpha*psi^-6)
-  // (Gmunu eq. 75 rhs), reusing s_tilde_d already built for the X^i solve.
-  // In both cases: eta_src = -p_src_i * x^i (Shibata eq. 3.11). Write both into the
-  // member arrays p_src/eta_src (cfc.hpp) -- LoadPoissonSource() on the two multigrid
-  // drivers below needs their raw DvceArray5D<Real> backing storage (u_p_src for
-  // p_src; eta_src is already that type), not the AthenaTensor view.
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+
+  auto &adm = pmy_pack->padm->adm;
+  auto s_tilde_d_ = s_tilde_d;
+  auto p_src_ = p_src;
+  auto &eta_src_ = eta_src;
+
+  if (!for_shift) {
+    // Step 1 (Gmunu eq. 72): U/S_i built directly from the evolved conserved state
+    // (pmy_pack->pmhd->u0), mirroring dyn_grmhd.cpp's DynGRMHD::SetTmunu lines
+    // 472/474 exactly -- no primitives needed for these two. psi^6 here is the
+    // *previous* stage's converged psi (this stage's own psi doesn't exist yet;
+    // standard XCFC lagged-coefficient structure).
+    auto &cons = pmy_pack->pmhd->u0;
+    auto &u_tilde_ = u_tilde;
+    auto &psi_ = psi;
+    par_for("cfc_assemble_vecX_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real detg = adm::SpatialDet(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                                   adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                                   adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i));
+      Real ivol = 1.0/sqrt(detg);
+      Real psi_val = psi_(m,0,k,j,i);
+      Real psi2 = psi_val*psi_val;
+      Real psi6 = psi2*psi2*psi2;
+
+      Real e_dens = (cons(m,IEN,k,j,i) + cons(m,IDN,k,j,i))*ivol;
+      u_tilde_(m,0,k,j,i) = psi6*e_dens;
+
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real xk[3] = {x1v, x2v, x3v};
+
+      Real eta_val = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        Real s_a = psi6*cons(m,IM1+a,k,j,i)*ivol;
+        s_tilde_d_(m,a,k,j,i) = s_a;
+        Real p_a = 8.0*M_PI*s_a;  // Gmunu eq. 72 rhs, f^ij = delta^ij (Cartesian)
+        p_src_(m,a,k,j,i) = p_a;
+        eta_val -= p_a*xk[a];  // Shibata eq. 3.11: eta_src = -S_i x^i
+      }
+      eta_src_(m,0,k,j,i) = eta_val;
+    });
+  } else {
+    // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
+    // using this stage's newly-solved psi/alpha_psi and the s_tilde_d step 1 already
+    // built (not rebuilt here -- see cfc.hpp's s_tilde_d comment).
+    auto &psi_ = psi;
+    auto &alpha_psi_ = alpha_psi;
+    par_for("cfc_assemble_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real psi_val = psi_(m,0,k,j,i);
+      Real psi2 = psi_val*psi_val;
+      Real psi7 = psi2*psi2*psi2*psi_val;
+      // alpha*psi^-6 = (alpha_psi/psi)*psi^-6 = alpha_psi*psi^-7.
+      Real ap6 = alpha_psi_(m,0,k,j,i)/psi7;
+      for (int a = 0; a < 3; ++a) {
+        p_src_(m,a,k,j,i) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
+      }
+    });
+    // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
+    BuildShiftSource(pmy_pack, psi, alpha_psi, a_dd, p_src);
+
+    // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
+    par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
+            is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real xk[3] = {x1v, x2v, x3v};
+      Real eta_val = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        eta_val -= p_src_(m,a,k,j,i)*xk[a];
+      }
+      eta_src_(m,0,k,j,i) = eta_val;
+    });
+  }
   return;
 }
 
@@ -186,17 +690,23 @@ void CFC::AssembleVectorSource(bool for_shift) {
 //! \fn void CFC::SolveVectorPotential(Driver *pdriver, int stage)
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
-  // TODO(cfc): AssembleVectorSource(/*for_shift=*/false), built directly from
-  // pmy_pack->pmhd->u0 (post MHD_AddSrc, this task's dependency -- see
-  // QueueCFCTasks), to fill the member arrays p_src/eta_src with both right-hand
-  // sides. Then, in order (P_i first, since P_x/P_y/P_z/eta are all independent of
-  // each other but eta's source was built from the same S_i used for P_i):
-  //   1. pmgd_px->LoadPoissonSource(u_p_src); pmgd_px->Solve(pdriver, stage);
-  //      pmgd_px->RetrieveSolution(u_p_x);  // p_x (the AthenaTensor view) now
-  //                                         // reflects the converged solution too.
-  //   2. pmgd_etax->LoadPoissonSource(eta_src); pmgd_etax->Solve(pdriver, stage);
-  //      pmgd_etax->RetrieveSolution(eta_x);
-  // Finally cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, eta_x, x_u).
+  AssembleVectorSource(/*for_shift=*/false);
+
+  pmgd_px->LoadPoissonSource(u_p_src);
+  pmgd_px->Solve(pdriver, stage);
+  pmgd_px->RetrieveSolution(u_p_x);
+
+  pmgd_etax->LoadPoissonSource(eta_src);
+  pmgd_etax->Solve(pdriver, stage);
+  pmgd_etax->RetrieveSolution(eta_x);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ReconstructVectorPotential()
+
+void CFC::ReconstructVectorPotential() {
+  cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, eta_x, x_u);
   return;
 }
 
@@ -204,8 +714,28 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
 //! \fn void CFC::ComputeADual()
 
 void CFC::ComputeADual() {
-  // TODO(cfc): cfc::ComputeADualFromX(pmy_pack, x_u, a_dd); then contract a_dd with
-  // itself (flat metric) into a_sq.
+  cfc::ComputeADualFromX(pmy_pack, x_u, a_dd);
+
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto a_dd_ = a_dd;
+  auto &a_sq_ = a_sq;
+  par_for("cfc_ahat_sq", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    // Ahat^2 = f_ik f_jl Adual^kl Adual^ij = sum_{a,b} (Adual^ab)^2 (flat metric,
+    // Cartesian): full double sum over the symmetric tensor's 9 (a,b) pairs.
+    Real sq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        Real aab = a_dd_(m,a,b,k,j,i);
+        sq += aab*aab;
+      }
+    }
+    a_sq_(m,0,k,j,i) = sq;
+  });
   return;
 }
 
@@ -213,38 +743,104 @@ void CFC::ComputeADual() {
 //! \fn void CFC::SolveConformalFactor(Driver *pdriver, int stage)
 
 void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
-  // TODO(cfc): pmgd_psi->LoadMatterSource(u_tilde), pmgd_psi->LoadNonlinearCoefficient
-  // (a_sq), pmgd_psi->Solve(pdriver, stage), pmgd_psi->RetrieveSolution(...) into psi
-  // (adding back the +1 offset from the delta_psi convention). Then
-  // cfc::AssembleConformalMetric(pmy_pack, psi) to write psi4/g_dd into
-  // pmy_pack->padm->u_adm -- MHD_C2P (the single con2prim shared with dyn_grmhd,
-  // queued to depend on CFC_SolvePsi -- see QueueCFCTasks/dyn_grmhd.cpp) reads
-  // padm->adm.g_dd directly (PrimitiveSolverHydro::ConsToPrim), so this write cannot
-  // be deferred to the final AssembleADM() step.
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  pmgd_psi->LoadMatterSource(u_tilde, indcs.ng);
+  pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
+  pmgd_psi->Solve(pdriver, stage);
+  pmgd_psi->RetrieveSolution(psi);
+
+  // psi member holds the physical psi, not delta_psi = psi - 1 the solver itself
+  // iterates on -- RetrieveSolution() hands back delta_psi verbatim (see plan
+  // addendum #4, Finding G), so a small pointwise pass adds the +1 back. Runs over
+  // the full array extent: cells outside what RetrieveResult actually filled
+  // (beyond this solver's own ngh_) are physically meaningless until CFC_ProlongPsi
+  // overwrites them from real neighbor data (see QueueCFCTasks), which always
+  // happens before anything differentiates psi -- so a stray 1.0 there is harmless.
+  int nmb = pmy_pack->nmb_thispack;
+  int ncells1 = psi.extent_int(4);
+  int ncells2 = psi.extent_int(3);
+  int ncells3 = psi.extent_int(2);
+  auto &psi_ = psi;
+  par_for("cfc_psi_offset", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
+          0, ncells1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    psi_(m,0,k,j,i) += 1.0;
+  });
+
+  cfc::AssembleConformalMetric(pmy_pack, psi);
   return;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::RescaleMatterSources(Driver *pdriver, int stage)
+//! \brief step 4: rebuild S-tilde (trace of S_ij) from the fresh primitives MHD_C2P
+//! just recovered. Mirrors dyn_grmhd.cpp's DynGRMHD::SetTmunu's S_dd formula (lines
+//! 472-481) exactly, including the magnetic-field terms, then contracts to the trace
+//! via adm::Trace -- NOT the pure-fluid closed form (rho*h*W^2*v^2+3*P) alone, which
+//! would silently drop the magnetic contribution for any magnetized run (plan
+//! addendum #4, Finding E). No con2prim call here: this task depends on MHD_C2P, so
+//! pmy_pack->pmhd->w0 is already fresh against the g_dd SolveConformalFactor() wrote.
 
 void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
-  // TODO(cfc): No con2prim call here -- RescaleSrcTask depends on MHD_C2P (dyn_grmhd's
-  // own per-stage con2prim, queued to depend on CFC_SolvePsi so it inverts against
-  // this stage's new g_dd -- see QueueCFCTasks/dyn_grmhd.cpp's MHD_C2P task), so
-  // pmy_pack->pmhd->w0 (density, pressure, velocity) is already fresh by the time
-  // this task runs. This is the fix for the double con2prim call: CFC used to run
-  // its own ConToPrim here, duplicating dyn_grmhd's; now there is exactly one
-  // con2prim per stage, shared by both.
-  //
-  // u_tilde (psi^6 U) and s_tilde_d (psi^6 S_i) do NOT need primitives at all: build
-  // them directly from pmy_pack->pmhd->u0 (D, S_i, tau -- see AssembleVectorSource),
-  // the same way steps 1/3 already do -- no con2prim involved either way.
-  //
-  // s_tilde (trace of S_ij, needed by the lapse equation in step 5) is different: it
-  // needs primitives (velocity, pressure), which is exactly why this task waits for
-  // MHD_C2P. Mirror dyn_grmhd.cpp's DynGRMHD::SetTmunu's S_dd formula (lines
-  // 464-468), computing s_tilde = psi^6 * (rho*h*W^2*v^2 + 3*P) directly from the
-  // fresh w0/g_dd this task now has (no ptmunu involved).
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+
+  auto &adm = pmy_pack->padm->adm;
+  auto &prim = pmy_pack->pmhd->w0;
+  auto &cons = pmy_pack->pmhd->u0;
+  auto &bcc = pmy_pack->pmhd->bcc0;
+  auto &psi_ = psi;
+  auto &s_tilde_ = s_tilde;
+
+  par_for("cfc_rescale_matter_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+    Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+    Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+    Real detg = adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz);
+    Real ivol = 1.0/sqrt(detg);
+    Real detginv = 1.0/detg;
+
+    Real v_d[3] = {0.0};
+    Real iW = 0.0;
+    Real B_d[3] = {0.0};
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        v_d[a] += prim(m, IVX+b, k, j, i)*adm.g_dd(m, a, b, k, j, i);
+        iW += prim(m, IVX+a, k, j, i)*prim(m, IVX+b, k, j, i)*adm.g_dd(m, a, b, k, j, i);
+        B_d[a] += bcc(m, b, k, j, i)*adm.g_dd(m, a, b, k, j, i)*ivol;
+      }
+    }
+    iW = 1.0/sqrt(1. + iW);
+    Real Bv = 0.0, Bsq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      Bv += bcc(m, a, k, j, i)*v_d[a]*ivol;
+      Bsq += bcc(m, a, k, j, i)*B_d[a]*ivol;
+    }
+    Real bsq = (Bsq + Bv*Bv)*(iW*iW);
+
+    Real S_dd[3][3];
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        S_dd[a][b] = cons(m, IM1+a, k, j, i)*ivol*v_d[b]*iW
+                     - (B_d[a] + Bv*v_d[a])*SQR(iW)*B_d[b]
+                     + (prim(m, IPR, k, j, i) + 0.5*bsq)*adm.g_dd(m, a, b, k, j, i);
+        S_dd[b][a] = S_dd[a][b];
+      }
+    }
+
+    Real trace_S = adm::Trace(detginv, gxx, gxy, gxz, gyy, gyz, gzz,
+                               S_dd[0][0], S_dd[0][1], S_dd[0][2],
+                               S_dd[1][1], S_dd[1][2], S_dd[2][2]);
+
+    Real psi_val = psi_(m,0,k,j,i);
+    Real psi2 = psi_val*psi_val;
+    Real psi6 = psi2*psi2*psi2;
+    s_tilde_(m,0,k,j,i) = psi6*trace_S;
+  });
   return;
 }
 
@@ -252,9 +848,39 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
 //! \fn void CFC::SolveLapse(Driver *pdriver, int stage)
 
 void CFC::SolveLapse(Driver *pdriver, int stage) {
-  // TODO(cfc): pmgd_alpha->LoadMatterSource(u_tilde + 2*s_tilde),
-  // pmgd_alpha->LoadKnownFields(psi, a_sq), pmgd_alpha->Solve(pdriver, stage),
-  // pmgd_alpha->RetrieveSolution(...) into alpha_psi (adding back the +1 offset).
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int nmb = pmy_pack->nmb_thispack;
+  int ncells1 = u_tilde.extent_int(4);
+  int ncells2 = u_tilde.extent_int(3);
+  int ncells3 = u_tilde.extent_int(2);
+
+  // u_tilde + 2*s_tilde: local scratch, not a persistent member (only ever needed
+  // transiently, right before LoadMatterSource reads it) -- sized identically to
+  // u_tilde/s_tilde (mesh-NGHOST depth) so LoadMatterSource's ngh=indcs.ng call
+  // below is valid over the same full extent LoadMatterSource ultimately reads.
+  DvceArray5D<Real> u_plus_2s("cfc_u_plus_2s", nmb, 1, ncells3, ncells2, ncells1);
+  auto &u_tilde_ = u_tilde;
+  auto &s_tilde_ = s_tilde;
+  par_for("cfc_u_plus_2s", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
+          0, ncells1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    u_plus_2s(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
+  });
+
+  pmgd_alpha->LoadMatterSource(u_plus_2s, indcs.ng);
+  pmgd_alpha->LoadKnownFields(psi, a_sq, indcs.ng);
+  pmgd_alpha->Solve(pdriver, stage);
+  pmgd_alpha->RetrieveSolution(alpha_psi);
+
+  // delta_(alpha*psi) -> alpha*psi: same +1 offset reasoning as SolveConformalFactor
+  // (Finding G) -- alpha_psi's own ghost exchange (CFC_ProlongAlphaPsi) always runs
+  // before anything differentiates it.
+  auto &alpha_psi_ = alpha_psi;
+  par_for("cfc_alpha_psi_offset", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
+          0, ncells1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    alpha_psi_(m,0,k,j,i) += 1.0;
+  });
   return;
 }
 
@@ -262,14 +888,23 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 //! \fn void CFC::SolveShift(Driver *pdriver, int stage)
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
-  // TODO(cfc): AssembleVectorSource(/*for_shift=*/true) using alpha_psi, psi, a_dd,
-  // s_tilde_d (Gmunu eq. 75 rhs) to fill the member arrays p_src/eta_src. Then, in
-  // order (P_i first, same reasoning as SolveVectorPotential):
-  //   1. pmgd_pbeta->LoadPoissonSource(u_p_src); pmgd_pbeta->Solve(pdriver, stage);
-  //      pmgd_pbeta->RetrieveSolution(u_p_beta);
-  //   2. pmgd_etabeta->LoadPoissonSource(eta_src); pmgd_etabeta->Solve(pdriver, stage);
-  //      pmgd_etabeta->RetrieveSolution(eta_beta);
-  // Finally cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, eta_beta, beta_u).
+  AssembleVectorSource(/*for_shift=*/true);
+
+  pmgd_pbeta->LoadPoissonSource(u_p_src);
+  pmgd_pbeta->Solve(pdriver, stage);
+  pmgd_pbeta->RetrieveSolution(u_p_beta);
+
+  pmgd_etabeta->LoadPoissonSource(eta_src);
+  pmgd_etabeta->Solve(pdriver, stage);
+  pmgd_etabeta->RetrieveSolution(eta_beta);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ReconstructShift()
+
+void CFC::ReconstructShift() {
+  cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, eta_beta, beta_u);
   return;
 }
 
@@ -277,7 +912,7 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
 //! \fn void CFC::AssembleADM()
 
 void CFC::AssembleADM() {
-  // TODO(cfc): cfc::AssembleLapseShiftK(pmy_pack, psi, alpha_psi, a_dd, beta_u);
+  cfc::AssembleLapseShiftK(pmy_pack, psi, alpha_psi, a_dd, beta_u);
   return;
 }
 

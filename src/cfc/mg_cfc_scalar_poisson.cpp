@@ -137,7 +137,10 @@ void MGCFCScalarPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &eta_sr
 }
 
 void MGCFCScalarPoissonDriver::RetrieveSolution(DvceArray5D<Real> &eta_dst) {
-  mglevels_->RetrieveResult(eta_dst, 0, mglevels_->GetGhostCells());
+  // eta_dst (cfc::CFC::eta_x/eta_beta) is sized at mesh-NGHOST depth -- see
+  // MGCFCVectorPoissonDriver::RetrieveSolution's identical comment (plan addendum
+  // #4, Finding F) for why this must be the mesh's ng, not this solver's own ngh_.
+  mglevels_->RetrieveResult(eta_dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
 

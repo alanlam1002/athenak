@@ -277,36 +277,42 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 // call can't be reused here anyway (Finding B) -- writing our own zero-offset
 // per-channel copy costs nothing extra beyond what LoadCoefficients would do.
 
-void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_tilde) {
+void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_tilde,
+                                                   int ngh) {
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;
   int is = 0, ie = indcs.nx1 + 2*lngh - 1;
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  // u_tilde is padded to depth ngh, not this driver's own (generally shallower)
+  // lngh -- mirror Multigrid::LoadCoefficients' offset-aware indexing (Finding H)
+  // rather than assuming the two depths match.
+  const int off = ngh - lngh;
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
   par_for("MGCFCConformalFactorDriver::LoadMatterSource", DevExeSpace(),
           0, nmmb-1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    cm_d(m, 0, k, j, i) = u_tilde(m, 0, k, j, i);
+  KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
+    cm_d(m, 0, mk, mj, mi) = u_tilde(m, 0, mk+off, mj+off, mi+off);
   });
 }
 
 void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
-    const DvceArray5D<Real> &a_sq) {
+    const DvceArray5D<Real> &a_sq, int ngh) {
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;
   int is = 0, ie = indcs.nx1 + 2*lngh - 1;
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  const int off = ngh - lngh;  // see LoadMatterSource above (Finding H)
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
   par_for("MGCFCConformalFactorDriver::LoadNonlinearCoefficient", DevExeSpace(),
           0, nmmb-1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    cm_d(m, 1, k, j, i) = a_sq(m, 0, k, j, i);
+  KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
+    cm_d(m, 1, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off);
   });
 }
 

@@ -76,16 +76,22 @@ class MGCFCLapseDriver : public MultigridDriver {
     // V-cycle machinery restricts *and* adds FAS tau-corrections into -- if this data
     // lived in src_, those corrections would corrupt the physical field K(x) needs.
     // See MGCFCConformalFactorDriver's equivalent LoadMatterSource for the identical
-    // reasoning (Finding B, plan addendum #3).
-    void LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde);
+    // reasoning (Finding B, plan addendum #3). ngh is the depth u_plus_2s_tilde
+    // itself is padded to (the mesh's own NGHOST, not this driver's shallower ngh_
+    // -- plan addendum #4, Finding H; mirrors Multigrid::LoadSource/
+    // LoadCoefficients' own ngh parameter).
+    void LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde, int ngh);
 
     // load the other two known fixed fields K(x) depends on (psi, Ahat^2); together
     // with LoadMatterSource's channel 0 this makes ncoeff_ = 3: channel 0 =
     // Ũ+2S̃, channel 1 = psi, channel 2 = Ahat^2. Multigrid::LoadCoefficients() can't
     // be reused for either load (it copies all ncoeff_ channels in one shot, no
     // per-channel offset) -- both loaders do their own single/double-channel par_for
-    // via the CoeffAtLevel() accessor.
-    void LoadKnownFields(const DvceArray5D<Real> &psi, const DvceArray5D<Real> &a_sq);
+    // via the CoeffAtLevel() accessor, mirroring LoadCoefficients' offset-aware ngh
+    // handling (Finding H). psi and a_sq are assumed padded to the same depth ngh
+    // (both are mesh-NGHOST-deep CFC fields in practice -- see cfc.cpp).
+    void LoadKnownFields(const DvceArray5D<Real> &psi, const DvceArray5D<Real> &a_sq,
+                         int ngh);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);

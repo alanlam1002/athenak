@@ -79,15 +79,21 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // load Ũ (matter energy density source, raw/unscaled -- the 2*pi factor is
     // applied inside the Newton kernel itself, mg_cfc_conformal_factor.cpp). Stored
     // in coeff_ (channel 0), NOT via Multigrid::LoadSource()/src_ -- see this file's
-    // top docstring and the .cpp's file-level comment for why.
-    void LoadMatterSource(const DvceArray5D<Real> &u_tilde);
+    // top docstring and the .cpp's file-level comment for why. ngh is the depth
+    // u_tilde itself is padded to (mirrors Multigrid::LoadSource/LoadCoefficients'
+    // own ngh parameter, multigrid.cpp:289/327) -- callers pass the mesh's own
+    // NGHOST here, NOT this driver's (generally shallower) ngh_, since u_tilde is
+    // also differentiated/ghost-exchanged elsewhere and must be sized accordingly
+    // (plan addendum #4, Finding H).
+    void LoadMatterSource(const DvceArray5D<Real> &u_tilde, int ngh);
 
     // load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromX), stored
     // in coeff_ channel 1 (ncoeff_ = 2 total). Multigrid::LoadCoefficients() can't be
     // reused for either load (it copies all ncoeff_ channels in one shot, no
     // per-channel offset) -- both loaders do their own single-channel par_for via
-    // the CoeffAtLevel() accessor.
-    void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq);
+    // the CoeffAtLevel() accessor, but mirror LoadCoefficients' offset-aware ngh
+    // handling (Finding H, same reasoning as LoadMatterSource above).
+    void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq, int ngh);
 
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);

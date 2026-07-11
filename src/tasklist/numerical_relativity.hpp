@@ -91,11 +91,21 @@ enum TaskName {
   Z4c_DumpHorizon,
   Z4c_NTASKS,
 
-  CFC_SolveVecX,
+  CFC_BuildSrcX,
+  CFC_RestPX, CFC_SendPX, CFC_RecvPX, CFC_ProlongPX,
+  CFC_RestEtaX, CFC_SendEtaX, CFC_RecvEtaX, CFC_ProlongEtaX,
+  CFC_ReconstructX,
+  CFC_RestX, CFC_SendX, CFC_RecvX, CFC_ProlongX,
+  CFC_ComputeADual,
   CFC_SolvePsi,
   CFC_RescaleSrc,
   CFC_SolveLapse,
-  CFC_SolveShift,
+  CFC_RestPsi, CFC_SendPsi, CFC_RecvPsi, CFC_ProlongPsi,
+  CFC_RestAlphaPsi, CFC_SendAlphaPsi, CFC_RecvAlphaPsi, CFC_ProlongAlphaPsi,
+  CFC_BuildSrcBeta,
+  CFC_RestPBeta, CFC_SendPBeta, CFC_RecvPBeta, CFC_ProlongPBeta,
+  CFC_RestEtaBeta, CFC_SendEtaBeta, CFC_RecvEtaBeta, CFC_ProlongEtaBeta,
+  CFC_ReconstructBeta,
   CFC_AssembleFinal,
   CFC_NTASKS
 };

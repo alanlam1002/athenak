@@ -69,29 +69,26 @@ class MGCFCLapseDriver : public MultigridDriver {
 
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // load (Ũ + 2 S̃) (raw, unscaled -- the 2*pi factor is applied inside the GS
-    // kernel itself, mg_cfc_lapse.cpp). Stored in coeff_ (channel 0), NOT via
-    // Multigrid::LoadSource()/src_: K(x) reads this field every time it's evaluated,
-    // including at every coarser V-cycle level, but src_ is exactly what the generic
-    // V-cycle machinery restricts *and* adds FAS tau-corrections into -- if this data
-    // lived in src_, those corrections would corrupt the physical field K(x) needs.
-    // See MGCFCConformalFactorDriver's equivalent LoadMatterSource for the identical
-    // reasoning (Finding B, plan addendum #3). ngh is the depth u_plus_2s_tilde
-    // itself is padded to (the mesh's own NGHOST, not this driver's shallower ngh_
-    // -- plan addendum #4, Finding H; mirrors Multigrid::LoadSource/
-    // LoadCoefficients' own ngh parameter).
-    void LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde, int ngh);
-
-    // load the other two known fixed fields K(x) depends on (psi, Ahat^2); together
-    // with LoadMatterSource's channel 0 this makes ncoeff_ = 3: channel 0 =
-    // Ũ+2S̃, channel 1 = psi, channel 2 = Ahat^2. Multigrid::LoadCoefficients() can't
-    // be reused for either load (it copies all ncoeff_ channels in one shot, no
-    // per-channel offset) -- both loaders do their own single/double-channel par_for
-    // via the CoeffAtLevel() accessor, mirroring LoadCoefficients' offset-aware ngh
-    // handling (Finding H). psi and a_sq are assumed padded to the same depth ngh
-    // (both are mesh-NGHOST-deep CFC fields in practice -- see cfc.cpp).
-    void LoadKnownFields(const DvceArray5D<Real> &psi, const DvceArray5D<Real> &a_sq,
-                         int ngh);
+    // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 once, at the
+    // finest level, from the three known fixed fields it depends on, and store only
+    // that single value in coeff_ (channel 0, ncoeff_ = 1). Round 16 fix: an earlier
+    // version stored Utilde+2*Stilde/psi/Ahat^2 as three separate coeff_ channels and
+    // recomputed K(x) fresh at every V-cycle level (including coarse ones) from
+    // independently-restricted copies of each -- inconsistent with FAS, since
+    // restrict(f(a,b)) != f(restrict(a), restrict(b)) for this nonlinear combination;
+    // psi and Ahat^2 are genuinely fixed *coefficients* here (unlike psi's own solver,
+    // where psi is the local unknown u+1, correctly carried through the standard FAS
+    // u_ restriction instead). Precomputing K(x) once and restricting it directly
+    // (via the ordinary RestrictCoefficients()) is the FAS-consistent treatment; see
+    // this file's header comment (mg_cfc_lapse.cpp) for the full derivation. NOT
+    // stored in src_ via Multigrid::LoadSource(): src_ is exactly what the generic
+    // V-cycle machinery restricts *and* adds FAS tau-corrections into, which would
+    // corrupt K(x) (Finding B, plan addendum #3). u_plus_2s_tilde/psi/a_sq are all
+    // assumed padded to the same depth ngh -- the mesh's own NGHOST, not this
+    // driver's shallower ngh_ (plan addendum #4, Finding H).
+    void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
+                                 const DvceArray5D<Real> &psi,
+                                 const DvceArray5D<Real> &a_sq, int ngh);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);

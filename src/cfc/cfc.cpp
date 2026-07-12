@@ -895,9 +895,9 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   int ncells3 = u_tilde.extent_int(2);
 
   // u_tilde + 2*s_tilde: local scratch, not a persistent member (only ever needed
-  // transiently, right before LoadMatterSource reads it) -- sized identically to
-  // u_tilde/s_tilde (mesh-NGHOST depth) so LoadMatterSource's ngh=indcs.ng call
-  // below is valid over the same full extent LoadMatterSource ultimately reads.
+  // transiently, right before LoadReactionCoefficient reads it) -- sized identically
+  // to u_tilde/s_tilde (mesh-NGHOST depth) so LoadReactionCoefficient's ngh=indcs.ng
+  // call below is valid over the same full extent it ultimately reads.
   DvceArray5D<Real> u_plus_2s("cfc_u_plus_2s", nmb, 1, ncells3, ncells2, ncells1);
   auto &u_tilde_ = u_tilde;
   auto &s_tilde_ = s_tilde;
@@ -907,8 +907,7 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     u_plus_2s(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
   });
 
-  pmgd_alpha->LoadMatterSource(u_plus_2s, indcs.ng);
-  pmgd_alpha->LoadKnownFields(psi, a_sq, indcs.ng);
+  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, psi, a_sq, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);
   pmgd_alpha->RetrieveSolution(alpha_psi);
 

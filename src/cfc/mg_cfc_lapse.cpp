@@ -18,10 +18,30 @@
 //! Utilde+2*Stilde is this equation's own known matter source) -- not on u at all --
 //! so F(u) is affine in u and F'(u) = 6 + dx^2*K(x) is u-independent: the "Newton"
 //! step below is an exact one-step Gauss-Seidel solve, matching mg_cfc_lapse.hpp's
-//! docstring. All three of K(x)'s ingredients live in coeff_ (ncoeff_=3: channel 0 =
-//! Utilde+2*Stilde, channel 1 = psi, channel 2 = Ahat^2), not src_, for the identical
+//! docstring. K(x) itself lives in coeff_ (ncoeff_=1), not src_, for the identical
 //! FAS-consistency reason documented in mg_cfc_conformal_factor.cpp (src_ is the FAS
-//! tau-correction accumulator; K(x)'s ingredients must stay pristine at every level).
+//! tau-correction accumulator; K(x) must stay pristine at every level).
+//!
+//! Round 16 fix: K(x) is precomputed ONCE, at the finest level, from psi/Ahat^2/
+//! Utilde+2*Stilde (LoadReactionCoefficient below), and only the resulting scalar
+//! K(x) is carried through coeff_/RestrictCoefficients() down to coarser levels --
+//! NOT its three raw ingredients restricted separately and recombined at each level.
+//! The earlier (pre-round-16) version stored psi and Ahat^2 as two more coeff_
+//! channels and called LapseReactionCoeff() (still below, now a load-time helper
+//! rather than a per-kernel-call one) fresh at every level, including coarse ones.
+//! That is inconsistent with FAS: unlike psi's own solver (mg_cfc_conformal_
+//! factor.cpp), where "psi" is the local unknown u+1 and is correctly carried
+//! through the standard FAS u_ restriction, here psi/Ahat^2 are genuinely fixed
+//! *coefficients* -- and restrict(f(a,b)) != f(restrict(a), restrict(b)) for the
+//! nonlinear psi^-2/psi^-8 combination K(x) uses. Restricting psi and Ahat^2
+//! independently then recombining them at each coarse level therefore gave every
+//! level below the finest a systematically wrong K(x), i.e. a coarse-grid operator
+//! inconsistent with the fine-grid equation -- exactly the kind of defect that
+//! produces the round-16-observed symptom (SolveIterative failing to reach its
+//! convergence threshold, with the stalled defect *growing* rather than shrinking
+//! at higher resolution, since deeper V-cycles exercise more, and more divergent,
+//! coarse levels). Restricting the already-combined K(x) directly is the standard,
+//! FAS-consistent treatment for a nonlinearly-derived reaction coefficient.
 
 #include <algorithm>
 #include <cmath>
@@ -64,7 +84,7 @@ MGCFCLapse::MGCFCLapse(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
     : Multigrid(pmd, pmbp, nghost, on_host) {
   // Finding B (plan addendum #3): see MGCFCConformalFactor's ctor -- coeff_/ncoeff_
   // are never allocated by the base Multigrid ctor, so we do it ourselves.
-  ncoeff_ = 3;  // channel 0 = Utilde+2*Stilde, channel 1 = psi, channel 2 = Ahat^2
+  ncoeff_ = 1;  // channel 0 = K(x), precomputed at the finest level (round 16 fix)
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -95,7 +115,7 @@ void MGCFCLapse::SmoothPack(int color) {
     Real dx2 = dx * dx;
     const int c = (c0 + k + j) & 1;
     for (int i = is + c; i <= ie; i += 2) {
-      Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+      Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
       Real lap = LapseLap(u, m, k, j, i);
       Real u_old = u(m,0,k,j,i);
       Real fval = lap + dx2*kx*(u_old + 1.0);
@@ -122,7 +142,7 @@ void MGCFCLapse::CalculateDefectPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
     Real lap = LapseLap(u, m, k, j, i);
     // def = RHS(u) - lap(u)*idx2, RHS(u) = -kx*(u+1) (F(u) = lap(u) - dx^2*RHS(u)).
     def(m,0,k,j,i) = -kx*(u(m,0,k,j,i) + 1.0) - lap*idx2;
@@ -146,7 +166,7 @@ void MGCFCLapse::CalculateFASRHSPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = LapseReactionCoeff(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i));
+    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
     Real lap = LapseLap(u, m, k, j, i);
     // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + kx*(u+1).
     src(m,0,k,j,i) += lap*idx2 + kx*(u(m,0,k,j,i) + 1.0);
@@ -156,12 +176,13 @@ void MGCFCLapse::CalculateFASRHSPack() {
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 3 (carries Utilde+2*Stilde, psi, Ahat^2); mg_multipole
-//! boundary conditions (Gmunu eq. 78, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 1 (K(x), precomputed at the finest level -- round 16
+//! fix, see this file's header comment); mg_multipole boundary conditions (Gmunu
+//! eq. 78, isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  ncoeff_ = 3;
+  ncoeff_ = 1;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
@@ -217,8 +238,8 @@ MGCFCLapseDriver::~MGCFCLapseDriver() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt)
-//! \brief run the V-cycle solve for delta_(alpha*psi). Assumes LoadMatterSource()/
-//! LoadKnownFields() were already called for this stage.
+//! \brief run the V-cycle solve for delta_(alpha*psi). Assumes
+//! LoadReactionCoefficient() was already called for this stage.
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
@@ -248,47 +269,33 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   return;
 }
 
-// Both loaders assume u_plus_2s_tilde/psi/a_sq are sized with ngh_-deep (multigrid-
-// width, not mesh-NGHOST-deep) ghost padding, matching MGCFCConformalFactorDriver's
-// identical choice for Utilde/Ahat^2 (see that file's loader comment for why).
-
-void MGCFCLapseDriver::LoadMatterSource(const DvceArray5D<Real> &u_plus_2s_tilde,
-                                        int ngh) {
+// Round 16 fix: combines the old LoadMatterSource/LoadKnownFields pair into one
+// call that evaluates K(x) = LapseReactionCoeff(...) once per point, at the finest
+// level, and writes only that single value into coeff_ -- see this file's header
+// comment for why restricting K(x) directly (rather than restricting psi/Ahat^2/
+// Utilde+2*Stilde separately and recombining them nonlinearly at every coarser
+// level) is required for a FAS-consistent coarse-grid operator. u_plus_2s_tilde/
+// psi/a_sq are assumed padded to the same depth ngh (mesh-NGHOST-deep CFC fields,
+// per cfc.cpp), not this driver's own (generally shallower) ngh_ -- Finding H.
+void MGCFCLapseDriver::LoadReactionCoefficient(
+    const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &psi,
+    const DvceArray5D<Real> &a_sq, int ngh) {
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;
   int is = 0, ie = indcs.nx1 + 2*lngh - 1;
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
-  // u_plus_2s_tilde is padded to depth ngh, not this driver's own (generally
-  // shallower) lngh -- see MGCFCConformalFactorDriver::LoadMatterSource's identical
-  // comment (Finding H).
-  const int off = ngh - lngh;
+  const int off = ngh - lngh;  // Finding H
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
-  par_for("MGCFCLapseDriver::LoadMatterSource", DevExeSpace(),
+  par_for("MGCFCLapseDriver::LoadReactionCoefficient", DevExeSpace(),
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
-    cm_d(m, 0, mk, mj, mi) = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
-  });
-}
-
-void MGCFCLapseDriver::LoadKnownFields(const DvceArray5D<Real> &psi,
-                                       const DvceArray5D<Real> &a_sq, int ngh) {
-  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
-  int lngh = mglevels_->GetGhostCells();
-  auto &indcs = pmy_pack_->pmesh->mb_indcs;
-  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
-  int js = 0, je = indcs.nx2 + 2*lngh - 1;
-  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
-  const int off = ngh - lngh;  // see LoadMatterSource above (Finding H)
-  auto cm_d = cm.d_view;
-  int nmmb = pmy_pack_->nmb_thispack;
-  par_for("MGCFCLapseDriver::LoadKnownFields", DevExeSpace(),
-          0, nmmb-1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
-    cm_d(m, 1, mk, mj, mi) = psi(m, 0, mk+off, mj+off, mi+off);
-    cm_d(m, 2, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off);
+    Real u2s = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
+    Real psi_known = psi(m, 0, mk+off, mj+off, mi+off);
+    Real ahat_sq = a_sq(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 0, mk, mj, mi) = LapseReactionCoeff(u2s, psi_known, ahat_sq);
   });
 }
 

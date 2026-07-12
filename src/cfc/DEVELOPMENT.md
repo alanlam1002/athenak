@@ -39,16 +39,30 @@ its Riemann solver and conserved-to-primitive conversion.
 ## actual corner-catastrophe root cause. `psi_maxerr` dropped from `0.996` to
 ## `~0.025` after both fixes, with the (much smaller, expected) remaining error
 ## now located near the star's surface rather than at domain corners. `alpha` had
-## the identical `RetrieveSolution` bug (`mg_cfc_lapse.cpp`, also fixed) and
-## almost certainly shares the same root cause as its own O(0.1-0.25) core error
-## from rounds 8-10, though not yet directly re-verified (would need extending
-## the diagnostic replay through `MHD_C2P`/`RescaleSrcTask`/`SolveLapseTask`).
-## Two open follow-ups from round 15, not yet investigated: (1) re-verify
-## `alpha`'s error is actually resolved; (2) a full (non-isolated) run of
-## `cfc_tov_full_2x.athinput` still shows 3 `"Failed to converge"` V-cycle
-## messages in cycle 0 (down from 6 pre-fix, but not zero) -- not yet
-## root-caused, could be `alpha`'s own solve or one of the vector-potential
-## Poisson solves (spot-checked but not fully ruled out).
+## the identical `RetrieveSolution` bug (`mg_cfc_lapse.cpp`, also fixed).
+## Round 16 (per user request) re-verified BOTH `psi` and `alpha` end-to-end
+## (through `AssembleFinalTask`, not just `SolvePsiTask`) and confirms round 15's
+## fixes hold: self-consistently iterated (as every real per-stage solve is, but
+## NOT a single isolated cold-start solve -- see round 16), `psi`/`alpha` converge
+## to a small, resolution-stable residual (`~0.7%` / `~1.7-2%`). Round 16 also
+## found a genuinely new, unresolved issue: the lapse (`alpha`) solve's multigrid
+## V-cycle fails to converge to its `1e-10` threshold on *every* call (stalls at
+## `SolveIterative`'s 40-iteration cap, defect `~1e-5`, defect increasing rather
+## than decreasing with resolution) -- narrows down round 15's open follow-up (2)
+## to specifically the lapse solve, not the vector-potential Poisson solves (which
+## never showed this in round 16's tests). Round 17 (per user's own code review)
+## found and fixed a real, separate bug in the lapse solve: `LapseReactionCoeff`'s
+## three ingredients (`Utilde+2*Stilde`, `psi`, `Ahat^2`) were restricted to coarser
+## V-cycle levels independently, then recombined nonlinearly (`psi^-2`, `psi^-8`) at
+## every level -- inconsistent with FAS, since restriction doesn't commute with a
+## nonlinear recombination. Fixed by precomputing `K(x) = LapseReactionCoeff(...)`
+## once at the finest level and restricting that single coefficient directly
+## (`ncoeff_` 3->1). This measurably improved `alpha`'s accuracy (`0.0180` ->
+## `0.01351`) and moved its worst-error location off the star's core to match
+## `psi`'s -- a real, kept fix -- but did NOT resolve the underlying "Failed to
+## converge" message, which still fires on every lapse solve post-fix. The lapse
+## solve's non-convergence therefore has at least one other, still-unidentified
+## cause; not yet root-caused.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -1543,3 +1557,155 @@ src/cfc/
        `driver.cpp` show no diff), leaving only the two permanent fixes in
        `mg_cfc_conformal_factor.cpp`/`mg_cfc_lapse.cpp`. Clean rebuild confirmed
        both with and without the temporary diagnostic present.
+   - **Round 16 (per user request: verify the full CFC solver for both psi and alpha
+     at t=0)**: reconstructed `DebugCFCSolveAtT0` again (same mechanism as rounds
+     9/11/13/14/15), this time extended all the way through `RescaleSrcTask`,
+     `SolveLapseTask`, `SolveShiftTask`, and `AssembleFinalTask` (not stopping at
+     `SolvePsiTask`), so both `psi` (the member array) and the *final assembled*
+     `alpha` (`pmy_pack->padm->u_adm`'s `I_ADM_ALPHA` channel -- the actual field
+     downstream consumers read, not a hand-computed `alpha_psi/psi`) could be
+     checked against the analytic isotropic TOV solution in one pass. Bypassed
+     `MHD_C2P` as before (`w0` is already exact at t=0).
+     - **First result, single isolated solve** (`cfc_tov_full_2x.athinput`,
+       128^3): `psi_maxerr=0.1021` and `alpha_maxerr=0.1262`, both located at the
+       star's *core* (`r=1.386`) -- much larger than round 15's reported
+       `psi_maxerr=0.0247` near the star's surface, and initially looked like a
+       possible new, unfixed bug. Repeated at hi-res (256^3,
+       `cfc_tov_full_2x_hires.athinput`): `psi_maxerr=0.1059`,
+       `alpha_maxerr=0.1298`, essentially unchanged -- **not resolution-convergent**,
+       which briefly looked concerning (a genuine truncation effect should shrink
+       substantially between 128^3 and 256^3).
+     - **Diagnosed via a targeted intermediate check**: added interior-only vs.
+       full-domain (ghost-inclusive) error reporting after each task, plus raw
+       `psi_num`/`psi_analytic` printouts at the worst point. This showed the
+       *interior* error was already `0.1021` immediately after `SolvePsiTask`
+       itself (unchanged by every later task, confirming `psi` is never modified
+       after `SolveConformalFactor` returns, as expected) -- so this is not a
+       ghost-exchange-timing artifact, and not related to round 15's fix. Root
+       cause: `AssembleVectorSource`'s `u_tilde = psi^6 * U` deliberately uses the
+       *previous stage's converged* `psi` (cfc.cpp's own documented lagged-
+       coefficient convention, matching the paper's XCFC iteration structure) --
+       but in this *isolated, single-solve* diagnostic starting cold from the
+       pgen's uniform `psi=1` initial guess, "previous stage" is literally `psi=1`
+       everywhere, not the true converged profile. At the star's core
+       `psi_analytic≈1.19`, so `psi_analytic^6≈4.0` -- using `1.0` instead
+       under-sources eq. 73 by a factor of ~4 exactly where the density is
+       highest, which is large enough to explain the observed core error and
+       is *not* resolution-dependent (it's a wrong-input-coefficient effect, not
+       a discretization-error effect), matching what was observed.
+     - **Verified by iterating the isolated solve**: reran the exact same full
+       task-chain replay a second, third, and fourth time in the same process
+       (cheap: `psi`/`x_u`/etc. are persistent member arrays, so a second replay
+       naturally uses the just-solved `psi` as the next "previous stage" input,
+       exactly like consecutive RK stages would in a real run). Result (both
+       resolutions): `psi_maxerr` and `alpha_maxerr` both drop by more than an
+       order of magnitude after just one extra iteration (128^3:
+       `psi 0.1021->0.00681`, `alpha 0.1262->0.0180`; 256^3: `psi 0.1059->0.00682`,
+       `alpha 0.1298->0.0167`) and then stay **bit-for-bit stable** for two further
+       iterations -- a genuine, resolution-stable fixed point. **Conclusion: the
+       large core error was the expected single-solve "lagged psi^6" cold-start
+       artifact, not a new bug** -- a real run never starts every stage from a
+       flat `psi=1` guess, so this doesn't apply outside this isolated diagnostic.
+       This also re-confirms round 15's fixes are working correctly: self-
+       consistently iterated, both `psi` and `alpha` converge to a small,
+       resolution-stable residual (`~0.7%` / `~1.7-2%`).
+     - **Genuinely new finding, not previously confirmed**: every single call to
+       `SolveLapseTask` (all 4 iterations, both resolutions) printed
+       `### FATAL ERROR in MultigridDriver::SolveIterative -- Failed to converge
+       after 40 iterations`, with the stalled defect *increasing* with resolution
+       (128^3: `4-8e-6`; 256^3: `1.3e-5`-`2.6e-5`) -- atypical for correctly
+       functioning multigrid, which should converge in a roughly resolution-
+       independent number of V-cycles. No such message was ever printed for
+       `psi`'s own solve or for any of the four vector-potential Poisson solves
+       (`p_x`/`eta_x`/`p_beta`/`eta_beta`) in these runs. **This directly confirms
+       and narrows down the round-15 open follow-up (2)** ("3 `Failed to converge`
+       messages in a full run... could be alpha's own solve or the vector-potential
+       Poisson solves") -- it is specifically the lapse (`alpha`) solve. The
+       resulting `alpha` error is still small and slightly *improves* with
+       resolution (`0.0180` -> `0.0167`), so this does not look like a correctness
+       bug, but the non-convergence itself is unexplained and worth investigating
+       (Finding A in the item-3 addendum above already notes the lapse equation is
+       a linear Helmholtz solve, not Newton -- a different code path from `psi`'s
+       nonlinear solver but sharing the same FAS/coarse-grid-correction
+       machinery that round 15 found and fixed one bug in for `psi`; an analogous
+       bug specific to the lapse solve's own `SmoothPack`/`CalculateDefectPack`/
+       `CalculateFASRHSPack` has not yet been ruled out).
+     - Temporary diagnostic fully reverted after use (confirmed via `git diff
+       --stat`: `driver.cpp`/`dyngr_tov.cpp` show no diff), clean rebuild confirmed.
+     - **Not yet investigated**: root-causing the lapse solve's non-convergence
+       (this round's new finding); the pre-existing round-15 follow-up (2)'s other
+       half (whether the vector-potential Poisson solves ever contribute to a full
+       run's "Failed to converge" count) is now less likely given this round's
+       observation that they never triggered the message in any of these isolated-
+       solve tests, but a full (non-isolated) run hasn't been re-checked since
+       round 15's fixes to see if its count is now fully explained by the lapse
+       solve alone.
+   - **Round 17 (per user's own code review of `LapseReactionCoeff`)**: the user
+     independently spotted a real bug while reading `mg_cfc_lapse.cpp`:
+     `LapseReactionCoeff` takes three coefficients (`Utilde+2*Stilde`, `psi`,
+     `Ahat^2`) as arguments, none of which depend on the equation's own unknown
+     `alpha*psi` -- and the pre-round-17 code stored all three as separate `coeff_`
+     channels (`ncoeff_=3`), restricted independently to every coarser V-cycle
+     level via the generic (linear, per-channel) `Multigrid::RestrictCoefficients`,
+     then recombined them nonlinearly (via `psi^-2`, `psi^-8`) *inside* `SmoothPack`/
+     `CalculateDefectPack`/`CalculateFASRHSPack` at *every* level, including coarse
+     ones. The user's suggested fix: since `K(x) = LapseReactionCoeff(...)` doesn't
+     depend on the unknown, compute it once at the finest level and restrict *that*
+     single coefficient down through the hierarchy, instead of restricting its raw
+     ingredients separately and recombining them at each level.
+     - **Why this is a real bug, confirmed by re-deriving the FAS math**: for a
+       linear restriction operator `R`, `R(f(a,b)) != f(R(a), R(b))` whenever `f`
+       is nonlinear -- true here (`psi^-2`/`psi^-8`). This is different from `psi`'s
+       own nonlinear solver (`mg_cfc_conformal_factor.cpp`), which also mixes
+       `Utilde`/`Ahat^2` (restricted independently, but each appears *linearly* in
+       that equation's RHS) with `psi` itself -- but there, `psi = u+1` is the
+       *local unknown being solved for*, correctly carried through the standard FAS
+       `u_` restriction (which *is* the FAS-correct treatment for a genuinely
+       nonlinear unknown), not a separately-restricted "coefficient". In the lapse
+       equation, `psi` and `Ahat^2` are both already-converged, externally-fixed
+       fields from earlier steps -- genuine coefficients, not this equation's
+       unknown -- so restricting them independently and recombining nonlinearly at
+       each coarse level gives every level below the finest a systematically wrong
+       `K(x)`, i.e. an inconsistent coarse-grid operator. This is exactly the kind
+       of defect that produces round 16's observed symptom (`SolveIterative`
+       failing to converge, with the stalled defect *growing* rather than shrinking
+       at higher resolution -- deeper V-cycles exercise more, and more divergent,
+       coarse levels).
+     - **Fix implemented**: `MGCFCLapseDriver::LoadMatterSource`/`LoadKnownFields`
+       (two separate loaders, three `coeff_` channels) replaced with a single
+       `LoadReactionCoefficient(u_plus_2s_tilde, psi, a_sq, ngh)` that evaluates
+       `LapseReactionCoeff` once per point, at the finest level only, and writes
+       the resulting `K(x)` into `coeff_` channel 0 (`ncoeff_` dropped `3` -> `1`
+       in both `MGCFCLapse`'s and `MGCFCLapseDriver`'s constructors).
+       `SmoothPack`/`CalculateDefectPack`/`CalculateFASRHSPack` now read `K(x)`
+       directly from `coeff(m,0,k,j,i)` instead of recomputing it from three
+       channels. `TransferCoeffToRoot` needed no code change (already generic over
+       `ncoeff_`). `cfc.cpp`'s `SolveLapse` updated to call the new combined
+       loader. `mg_cfc_lapse.cpp`'s file-header comment and `mg_cfc_lapse.hpp`'s
+       loader docstring rewritten to document the fix and the FAS reasoning above.
+     - **Verified via the same iterated `DebugCFCSolveAtT0` replay as round 16**
+       (reapplied, then reverted again after use -- `git diff --stat` confirms
+       `driver.cpp`/`dyngr_tov.cpp` show no diff). Result (`cfc_tov_full_2x.athinput`,
+       128^3, 4 iterations): `alpha_maxerr` improved from `0.0180` to `0.01351` at
+       the stable fixed point, and its worst-error location moved from the star's
+       core (`r=1.386`, independent of `psi`'s own worst point) to exactly match
+       `psi`'s (`r=101.6`) -- both now dominated by the same general residual
+       source rather than `alpha` having its own independent core-localized
+       problem. A real, worthwhile improvement, kept.
+     - **However, the fix did NOT resolve the "Failed to converge" message**:
+       `SolveLapseTask` still triggers `### FATAL ERROR in MultigridDriver::
+       SolveIterative -- Failed to converge after 40 iterations` on every single
+       call, post-fix, with a similar stalled defect (`3.6e-6`-`6.3e-6`, vs.
+       `4.1e-6`-`8.4e-6` pre-fix -- marginally better but still failing the
+       `1e-10` threshold). **Conclusion: the nonlinear-coefficient-restriction bug
+       was real and worth fixing (it measurably improved `alpha`'s accuracy and
+       eliminated its independent core-error localization), but it is not the sole
+       cause of the lapse solve's non-convergence** -- something else is still
+       preventing `SolveIterative` from reaching its threshold. Not yet
+       root-caused; the search should continue elsewhere (candidates not yet
+       checked: `mgroot_`'s coarsest-grid direct solve reading `K(x)` correctly;
+       whether `TransferCoeffToRoot`'s single-cell-per-block copy is consistent
+       with `RestrictCoefficients()` already having been called first; whether the
+       screened/Helmholtz operator's coarse-grid smoothing factor is fundamentally
+       different from the plain-Laplacian case `SolveIterative`'s convergence
+       expectations were tuned against).

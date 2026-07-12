@@ -25,9 +25,9 @@ its Riemann solver and conserved-to-primitive conversion.
 - `src/gravity/{gravity,mg_gravity}.{hpp,cpp}` — the structural template this module
   mirrors (a thin physics orchestrator + Multigrid/MultigridDriver subclass pairs).
 
-## Status: skeleton, plus `cfc_reconstruct.cpp` and all four multigrid solvers
-## (`MGCFCVectorPoisson`/`MGCFCScalarPoisson`/`MGCFCConformalFactor`/`MGCFCLapse`)
-## implemented
+## Status: feature-complete (all equation bodies implemented); first full project
+## build succeeded (Sakura, PROBLEM=dyn_grmhd/dyngr_tov); BU0/BU8 physics
+## verification not yet started
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -35,24 +35,59 @@ the shared `NumericalRelativity` task graph — see the task-graph design-decisi
 bullet below). `src/cfc/cfc_reconstruct.cpp`'s 4 free functions
 (`ComputeADualFromX`, `ReconstructVectorFromPotentials`, `AssembleConformalMetric`,
 `AssembleLapseShiftK`), `MGCFCVectorPoisson[Driver]`/`MGCFCScalarPoisson[Driver]`
-(the two linear/`nvar_`-decoupled elliptic solvers, `P_i` and `eta`), and
+(the two linear/`nvar_`-decoupled elliptic solvers, `P_i` and `eta`),
 `MGCFCConformalFactor[Driver]`/`MGCFCLapse[Driver]` (the two nonlinear/screened-affine
-solvers, `psi` and `alpha*psi`) are now implemented (open items 1-3, below) —
-everything else (`cfc.cpp`'s own bodies: constructor, `AssembleVectorSource`,
-`RescaleMatterSources`) is still a `// TODO(cfc): ...` stub. `cpplint` was run
-against all files; no new warning categories beyond what's already accepted in
-`gravity`'s own files (include-path style, `public:`/`private:` indent). **Not
-compiled**: this sandbox's system GCC (7.5.0) is below the bundled Kokkos 4.7.2's
-minimum (8.2.0), so all of this has only been verified by cpplint and careful manual
-cross-checking against
-`z4c_calcrhs.cpp`/`z4c_adm.cpp`/`adm.cpp`/`mg_gravity.hpp`/`.cpp`'s equivalent
-patterns — a real compile against a supported toolchain is still owed before
-trusting any of it further, and is *especially* owed for items 3's `RHS(u)`
-sign/scaling derivation and its new `TransferCoeffToRoot` MPI path (see item 3's
-findings below), neither of which reuses an already-exercised code path the way
-items 1-2 did. The pure-virtual method requirements on `Multigrid`/`MultigridDriver`
-do give a strong, free structural check once a real compile is possible: miss one and
-the class stays abstract.
+solvers, `psi` and `alpha*psi`), and `cfc::CFC` itself (constructor,
+`AssembleVectorSource`, `RescaleMatterSources`, the full ghost-exchange task graph)
+are now all implemented (open items 1-4, below) — no `// TODO(cfc): ...` stubs
+remain anywhere in `src/cfc/`. `cpplint` was run against all files; no new warning
+categories beyond what's already accepted in `gravity`'s own files (include-path
+style, `public:`/`private:` indent).
+
+**First real compile attempted** (`~/athenak_cfc/cfc_sakura.sh`, Sakura cluster,
+`PROBLEM=dyn_grmhd/dyngr_tov`, Intel oneAPI `mpiicpx`/`icx` 2024.0 over a
+`gcc/13`-toolchain, Kokkos 4.7.2 — this sandbox's own system GCC (7.5.0) is still
+below Kokkos's minimum, but a working module-based toolchain exists on Sakura),
+surfaced two compile errors — full detail, root cause, and fix in open item 7
+below. **Both are now fixed**: all six `cfc/*.cpp` object files compile cleanly,
+and no error touching `src/cfc` or `src/multigrid/multigrid.hpp` appears anywhere
+in the rebuild log (76 files built past that point). Everything below the "Not
+compiled" caveats this status line replaces has thus cleared its first real
+compile: item 3's `RHS(u)` sign/scaling derivation and its `TransferCoeffToRoot`
+MPI path, and item 4's matter-source algebra (`RescaleMatterSources`' `S_dd`/trace
+contraction, Finding E) and its 32-node ghost-exchange task graph are now known to
+at least type-check and link against the rest of the project; they still haven't
+been *run*. The pure-virtual method requirements on `Multigrid`/`MultigridDriver`
+gave one free structural check along the way: nothing reported a class staying
+abstract from a missed pure-virtual override.
+
+**Full project build initially still failed**, but on something unrelated to CFC
+or `multigrid.hpp`: the rebuild crashed (exit 139, not a normal diagnostic) inside
+Intel `icx` 2024.0.2's optimizer while compiling `src/multigrid/multigrid_driver.cpp`
+— a file untouched by either fix above, and not reached by the two earlier
+(pre-fix) build attempts. Isolated by hand (recompiling just that file with
+different flags outside the normal `make` invocation): reproduced at `-O3` both
+with and without `-march=native -mtune=native`; did **not** reproduce at `-O2` or
+`-O1`. Diagnosed as a pre-existing Intel `icx` 2024.0.2 optimizer bug on that
+file, independent of this session's other changes.
+
+**Fixed by switching toolchain, no source changes**: reran the same isolated
+compile of `multigrid_driver.cpp` with `intel/2025.3` + `impi/2021.17` (both
+available as Sakura modules) instead of `intel/2024.0` + `impi/2021.11` — compiled
+cleanly at `-O3 -march=native -mtune=native`, same as every other flag
+combination tried. `cfc_sakura.sh` was updated to load `intel/2025.3`/
+`impi/2021.17` (and the corresponding `INTEL_ROOT`/`IMPI_ROOT` paths) instead of
+the 2024.0 versions. **A full rebuild from clean then succeeded end to end**:
+`athena` links (15MB executable, `~/athenak_cfc/build_cfc/src/athena`) with
+`PROBLEM=dyn_grmhd/dyngr_tov`, exercising every line of `src/cfc/` and the fixed
+`multigrid.hpp` through to a real linked binary — the first time this has
+happened. This was a genuine upstream Intel compiler bug fixed between 2024.0.2
+and 2025.3, not anything in this project's code; worth mentioning to
+`multigrid.hpp`'s owner (or whoever maintains the Sakura build scripts) in case
+other in-progress work is still pinned to `intel/2024.0` for this project.
+
+Full physics verification (BU0/BU8, open item 5) is the next milestone — it was
+blocked only on getting a working binary, which now exists.
 
 ## The XCFC equations and solve order (Gmunu eqs. 71-76)
 
@@ -88,8 +123,14 @@ per-stage con2prim.
    task-graph design-decision bullet below), so by the time this step runs,
    `pmy_pack->pmhd->w0` (density, pressure, velocity) is already fresh against the
    `g_dd` step 3 just wrote — no second con2prim call. `S-tilde` (the trace of
-   `S_ij`) is rebuilt from that `w0` (`rho*h*W^2*v^2 + 3*P`, densitized by the new
-   `psi^6`); `U-tilde`/`S-tilde_i` don't need rebuilding (see above).
+   `S_ij`) is rebuilt from that `w0`, densitized by the new `psi^6`. **Not** the
+   pure-fluid closed form `rho*h*W^2*v^2 + 3*P` this bullet originally said (that
+   drops the magnetic-field contribution) — `RescaleMatterSources` instead mirrors
+   `SetTmunu`'s full `S_dd` formula (including the `B_d`/`Bv`/`bsq` magnetic terms,
+   lines 476-479) inline, then contracts to the trace via the existing
+   `adm::Trace(detginv, g_dd components, S_dd components)` utility (`coordinates/
+   adm.hpp`) rather than a hand-derived closed form (see item 4's Finding E).
+   `U-tilde`/`S-tilde_i` don't need rebuilding (see above).
 5. **Lapse x psi `alpha*psi`** (nonlinear): depends on `psi`, `Ahat^2`, and the
    post-con2prim rescaled sources (especially `S-tilde`, the trace term).
 6. **Shift `beta^i`**: same vector-equation form as step 1, different source.
@@ -176,14 +217,33 @@ src/cfc/
   resulting per-stage order, all inside `"stagen"`:
   ```
   MHD_CopyU -> MHD_Flux -> ... -> MHD_ExplRK -> MHD_AddSrc
-    -> CFC_SolveVecX (steps 1-2) -> CFC_SolvePsi (step 3, writes psi4/g_dd)
+    -> CFC_BuildSrcX (step 1: S_i from pmhd->u0; solve P_i/eta)
+    -> CFC_Rest/Send/Recv/ProlongPX, ...EtaX (ghost-exchange p_x, eta_x, parallel)
+    -> CFC_ReconstructX (Shibata recon -> x_u)
+    -> CFC_Rest/Send/Recv/ProlongX (ghost-exchange x_u)
+    -> CFC_ComputeADual (step 2: Adual^ij/Ahat^2)
+    -> CFC_SolvePsi (step 3, writes psi4/g_dd)
     -> [B-field CT/restrict/send/recv/BCS/Prolong, unchanged, running in parallel]
     -> MHD_C2P (single con2prim; required dep {MHD_Prolong}, optional dep
        {Z4c_Excise, CFC_SolvePsi} -- see dyn_grmhd.cpp)
     -> CFC_RescaleSrc (step 4, no con2prim call -- just reads the w0 MHD_C2P wrote)
-    -> CFC_SolveLapse (step 5) -> CFC_SolveShift (step 6) -> CFC_AssembleFinal
+    -> CFC_SolveLapse (step 5)
+    -> CFC_Rest/Send/Recv/ProlongPsi, ...AlphaPsi (ghost-exchange psi/alpha_psi)
+    -> CFC_BuildSrcBeta (step 6: eq. 75 source; solve P_i/eta for beta^i)
+    -> CFC_Rest/Send/Recv/ProlongPBeta, ...EtaBeta (ghost-exchange, parallel)
+    -> CFC_ReconstructBeta (Shibata recon -> beta_u)
+    -> CFC_AssembleFinal
     -> MHD_Newdt (optional dep on CFC_AssembleFinal)
   ```
+  32 `CFC_*` `TaskName` entries total (see the enum in `numerical_relativity.hpp` for
+  the exact list) -- expanded from an original 6-node sketch once it became clear
+  each multigrid solve's *output* needs its own post-retrieve ghost-exchange round
+  before `cfc_reconstruct.cpp` can safely finite-difference it (see item 4's "NGHOST-
+  deep ghost exchange" design, folded into item 4's implementation). Each `Rest*`/
+  `Send*`/`Recv*`/`Prolong*` quartet is a thin one-liner on `cfc::CFC` mirroring
+  `z4c::Z4c::RestrictU`/`SendU`/`RecvU`/`Prolongate`'s exact shape, using one
+  `MeshBoundaryValuesCC` + `coarse_*` pair per field (`pbval_px`/`coarse_u_px`, etc.,
+  `cfc.hpp`) -- `is_z4c=false` throughout since CFC is not z4c.
   `MHD_C2P`/`MHD_Newdt`'s CFC dependencies are *optional*
   (`NumericalRelativity::AddExtraDependencies`), so a run without a `<cfc>` block
   produces the exact same task graph as before this change. Because
@@ -217,11 +277,13 @@ src/cfc/
   `pnr = new numrel::NumericalRelativity(...)` / `AssembleNumericalRelativityTasks`
   runs (moved from its original spot after `gravity`'s construction), since that
   call is what invokes `pcfc->QueueCFCTasks()`.
-- `src/tasklist/numerical_relativity.hpp`/`.cpp`: `CFC_SolveVecX`, `CFC_SolvePsi`,
-  `CFC_RescaleSrc`, `CFC_SolveLapse`, `CFC_SolveShift`, `CFC_AssembleFinal`
-  `TaskName` values (appended after `Z4c_NTASKS`) and a `Phys_CFC`
-  `PhysicsDependency`; `AssembleNumericalRelativityTasks(tl_map)` calls
-  `pmy_pack->pcfc->QueueCFCTasks()` alongside `pdyngr`/`pz4c`'s equivalents.
+- `src/tasklist/numerical_relativity.hpp`/`.cpp`: 32 `CFC_*` `TaskName` values
+  (appended after `Z4c_NTASKS`, see the task-graph design-decision bullet above for
+  the full list/order) and a `Phys_CFC` `PhysicsDependency`; both `NeedsPhysics`/
+  `DependencyAvailable` are purely ordinal against `Z4c_NTASKS`/`CFC_NTASKS`, so no
+  `.cpp` changes were needed there when the list grew from 6 to 32 entries.
+  `AssembleNumericalRelativityTasks(tl_map)` calls `pmy_pack->pcfc->QueueCFCTasks()`
+  alongside `pdyngr`/`pz4c`'s equivalents.
 - `src/dyn_grmhd/dyn_grmhd.cpp`: `MHD_C2P`'s and `MHD_Newdt`'s `QueueTask` calls
   take `CFC_SolvePsi`/`CFC_AssembleFinal` as *optional* dependencies (alongside the
   existing `Z4c_Excise`), so con2prim/new-dt wait on CFC's outputs only when a
@@ -363,20 +425,155 @@ src/cfc/
     `max(nvar_, max(ncoeff_,1))` — possibly anticipated by an earlier author but
     never finished). Not required for BU0/BU8 (item 5, uniform-resolution test
     cases) — defer until AMR+CFC is an actual need.
-4. Fill in `cfc.cpp`'s constructor (sizing all arrays including the new
-   `u_p_src`/`eta_src`, wiring `InitWithShallowSlice`, constructing the 6
-   driver instances), `AssembleVectorSource(bool for_shift)` (signature no
-   longer takes `p_src`/`eta_src` as parameters — writes directly into the
-   `p_src`/`eta_src` members now that they exist; building `S-tilde_i` directly
-   from `pmy_pack->pmhd->u0`, mirroring `dyn_grmhd.cpp`'s `SetTmunu` lines
-   461/463 but without going through `Tmunu`), and `RescaleMatterSources`'s
-   trace-source recomputation from the `w0` `MHD_C2P` already populated
-   (reference `SetTmunu`'s `S_dd` formula, lines 464-468, for the exact trace
-   to mirror with fresh primitives). `SolveVectorPotential`/`SolveShift`'s
-   `LoadPoissonSource`/`RetrieveSolution` calls take the raw `u_p_x`/`u_p_beta`/
-   `u_p_src` arrays, not the `p_x`/`p_beta`/`p_src` `AthenaTensor` views (item
-   2's Finding 4) — the TODO comments in `cfc.cpp` already reflect this.
-5. Verify against the Gmunu paper's BU0/BU8 test cases once the above is complete —
-   out of scope until equation bodies exist.
+4. ~~Fill in `cfc.cpp`'s constructor, `AssembleVectorSource`, `RescaleMatterSources`,
+   and the rest of the orchestrator~~ **Done.** Grew well beyond the original
+   sketch once the "NGHOST-deep ghost exchange" design (this file, addendum-era
+   text above/below) was folded in as part of the same pass, plus two follow-up
+   fixes to already-committed item 2/3 code. Four more findings (E-H), recorded in
+   the plan file's addendum #4 and restated here:
+   - **Finding E**: `RescaleMatterSources`' trace source must mirror `SetTmunu`'s
+     full `S_dd` (fluid + magnetic), contracted via `adm::Trace`, not the pure-fluid
+     closed form this file originally sketched in the solve-order section above
+     (now corrected there too) — dropping the magnetic terms would be silently
+     wrong for any magnetized run.
+   - **Finding F**: multigrid solver *outputs* that get finite-differenced
+     afterward (`p_x`/`eta_x`/`p_beta`/`eta_beta`, alongside `x_u`/`psi`/
+     `alpha_psi` which were already mesh-`NGHOST`-deep) must be sized at
+     mesh-`NGHOST` depth, not this solver's own `ngh_` — confirmed from
+     `Multigrid::RetrieveResult`'s actual body (`multigrid.cpp:420-449`), which
+     already accepts an arbitrary caller depth via its `ngh` parameter and offsets
+     correctly. **Required a small fix to already-committed item-2 code**:
+     `MGCFCVectorPoissonDriver::RetrieveSolution`/`MGCFCScalarPoissonDriver::
+     RetrieveSolution` (`mg_cfc_vector_poisson.cpp`/`mg_cfc_scalar_poisson.cpp`)
+     hardcoded `mglevels_->GetGhostCells()` as that depth; both now pass
+     `pmy_pack_->pmesh->mb_indcs.ng` instead.
+   - **Finding G**: the `delta_psi -> psi` (`+1`) offset is `cfc.cpp`'s own
+     responsibility (`RetrieveSolution` hands back the raw deviation), applied as
+     one pointwise pass over the full array — safe because the field's own
+     ghost-exchange round always overwrites the untouched outer ring before
+     anything differentiates it.
+   - **Finding H**: the load-side sibling of Finding F — `LoadMatterSource`/
+     `LoadNonlinearCoefficient` (`mg_cfc_conformal_factor.cpp`) and
+     `LoadMatterSource`/`LoadKnownFields` (`mg_cfc_lapse.cpp`) had the identical
+     hardcoded-depth bug, discovered only once `psi` needed to flow *both*
+     directions (solved, then read back in by `LoadKnownFields` for the lapse
+     solve, while also needing mesh-`NGHOST` depth for the eq. 75 finite
+     difference). **Required a second fix to already-committed item-3 code**: all
+     four functions gained an explicit `int ngh` parameter and now use the same
+     offset-aware indexing `Multigrid::LoadCoefficients` (the generic base-class
+     version, `multigrid.cpp:327`) already established, instead of assuming their
+     argument matches this driver's own `ngh_` exactly. Every "physical" CFC field
+     (everything except `u_p_src`/`eta_src`, which stay `ngh_`-deep — pure
+     `LoadSource` inputs, never differentiated or ghost-exchanged) is now
+     uniformly sized at mesh-`NGHOST` depth, with every `Load*`/`Retrieve*` call
+     site in `cfc.cpp` passing `indcs.ng`.
+
+   The ghost-exchange design itself (7 `MeshBoundaryValuesCC`/`coarse_*` pairs, the
+   32-node task graph) is exactly as scoped in this file's task-graph
+   design-decision bullet above — see that bullet and the plan file's addendum #4
+   for the full per-field rationale (which fields need exchange and why).
+5. Verify against the Gmunu paper's BU0/BU8 test cases now that all equation bodies
+   exist — the next real milestone, and now unblocked: `~/athenak_cfc/cfc_sakura.sh`
+   produces a working `athena` binary (see "Status" above and item 7). Not started
+   yet. The findings E/H above (new, unexercised numerics) are the highest-risk
+   places to re-check by hand first, since a clean compile+link doesn't validate
+   the physics. `inputs/dyn_grmhd/whisky_tov.athinput` (ADM-only, no `<z4c>` block,
+   `<mhd>` present) is the natural base input file to add a `<cfc>` block to for a
+   first single-star test.
 6. Consider the `\Delta n`-cycle solve cadence (Gmunu sec. 2.6.2) as a later
    performance optimization.
+7. First real-compiler pass (`cfc_sakura.sh`, Sakura, Intel `mpiicpx`/`icx` 2024.0
+   over `gcc/13`, `PROBLEM=dyn_grmhd/dyngr_tov`) found two compile errors. **Both
+   now fixed** (rebuild confirms: all six `cfc/*.cpp` object files compile, and no
+   error touching `src/cfc` or `src/multigrid/multigrid.hpp` appears anywhere in
+   the log — see "Status" above for what's still outstanding, an unrelated
+   compiler crash in a different file):
+   - **Own bug — root cause in `src/cfc/`, fix landed in `multigrid.hpp` since the
+     missing piece was a shared accessor other physics modules could reuse**:
+     `mg_cfc_conformal_factor.cpp`'s `LoadMatterSource`/`LoadNonlinearCoefficient`
+     and `mg_cfc_lapse.cpp`'s equivalents call
+     `mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1)` — an accessor that
+     was never actually added to `Multigrid`. `Multigrid::coeff_` is a protected
+     member array only reachable via `Multigrid`'s own methods or its two declared
+     friends (`MultigridDriver`, `MultigridBoundaryValues`); neither CFC driver
+     class is either. The existing public `LoadCoefficients(coeff, ngh)` can't
+     substitute — it copies **all** `ncoeff_` channels from one combined array in a
+     single call, but `u_tilde`/`a_sq` (and `MGCFCLapse`'s three known-field inputs)
+     are loaded via separate calls into separate channels of the same `coeff_`
+     tensor. **Fix applied**: added a one-line accessor to `Multigrid`, right next
+     to the existing `GetCurrentCoefficient()`:
+     ```cpp
+     // multigrid.hpp, in class Multigrid's public section, after GetCurrentCoefficient()
+     DualArray5D<Real>& CoeffAtLevel(int lev) { return coeff_[lev]; }
+     ```
+     No other changes needed — all eight call sites (`mg_cfc_conformal_factor.cpp:
+     282, 303, 340, 366`, `mg_cfc_lapse.cpp:249, 270, 302, 328`) already assumed
+     exactly this signature.
+   - **Pre-existing bug in `multigrid.hpp`, not introduced by CFC — reported to,
+     and now fixed with, the module owner's sign-off**: `Multigrid::Smooth`
+     (was `multigrid.hpp:305-329`, templated on `<ViewType, StencilOp>`, defined
+     inline inside the `Multigrid` class body) calls `pmy_driver_->GetCoffset()`
+     (`pmy_driver_` is `MultigridDriver*`). `class MultigridDriver`'s full
+     definition (where `GetCoffset()` lives) appears *later* in the same header —
+     only forward-declared at the point `Smooth` was defined. Because
+     `pmy_driver_`'s type doesn't depend on `Smooth`'s template parameters,
+     two-phase lookup requires `MultigridDriver` to be complete at `Smooth`'s
+     definition point, which it wasn't — Clang/IntelLLVM (`icx`) diagnosed this as
+     `error: member access into incomplete type 'MultigridDriver'`; GCC is known to
+     be more lenient about exactly this case (untested here, so unconfirmed whether
+     GCC builds were silently relying on that leniency). `git blame` traces both
+     the `GetCoffset()`/`coffset_` AMR-coloring mechanism and this call site to
+     `davidvelasco07`, Feb 2026 — no evidence anyone had compiled this file with a
+     strict/Clang-based toolchain before this session. `mg_gravity.{hpp,cpp}` also
+     includes `multigrid.hpp` and would have hit the identical error if ever
+     compiled the same way (it doesn't currently call `Smooth` from outside
+     `multigrid.hpp`, so it was never exposed to this).
+     **Fix applied** (the "proper fix" option, not the GCC-workaround option — see
+     recommendation below for why): declared `Smooth` in-class as before but with
+     no body, then defined it out-of-line further down `multigrid.hpp`, after
+     `class MultigridDriver` closes, so `MultigridDriver` is complete by the time
+     the body is parsed. `CalculateDefect`/`CalculateFASRHS` (the two templates
+     right after `Smooth` in the class body) were left untouched — they don't
+     touch `pmy_driver_`, so they never had this problem.
+     ```cpp
+     // In class Multigrid's public section (was a full inline definition, now a
+     // declaration only):
+     template <typename ViewType, typename StencilOp>
+     void Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
+                 const ViewType &matrix, const StencilOp &stencil, int rlev,
+                 int il, int iu, int jl, int ju, int kl, int ku, int color, bool th);
+
+     // ... class Multigrid { ... }; ends, then class MultigridDriver { ... }; ends ...
+
+     // New: out-of-line definition, placed immediately after MultigridDriver's
+     // closing brace, body byte-for-byte identical to the original inline one:
+     template <typename ViewType, typename StencilOp>
+     void Multigrid::Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
+                             const ViewType &matrix, const StencilOp &stencil,
+                             int rlev, int il, int iu, int jl, int ju, int kl,
+                             int ku, int color, bool th) {
+       // ... unchanged body, including the pmy_driver_->GetCoffset() call ...
+     }
+     ```
+     Net effect: identical generated code, identical public API (still a public
+     template member of `Multigrid`, called the same way from every existing call
+     site) — this is purely a reordering to satisfy two-phase lookup, not a
+     behavior change. Verified by rebuild: the incomplete-type error is gone and
+     no new error appears in its place.
+   **For reporting to `multigrid.hpp`'s owner**: both changes are additive/
+   reordering only — no existing method signature, behavior, or call site changed.
+   The `Smooth` reorder is the one worth their explicit review, since it's their
+   code being restructured: confirm the moved body is indeed unchanged (it is,
+   verified during the edit — no lines inside the function body differ from the
+   original), and confirm no other `.cpp` in the tree defines its own
+   out-of-line specialization of `Multigrid::Smooth` that would now conflict with
+   the new location (none found via `grep -rn "Multigrid::Smooth"` across `src/`
+   before this change — only the one definition existed). Recommend they also
+   audit whether any GCC-only build of this project was implicitly relying on
+   GCC's leniency here, in case other code near `GetCoffset()`/AMR-coloring has
+   the same latent pattern elsewhere. Also found while verifying, unrelated to
+   either fix: a full project build initially crashed inside Intel `icx`
+   2024.0.2's optimizer while compiling `multigrid_driver.cpp` at `-O3` — resolved
+   by moving to `intel/2025.3`/`impi/2021.17` on Sakura, no source change needed
+   (see "Status" above). Worth flagging to the owner in case other in-progress
+   work on this project is still pinned to `intel/2024.0`.

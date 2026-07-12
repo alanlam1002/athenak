@@ -281,6 +281,10 @@ class Multigrid {
   auto GetCurrentSource() { return src_[current_level_].d_view; }
   auto GetCurrentOldData() { return uold_[current_level_].d_view; }
   auto GetCurrentCoefficient() { return coeff_[current_level_].d_view; }
+  // Level-indexed sibling of GetCurrentCoefficient(), for callers (e.g. cfc/) that
+  // need the finest (or any specific) level's coeff_ array without depending on
+  // current_level_'s transient state (which V-cycle progress mutates).
+  DualArray5D<Real>& CoeffAtLevel(int lev) { return coeff_[lev]; }
   auto GetCurrentData_h() { return u_[current_level_].h_view; }
   auto GetCurrentSource_h() { return src_[current_level_].h_view; }
   auto GetCurrentOldData_h() { return uold_[current_level_].h_view; }
@@ -302,32 +306,15 @@ class Multigrid {
   // The stencil functor must provide:
   //   Real Apply(const ViewType&, const ViewType&, int m, int v, int k, int j, int i)
   //   Real omega_over_diag
+  // Declared here, defined out-of-line below (after MultigridDriver's full
+  // definition): the body calls MultigridDriver::GetCoffset() through pmy_driver_,
+  // whose type (MultigridDriver*) doesn't depend on this method's template
+  // parameters, so two-phase lookup requires MultigridDriver to be complete at the
+  // point of definition, not merely at instantiation.
   template <typename ViewType, typename StencilOp>
   void Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
               const ViewType &matrix, const StencilOp &stencil, int rlev,
-              int il, int iu, int jl, int ju, int kl, int ku, int color, bool th) {
-    using ExeSpace = typename ViewType::execution_space;
-    auto brdx = [this]() {
-      if constexpr (std::is_same_v<ExeSpace, HostExeSpace>)
-        return block_rdx_.h_view;
-      else
-        return block_rdx_.d_view;
-    }();
-    int rlev_l = rlev;
-    Real odiag = stencil.omega_over_diag;
-    color ^= pmy_driver_->GetCoffset();
-    par_for("Multigrid::Smooth", ExeSpace(), 0, nmmb_-1, kl, ku, jl, ju,
-    KOKKOS_LAMBDA(const int m, const int k, const int j) {
-      Real dx = (rlev_l <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev_l))
-                              : brdx(m) / static_cast<Real>(1<<rlev_l);
-      Real dx2 = dx * dx;
-      const int c = (color + k + j) & 1;
-      for (int i = il + c; i <= iu; i += 2) {
-        Real lap = stencil.Apply(u, coeff, m, 0, k, j, i);
-        u(m,0,k,j,i) -= (lap - src(m,0,k,j,i)*dx2) * odiag;
-      }
-    });
-  }
+              int il, int iu, int jl, int ju, int kl, int ku, int color, bool th);
 
   template <typename ViewType, typename StencilOp>
   void CalculateDefect(ViewType &def, const ViewType &u, const ViewType &src,
@@ -588,6 +575,38 @@ class MultigridDriver {
  private:
   int nb_rank_;
 };
+
+// Out-of-line definition of Multigrid::Smooth (declared in the Multigrid class
+// body above) -- must appear after MultigridDriver's full definition, since the
+// body's pmy_driver_->GetCoffset() call needs MultigridDriver to be complete
+// (see the declaration's comment for why this can't stay inline in-class).
+template <typename ViewType, typename StencilOp>
+void Multigrid::Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
+                        const ViewType &matrix, const StencilOp &stencil, int rlev,
+                        int il, int iu, int jl, int ju, int kl, int ku, int color,
+                        bool th) {
+  using ExeSpace = typename ViewType::execution_space;
+  auto brdx = [this]() {
+    if constexpr (std::is_same_v<ExeSpace, HostExeSpace>)
+      return block_rdx_.h_view;
+    else
+      return block_rdx_.d_view;
+  }();
+  int rlev_l = rlev;
+  Real odiag = stencil.omega_over_diag;
+  color ^= pmy_driver_->GetCoffset();
+  par_for("Multigrid::Smooth", ExeSpace(), 0, nmmb_-1, kl, ku, jl, ju,
+  KOKKOS_LAMBDA(const int m, const int k, const int j) {
+    Real dx = (rlev_l <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev_l))
+                            : brdx(m) / static_cast<Real>(1<<rlev_l);
+    Real dx2 = dx * dx;
+    const int c = (color + k + j) & 1;
+    for (int i = il + c; i <= iu; i += 2) {
+      Real lap = stencil.Apply(u, coeff, m, 0, k, j, i);
+      u(m,0,k,j,i) -= (lap - src(m,0,k,j,i)*dx2) * odiag;
+    }
+  });
+}
 
 struct MGPerLevelIndcs {
   MeshBufferIndcs isame, icoar, ifine;

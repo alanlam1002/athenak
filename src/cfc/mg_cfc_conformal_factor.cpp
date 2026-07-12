@@ -195,10 +195,23 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
 
-  // Isolated (1/r falloff) boundary conditions on every non-periodic face -- fixed by
-  // the physics (Gmunu eq. 77), no configurable mg_bc input the way gravity has.
+  // Isolated (1/r falloff) boundary conditions on every non-periodic, non-reflecting
+  // face -- fixed by the physics (Gmunu eq. 77), no configurable mg_bc input the way
+  // gravity has. Faces where the *mesh* itself is reflecting (e.g. an octant-reduced
+  // domain's inner symmetry planes) need BoundaryFlag::mg_zerograd instead of
+  // mg_multipole (NOT plain BoundaryFlag::reflect -- mg_mesh_bcs_ is
+  // multigrid-internal state, and MGRootBoundary's device path only recognizes
+  // periodic/mg_zerofixed/mg_zerograd; passing the ordinary mesh BoundaryFlag::
+  // reflect there falls through every branch silently, leaving that ghost cell
+  // untouched at stale zero -- confirmed to seed a NaN cascade through the Newton
+  // solve within the first V-cycle). mg_multipole (like mg_zerofixed) selects the
+  // odd/antisymmetric mirror, appropriate for the true outer/asymptotically-flat
+  // boundary but wrong for a symmetry plane, which needs mg_zerograd's even/
+  // symmetric mirror instead.
   for (int f = 0; f < 6; ++f) {
-    if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
+    if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
+      mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
     }
   }

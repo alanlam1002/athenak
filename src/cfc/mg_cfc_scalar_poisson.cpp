@@ -89,14 +89,18 @@ void MGCFCScalarPoisson::CalculateFASRHSPack() {
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCScalarPoissonDriver::MGCFCScalarPoissonDriver(...)
 //! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 1.
-//! Boundary conditions are NOT set explicitly here: the MultigridDriver base
-//! constructor already defaults every non-periodic mg_mesh_bcs_[f] to
-//! BoundaryFlag::mg_zerofixed (see mg_cfc_vector_poisson.cpp's constructor comment for
-//! the full reasoning -- identical here).
+//! Restores BoundaryFlag::mg_zerograd (NOT plain BoundaryFlag::reflect -- see
+//! mg_cfc_vector_poisson.cpp's constructor comment for why) on any reflecting mesh
+//! face, after the MultigridDriver base constructor's blanket mg_zerofixed default.
 
 MGCFCScalarPoissonDriver::MGCFCScalarPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
+  for (int f = 0; f < 6; ++f) {
+    if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
+      mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    }
+  }
   omega_ = pin->GetOrAddReal("cfc", "mg_omega", 1.15);
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);

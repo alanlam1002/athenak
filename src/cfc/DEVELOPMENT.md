@@ -25,9 +25,9 @@ its Riemann solver and conserved-to-primitive conversion.
 - `src/gravity/{gravity,mg_gravity}.{hpp,cpp}` — the structural template this module
   mirrors (a thin physics orchestrator + Multigrid/MultigridDriver subclass pairs).
 
-## Status: feature-complete (all equation bodies implemented); first full project
-## build succeeded (Sakura, PROBLEM=dyn_grmhd/dyngr_tov); BU0/BU8 physics
-## verification not yet started
+## Status: feature-complete (all equation bodies implemented); first full run of a
+## CFC test case completes (10 cycles, dyngr_tov/isotropic TOV star) but is not
+## yet correct -- NaNs at the x3=0 reflecting boundary under active investigation
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -88,6 +88,37 @@ other in-progress work is still pinned to `intel/2024.0` for this project.
 
 Full physics verification (BU0/BU8, open item 5) is the next milestone — it was
 blocked only on getting a working binary, which now exists.
+
+**First actual run attempted**, `inputs/dyn_grmhd/cfc_tov.athinput` (new file,
+based on `whisky_tov.athinput`: `isotropic=true` so `dyngr_tov.cpp` sets up the
+exact analytic conformally-flat/K=0 TOV solution rather than the non-CFC-compatible
+Schwarzschild-coordinate branch, `v_pert=0` for a static-equilibrium first check,
+empty `<cfc>` block, `nlim=10` for a fast smoke test). The initial-data
+bootstrapping question that prompted this test (primitives-only initial data needs
+psi before it can build `Ũ=ψ⁶U`, but psi isn't solved yet) turned out to be a
+non-issue for TOV specifically: `dyngr_tov.cpp`'s `isotropic=true` branch sets
+`adm.psi4` from the exact closed-form isotropic TOV mapping *before* the first
+`Prim2Con` ever runs, so the very first conserved state already has the correct
+psi baked in — no Picard iteration needed here (deferred to whenever non-analytic
+initial data, e.g. a LORENE/KADATH binary, is attempted — see open item 5's
+note). Three more bugs surfaced and were fixed getting to a completing run — full
+detail in open item 8 below. The run now completes all 10 cycles without crashing,
+but is not yet correct: `NANS_IN_CONS` C2P errors appear at cycle 0, localized to
+grid points at `k=4` (the first physical cell above the `x3=0` reflecting
+boundary) where `g_dd`/`psi4` come out `-nan`.
+
+**Still unresolved as of this writing** — see open item 9 for the full,
+multi-round investigation, including one claim that turned out to be wrong
+(`MultigridDriver::PhysicalBoundary` was reported dead code; it is not — a bad
+grep exclusion hid its actual call sites) and one real fix that landed but did
+not resolve the crash (`mg_mesh_bcs_[face]` must hold a multigrid-internal
+`BoundaryFlag` value — `mg_zerograd`, not the ordinary mesh `BoundaryFlag::
+reflect` — fixed in all 4 CFC driver constructors). Isolated with temporary
+instrumentation (added, used, then removed — not left in the tree) to the root
+grid specifically: even with clean, sane inputs (`u_tilde`/`a_sq` both NaN-free
+going in), `psi` at the root grid's single interior cell is already partly NaN
+immediately after the very first V-cycle solve, before anything else in CFC
+touches it. Root cause not yet found. Full detail in open item 9.
 
 ## The XCFC equations and solve order (Gmunu eqs. 71-76)
 
@@ -577,3 +608,192 @@ src/cfc/
    by moving to `intel/2025.3`/`impi/2021.17` on Sakura, no source change needed
    (see "Status" above). Worth flagging to the owner in case other in-progress
    work on this project is still pinned to `intel/2024.0`.
+8. First actual run (`inputs/dyn_grmhd/cfc_tov.athinput`, new file, see "Status"
+   above) surfaced three more bugs, all now fixed, each caught by a successively
+   deeper stage of the same run:
+   - **`<cfc>` missing from `parameter_input.cpp`'s block-name whitelist**
+     (`ParameterInput::CheckBlockNames`, `src/parameter_input.cpp`) — the input
+     file was rejected outright before the mesh was even built (`FATAL ERROR ...
+     Invalid <block_name> in input file`). One-line fix: added `"cfc"` to the
+     `valid_name` list alongside `"z4c"`/`"cce"`/etc. Purely a missed registration,
+     not a design issue — every other `<cfc>`-reading code path already worked.
+   - **`AssembleVectorSource`/`BuildShiftSource` (`cfc.cpp`) wrote `p_src`/
+     `eta_src` at the wrong depth**: both are allocated at this solver's own
+     shallower `mg_nghost` ghost width (cfc.hpp's `u_p_src`/`eta_src` comment,
+     item 4/Finding H's "stays ngh_-deep" carve-out), but every write to them
+     reused the surrounding loop's mesh-`NGHOST`-indexed `(k,j,i)` directly, with
+     no translation between the two index spaces. With `nghost=4` (mesh) vs.
+     `mg_nghost=1` (default), this overran the destination array by exactly the
+     gap between the two depths — caught immediately by
+     `Kokkos_ENABLE_DEBUG_BOUNDS_CHECK` (`Kokkos::View ERROR: out of bounds
+     access label=("cfc_u_p_src") ...`) on the very first `AssembleVectorSource`
+     call at cycle 0. Fixed by adding a cached `mg_nghost_` member to `CFC` (set
+     once in the constructor, alongside the existing local `mg_nghost` the
+     constructor already reads to size `u_p_src`/`eta_src`) and computing
+     translated indices `mk = k - ks + mg_nghost_` (and `mj`/`mi` likewise) at
+     every `p_src_`/`eta_src_` read or write site — four sites total, all within
+     `AssembleVectorSource`'s two branches and `BuildShiftSourceImpl` (which
+     needed `mg_nghost` threaded through as a new parameter from its one call
+     site). `u_tilde_`/`s_tilde_d_` (mesh-`NGHOST`-deep, correctly indexed
+     already) were left untouched. `src_`'s own ghost ring is never actually
+     read by `Multigrid::Smooth`/`CalculateDefect`/`CalculateFASRHS` (confirmed
+     by inspection — both only index `src(m,0,k,j,i)` at the exact stencil
+     point, never a neighbor), so leaving `u_p_src`/`eta_src`'s own ghost ring at
+     its zero-initialized default (rather than also populating it) is safe, not
+     just expedient.
+   - **`MGCFCVectorPoisson`'s per-channel `Smooth`/`CalculateDefect`/
+     `CalculateFASRHS` helpers subview an array nobody allocates**: item 2's
+     `SmoothChannels`/`CalculateDefectChannels`/`CalculateFASRHSChannels`
+     (`mg_cfc_vector_poisson.cpp`) sliced `coeff_[level]`/`matrix_[level]` per
+     channel with `Kokkos::subview(..., std::make_pair(v,v+1), ...)`, alongside
+     the same per-channel treatment of `u_`/`src_`/`def_`. But
+     `CFCVectorPoissonStencil::Apply()` (this file's flat 7-point Laplacian)
+     never reads `coeff`/`matrix` at all, and neither is actually allocated for
+     this solver: `ncoeff_` stays at `MultigridDriver`'s default 0 (this solver
+     never sets it, unlike `MGCFCConformalFactor`/`MGCFCLapse`'s item-3 fix), and
+     `matrix_`/`nmatrix_` turn out to be dead code across the *entire* codebase —
+     grepping confirms no `Kokkos::realloc(matrix_...)` call exists anywhere,
+     including in `gravity`. Subviewing a channel range on an unallocated
+     (all-zero-extent) array is a bounds violation regardless of which channel,
+     caught by Kokkos on the very first V-cycle smooth
+     (`Kokkos::subview bounds error (...)`, traced via `addr2line` through
+     `MGCFCVectorPoisson::CalculateDefectPack` → `Multigrid::CalculateDefectNorm`
+     → `MultigridDriver::SolveIterative` → `CFC::SolveVecXTask`). Tried first:
+     widening the `coeff`/`matrix` subview's channel dimension to `Kokkos::ALL`
+     instead of `vr` — compiles only if `ViewType` still matches `u`/`src`/`def`'s
+     subview type, which it doesn't (`ALL_t` vs. `std::pair<int,int>` are
+     different template arguments to `Kokkos::subview`, confirmed by the
+     resulting "deduced conflicting types for parameter 'ViewType'" compile
+     error). **Fix actually applied**: stopped threading `coeff_lv`/`matrix_lv`
+     through these three helpers at all — `u`'s (or `src`'s) own already-valid,
+     already-correctly-typed per-channel subview is passed in the `coeff`/
+     `matrix` argument slots instead, since `Smooth`/`CalculateDefect`/
+     `CalculateFASRHS`'s generic signature requires *some* same-typed 4th/5th
+     argument but this stencil never dereferences it. Removed the now-dead
+     `coeff_[current_level_]`/`matrix_[current_level_]` arguments from all three
+     call sites in `SmoothPack`/`CalculateDefectPack`/`CalculateFASRHSPack`
+     rather than leaving unused parameters around.
+   With all three fixed, `cfc_tov.athinput` runs to completion (`nlim=10`, exit
+   0) for the first time — see "Status" above and item 9 for what's still wrong.
+9. **Investigation, in three rounds** — the completing run from item 8 throws
+   `NANS_IN_CONS` C2P errors at cycle 0, localized to grid points at `k=4` (the
+   first physical cell above the `x3=0` reflecting boundary, i.e. `ix3_bc=reflect`
+   in `cfc_tov.athinput`) where `g_dd`/`psi4` come out `-nan` (`alp`/`beta`/`K_dd`
+   are fine at the same points — turns out to be because `MHD_C2P` runs between
+   `CFC_SolvePsi` and `CFC_SolveLapse`, so it sees `adm.alpha` still holding the
+   pgen's original analytic value at this point, only `adm.g_dd`/`psi4` having
+   been freshly overwritten by `SolveConformalFactor`'s `AssembleConformalMetric`
+   call — a useful clue, not a bug itself). All 1000 reported error locations (the
+   cap before AthenaK suppresses further C2P error printouts) are at `k=4`
+   specifically, confirming this is boundary-localized, not domain-wide.
+   - **Round 1 (found and fixed, real bug, insufficient alone)**: CFC had no
+     equivalent of `Z4c::ApplyPhysicalBCs`/`MeshBoundaryValues::Z4cBCs` — its 7
+     `RecvAndUnpackCC` ghost-exchange calls (`CFC::QueueCFCTasks`) only handle
+     inter-MeshBlock/periodic communication, exactly like Hydro/Z4c/radiation, and
+     *all three* of those have a dedicated physical-BC pass the mesh-level
+     `MeshBoundaryValuesCC` machinery does not provide automatically. Fixed by
+     adding `src/bvals/physics/cfc_bcs.cpp` (new file, registered in
+     `src/CMakeLists.txt`, `MeshBoundaryValues::CFCScalarBCs`/`CFCVectorBCs`
+     declared in `bvals.hpp` alongside `HydroBCs`/`Z4cBCs`) and calling the
+     appropriate one from each of the 7 `Recv*Task` functions in `cfc.cpp`, gated
+     on `tstat == TaskStatus::complete && !strictly_periodic` (matching
+     `Z4c::ApplyPhysicalBCs`'s own periodicity guard; the completeness check
+     specifically guards against acting on a still-in-flight async MPI recv,
+     though it's moot for the current single-meshblock test). Deliberately
+     simpler than `HydroBCs`: no inflow table (no fluid-state analog for these
+     elliptic-equation potentials) and no diode-specific velocity clamping (no
+     flux/flow concept either) — `outflow`/`diode`/`inflow`/`user` all reduce to
+     a plain zero-gradient copy; only `reflect` (even parity for the 4 scalar
+     fields `eta_x`/`psi`/`alpha_psi`/`eta_beta`, odd parity on the
+     face-aligned channel only for the 3 vector fields `p_x`/`x_u`/`p_beta`) and
+     `vacuum` need special handling. **Rebuilt and reran: byte-for-byte identical
+     failure** (same location, same `alp` value) — this fix is real (these ghost
+     cells do feed `cfc_reconstruct.cpp`'s `Dx<NGHOST>` and were genuinely never
+     filled before), but provably not what's causing *this* NaN.
+   - **Round 2 (found and fixed, real bug; wrong flag value used at first, see
+     round 3)**: the `MultigridDriver` base constructor blanket-converts *every*
+     non-periodic mesh face to `BoundaryFlag::mg_zerofixed` (or, for
+     `MGCFCConformalFactorDriver`/`MGCFCLapseDriver`, their own constructors then
+     blanket-convert every non-periodic face again to `BoundaryFlag::mg_multipole`
+     — `multigrid_driver.cpp:82-91`, `mg_cfc_conformal_factor.cpp`/
+     `mg_cfc_lapse.cpp`'s old constructor comments). Both select the odd/
+     antisymmetric mirror at that face — correct for the true outer/
+     asymptotically-flat boundary (`X^i|_rmax=0`, Gmunu eq. 77/78's 1/r falloff),
+     wrong for a reflecting symmetry plane, which needs an even/symmetric mirror
+     instead. Fixed in all 4 CFC driver constructors: after the base
+     constructor's blanket default (and, for the two nonlinear solvers, their own
+     multipole-default loop) runs, a small loop restores the even-mirror
+     treatment wherever `pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect`.
+     **First attempt used `mg_mesh_bcs_[f] = BoundaryFlag::reflect`** (the
+     ordinary mesh-level flag) — rebuilt and reran: byte-for-byte identical
+     failure, which led to round 3.
+   - **Round 3 (found the real flag-value bug; also one claim below turned out
+     wrong, see the correction inline)**: traced why round 2 had zero effect.
+     `mg_mesh_bcs_[face]` is multigrid-internal state, read only by
+     `MultigridDriver`'s own boundary code — and that code recognizes exactly
+     four values: `periodic`, `mg_zerofixed`, `mg_zerograd`, `mg_multipole`.
+     `BoundaryFlag::reflect` (the ordinary mesh flag round 2 used) isn't one of
+     them. Confirmed directly in `MultigridDriver::MGRootBoundary`'s device path
+     (`multigrid_driver.cpp:1856-1920`): explicit `if`/`else if` chains on
+     `periodic`/`mg_zerofixed`/`mg_zerograd` only, no `else` fallback — a face
+     set to plain `reflect` falls through every branch silently and that ghost
+     cell is simply never written, leaking whatever was there before (0.0, from
+     allocation, on the first call). **Fix**: changed all 4 constructors to set
+     `mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd` instead of `reflect` on
+     reflecting mesh faces — `mg_zerograd`'s `ghost = interior` formula is
+     exactly the even mirror needed, and it's a value `MGRootBoundary` already
+     handles. **A claim made and then retracted in this same round**: initially
+     (wrongly) concluded `MultigridDriver::PhysicalBoundary`
+     (`multigrid_tasks.cpp:129`) was dead code, never called anywhere, based on
+     `grep -rn "PhysicalBoundary" src/ | grep -v "multigrid_tasks.cpp|multigrid.
+     hpp"` — an exclusion that hid the very call sites it was looking for, since
+     `SetMGTaskListToFiner`/`SetMGTaskListToCoarser`/`SetMGTaskListFMGProlongate`
+     (all in `multigrid_tasks.cpp`, the file excluded) queue `PhysicalBoundary`
+     seven times combined via `AddTask(&MultigridDriver::PhysicalBoundary, ...)`.
+     It is not dead code and needed no wiring; this was communicated to the user
+     as a "root cause" before being caught and corrected — flagged here so the
+     mistake isn't silently lost. **Rebuilt and reran with the `mg_zerograd`
+     fix: still fails**, and by a NaN-scan diagnostic added in round 4, the root
+     grid's own defect count got *worse* (4 NaN cells out of 27 before this fix,
+     20 after) — the fix is more correct in principle but is not what's causing
+     this crash, or isn't the whole story.
+   - **Round 4 (bisection, temporary instrumentation, not left in the tree)**:
+     added a temporary host-side NaN scan (`Kokkos::create_mirror_view` +
+     `std::isnan` loop, removed after use — no debug code remains in `src/cfc/`)
+     at three points in `CFC::SolveConformalFactor`/
+     `MGCFCConformalFactorDriver::Solve`: (1) `u_tilde`/`a_sq` right before the
+     solve — **clean**, zero NaN, sane magnitudes (max ~1.3e-3 and ~2.2e-7
+     respectively) on the very first call; (2) the root grid's `coeff_` right
+     after `TransferCoeffToRoot()` — **clean**, zero NaN; (3) the root grid's
+     `u_` (its single interior cell plus ghost ring, 3x3x3 with `ngh=1`) right
+     after `SolveMG` returns — **already 4 (later 20) of 27 cells NaN**, with
+     every remaining cell exactly `0.0`. So the corruption is seeded at the root
+     grid, during the very first V-cycle, from otherwise-clean inputs — not
+     something a later stage's stale data drags in, and not domain-wide in the
+     sense of "everywhere at once": `psi` after the full solve showed 287,300 of
+     373,248 mesh-depth cells NaN (~77%), but that's downstream contamination
+     spreading from this one degenerate root grid outward once the corrupted
+     root values get transferred back to the meshblock level
+     (`TransferFromRootToBlocks`) and iterated on.
+   - **Round 5 (narrowed further, root cause still not found)**: the root grid
+     for this test is a single interior cell (`nlevel=1`, aggregating the one
+     meshblock down to one point), with 3 faces on `mg_zerograd` (the fixed
+     reflecting faces) and 3 on `mg_multipole` (the true outer/diode faces,
+     `mporder=4` by default). Tried `mporder=2` (quadrupole instead of
+     hexadecapole) via the input file, no rebuild needed: identical result (20
+     NaN). Could not test with multipole disabled entirely —
+     `MGCFCConformalFactorDriver`'s constructor fatal-errors unless
+     `mporder` is 2 or 4, there is no "off" setting. Current best guess, **not
+     confirmed**: something in the multipole boundary evaluation
+     (`EvalMultipolePhi`, or the `CalculateCenterOfMass`/
+     `CalculateMultipoleCoefficients` calculation feeding it) misbehaves for
+     this degenerate single-cell root grid specifically, independent of the
+     `mg_zerograd` faces (which were confirmed correct in isolation by
+     `MGRootBoundary`'s code, round 3) — but this has not been verified by
+     directly instrumenting the multipole coefficients/evaluation the way
+     rounds 3-4 instrumented the transfer and root `u_`. **Stopped here** to
+     check in rather than keep iterating unilaterally; next step is almost
+     certainly to scan `mpcoeff_`/`d_mpcoeff_` for NaN right after
+     `CalculateMultipoleCoefficients()`/`SyncMultipoleToDevice()`, and/or to
+     manually trace `EvalMultipolePhi`'s arithmetic for a degenerate
+     single-source-point, single-evaluation-point geometry.

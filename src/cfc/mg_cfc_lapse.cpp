@@ -167,10 +167,15 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
 
-  // Isolated (1/r falloff) boundary conditions on every non-periodic face -- fixed by
-  // the physics (Gmunu eq. 78), no configurable mg_bc input the way gravity has.
+  // Isolated (1/r falloff) boundary conditions on every non-periodic, non-reflecting
+  // face -- fixed by the physics (Gmunu eq. 78), no configurable mg_bc input the way
+  // gravity has. See mg_cfc_conformal_factor.cpp's constructor comment for why
+  // mesh-reflecting faces need BoundaryFlag::mg_zerograd, not plain
+  // BoundaryFlag::reflect, instead of mg_multipole here.
   for (int f = 0; f < 6; ++f) {
-    if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
+    if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
+      mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
     }
   }

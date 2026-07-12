@@ -135,6 +135,11 @@ class CFC {
   DvceArray5D<Real> u_p_src;                          // storage backing p_src (3 comp.)
   AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_src;   // S_i, P_i's vector source
   DvceArray5D<Real> eta_src;                          // -S_i.x^i, eta's scalar source
+  // Ghost width u_p_src/eta_src were allocated with (the "cfc"/"mg_nghost" input
+  // parameter, cached here since AssembleVectorSource/BuildShiftSource need it on
+  // every call to translate mesh-NGHOST-indexed loop indices into this shallower
+  // array's own index space -- see AssembleVectorSource's definition.
+  int mg_nghost_;
 
   // multigrid solvers, one per distinct elliptic equation (shared classes for the
   // two vector solves and the two scalar solves -- see mg_cfc_vector_poisson.hpp /

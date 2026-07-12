@@ -40,7 +40,8 @@ template <int NGHOST>
 void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
                           const DvceArray5D<Real> &alpha_psi,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                          AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src) {
+                          AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
+                          int mg_nghost) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -70,6 +71,7 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
 
   par_for("cfc_build_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
     Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
                   1.0/size.d_view(m).dx3};
     Real dap6[3];
@@ -81,7 +83,7 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
       for (int b = 0; b < 3; ++b) {
         div += a_dd(m,a,b,k,j,i)*dap6[b];
       }
-      p_src(m,a,k,j,i) += 2.0*div;
+      p_src(m,a,mk,mj,mi) += 2.0*div;
     }
   });
 }
@@ -89,12 +91,13 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
 void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
                       const DvceArray5D<Real> &alpha_psi,
                       const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src) {
+                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
+                      int mg_nghost) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: BuildShiftSourceImpl<2>(pmbp, psi, alpha_psi, a_dd, p_src); break;
-    case 3: BuildShiftSourceImpl<3>(pmbp, psi, alpha_psi, a_dd, p_src); break;
-    case 4: BuildShiftSourceImpl<4>(pmbp, psi, alpha_psi, a_dd, p_src); break;
+    case 2: BuildShiftSourceImpl<2>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
+    case 3: BuildShiftSourceImpl<3>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
+    case 4: BuildShiftSourceImpl<4>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
   }
 }
 
@@ -191,6 +194,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // constructor reads independently with the same default, so this is guaranteed
   // consistent with whatever ngh_ they end up with.
   int mg_nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
+  mg_nghost_ = mg_nghost;
   int mncells1 = indcs.nx1 + 2*mg_nghost;
   int mncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*mg_nghost) : 1;
   int mncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*mg_nghost) : 1;
@@ -374,7 +378,11 @@ TaskStatus CFC::SendPXTask(Driver *pdriver, int stage) {
   return pbval_px->PackAndSendCC(u_p_x, coarse_u_px);
 }
 TaskStatus CFC::RecvPXTask(Driver *pdriver, int stage) {
-  return pbval_px->RecvAndUnpackCC(u_p_x, coarse_u_px);
+  TaskStatus tstat = pbval_px->RecvAndUnpackCC(u_p_x, coarse_u_px);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_x);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongPXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -393,7 +401,11 @@ TaskStatus CFC::SendEtaXTask(Driver *pdriver, int stage) {
   return pbval_etax->PackAndSendCC(eta_x, coarse_eta_x);
 }
 TaskStatus CFC::RecvEtaXTask(Driver *pdriver, int stage) {
-  return pbval_etax->RecvAndUnpackCC(eta_x, coarse_eta_x);
+  TaskStatus tstat = pbval_etax->RecvAndUnpackCC(eta_x, coarse_eta_x);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_x);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -412,7 +424,11 @@ TaskStatus CFC::SendXTask(Driver *pdriver, int stage) {
   return pbval_x->PackAndSendCC(u_x, coarse_u_x);
 }
 TaskStatus CFC::RecvXTask(Driver *pdriver, int stage) {
-  return pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
+  TaskStatus tstat = pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_x);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -431,7 +447,11 @@ TaskStatus CFC::SendPsiTask(Driver *pdriver, int stage) {
   return pbval_psi->PackAndSendCC(psi, coarse_psi);
 }
 TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
-  return pbval_psi->RecvAndUnpackCC(psi, coarse_psi);
+  TaskStatus tstat = pbval_psi->RecvAndUnpackCC(psi, coarse_psi);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, psi);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -450,7 +470,11 @@ TaskStatus CFC::SendAlphaPsiTask(Driver *pdriver, int stage) {
   return pbval_alpha_psi->PackAndSendCC(alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
-  return pbval_alpha_psi->RecvAndUnpackCC(alpha_psi, coarse_alpha_psi);
+  TaskStatus tstat = pbval_alpha_psi->RecvAndUnpackCC(alpha_psi, coarse_alpha_psi);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, alpha_psi);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -469,7 +493,11 @@ TaskStatus CFC::SendPBetaTask(Driver *pdriver, int stage) {
   return pbval_pbeta->PackAndSendCC(u_p_beta, coarse_u_pbeta);
 }
 TaskStatus CFC::RecvPBetaTask(Driver *pdriver, int stage) {
-  return pbval_pbeta->RecvAndUnpackCC(u_p_beta, coarse_u_pbeta);
+  TaskStatus tstat = pbval_pbeta->RecvAndUnpackCC(u_p_beta, coarse_u_pbeta);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_beta);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongPBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -488,7 +516,11 @@ TaskStatus CFC::SendEtaBetaTask(Driver *pdriver, int stage) {
   return pbval_etabeta->PackAndSendCC(eta_beta, coarse_eta_beta);
 }
 TaskStatus CFC::RecvEtaBetaTask(Driver *pdriver, int stage) {
-  return pbval_etabeta->RecvAndUnpackCC(eta_beta, coarse_eta_beta);
+  TaskStatus tstat = pbval_etabeta->RecvAndUnpackCC(eta_beta, coarse_eta_beta);
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_beta);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -604,6 +636,11 @@ void CFC::AssembleVectorSource(bool for_shift) {
   auto s_tilde_d_ = s_tilde_d;
   auto p_src_ = p_src;
   auto &eta_src_ = eta_src;
+  // p_src_/eta_src_ are allocated at this solver's own (shallower) mg_nghost_ depth,
+  // not mesh-NGHOST depth like everything else this function touches (cfc.hpp's
+  // u_p_src/eta_src comment) -- every write to them below needs the loop's
+  // mesh-indexed (k,j,i) translated into their own index space first.
+  int mg_nghost = mg_nghost_;
 
   if (!for_shift) {
     // Step 1 (Gmunu eq. 72): U/S_i built directly from the evolved conserved state
@@ -616,6 +653,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
     auto &psi_ = psi;
     par_for("cfc_assemble_vecX_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
       Real detg = adm::SpatialDet(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
                                    adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
                                    adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i));
@@ -640,10 +678,10 @@ void CFC::AssembleVectorSource(bool for_shift) {
         Real s_a = psi6*cons(m,IM1+a,k,j,i)*ivol;
         s_tilde_d_(m,a,k,j,i) = s_a;
         Real p_a = 8.0*M_PI*s_a;  // Gmunu eq. 72 rhs, f^ij = delta^ij (Cartesian)
-        p_src_(m,a,k,j,i) = p_a;
+        p_src_(m,a,mk,mj,mi) = p_a;
         eta_val -= p_a*xk[a];  // Shibata eq. 3.11: eta_src = -S_i x^i
       }
-      eta_src_(m,0,k,j,i) = eta_val;
+      eta_src_(m,0,mk,mj,mi) = eta_val;
     });
   } else {
     // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
@@ -653,22 +691,24 @@ void CFC::AssembleVectorSource(bool for_shift) {
     auto &alpha_psi_ = alpha_psi;
     par_for("cfc_assemble_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
       Real psi_val = psi_(m,0,k,j,i);
       Real psi2 = psi_val*psi_val;
       Real psi7 = psi2*psi2*psi2*psi_val;
       // alpha*psi^-6 = (alpha_psi/psi)*psi^-6 = alpha_psi*psi^-7.
       Real ap6 = alpha_psi_(m,0,k,j,i)/psi7;
       for (int a = 0; a < 3; ++a) {
-        p_src_(m,a,k,j,i) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
+        p_src_(m,a,mk,mj,mi) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
       }
     });
     // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
-    BuildShiftSource(pmy_pack, psi, alpha_psi, a_dd, p_src);
+    BuildShiftSource(pmy_pack, psi, alpha_psi, a_dd, p_src, mg_nghost);
 
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
             is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
       Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
@@ -678,9 +718,9 @@ void CFC::AssembleVectorSource(bool for_shift) {
       Real xk[3] = {x1v, x2v, x3v};
       Real eta_val = 0.0;
       for (int a = 0; a < 3; ++a) {
-        eta_val -= p_src_(m,a,k,j,i)*xk[a];
+        eta_val -= p_src_(m,a,mk,mj,mi)*xk[a];
       }
-      eta_src_(m,0,k,j,i) = eta_val;
+      eta_src_(m,0,mk,mj,mi) = eta_val;
     });
   }
   return;

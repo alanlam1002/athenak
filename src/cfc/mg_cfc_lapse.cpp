@@ -42,6 +42,17 @@
 //! at higher resolution, since deeper V-cycles exercise more, and more divergent,
 //! coarse levels). Restricting the already-combined K(x) directly is the standard,
 //! FAS-consistent treatment for a nonlinearly-derived reaction coefficient.
+//!
+//! Round 18 fix (found by the user reading this file directly): the round-16 fix
+//! above did not, by itself, resolve SolveIterative's non-convergence -- a second,
+//! independent bug remained. SmoothPack/CalculateDefectPack never read src_ at all,
+//! even though CalculateFASRHSPack (below) correctly accumulates the FAS
+//! tau-correction into it -- the exact same bug class as MGCFCConformalFactor's
+//! Bug 1 (round 15): the coarse-grid correction was computed and stored every
+//! V-cycle descent, then silently discarded, leaving every level below the finest
+//! relaxing its own homogeneous equation decoupled from the fine grid's actual
+//! defect. Fixed by adding src(m,0,k,j,i) into both formulas, mirroring
+//! MGCFCConformalFactor::SmoothPack/CalculateDefectPack's identical fix exactly.
 
 #include <algorithm>
 #include <cmath>
@@ -108,6 +119,14 @@ void MGCFCLapse::SmoothPack(int color) {
   auto brdx = block_rdx_.d_view;
   auto u = u_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  // FAS tau-correction accumulator (round 18 fix -- see this file's top-of-file
+  // comment): zero at the finest level, nonzero at every coarser level once
+  // CalculateFASRHSPack has run there. Must be added here, mirroring
+  // MGCFCConformalFactor::SmoothPack's identical fix (round 15, Bug 1) -- or the
+  // coarse-grid correction this array exists to carry is silently dropped and every
+  // level below the finest just relaxes its own homogeneous equation, decoupled
+  // from the fine grid's actual defect.
+  auto src = src_[lev].d_view;
   par_for("MGCFCLapse::SmoothPack", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
   KOKKOS_LAMBDA(const int m, const int k, const int j) {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
@@ -118,7 +137,7 @@ void MGCFCLapse::SmoothPack(int color) {
       Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
       Real lap = LapseLap(u, m, k, j, i);
       Real u_old = u(m,0,k,j,i);
-      Real fval = lap + dx2*kx*(u_old + 1.0);
+      Real fval = lap + dx2*kx*(u_old + 1.0) - dx2*src(m,0,k,j,i);
       Real fprime = 6.0 + dx2*kx;
       u(m,0,k,j,i) = u_old - fval/fprime;
     }
@@ -136,6 +155,12 @@ void MGCFCLapse::CalculateDefectPack() {
   auto u = u_[lev].d_view;
   auto def = def_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  // Same FAS tau-correction as SmoothPack above -- must be included here too, or
+  // RestrictPack's downstream Restrict(src_[coarser], def_[this level], ...) would
+  // restrict a defect that ignores whatever correction this level itself already
+  // received, corrupting the correction chain for every level further down
+  // (round 18 fix, mirroring MGCFCConformalFactor::CalculateDefectPack, round 15).
+  auto src = src_[lev].d_view;
   par_for("MGCFCLapse::CalculateDefectPack", DevExeSpace(), 0, nmmb_-1,
           ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -144,8 +169,9 @@ void MGCFCLapse::CalculateDefectPack() {
     Real idx2 = 1.0 / (dx*dx);
     Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
     Real lap = LapseLap(u, m, k, j, i);
-    // def = RHS(u) - lap(u)*idx2, RHS(u) = -kx*(u+1) (F(u) = lap(u) - dx^2*RHS(u)).
-    def(m,0,k,j,i) = -kx*(u(m,0,k,j,i) + 1.0) - lap*idx2;
+    // def = (RHS(u) + src) - lap(u)*idx2, RHS(u) = -kx*(u+1)
+    // (F(u) = lap(u) - dx^2*(RHS(u) + src)).
+    def(m,0,k,j,i) = (-kx*(u(m,0,k,j,i) + 1.0) + src(m,0,k,j,i)) - lap*idx2;
   });
 }
 

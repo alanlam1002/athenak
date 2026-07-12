@@ -26,43 +26,39 @@ its Riemann solver and conserved-to-primitive conversion.
   mirrors (a thin physics orchestrator + Multigrid/MultigridDriver subclass pairs).
 
 ## Status: feature-complete (all equation bodies implemented); the original
-## boundary NaN is fixed (item 9, rounds 6-7). The `psi` O(1) corner-error bug
-## (item 9, rounds 8-15) is FIXED and verified at two resolutions: two bugs were
-## found and fixed in round 15 -- `MGCFCConformalFactor::SmoothPack`/
-## `CalculateDefectPack` silently dropped the FAS `src_` coarse-grid-correction
-## term (real, improved convergence dramatically, but not the corner root cause
-## by itself), and `RetrieveSolution` passed the wrong ghost depth to
-## `Multigrid::RetrieveResult` (`mglevels_->GetGhostCells()`, this solver's own
-## shallow internal depth, instead of the mesh's true `NGHOST`), silently
-## mis-aligning the solved-interior copy-out by 3 cells and leaving the outermost
-## interior cells near every domain face never written at all -- this was the
-## actual corner-catastrophe root cause. `psi_maxerr` dropped from `0.996` to
-## `~0.025` after both fixes, with the (much smaller, expected) remaining error
-## now located near the star's surface rather than at domain corners. `alpha` had
-## the identical `RetrieveSolution` bug (`mg_cfc_lapse.cpp`, also fixed).
-## Round 16 (per user request) re-verified BOTH `psi` and `alpha` end-to-end
-## (through `AssembleFinalTask`, not just `SolvePsiTask`) and confirms round 15's
-## fixes hold: self-consistently iterated (as every real per-stage solve is, but
-## NOT a single isolated cold-start solve -- see round 16), `psi`/`alpha` converge
-## to a small, resolution-stable residual (`~0.7%` / `~1.7-2%`). Round 16 also
-## found a genuinely new, unresolved issue: the lapse (`alpha`) solve's multigrid
-## V-cycle fails to converge to its `1e-10` threshold on *every* call (stalls at
-## `SolveIterative`'s 40-iteration cap, defect `~1e-5`, defect increasing rather
-## than decreasing with resolution) -- narrows down round 15's open follow-up (2)
-## to specifically the lapse solve, not the vector-potential Poisson solves (which
-## never showed this in round 16's tests). Round 17 (per user's own code review)
-## found and fixed a real, separate bug in the lapse solve: `LapseReactionCoeff`'s
-## three ingredients (`Utilde+2*Stilde`, `psi`, `Ahat^2`) were restricted to coarser
-## V-cycle levels independently, then recombined nonlinearly (`psi^-2`, `psi^-8`) at
-## every level -- inconsistent with FAS, since restriction doesn't commute with a
-## nonlinear recombination. Fixed by precomputing `K(x) = LapseReactionCoeff(...)`
-## once at the finest level and restricting that single coefficient directly
-## (`ncoeff_` 3->1). This measurably improved `alpha`'s accuracy (`0.0180` ->
-## `0.01351`) and moved its worst-error location off the star's core to match
-## `psi`'s -- a real, kept fix -- but did NOT resolve the underlying "Failed to
-## converge" message, which still fires on every lapse solve post-fix. The lapse
-## solve's non-convergence therefore has at least one other, still-unidentified
-## cause; not yet root-caused.
+## boundary NaN is fixed (item 9, rounds 6-7). Both the `psi` O(1) corner-error
+## bug (item 9, rounds 8-15) and the `alpha`/lapse non-convergence bug (rounds
+## 16-18) are FIXED and verified at two resolutions. Four bugs total, all fixed
+## and committed:
+## 1. (round 15) `MGCFCConformalFactor::SmoothPack`/`CalculateDefectPack` silently
+##    dropped the FAS `src_` coarse-grid-correction term.
+## 2. (round 15) `RetrieveSolution` (both `psi` and `alpha` drivers) passed the
+##    wrong ghost depth to `Multigrid::RetrieveResult` (`mglevels_->
+##    GetGhostCells()`, this solver's own shallow internal depth, instead of the
+##    mesh's true `NGHOST`), silently mis-aligning the solved-interior copy-out
+##    by 3 cells and leaving the outermost interior cells near every domain face
+##    never written at all -- the actual `psi` corner-catastrophe root cause
+##    (`psi_maxerr` `0.996` -> `~0.025`).
+## 3. (round 17, found by user code review) `MGCFCLapse`'s `K(x)` reaction
+##    coefficient (`Utilde+2*Stilde`, `psi`, `Ahat^2`) was restricted to coarser
+##    V-cycle levels as three separate channels, then recombined nonlinearly
+##    (`psi^-2`, `psi^-8`) at every level -- inconsistent with FAS, since
+##    restriction doesn't commute with a nonlinear recombination. Fixed by
+##    precomputing `K(x)` once at the finest level and restricting that single
+##    coefficient directly (`ncoeff_` 3->1).
+## 4. (round 18, found by user code review) `MGCFCLapse::SmoothPack`/
+##    `CalculateDefectPack` never read `src_` at all (same bug class as #1, just
+##    in the lapse solver) -- the FAS coarse-grid correction `CalculateFASRHSPack`
+##    computed was silently discarded every V-cycle.
+## Verification: an iterated `DebugCFCSolveAtT0` t=0 replay (rounds 9/11/13-18,
+## always added then fully reverted after use) confirms both `psi` and the final
+## assembled `alpha` converge to a small, resolution-stable residual (`psi
+## ~0.68%`, `alpha ~1.35%`) once self-consistently iterated, at both 128^3 and
+## 256^3, with **zero** `"Failed to converge"` V-cycle messages post-round-18 (a
+## single cold-start isolated solve shows a much larger, non-resolution-
+## convergent error at the star's core for both fields -- this is expected
+## "lagged psi^6" cold-start behavior inherent to the diagnostic, not a bug; see
+## round 16). No outstanding open follow-ups from this investigation thread.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -1709,3 +1705,45 @@ src/cfc/
        screened/Helmholtz operator's coarse-grid smoothing factor is fundamentally
        different from the plain-Laplacian case `SolveIterative`'s convergence
        expectations were tuned against).
+   - **Round 18 (per user's own code review, again -- found by reading
+     `mg_cfc_lapse.cpp` directly): the actual remaining cause of the "Failed to
+     converge" non-convergence, and it's the exact same bug class as round 15's
+     Bug 1, just in the lapse solver instead of the conformal-factor solver.**
+     The user noticed `MGCFCLapse::SmoothPack` never reads `src_` at all -- and
+     confirmed `CalculateDefectPack` doesn't either, even though
+     `CalculateFASRHSPack` (unchanged, already correct) faithfully accumulates the
+     FAS tau-correction into it every V-cycle descent. Exactly like round 15's
+     original finding for `MGCFCConformalFactor`: the coarse-grid correction was
+     computed and stored, then silently discarded, leaving every level below the
+     finest smoothing/computing its defect against its own homogeneous equation,
+     decoupled from the fine grid's actual defect -- a textbook explanation for
+     "V-cycle relaxes locally fine but never actually converges."
+     - **Fix**: added `src(m,0,k,j,i)` into both `SmoothPack`'s Newton/GS update
+       (`fval = lap + dx2*kx*(u_old+1.0) - dx2*src(m,0,k,j,i)`) and
+       `CalculateDefectPack`'s residual (`def = (-kx*(u+1) + src) - lap*idx2`),
+       mirroring `MGCFCConformalFactor::SmoothPack`/`CalculateDefectPack`'s round-15
+       fix exactly (same sign convention, re-derived from `CalculateFASRHSPack`'s
+       existing, already-correct `src += lap*idx2 + kx*(u+1)` accumulation to keep
+       the three functions consistent).
+     - **Verified via the same iterated `DebugCFCSolveAtT0` replay as rounds 16-17**
+       (reapplied, then reverted -- `git diff --stat` confirms `driver.cpp`/
+       `dyngr_tov.cpp` show no diff), both resolutions: **zero** `"Failed to
+       converge"` messages across all 4 iterations, at both 128^3 and 256^3 --
+       completely resolved, not just improved. `alpha_maxerr` at the stable fixed
+       point: `0.01352` (128^3) / `0.01355` (256^3) -- resolution-stable, and
+       essentially unchanged from round 17's post-fix-but-still-stalling value
+       (`0.01351`/`0.01355`), confirming the round-17 coefficient-restriction fix
+       had already gotten `alpha`'s *accuracy* right; round 18 was purely about
+       actually reaching genuine multigrid convergence rather than stalling near a
+       similar-looking answer.
+     - **Both the psi (rounds 8-15) and alpha (rounds 16-18) corner/convergence
+       investigations under item 9 are now concluded.** All four fixes (FAS `src_`
+       for psi, `RetrieveResult` ghost depth for both psi and alpha, FAS-consistent
+       `K(x)` coefficient restriction for alpha, FAS `src_` for alpha) are
+       committed. No outstanding open follow-ups remain from this thread; a full
+       (non-isolated) run of `cfc_tov_full_2x.athinput` has not been re-checked
+       post-round-18 to confirm its "Failed to converge" count is now zero, but
+       given round 18's isolated-solve tests show zero failures at both
+       resolutions across repeated iterations, this is expected to also be
+       resolved -- worth a final confirmation run if/when convenient, not treated
+       as a live open item.

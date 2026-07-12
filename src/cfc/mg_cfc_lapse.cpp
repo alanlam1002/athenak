@@ -167,16 +167,21 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
 
-  // Isolated (1/r falloff) boundary conditions on every non-periodic, non-reflecting
-  // face -- fixed by the physics (Gmunu eq. 78), no configurable mg_bc input the way
-  // gravity has. See mg_cfc_conformal_factor.cpp's constructor comment for why
-  // mesh-reflecting faces need BoundaryFlag::mg_zerograd, not plain
-  // BoundaryFlag::reflect, instead of mg_multipole here.
+  // Outer (non-periodic, non-reflecting) faces use MultigridDriver's own base-
+  // constructor default, BoundaryFlag::mg_zerofixed, not mg_multipole -- see
+  // mg_cfc_conformal_factor.cpp's constructor comment for the full rationale
+  // (CalculateCenterOfMass()/CalculateMultipoleCoefficients() integrate src_, which
+  // this solver never populates -- Utilde+2*Stilde/psi/Ahat^2 all live in coeff_ --
+  // so the multipole path divides by zero and poisons the outer ghost cells with
+  // NaN; DEVELOPMENT.md item 9, rounds 1-6). mporder_/autompo_/
+  // AllocateMultipoleCoefficients() below are left in place, inert.
+  //
+  // Faces where the *mesh* itself is reflecting still need BoundaryFlag::mg_zerograd,
+  // not plain BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state;
+  // MGRootBoundary's device path only recognizes periodic/mg_zerofixed/mg_zerograd).
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
-    } else if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
-      mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
     }
   }
   mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);
@@ -230,11 +235,9 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
   SetupMultigrid(dt, false);
 
-  if (mporder_ > 0) {
-    if (autompo_) CalculateCenterOfMass();
-    CalculateMultipoleCoefficients();
-    SyncMultipoleToDevice();
-  }
+  // See MGCFCConformalFactorDriver::Solve's identical comment: no mg_multipole face
+  // is ever set, so skip the (otherwise dead, and internally NaN-producing via
+  // CalculateCenterOfMass's division by an always-zero src_) multipole setup call.
 
   SolveMG(pdriver);
   Kokkos::fence();
@@ -290,7 +293,13 @@ void MGCFCLapseDriver::LoadKnownFields(const DvceArray5D<Real> &psi,
 }
 
 void MGCFCLapseDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  mglevels_->RetrieveResult(dst, 0, mglevels_->GetGhostCells());
+  // dst (alpha_psi) is mesh-NGHOST-deep, not this solver's own (generally
+  // shallower) ngh_ -- same bug/fix as MGCFCConformalFactorDriver::RetrieveSolution
+  // (src/cfc/mg_cfc_conformal_factor.cpp): passing GetGhostCells() here collapsed
+  // RetrieveResult's dst_off to 0 instead of (mesh NGHOST - ngh_), silently
+  // corrupting the outermost interior cells near every domain face. Matches
+  // gravity's and MGCFCVectorPoissonDriver's own (correct) RetrieveResult calls.
+  mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
 

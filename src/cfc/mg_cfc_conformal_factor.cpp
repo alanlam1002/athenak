@@ -111,6 +111,14 @@ void MGCFCConformalFactor::SmoothPack(int color) {
   auto brdx = block_rdx_.d_view;
   auto u = u_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  // FAS tau-correction accumulator (see this file's top-of-file comment): zero at
+  // the finest level, nonzero at every coarser level once CalculateFASRHSPack has
+  // run there. Must be added to the nonlinear RHS here -- mirroring the generic
+  // linear Multigrid::Smooth's `u -= (lap - src*dx2)*odiag` (multigrid.hpp:606) --
+  // or the coarse-grid correction this array exists to carry is silently dropped
+  // and every level below the finest just relaxes its own homogeneous equation,
+  // decoupled from the fine grid's actual defect.
+  auto src = src_[lev].d_view;
   par_for("MGCFCConformalFactor::SmoothPack", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
   KOKKOS_LAMBDA(const int m, const int k, const int j) {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
@@ -123,7 +131,7 @@ void MGCFCConformalFactor::SmoothPack(int color) {
       ConformalFactorRHS(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
       Real lap = ConformalFactorLap(u, m, k, j, i);
       Real fprime = 6.0 - dx2*drhs_du;
-      Real u_new = u_old - omega*(lap - rhs*dx2)/fprime;
+      Real u_new = u_old - omega*(lap - (rhs + src(m,0,k,j,i))*dx2)/fprime;
       if (u_new + 1.0 < psi_floor) u_new = psi_floor - 1.0;
       u(m,0,k,j,i) = u_new;
     }
@@ -141,6 +149,11 @@ void MGCFCConformalFactor::CalculateDefectPack() {
   auto u = u_[lev].d_view;
   auto def = def_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  // Same FAS tau-correction as SmoothPack above -- must be included here too, or
+  // RestrictPack's downstream Restrict(src_[coarser], def_[this level], ...) would
+  // restrict a defect that ignores whatever correction this level itself already
+  // received, corrupting the correction chain for every level further down.
+  auto src = src_[lev].d_view;
   par_for("MGCFCConformalFactor::CalculateDefectPack", DevExeSpace(), 0, nmmb_-1,
           ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -150,7 +163,7 @@ void MGCFCConformalFactor::CalculateDefectPack() {
     Real rhs, drhs_du;
     ConformalFactorRHS(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
     Real lap = ConformalFactorLap(u, m, k, j, i);
-    def(m,0,k,j,i) = rhs - lap*idx2;
+    def(m,0,k,j,i) = (rhs + src(m,0,k,j,i)) - lap*idx2;
   });
 }
 
@@ -195,24 +208,35 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
 
-  // Isolated (1/r falloff) boundary conditions on every non-periodic, non-reflecting
-  // face -- fixed by the physics (Gmunu eq. 77), no configurable mg_bc input the way
-  // gravity has. Faces where the *mesh* itself is reflecting (e.g. an octant-reduced
-  // domain's inner symmetry planes) need BoundaryFlag::mg_zerograd instead of
-  // mg_multipole (NOT plain BoundaryFlag::reflect -- mg_mesh_bcs_ is
-  // multigrid-internal state, and MGRootBoundary's device path only recognizes
-  // periodic/mg_zerofixed/mg_zerograd; passing the ordinary mesh BoundaryFlag::
-  // reflect there falls through every branch silently, leaving that ghost cell
-  // untouched at stale zero -- confirmed to seed a NaN cascade through the Newton
-  // solve within the first V-cycle). mg_multipole (like mg_zerofixed) selects the
-  // odd/antisymmetric mirror, appropriate for the true outer/asymptotically-flat
-  // boundary but wrong for a symmetry plane, which needs mg_zerograd's even/
-  // symmetric mirror instead.
+  // Outer (non-periodic, non-reflecting) faces use MultigridDriver's own base-
+  // constructor default, BoundaryFlag::mg_zerofixed (Dirichlet delta_psi=0, i.e.
+  // psi=1 exactly at the boundary) -- the leading-order truncation of Gmunu eq. 77's
+  // true isolated 1/r falloff. Multipole boundaries (mg_multipole) were tried first
+  // and found buggy: CalculateCenterOfMass()/CalculateMultipoleCoefficients()
+  // (multigrid_driver.cpp) integrate mglevels_->src_ as "the density," which is
+  // exactly what gravity puts there -- but this solver's own Utilde/Ahat^2 live in
+  // coeff_, not src_ (see this file's top-of-file comment), by design (so V-cycle
+  // FAS tau-corrections into src_ can't corrupt them). src_ is therefore always zero
+  // when Solve() calls these, so CalculateCenterOfMass's im = 1.0/totals[0] divides
+  // by zero, poisoning mpo_/mpcoeff_ with NaN/inf that MGRootBoundary's mg_multipole
+  // branch then evaluates directly into the domain's outer ghost cells on the very
+  // first V-cycle -- root cause of the boundary NaN documented in DEVELOPMENT.md item
+  // 9 (rounds 1-5). Sidestepped by not using mg_multipole here at all: with the
+  // domain boundary placed well outside the star (as in the current test case), the
+  // zerofixed approximation's O(M/r_boundary) error is an acceptable tradeoff versus
+  // fixing/duplicating the multipole moment integration to read coeff_ instead of
+  // src_. mporder_/autompo_/AllocateMultipoleCoefficients() below are left in place,
+  // inert, so multipole support can be revisited later without redoing this input
+  // parsing -- see DEVELOPMENT.md item 9 round 6.
+  //
+  // Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain's
+  // inner symmetry planes) still need BoundaryFlag::mg_zerograd, not plain
+  // BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state; MGRootBoundary's
+  // device path only recognizes periodic/mg_zerofixed/mg_zerograd, and a face left at
+  // ordinary BoundaryFlag::reflect falls through every branch silently).
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
-    } else if (mg_mesh_bcs_[f] != BoundaryFlag::periodic) {
-      mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole;
     }
   }
   mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);
@@ -266,11 +290,12 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
   SetupMultigrid(dt, false);
 
-  if (mporder_ > 0) {
-    if (autompo_) CalculateCenterOfMass();
-    CalculateMultipoleCoefficients();
-    SyncMultipoleToDevice();
-  }
+  // No mg_multipole face is ever set (see the constructor's boundary-flag comment),
+  // so CalculateCenterOfMass()/CalculateMultipoleCoefficients() would be pure dead
+  // work here -- and worse, CalculateCenterOfMass's 1.0/totals[0] divides by an
+  // always-zero src_ for this solver regardless of whether the result is used,
+  // producing an inf/NaN internally every call. Skipped entirely rather than left in
+  // as unused-but-still-computed.
 
   SolveMG(pdriver);
   Kokkos::fence();
@@ -330,7 +355,15 @@ void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
 }
 
 void MGCFCConformalFactorDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  mglevels_->RetrieveResult(dst, 0, mglevels_->GetGhostCells());
+  // dst (psi) is mesh-NGHOST-deep, not this solver's own (generally shallower) ngh_
+  // -- passing GetGhostCells() here made RetrieveResult's dst_off = ngh - ngh_
+  // collapse to 0 instead of (mesh NGHOST - ngh_), silently copying the solved
+  // interior 3 cells too low (for NGHOST=4, ngh_=1) and leaving the outermost
+  // interior cells near every domain face never written at all (stuck at their
+  // pre-solve 1.0 default, becoming 2.0 after the +1 pass below). Matches gravity's
+  // and MGCFCVectorPoissonDriver's own (correct) RetrieveResult calls, which both
+  // pass the mesh's true NGHOST.
+  mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
 

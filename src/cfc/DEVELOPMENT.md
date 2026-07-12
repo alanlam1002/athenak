@@ -25,9 +25,30 @@ its Riemann solver and conserved-to-primitive conversion.
 - `src/gravity/{gravity,mg_gravity}.{hpp,cpp}` — the structural template this module
   mirrors (a thin physics orchestrator + Multigrid/MultigridDriver subclass pairs).
 
-## Status: feature-complete (all equation bodies implemented); first full run of a
-## CFC test case completes (10 cycles, dyngr_tov/isotropic TOV star) but is not
-## yet correct -- NaNs at the x3=0 reflecting boundary under active investigation
+## Status: feature-complete (all equation bodies implemented); the original
+## boundary NaN is fixed (item 9, rounds 6-7). The `psi` O(1) corner-error bug
+## (item 9, rounds 8-15) is FIXED and verified at two resolutions: two bugs were
+## found and fixed in round 15 -- `MGCFCConformalFactor::SmoothPack`/
+## `CalculateDefectPack` silently dropped the FAS `src_` coarse-grid-correction
+## term (real, improved convergence dramatically, but not the corner root cause
+## by itself), and `RetrieveSolution` passed the wrong ghost depth to
+## `Multigrid::RetrieveResult` (`mglevels_->GetGhostCells()`, this solver's own
+## shallow internal depth, instead of the mesh's true `NGHOST`), silently
+## mis-aligning the solved-interior copy-out by 3 cells and leaving the outermost
+## interior cells near every domain face never written at all -- this was the
+## actual corner-catastrophe root cause. `psi_maxerr` dropped from `0.996` to
+## `~0.025` after both fixes, with the (much smaller, expected) remaining error
+## now located near the star's surface rather than at domain corners. `alpha` had
+## the identical `RetrieveSolution` bug (`mg_cfc_lapse.cpp`, also fixed) and
+## almost certainly shares the same root cause as its own O(0.1-0.25) core error
+## from rounds 8-10, though not yet directly re-verified (would need extending
+## the diagnostic replay through `MHD_C2P`/`RescaleSrcTask`/`SolveLapseTask`).
+## Two open follow-ups from round 15, not yet investigated: (1) re-verify
+## `alpha`'s error is actually resolved; (2) a full (non-isolated) run of
+## `cfc_tov_full_2x.athinput` still shows 3 `"Failed to converge"` V-cycle
+## messages in cycle 0 (down from 6 pre-fix, but not zero) -- not yet
+## root-caused, could be `alpha`'s own solve or one of the vector-potential
+## Poisson solves (spot-checked but not fully ruled out).
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -107,18 +128,52 @@ but is not yet correct: `NANS_IN_CONS` C2P errors appear at cycle 0, localized t
 grid points at `k=4` (the first physical cell above the `x3=0` reflecting
 boundary) where `g_dd`/`psi4` come out `-nan`.
 
-**Still unresolved as of this writing** — see open item 9 for the full,
-multi-round investigation, including one claim that turned out to be wrong
+**The original boundary NaN (item 9, rounds 1-6) is fixed and confirmed by
+rebuild+rerun; a second, more serious bug has since been found and is
+unresolved** — see open item 9 for the full, multi-round investigation,
+including one claim that turned out to be wrong
 (`MultigridDriver::PhysicalBoundary` was reported dead code; it is not — a bad
 grep exclusion hid its actual call sites) and one real fix that landed but did
-not resolve the crash (`mg_mesh_bcs_[face]` must hold a multigrid-internal
-`BoundaryFlag` value — `mg_zerograd`, not the ordinary mesh `BoundaryFlag::
-reflect` — fixed in all 4 CFC driver constructors). Isolated with temporary
-instrumentation (added, used, then removed — not left in the tree) to the root
-grid specifically: even with clean, sane inputs (`u_tilde`/`a_sq` both NaN-free
-going in), `psi` at the root grid's single interior cell is already partly NaN
-immediately after the very first V-cycle solve, before anything else in CFC
-touches it. Root cause not yet found. Full detail in open item 9.
+not by itself resolve the original crash (`mg_mesh_bcs_[face]` must hold a
+multigrid-internal `BoundaryFlag` value — `mg_zerograd`, not the ordinary mesh
+`BoundaryFlag::reflect` — fixed in all 4 CFC driver constructors). Round 6
+tracked the actual NaN source to `CalculateCenterOfMass()`
+(`multigrid_driver.cpp`) dividing by an always-zero `src_` for these two solvers
+(their matter fields live in `coeff_`, not `src_`, by design — Finding B), which
+poisons the multipole expansion origin/coefficients with NaN and gets evaluated
+directly into the outer ghost cells via `mg_multipole`. Fixed by switching
+`psi`/`alpha_psi`'s outer boundary from `mg_multipole` to `mg_zerofixed`
+(matching `P_i`/`eta`'s existing treatment) instead of fixing the multipole
+integration itself. **Round 7 confirmed by rebuild+rerun that this actually
+clears the NaN** (cycle 0 completes, no `NANS_IN_CONS` anywhere), but surfaced a
+`SolveIterative` convergence-plateau warning in its place, hypothesized (at the
+time) to be caused by the `mg_zerofixed` outer boundary's `O(M/r)` mismatch.
+**Round 8 falsified that hypothesis**: spatial-defect and analytic-comparison
+diagnostics (both temporary, since reverted) show the stalled defect is
+concentrated at the single interior cell closest to the star's center — the
+corner where the three reflecting (`mg_zerograd`) faces meet — not near the
+outer boundary at all, and the solved `psi`/`alpha` are wrong by `O(1)`
+(`psi` off by up to `2.996`, `alpha` by `0.180`) after just one solve, not
+merely short of a tight tolerance. This is a real, unresolved bug, most likely
+in how the reflecting-corner ghost cells are filled, not a slow-convergence
+tuning question. **Round 9 (per user request) isolated it further**: running a
+single CFC solve directly against the pristine, exactly-analytic t=0 initial
+data — bypassing all hydro/con2prim tasks entirely — already produces
+`psi_maxerr=0.996`, `alpha_maxerr=0.248`. So the bug is not introduced or
+amplified by fluid evolution at all; it's present in CFC's very first solve on
+known-correct input. **Round 10 (per user request) then tested a full,
+non-octant domain with no reflecting boundaries anywhere**, to check whether
+the corner-localized error was specific to the reflecting/`mg_zerograd`
+symmetry or something more general — and found what now looks like **two
+separate bugs**: `psi`'s error (`0.992`) is still corner-localized, but now at
+a plain `mg_zerofixed`-only corner (ruling out anything reflecting-specific,
+pointing instead at `MGRootBoundary`'s sequential per-axis ghost fill not
+composing correctly at any multi-face corner, regardless of `BoundaryFlag`);
+`alpha`'s error (`0.254`) moved away from any corner entirely and onto the
+star's core, suggesting a second, independent problem in the lapse solve
+itself, unrelated to boundary handling. **Neither is yet root-caused**, see
+item 9 rounds 8-10 for the full evidence and the two separate next angles this
+split implies.
 
 ## The XCFC equations and solve order (Gmunu eqs. 71-76)
 
@@ -797,3 +852,694 @@ src/cfc/
      `CalculateMultipoleCoefficients()`/`SyncMultipoleToDevice()`, and/or to
      manually trace `EvalMultipolePhi`'s arithmetic for a degenerate
      single-source-point, single-evaluation-point geometry.
+   - **Round 6 (root cause confirmed, fixed by removing multipole use rather than
+     fixing the multipole path itself)**: round 5's guess was on the right track but
+     not quite located correctly — it isn't about the root grid's degenerate size,
+     it's that `CalculateCenterOfMass()`/`CalculateMultipoleCoefficients()`
+     (`multigrid_driver.cpp:2204/2365`, both written for and only previously
+     exercised by `gravity`) unconditionally integrate `mglevels_->src_[nlevel_-1]`
+     as "the density." That's correct for `gravity`, which populates `src_` via
+     `LoadSource(u0, IDN, ng, -four_pi_G_)` — but item 3's Finding B deliberately
+     put `Utilde`/`Ahat^2` (and the lapse equation's `Utilde+2*Stilde`/`psi`/
+     `Ahat^2`) in `coeff_` instead, specifically so the V-cycle's automatic FAS
+     tau-correction into `src_` can't corrupt them. `src_` is therefore always zero
+     for both nonlinear CFC solvers at the point `Solve()` calls the multipole
+     setup (before any V-cycle work has run). `CalculateCenterOfMass()`'s
+     `Real im = 1.0 / totals[0];` divides by that zero total, producing `inf`, and
+     `mpo_[0..2] = im * totals[1..3]` (`inf * 0.0`) comes out **NaN** —
+     `CalculateMultipoleCoefficients()` then uses this NaN `mpo_` as the expansion
+     origin for every higher moment (`x = ... - xorigin`, etc.), so even though the
+     per-point integrand `s = src(...)*vol` is exactly `0`, `s * x = 0 * NaN = NaN`
+     poisons `mpcoeff_[1..24]` (only the origin-independent monopole
+     `mpcoeff_[0]` survives as clean `0`). `SyncMultipoleToDevice()` ships this to
+     the device, and `MGRootBoundary`'s `mg_multipole` branch evaluates
+     `EvalMultipolePhi` with it directly into the outer ghost cells during the very
+     first V-cycle — exactly reproducing every earlier round's evidence: `coeff_`
+     clean (round 4, it was never the culprit), `u_` already NaN immediately after
+     `SolveMG` returns (corruption enters via the boundary before any interior
+     Newton iteration), and `mporder` 2 vs. 4 making no difference (round 5, both
+     orders consume the same NaN `mpo_`). This is also **not specific to the
+     octant/reflecting-boundary test setup** — the `mg_multipole` outer faces
+     exist in every CFC configuration that uses these two solvers, since that was
+     the only outer-BC option they had.
+     **Fix**: rather than fixing `CalculateCenterOfMass`/
+     `CalculateMultipoleCoefficients` to read `coeff_` instead of `src_` (which
+     would also need a from-scratch re-derivation of the multipole integrand's
+     normalization, since `ScaleMultipoleCoefficients()`'s constants are calibrated
+     for gravity's specific `src = -4*pi*G*rho` convention, not eq. 73/74's `2*pi`
+     coefficient), per user direction the outer-BC choice was changed instead:
+     `MGCFCConformalFactorDriver`/`MGCFCLapseDriver`'s constructors no longer set
+     `mg_mesh_bcs_[f] = BoundaryFlag::mg_multipole` on any face — non-periodic,
+     non-reflecting faces now fall through to `MultigridDriver`'s own base-
+     constructor default, `BoundaryFlag::mg_zerofixed` (`multigrid_driver.cpp:
+     83-90`), same as `P_i`/`eta`'s existing treatment. `mg_zerofixed`'s actual
+     ghost-cell formula (`ghost = -interior`, `multigrid_driver.cpp:1858-1859`) is
+     Dirichlet `u=0` at the face, i.e. `psi=1`/`alpha*psi=1` exactly at the domain
+     boundary — the leading-order (monopole-zero) truncation of Gmunu eq. 77/78's
+     true isolated `1/r` falloff. This is a real accuracy tradeoff (`O(M/r_boundary)`
+     error at the boundary instead of the paper's higher-order asymptotic
+     condition), accepted for now since `cfc_tov.athinput`'s boundary (`x1max=
+     102.4`) sits well outside the star; **not a permanent abandonment of
+     multipole support** — `mporder_`/`autompo_`/`nodipole_`/
+     `AllocateMultipoleCoefficients()`/the "mporder must be 2 or 4" input parsing
+     are left in place (inert), and `Solve()`'s call to `CalculateCenterOfMass()`/
+     `CalculateMultipoleCoefficients()`/`SyncMultipoleToDevice()` was removed
+     entirely (not just left unused) since it would otherwise still compute the
+     `1.0/totals[0]` division — and therefore still produce an internal inf/NaN —
+     every single stage regardless of whether any face reads the result, which is
+     both wasted work and a landmine under any future FPE-trapping build. If
+     multipole boundaries are wanted later (e.g. to allow a smaller box for the
+     same accuracy, per Gmunu sec. 2.6.2), the actual fix is a CFC-local
+     replacement for these two functions that integrates `coeff_` channel 0 instead
+     of `src_`, with the normalization re-derived — deliberately not implemented
+     now, to keep this fix minimal and avoid touching `src/multigrid/` at all.
+   - **Round 7 (fix verified by rebuild + rerun; new, much smaller issue found)**:
+     rebuilt (`cfc_sakura.sh`'s toolchain, `intel/2025.3`/`impi/2021.17`) and reran
+     `cfc_tov.athinput` (`run_cfc_tov/run10.log`). **The boundary NaN is gone**: no
+     `NANS_IN_CONS`, no `-nan` anywhere in the log; cycle 0 completes all RK stages
+     and cycle 1 begins. A different, far less severe issue surfaced in its place:
+     `MultigridDriver::SolveIterative` (`multigrid_driver.cpp:781-820`, generic,
+     untouched by this fix) logs "Failed to converge after 40 iterations" 6 times
+     during cycle 0 -- defect plateaus around `2e-6`-`7e-6`, short of the
+     `<cfc> mg_threshold` default of `1e-10`. Not a crash: hitting the 40-iteration
+     cap is a soft stop in that function (sets `pdriver->nlim = pmy_mesh_->ncycle`
+     rather than aborting), so the run just quietly ends after cycle 1 starts
+     instead of reaching `nlim=10`. Six failures in one cycle matches 2 nonlinear
+     solvers (`psi`, `alpha_psi`) x 3 RK stages -- consistent with this being
+     specific to the two solvers whose outer BC round 6 just changed, not the
+     linear `P_i`/`eta` solves (which use `mg_zerofixed` already and were
+     unaffected by this fix).
+     **Leading hypothesis, not yet confirmed**: `mg_zerofixed` forces
+     `psi=1`/`alpha*psi=1` exactly at the domain boundary (`x1max=102.4`), but the
+     true solution's boundary value is the small nonzero isolated `~M/(2r)`
+     falloff -- a fixed mismatch between the imposed Dirichlet data and the actual
+     solution that V-cycle smoothing can reduce but not eliminate, so the defect
+     plateaus at a floor set by that mismatch rather than continuing to shrink
+     toward `1e-10` (which was tuned assuming the more accurate multipole BC).
+     **Before picking a new `mg_threshold` value, next step (per user direction) is
+     to verify this hypothesis and validate the solver itself, not just tune around
+     the symptom**: (1) instrument the defect array's spatial distribution at the
+     40-iteration cutoff to confirm it's actually concentrated near the outer
+     boundary rather than spread through the domain (would falsify the boundary-
+     mismatch hypothesis and point at a different bug instead); (2) compare the
+     converged `psi`/`alpha=alpha_psi/psi` against `dyngr_tov.cpp`'s own analytic
+     isotropic-TOV profile (available since `isotropic=true`, `v_pert=0.0` is a
+     static-equilibrium configuration -- the matter distribution barely changes
+     step to step, so the CFC-solved metric should reproduce the pgen's original
+     analytic profile closely if the solver is working correctly, independent of
+     whatever `mg_threshold` is chosen). Both diagnostics to be added as temporary
+     instrumentation (removed once used, matching rounds 1-6's pattern) -- in
+     progress.
+   - **Round 8 (both diagnostics run; round 7's boundary-mismatch hypothesis
+     falsified -- this is a real wrong-answer bug, not a slow-convergence
+     tolerance issue)**: temporary instrumentation added to both
+     `MGCFCConformalFactor`/`MGCFCLapse` (a `DebugPrintDefectStats()` method
+     printing the finest-level `def_` array's largest magnitude and its location
+     as a fraction along each axis, called right after `SolveMG()` returns in each
+     driver's `Solve()`) and to `dyngr_tov.cpp`'s `TOVHistory` (two new history
+     columns, `psi-maxerr`/`alpha-maxerr`, comparing `padm->adm.psi4^0.25`/`alpha`
+     against the pgen's own analytic isotropic-TOV profile, reusing
+     `tov::TOVStar::GetMandAlphaIso`/`FindSchwarzschildR` the same way
+     `SetADMVariablesToTOV` does). Getting the second diagnostic working surfaced
+     two more real (if narrow) bugs along the way, both already reverted:
+     - `ptov_params` (the persistent TOV solution `TOVHistory` needs to read) is
+       only ever populated `if (pmbp->padm->is_dynamic || pmy_mesh_->adaptive)`
+       (`SolveTOV`/`SetupTOV`, `dyngr_tov.cpp`) -- both false for this test, so it
+       stays permanently `nullptr` for the whole run. A first attempt at the
+       diagnostic crashed with a null-pointer segfault inside `TOVHistory` at
+       startup (confirmed via `gdb -batch -ex "bt full"` on the resulting core
+       dump, using a `-g` recompile of just that one file to get line numbers) --
+       traced to `Driver::Initialize -> HistoryOutput::LoadOutputData` calling
+       `user_hist_func` once before `ProblemGenerator` has run at all. Worked
+       around for the diagnostic by temporarily removing the `is_dynamic`/
+       `adaptive` guard (unconditionally populating `ptov_params`) -- confirmed
+       safe (nothing else conditions on its null-ness except `FinalizeTOV`'s
+       cleanup and `SetADMVariablesToTOV`, the latter separately gated on
+       `is_dynamic` in `dyn_grmhd.cpp`'s own task queueing, unaffected) -- but
+       reverted afterward rather than kept, since it's a real behavior change to
+       shared pgen code that wasn't asked for.
+     - Own bug in the comparison formula itself: first pass set
+       `psi_analytic = fmet` (`fmet = r_schw/r`), but `dyngr_tov.cpp`'s own pgen
+       code sets `psi4 = fmet^2` (`g_dd = psi4*delta_ij`), and `tov.hpp`'s exterior
+       formula (`FindSchwarzschildR`: `r_schw = r_iso*psi^2`) confirms
+       `fmet = psi^2`, not `psi` -- so `psi_analytic` should be `sqrt(fmet)`. Caught
+       immediately by a sanity check built into the diagnostic itself: at `t=0`
+       (before CFC's first solve ever runs, metric still exactly the pgen's raw
+       analytic initial data), `psi-maxerr` should read machine epsilon, not a
+       real number -- the first (buggy) formula gave `0.222` at `t=0`, an obvious
+       tell; fixed to `sqrt(fmet)`, rerun gave `2.22e-16` at `t=0` as expected,
+       confirming the corrected formula and the rest of the diagnostic
+       infrastructure are both trustworthy before trusting its `t=0.64` output.
+     - **Results, `run_cfc_tov/run15.log` + `cfc_tov.user.hst`** (both diagnostics
+       reverted after this run, per the established add-use-remove pattern; not
+       left in the tree):
+       - Defect location: **identical for every one of the 6 failed solves across
+         both `psi` and `alpha_psi`** -- `(k,j,i)=(1,1,1)`,
+         `frac_along_axis=(0,0,0)`, i.e. the single innermost interior cell at the
+         corner where all three reflecting faces (`x1=x2=x3=0`) meet, closest to
+         the star's center (highest density, `rhoc=1.28e-3`) -- **not** near the
+         outer `mg_zerofixed` boundary at all. This directly falsifies round 7's
+         "Dirichlet-mismatch-at-the-outer-boundary" hypothesis: whatever is
+         stalling convergence is happening at the opposite end of the domain,
+         at/near the coordinate origin where the three `mg_zerograd` reflecting
+         faces meet in a corner, not at any `mg_zerofixed` face.
+       - Analytic comparison: `psi-maxerr` goes from `2.22e-16` at `t=0` (confirms
+         the diagnostic is measuring correctly, and confirms the pgen's initial
+         data is exactly analytic as expected) to **`2.996`** at `t=0.64` (after
+         cycle 0's single CFC solve) -- `psi` itself is `O(1-1.5)` for this star,
+         so an absolute error of `~3.0` is not "close but short of a tight
+         tolerance," it is grossly wrong. `alpha-maxerr` goes from `0.0` to
+         `0.180` over the same step (`alpha` ranges roughly `0.68`-`1.0` here) --
+         also a large, not-nearly-converged error.
+     - **Conclusion**: this is not the "boundary Dirichlet-mismatch creates an
+       irreducible defect floor" issue round 7 hypothesized -- that framing is
+       retired. The real, still-unexplained problem is localized at/near the
+       reflecting-boundary corner nearest the star's center, and is severe enough
+       to produce an `O(1)` error in `psi`/`alpha` after just one solve, not a
+       slow-but-basically-correct convergence tail. **Not yet root-caused.**
+       Plausible next angles (not yet tried): (1) whether `cfc_bcs.cpp`'s
+       `CFCScalarBCs`/`CFCVectorBCs` (or `MGRootBoundary`'s `mg_zerograd` fill,
+       `multigrid_driver.cpp:1858-1920`) correctly fill the actual *corner* ghost
+       cells where two or three reflecting faces meet -- the per-face sequential
+       x1-then-x2-then-x3 fill order in `MGRootBoundary` means a true corner cell
+       needs contributions this fill order may not compose correctly, and this is
+       a genuinely different code path from the single-flat-face case already
+       exercised/confirmed correct in round 3; (2) whether the Newton
+       linearization (`ConformalFactorRHS`, `mg_cfc_conformal_factor.cpp`) is
+       well-behaved at the highest-density point in the domain, independent of
+       any boundary-fill question, given this cell is also where `rhoc` peaks;
+       (3) re-running with a non-octant (full, non-reflecting-boundary) domain to
+       see if the same corner-adjacent failure mode persists without any
+       reflecting faces at all, which would cleanly separate "corner-fill bug"
+       from "high-density-point solver bug." Stopped here to report back rather
+       than keep iterating unilaterally, per the same pattern as round 5.
+   - **Round 9 (per user request: isolate the CFC solve from fluid evolution
+     entirely, by running it once against the pristine t=0 initial data)**: added
+     a temporary `DebugCFCSolveAtT0(Driver*, Mesh*)` function (in `dyngr_tov.cpp`,
+     since it needed direct access to `ptov_params`/`tov::TOVStar` for the
+     analytic comparison), hooked into the very top of `Driver::Execute()` --
+     before `ExecuteTaskList(pmesh, "before_timeintegrator", 0)` or anything else
+     runs -- so it sees `pmbp->pmhd->u0`/`w0`/`padm->adm` exactly as
+     `ProblemGenerator` left them. It manually calls all ~35 of `cfc::CFC`'s
+     public task methods once, by hand, in the exact order `QueueCFCTasks()`
+     queues them (`cfc.cpp:271-361`, a call sequence that is already a valid
+     topological order of the dependency graph, so replaying it literally in
+     source order is correct), bypassing `MHD_C2P` entirely (`RescaleSrcTask`'s
+     real dependency) since `w0` at this point is already exactly the pgen's
+     analytic primitives -- no con2prim inversion needed or wanted. After the
+     chain completes it compares the resulting `psi`/`alpha` against the same
+     analytic isotropic-TOV formula used in round 8, then calls `std::exit(0)` so
+     the program never proceeds into the real simulation loop. Needed the same
+     `ptov_params`-unconditional-populate change as round 8 (reapplied, then
+     re-reverted afterward, exact same rationale).
+     - **Result** (`run_cfc_tov/run16.log`): `global psi_maxerr=0.996`,
+       `alpha_maxerr=0.248` after a *single* CFC solve against data that is
+       *exactly* the analytic fixed point going in -- no fluid evolution, no RK
+       substepping, no repeated cycles involved at all. This is smaller than
+       round 8's after-one-full-cycle numbers (`2.996`/`0.180`) but is equally
+       definitive: **the bug is entirely inside CFC's own solve pipeline, not
+       something introduced or amplified by hydro/con2prim coupling.** Only 2
+       `SolveIterative` "Failed to converge" messages this run (vs. 6 in round 7/8,
+       which included 3 RK-stage repeats) -- exactly matches the 2 nonlinear
+       solves (`psi`, `alpha_psi`) invoked, confirming the manual chain really did
+       run exactly once as intended, not by accident replaying stale state.
+       At the specific corner cell flagged in round 8 (mesh-indexed `(ks,js,is)`,
+       `r=1.386`): `psi_solved=1.032` vs `psi_analytic=1.187` (off by `0.155` --
+       notably *not* the domain's worst point in this pure-t=0 test, unlike round
+       8's after-hydro run) but `alpha_solved=0.928` vs `alpha_analytic=0.680`
+       (off by `0.248`, exactly matching the printed global `alpha_maxerr` -- so
+       the worst `alpha` error *is* at this corner, even in the pure t=0 case).
+     - **Narrows the search substantially**: no need to look at `MHD_C2P`/hydro
+       coupling, RK sub-stepping, or repeated-cycle accumulation at all -- the
+       first-ever CFC solve on known-exact input already fails. The bug is
+       somewhere in the ~35-task chain itself: `AssembleVectorSource`/the `P_i`/
+       `eta` linear solves, `ComputeADualFromX`, `SolveConformalFactor`'s Newton
+       iteration, `RescaleMatterSources`, `SolveLapse`'s Gauss-Seidel solve, the
+       ghost-exchange/`cfc_bcs.cpp` physical-BC rounds between them, or
+       `AssembleLapseShiftK`'s final pointwise assembly. Round 8's corner-adjacent
+       defect concentration is still the strongest lead (now further supported by
+       `alpha`'s worst error recurring at that exact corner even at `t=0`) --
+       round 8's three next-angle suggestions (corner ghost-cell fill correctness,
+       Newton behavior at the high-density point, non-octant domain to isolate
+       corner-fill from high-density-point causes) remain the natural next steps,
+       now with added confidence they're looking in the right general area since
+       fluid coupling has been ruled out as a contributing factor. Not yet
+       root-caused. Temporary instrumentation removed after use, as in every
+       prior round.
+   - **Round 10 (per user request: rule out the *reflecting*-corner hypothesis
+     specifically, by testing a full non-octant domain with no reflecting
+     boundaries anywhere)**: new input file
+     `inputs/dyn_grmhd/cfc_tov_full.athinput` -- same star (`rhoc=1.28e-3`,
+     `kappa=100`), same resolution (`dx=1.6`, 64 cells per axis, so identical
+     per-solve cost to the octant test), but centered in a full box
+     (`x1,x2,x3 in [-51.2,51.2]`) with `diode` (-> `mg_zerofixed`) on all six
+     faces and no `reflect` anywhere -- so `mg_mesh_bcs_[f]` is `mg_zerofixed` on
+     every face for both nonlinear solvers, with no `mg_zerograd` faces and no
+     reflecting-symmetry corner at all. Reran round 9's `DebugCFCSolveAtT0`
+     diagnostic (reapplied then re-reverted, identical mechanism), extended to
+     also report the domain-relative location (fraction along each axis) of the
+     worst `psi`/`alpha` error, not just the corner-cell value, since this domain
+     has no reflecting corner to specifically check.
+     - **Result** (`run_cfc_tov_full/run1.log`): `psi_maxerr=0.992` at
+       `frac_along_axis=(0,0,1)` -- a genuine corner of the box (where `x3min`,
+       `x2min`, `x1max` meet), even though every face there is a plain
+       `mg_zerofixed` face with no reflecting symmetry involved at all.
+       `alpha_maxerr=0.254` at `frac_along_axis=(0.508,0.508,0.508)` -- the
+       domain's geometric *center*, i.e. right at the star's core, nowhere near
+       any boundary.
+     - **Conclusion: this looks like two separate bugs, not one.**
+       - `psi`'s error is still large and still corner-concentrated, but the
+         corner is now a plain `mg_zerofixed`-`mg_zerofixed`-`mg_zerofixed`
+         meeting point, not a reflecting/`mg_zerograd` one. This rules out
+         anything specific to reflecting symmetry or `mg_zerograd`'s even-mirror
+         formula as the cause -- the real issue is more general: `MGRootBoundary`
+         filling ghost cells one axis at a time in sequence (x1, then x2 using
+         the just-filled x1 ghosts, then x3 using both) may simply not compose
+         correctly at any point where 2 or 3 faces' fills overlap, regardless of
+         which `BoundaryFlag` those faces carry. Round 8's suspicion of the
+         reflecting corner specifically is superseded by this more general
+         "any multi-face corner" framing.
+       - `alpha`'s error moved entirely away from any corner and onto the star's
+         core instead -- a location with no boundary-fill explanation at all,
+         pointing at something in the lapse solve itself (`SolveLapseTask`/
+         `MGCFCLapse`'s Gauss-Seidel kernel, or the `RescaleSrcTask` source it
+         consumes) misbehaving specifically where the matter source is largest,
+         independent of whatever's wrong with `psi` at the corners. That
+         `alpha`'s worst error happened to sit at the same corner cell in
+         rounds 8-9's octant tests now looks like it may have been coincidence
+         (or a secondary/downstream effect of `psi`'s corner error feeding into
+         `alpha`'s own equation, since `K(x)` in eq. 74 depends on `psi`) rather
+         than `alpha` having its own independent corner problem.
+     - **Two separate next angles, not one**: (1) for `psi`, inspect
+       `MGRootBoundary`'s per-axis-sequential ghost fill
+       (`multigrid_driver.cpp:1847-1922`) directly at a corner cell to see
+       whether the x2/x3 passes correctly incorporate the x1 pass's results (or
+       clobber/ignore them) -- this is now suspected to be a general multigrid
+       ghost-fill bug potentially affecting `gravity` too if it ever runs a
+       single-meshblock, all-`mg_zerofixed` configuration, not CFC-specific,
+       worth flagging carefully if confirmed; (2) for `alpha`, examine
+       `SolveLapseTask`/`RescaleSrcTask`/`MGCFCLapse`'s Gauss-Seidel kernel
+       independently of any corner question, focusing on behavior at/near the
+       highest-density point. Not yet root-caused for either. Temporary
+       instrumentation removed after use; `cfc_tov_full.athinput` and
+       `run_cfc_tov_full/` are kept (unlike the driver.cpp/dyngr_tov.cpp
+       instrumentation) since they're reusable test scaffolding, not debug code.
+   - **Round 11 (per user request: focus on `psi` only for now -- `alpha`'s error
+     may just be a downstream effect of `psi`'s, so it's set aside until `psi` is
+     understood -- and test whether round 10's corner error is a real bug or an
+     artifact of the outer boundary being too close, by doubling the domain
+     half-width)**: before running anything, a back-of-envelope check using the
+     star's known mass (`Mass: 1.40016` from the pgen's own log output) against the
+     analytic exterior falloff `psi = 1 + M/(2r)`: at round 10's corner
+     (`r = 51.2*sqrt(3) = 88.7`), the true deviation from `psi=1` out there is only
+     `1.40016/(2*88.7) = 0.008` -- two orders of magnitude below the observed
+     `psi_maxerr=0.992`, suggesting the corner error is not simple finite-domain
+     Dirichlet truncation. Tested this directly rather than trusting the estimate
+     alone: new input `inputs/dyn_grmhd/cfc_tov_full_2x.athinput` (kept, reusable
+     scaffolding like round 10's `cfc_tov_full.athinput`) -- same star, same
+     `dx=1.6` resolution, but half-width doubled `51.2 -> 102.4` (`nx` doubled
+     `64 -> 128` per axis to hold resolution fixed while only the boundary moves,
+     isolating domain-size from resolution effects), still all `diode`
+     (-> `mg_zerofixed`) on every face. Reran round 9-10's `DebugCFCSolveAtT0`
+     diagnostic unchanged (reapplied to `driver.cpp`/`dyngr_tov.cpp`, including the
+     `ptov_params` unconditional-populate patch, then fully reverted after use --
+     confirmed via `git diff --stat` showing empty output on both files, and a
+     clean rebuild afterward). Built and ran on `/sakura/ptmp/tlam/` (scratch
+     space) rather than the home-directory `~/athenak_cfc/build_cfc` used in
+     earlier rounds: the home-directory build hit `Disk quota exceeded` mid-compile,
+     traced to ~9.3 GB of accumulated `core.sakura01.*` crash dumps in `~/tlam`
+     left over from earlier debugging sessions (some pre-dating this investigation
+     entirely) -- removed, and a fresh build tree set up under
+     `/sakura/ptmp/tlam/athenak_cfc_build` (source still read from
+     `~/athenak_cfc`) to keep future large runs off the quota-limited home
+     filesystem. `run_cfc_tov_full_2x/` (also on scratch,
+     `/sakura/ptmp/tlam/run_cfc_tov_full_2x/`) holds `run1.log`.
+     - **Result**: `psi_maxerr=0.996022` at `frac_along_axis=(0.996,0.004,0.004)`,
+       `r=175.976` -- essentially unchanged from round 10's `0.992` at the
+       half-width-51.2 domain's corner (if anything, very slightly larger), even
+       though the boundary moved twice as far away and the back-of-envelope
+       truncation estimate at this new, farther corner is smaller still
+       (`1.40016/(2*175.976) = 0.004`). The error stayed pinned to a domain corner
+       in both cases (`frac_along_axis` component values sit at/near `0` or `1` on
+       all three axes in both round 10 and round 11 -- the exact corner identity
+       shifted since round 10 used `ix1_bc=ix2_bc=ix3_bc=diode` symmetric bounds
+       and this run's data-dependent worst point simply landed on a different one
+       of the box's 8 corners, not evidence against the "any multi-face corner"
+       framing). `alpha_maxerr=0.247404` at `frac_along_axis=(0.504,0.504,0.504)`
+       (the domain center/star's core again, essentially unchanged from round 10's
+       `0.254`), consistent with `alpha`'s error being independent of domain size
+       too, as expected for an issue unrelated to any boundary.
+     - **Conclusion: this rules out finite-domain Dirichlet truncation as the
+       (or a significant) cause of `psi`'s corner error.** Doubling the domain --
+       which should have roughly halved a true truncation-driven error, per the
+       `M/(2r)` scaling -- left `psi_maxerr` unchanged to 3 significant figures.
+       Combined with round 10's result (reflecting vs. plain `mg_zerofixed`
+       corners both fail identically) and the original back-of-envelope estimate
+       (predicted truncation error two orders of magnitude too small to explain
+       the observed one even before running anything), the `psi` corner error is
+       now on strong footing as a genuine bug, most likely in `MGRootBoundary`'s
+       sequential per-axis (x1, then x2, then x3) ghost-cell fill
+       (`multigrid_driver.cpp:1847-1922`) not composing multiple faces' Dirichlet
+       data correctly at a true corner cell -- not a symptom of the domain being
+       "too small" for the physics. **Next step (per user direction to focus on
+       `psi` only): read `MGRootBoundary` directly and check what happens at a
+       corner cell where 2 or 3 faces are filled in sequence** -- does the x2 pass
+       see/preserve the x1 pass's result, does x3 see both, or does a later pass
+       overwrite an earlier one's corner contribution? `alpha` remains set aside
+       per this round's framing (its error is unchanged in both magnitude and
+       location by this test, still consistent with it being either a downstream
+       effect of `psi`'s own error via eq. 74's `K(x)` term, or an independent
+       lapse-solve issue -- not distinguished by this test, deliberately not
+       investigated further this round).
+   - **Round 12 (per user direction: read `MGRootBoundary` and check the corner-fill
+     composition directly)**: before touching code, hand-traced both
+     `MultigridDriver::MGRootBoundary` (`multigrid_driver.cpp:1826-2020`, the
+     distributed-root-grid fill) and `MultigridDriver::PhysicalBoundary`
+     (`multigrid_tasks.cpp:129-350`, the per-MeshBlock finest-level fill that
+     actually governs the Newton-smoothed `psi` solution in these single-MeshBlock
+     tests) -- both share the same sequential x1-then-x2-then-x3 structure, each
+     pass looping over the *full* (ghost-inclusive) extent of the other two axes.
+     Worked a concrete 3D example by hand (`ngh=1`, all faces `mg_zerofixed`,
+     interior corner value `A`): pass 1 (x) writes wrong garbage at the true
+     corner (reads an as-yet-unfilled ghost row), but pass 2 (y) *overwrites* the
+     x1-x2 edge at the interior-k row correctly (`= +A`, using pass 1's already-
+     valid face fill), and pass 3 (z), last, overwrites the true 3-way corner using
+     that now-valid edge value (`= -A`) -- exactly the correct triple-reflection
+     result. The scheme is self-correcting by construction for any BC formula that
+     only mirrors along its own axis while holding the other two indices fixed
+     (`mg_zerofixed`/`mg_zerograd`/`periodic`, everything used in these tests) --
+     the *last* pass to touch a given ghost cell always wins, and by induction its
+     source is already validated by the earlier passes in the sequence. This
+     directly contradicts round 10-11's leading hypothesis.
+     - **Verified empirically, not just on paper**: added a small, surgical
+       temporary probe (`MGCFCConformalFactorDriver::DebugPrintCornerGhosts()`,
+       `mg_cfc_conformal_factor.hpp`/`.cpp`, called once right after `SolveMG()`
+       returns in `Solve()`) that reads back the finest-level `delta_psi` array
+       and prints the interior cell adjacent to the round-11 corner
+       (`ox1`/`ix2`/`ix3`, all `mg_zerofixed` for `cfc_tov_full_2x.athinput`)
+       alongside its 2-face-edge and 3-face-corner ghost mirrors, comparing
+       against the hand-derived expected values (`edge = +A`, `corner = -A`).
+       Rebuilt (scratch space) and ran the normal `cfc_tov_full_2x.athinput`
+       task graph directly (no need to reapply the `DebugCFCSolveAtT0` replay
+       machinery this time -- this check is a pointwise algebraic identity on the
+       multigrid's own ghost fill, true regardless of convergence state, so the
+       ordinary per-stage `CFC_SolvePsi` task exercises it for free).
+     - **Result** (`/sakura/ptmp/tlam/run_cfc_tov_full_2x_probe/run1.log`):
+       `edge_diff=0.000000e+00` and `corner_diff=0.000000e+00` **exactly**, on
+       every RK stage sampled. The multigrid's internal ghost fill composes
+       corners perfectly correctly -- round 10-11's leading hypothesis
+       (`MGRootBoundary`/`PhysicalBoundary`'s sequential fill not composing
+       multi-face corners) is **retracted**. This was a real, reasoned hypothesis
+       that looked structurally suspicious, but both the hand trace and the
+       empirical probe now rule it out conclusively.
+     - **Conclusion / where this leaves the `psi` corner error**: the O(1) error
+       at corner-adjacent interior cells is real (rounds 8-11) but is *not* a
+       ghost-fill composition bug. Originally logged two remaining candidates
+       here; **candidate (2), the CFC-level post-solve `MeshBoundaryValuesCC`
+       exchange for `psi` (`pbval_psi`), is retracted** (caught by the user while
+       reviewing this round -- see round 13's note below for the full reasoning):
+       `SolveConformalFactor` (`cfc.cpp`, called by `SolvePsiTask`) ends with
+       `AssembleConformalMetric(pmy_pack, psi)`, which takes `psi` as
+       `const DvceArray5D<Real>&` (`cfc_reconstruct.cpp:137`) and never writes
+       back into it -- so `psi` is fully determined once `SolvePsiTask` returns,
+       strictly *before* `CFC_RestPsi`/`SendPsi`/`RecvPsi`/`ProlongPsi` (later,
+       separate nodes in `QueueCFCTasks()`, `cfc.cpp:318-325`) ever run. Every
+       `psi_maxerr` measurement in rounds 9-13 was taken by replaying only up
+       through `SolvePsiTask` and reading `psi` back immediately after, so that
+       post-solve exchange was never even exercised by any of these diagnostics
+       -- and even if it had run, it only touches mesh-level *ghost* cells, never
+       the interior cells (`i=ie`, etc.) these rounds have been tracking. The
+       sole remaining candidate is **(1) `MGCFCConformalFactor`'s own
+       Newton-Gauss-Seidel kernel** (`SmoothPack`/`ConformalFactorRHS`,
+       `mg_cfc_conformal_factor.cpp`) or another step inside
+       `SolveConformalFactor`'s own solve path itself (`LoadMatterSource`,
+       `LoadNonlinearCoefficient`, `RetrieveSolution`, the `+1` offset pass --
+       all in-scope, all executed, all upstream of what every round's diagnostic
+       has read back) -- possibly misbehaving specifically for interior cells
+       adjacent to multiple ghost faces at once (e.g. a coloring/indexing issue,
+       or the `psi_floor` positivity clamp firing pathologically in this
+       far-field, near-vacuum region where `Utilde`/`Ahat^2` are both ~0).
+       Temporary probe fully reverted after use (confirmed via `git diff --stat`:
+       `mg_cfc_conformal_factor.hpp`
+       shows no diff, `.cpp` matches exactly the permanent round-6/7 fix's diff
+       stat), and a clean rebuild confirms the revert compiles.
+   - **Round 13 (per user request: double the resolution to check whether this is
+     just a convergence problem)**: same domain as round 11-12's
+     `cfc_tov_full_2x.athinput` (half-width 102.4, all faces `mg_zerofixed`), but
+     `dx` halved (`1.6 -> 0.8`, `nx` doubled `128 -> 256`) -- new input
+     `inputs/dyn_grmhd/cfc_tov_full_2x_hires.athinput` (kept, reusable scaffolding
+     like the other `cfc_tov_full*` inputs). Needed rounds 9-12's isolated t=0
+     `DebugCFCSolveAtT0` replay again (a full normal run's per-cycle multigrid
+     solves are too slow to wait out repeatedly at this resolution -- confirmed
+     directly this round: a first attempt just running the ordinary task graph
+     and hooking the comparison through `TOVHistory` instead took over 7 minutes
+     for a single cycle to reach its first history output and was abandoned, see
+     below), but the prior rounds' version of that diagnostic was never committed
+     and had already been reverted out of the working tree, so it isn't preserved
+     anywhere -- **reconstructed from scratch** this round, directly off
+     `cfc.cpp`'s `QueueCFCTasks()` ordering (`cfc.cpp:271-361`) rather than
+     memory: replays `SolveVecXTask` through `ComputeADualTask` (the full
+     X-vector-potential chain `Ahat^2` depends on) then `SolvePsiTask`, skipping
+     `MHD_C2P`/`RescaleSrcTask`/`SolveLapseTask`/the shift solve entirely (not
+     needed for a `psi`-only check, same reasoning as before: `w0` at t=0 is
+     already exactly the pgen's analytic primitives). Comparison target and
+     reporting logic also rebuilt from first principles rather than recalled:
+     analytic `psi(r) = sqrt(FindSchwarzschildR(r,mass)/r)`, the exact relation
+     `dyngr_tov.cpp`'s own `SetADMVariablesToTOV` uses to set the initial guess
+     (lines 162/218-219 and 543/577-578) -- confirmed this reconstruction is
+     faithful by first rerunning the *unchanged* `cfc_tov_full_2x.athinput` and
+     getting back round 11's exact number, `psi_maxerr=0.996022` at the same
+     corner, before trusting the new hi-res input's result.
+     - **Abandoned approach, noted for the record**: first tried hooking the
+       comparison through `TOVHistory` (which already runs every history-output
+       dt and has `ptov_params` in scope in the same translation unit) instead of
+       replaying the CFC task graph by hand, reasoning that a pointwise
+       comparison against the *converged* per-cycle state should be just as valid
+       as an isolated t=0 solve and would avoid needing to reconstruct the replay
+       machinery. This was correct in principle but impractical: with `nlim=10`
+       and `dt`-limited timesteps, a single cycle's worth of real (non-isolated)
+       multigrid solves -- 2 nonlinear solves (`psi`, `alpha*psi`) x 3 RK stages,
+       each hitting the same 40-iteration non-convergence -- took over 7 minutes
+       of wall time before the first history output even fired, confirmed via a
+       run that hit a wall-clock timeout mid-cycle-1 with zero diagnostic prints
+       despite cycle 0 having fully completed. Reverted (`git diff --stat` clean
+       on `dyngr_tov.cpp` before starting the replay reconstruction) in favor of
+       the isolated-solve replay, which reproduces a comparable result in
+       seconds.
+     - **Result**: hi-res (`/sakura/ptmp/tlam/run_cfc_tov_full_2x_hires/run_replay.log`):
+       `psi_maxerr=0.996037` at `frac_along_axis=(1,0,0)`, `r=176.669` --
+       essentially identical to the baseline-resolution run's `psi_maxerr=0.996022`
+       at `r=175.976` (same corner; the small `r` shift is just the finer grid's
+       cell-center landing fractionally closer to the true corner). Doubling
+       resolution changed the error by 1.5e-5 in absolute terms, a 0.0015%
+       relative change -- effectively zero, and nowhere near what halving the
+       discretization error of an under-resolved or slowly-converging feature
+       should produce.
+     - **Conclusion: this rules out under-resolution and slow/incomplete Newton
+       convergence as the (or a significant) cause of `psi`'s corner error.**
+       Combined with round 11 (domain size doesn't matter) and round 12
+       (ghost-fill composition is provably correct), three independent axes --
+       domain size, resolution, and ghost-fill algorithm -- have now all been
+       ruled out. The error is not a truncation, convergence, or boundary-fill
+       artifact; whatever is wrong lives specifically in the per-point physics/
+       numerics of the corner-adjacent interior cells themselves. (Round 12's
+       other candidate, the CFC-level post-solve `MeshBoundaryValuesCC` psi
+       exchange, was separately retracted after this round -- see the note added
+       to round 12's writeup above -- since every `psi_maxerr` measurement,
+       rounds 9-13 alike, is read back before that exchange ever runs.) This
+       leaves `SolveConformalFactor`'s own solve path (`cfc.cpp`) -- most likely
+       the Newton-Gauss-Seidel kernel itself
+       (`SmoothPack`/`ConformalFactorRHS`, `mg_cfc_conformal_factor.cpp`) -- as
+       the sole remaining candidate; next round should instrument it directly
+       rather than continue testing external variables.
+       Temporary diagnostic fully reverted after use (confirmed via
+       `git diff --stat` showing empty output on `dyngr_tov.cpp` and
+       `driver.cpp`), and a clean rebuild confirms the revert compiles.
+   - **Round 14 (per user suggestion: substitute the analytic TOV solution into the
+     discretized equation directly and check the residual, to test whether the
+     equation itself is implemented correctly independent of whether the Newton-
+     Gauss-Seidel solver converges to it)**: for a static (`v_pert=0`), non-rotating
+     TOV star, `Ahat^2 = 0` identically everywhere (no extrinsic curvature in a
+     static conformally-flat spacetime) and `psi_analytic = 1+M/(2r)` is the *exact*
+     solution of the vacuum Laplace equation eq. 73 reduces to away from the star --
+     so injecting the analytic profile and evaluating the discrete residual should
+     give ~roundoff, not O(1), if the discretization is correct.
+     - **Implementation**: reused rounds 9-13's `SolveVecXTask`-through-
+       `ComputeADualTask` replay unchanged (populates the real `u_tilde`/`a_sq`),
+       but instead of calling `SolvePsiTask` (the real Newton solve), built the
+       analytic `delta_psi = sqrt(FindSchwarzschildR(r,mass)/r) - 1` array on the
+       host over the *entire* domain (interior and ghost alike, valid inside the
+       star too via `FindSchwarzschildR`'s interior interpolation-table branch, not
+       just the `r > 2*R_edge_iso` restriction rounds 9-13 used) and injected it
+       directly into the multigrid's finest-level `u_` via one new temporary method,
+       `MGCFCConformalFactorDriver::DebugCheckAnalyticResidual` (mirrors
+       `LoadMatterSource`/`LoadNonlinearCoefficient`'s existing offset-aware
+       ngh-vs-lngh copy pattern, `mg_cfc_conformal_factor.cpp`), which then calls
+       the solver's own *unmodified* `Multigrid::CalculateDefectPack()`
+       (`def(m,0,k,j,i) = RHS(u) - Laplacian(u)/dx^2`, `mg_cfc_conformal_factor.cpp:
+       133-155`) and reads the result back via one new temporary accessor,
+       `MGCFCConformalFactor::DefAtLevel(int l)` (same public-accessor-for-
+       cross-hierarchy-access shape as the existing, permanent `CoeffAtLevel`).
+       Reusing the solver's own residual code (rather than re-deriving the RHS
+       formula by hand in the diagnostic) was deliberate: it means this check has
+       zero risk of the diagnostic itself introducing a formula mismatch that could
+       be mistaken for a solver bug. Reports both the global max `|residual|` and,
+       separately, the residual specifically at the round 8-13 corner (max-x1,
+       min-x2, min-x3) -- added after a first pass showed the global max landing at
+       the star's core, not the corner (see below), so a corner-specific readout
+       was needed to actually test the hypothesis at hand rather than an unrelated
+       one.
+     - **Result** (`/sakura/ptmp/tlam/run_cfc_tov_full_2x_r14/run_residual2.log`,
+       `/sakura/ptmp/tlam/run_cfc_tov_full_2x_hires_r14/run_residual.log`):
+       at the corner, `residual_at_corner=6.0105e-10` (baseline, 128^3) and
+       `6.19764e-10` (hi-res, 256^3) -- **essentially machine precision, unchanged
+       across resolutions**. The global max `|residual|` (`0.0118535` baseline,
+       `0.0136989` hi-res) lands at the star's *core* (`(k,j,i)=(64,64,64)` /
+       `(128,128,128)`, the domain center), not the corner -- ordinary, expected
+       truncation error where the density/RHS is steepest, unrelated to the corner
+       investigation (not chased further this round; noted for completeness only).
+     - **Conclusion: the discretized equation (stencil, `ConformalFactorRHS`, and
+       the `Utilde`/`Ahat^2` coefficients feeding it) is correct at the corner.**
+       This directly confirms -- not just by elimination, but by positive proof
+       that the true fixed point exists and satisfies the discrete equations to
+       roundoff -- that round 12-13's remaining candidate is right: the bug is in
+       the *iterative* Newton-Gauss-Seidel solve process itself, not the equation
+       it's solving. This sharpens the picture further: a correct fixed point
+       exists and is locally self-consistent (near-zero residual) at the corner,
+       yet the solver converges to a value ~0.99 away from it. That combination --
+       small *local* residual but wrong *global* value, in a region where the
+       source term is exactly zero (pure vacuum Laplace's equation, which is only
+       satisfied by the *correct* smooth 1/r-falloff solution given the right
+       long-range boundary information, not by just any locally-flat
+       configuration) -- is the classic signature of a multigrid V-cycle whose
+       *coarse-grid correction* isn't propagating long-wavelength information
+       correctly, leaving point relaxation to satisfy the local stencil in a
+       self-consistent but globally-wrong way. Also consistent with rounds 11/13's
+       observation that `SolveIterative` needs far more than the expected ~10-20
+       V-cycles for grid-size-independent multigrid convergence (`"Failed to
+       converge after 40 iterations"`, defect still 4-5 orders above threshold) --
+       true multigrid convergence should not degrade with iteration count this way
+       regardless of domain size. **Next round's leading hypothesis: check this
+       solver's V-cycle coarse-grid correction specifically** -- `RestrictCoefficients()`
+       (this solver's own hand-written `Utilde`/`Ahat^2` restriction, since generic
+       `Multigrid::LoadCoefficients()` can't be reused here, see this file's header
+       docstring) and `CalculateFASRHSPack()`'s tau-correction are the two most
+       likely places a nonlinear-solver-specific restriction bug could silently
+       corrupt what the coarse levels correct against, without affecting the
+       fine-level residual check just performed here at all. A useful complementary
+       check: compare the defect-reduction factor per V-cycle iteration against
+       what a correctly functioning multigrid should show (roughly constant,
+       ~0.1-0.3x per cycle, independent of resolution) rather than the apparent
+       slow/stalling behavior observed so far.
+     - Temporary diagnostic fully reverted after use (confirmed via `git diff
+       --stat`: `dyngr_tov.cpp`/`driver.cpp`/`mg_cfc_conformal_factor.hpp` show no
+       diff, `mg_cfc_conformal_factor.cpp` matches exactly the permanent round-6/7
+       fix's diff stat), and a clean rebuild confirms the revert compiles. Decided
+       against leaving this round's specific injection/residual-check scaffolding
+       in place for reuse (despite it being a live option) since round 15's new
+       leading hypothesis (coarse-grid correction / convergence-rate) needs
+       different instrumentation entirely -- this round's code already did its job
+       and gave a clean, conclusive answer.
+   - **Round 15 (per user direction: dig into the coarse-grid correction) -- TWO
+     bugs found and fixed, one masking the other**:
+     - **Bug 1 (real, but not the corner root cause): `MGCFCConformalFactor::
+       SmoothPack`/`CalculateDefectPack` silently dropped the FAS `src_`
+       tau-correction.** Comparing against the generic linear pattern
+       (`Multigrid::Smooth`/`CalculateDefect`, `multigrid.hpp:315-360`, used
+       correctly by `gravity/mg_gravity.cpp`) and against this file's own
+       (correct) `CalculateFASRHSPack`, which properly accumulates
+       `src_ += lap(ubar)/dx^2 - RHS(ubar)`: `SmoothPack`'s Newton step
+       (`u_new = u_old - omega*(lap - rhs*dx2)/fprime`) and `CalculateDefectPack`'s
+       residual (`def = rhs - lap*idx2`) both never read `src_` at all, even though
+       this file's own header docstring explicitly says `src_`'s "entire role here
+       is the FAS correction accumulator." Traced the V-cycle sequencing
+       (`multigrid_driver.cpp:677-693`) and confirmed it's otherwise a
+       textbook-correct FAS down-sweep -- this was the only broken link. Since
+       `src_` is always exactly zero at the finest level (nothing restricts into
+       it there), this bug has zero effect at the finest level -- consistent with
+       round 14's residual check (evaluated at the finest level) showing
+       machine-precision agreement despite this bug already being present at the
+       time. **Fixed**: added `src(m,0,k,j,i)` into both formulas (`mg_cfc_
+       conformal_factor.cpp`, `SmoothPack`/`CalculateDefectPack`). Verified via
+       `mg_verbose=2`: defect went from `"Failed to converge after 40 iterations,
+       defect=2.7e-6"` to a textbook multigrid trajectory (`~5x` reduction per
+       iteration, `5.9e-11` in 8 iterations) -- a real, substantial improvement,
+       kept. **But `psi_maxerr` was completely unchanged (`0.996022`, bit-for-bit)
+       after this fix alone** -- the actual corner catastrophe was untouched.
+     - **Bug 2 (the actual corner root cause): `RetrieveSolution` passed the
+       wrong ghost depth to `Multigrid::RetrieveResult`.** Investigated the
+       "beautiful convergence, unchanged wrong answer" puzzle by printing the raw
+       solved `psi` (not just the error) plus a full radial trace: `psi_num=2`
+       exactly, uniformly, at the corner cell *and* its immediate neighbors (both
+       interior and ghost) -- a suspiciously round number. Prompted by the user's
+       question about the initial guess for `u`: confirmed `psi` is correctly
+       initialized to `1.0` at construction (`cfc.cpp:178`, with a comment
+       explicitly flagging this exact concern), so `u=1.0` wasn't simply an
+       untouched initial guess -- something moved it there. The radial trace
+       (`i=4` to `i=128`, stepping by 4) showed a smooth profile tracking the
+       analytic one reasonably (small, explainable lag -- see below) all the way
+       out to `i=128`, then a *sharp* jump to `psi=2` at `i=131` (`=ie`, the true
+       last interior cell) -- a 3-cell-wide anomaly, not a gradual departure.
+       Comparing all four multigrid solvers' `RetrieveResult` calls:
+       `gravity/mg_gravity.cpp:242` and `cfc/mg_cfc_vector_poisson.cpp:242` both
+       correctly pass the *mesh's* `NGHOST` (`indcs.ng`, e.g. 4); `cfc/mg_cfc_
+       conformal_factor.cpp:358` and `cfc/mg_cfc_lapse.cpp:296` (alpha's
+       identical bug) both instead passed `mglevels_->GetGhostCells()` -- this
+       solver's own, generally much shallower, internal ghost depth (`ngh_=1` for
+       this test). `RetrieveResult`'s copy offset is `dst_off = ngh - ngh_`;
+       passing `ngh_` in place of the mesh's true `NGHOST` collapses this to `0`
+       instead of the correct `3` (`4-1`), so the fully-solved interior gets
+       copied into `dst` (`psi`, mesh-`NGHOST`-deep) **unshifted** -- landing 3
+       cells too low relative to where `dst`'s own indexing expects it. A 3-cell
+       position error is nearly invisible where the profile is smooth and slowly
+       varying (matching the small, uniform-looking lag seen across most of the
+       radial trace), but the outermost mesh-interior cells (`ie-2` through `ie`)
+       fall completely outside the (mis-aligned) copy loop's write range and are
+       *never written at all* -- retaining their pre-solve `1.0` default, which
+       the unconditional `+1.0` post-pass in `SolveConformalFactor` then turns
+       into exactly `2.0`, matching the observed value precisely. **Fixed**:
+       changed both `RetrieveResult(dst, 0, mglevels_->GetGhostCells())` calls
+       (`mg_cfc_conformal_factor.cpp`, `mg_cfc_lapse.cpp`) to
+       `RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng)`, matching gravity's
+       and `MGCFCVectorPoissonDriver`'s already-correct pattern.
+     - **Result, both fixes together** (`/sakura/ptmp/tlam/run_cfc_tov_full_2x_r15/
+       run_verify3.log`, `/sakura/ptmp/tlam/run_cfc_tov_full_2x_hires_r15/
+       run_verify.log`): `psi_maxerr` dropped from `0.996022` to `0.0247179`
+       (baseline, 128^3) / `0.0248592` (hi-res, 256^3) -- a ~40x reduction, and
+       critically the worst-error location **moved from the domain corner
+       (`r=176`) to just outside the star's surface (`r≈16.4`, `R_edge_iso≈8.1`)**,
+       a far more ordinary place for residual solver error to concentrate. The
+       corner cells are now smoothly consistent with the interior profile
+       (`psi_at_ie_plus1=1.019`, not `2.0`). The remaining `~2.5%` discrepancy
+       near the star is consistent with the *expected* single-solve "lagged
+       Utilde" effect inherent to the XCFC scheme (`AssembleVectorSource`'s
+       `psi^6` factor uses the *previous* stage's converged psi, standard
+       lagged-coefficient structure per this file's own comments) -- this
+       diagnostic only ever runs one isolated solve, not the multi-stage/
+       multi-cycle iteration a real run would use to refine it further, so this
+       residual isn't itself surprising and wasn't chased further this round.
+     - **This round's corner-catastrophe investigation (rounds 8-15) is
+       concluded**: the O(1) `psi` error was a genuine, confirmed, two-part bug
+       (a masked-but-real FAS correction gap, plus a silent result-copy
+       misalignment that was the actual dominant cause), now fixed and verified
+       at two resolutions.
+     - **Two open follow-ups noted, not yet investigated**: (1) `alpha` has the
+       identical `RetrieveSolution` bug (`mg_cfc_lapse.cpp`, now also fixed) and
+       almost certainly shares the same root cause as its own O(0.1-0.25) core
+       error from rounds 8-10 -- not directly re-verified this round (would need
+       extending the replay chain through `MHD_C2P`/`RescaleSrcTask`/
+       `SolveLapseTask`, not just `SolvePsiTask`); (2) a full (non-isolated,
+       ordinary task-graph) run of `cfc_tov_full_2x.athinput` still shows 3
+       `"Failed to converge"` messages in cycle 0 (down from 6 before this
+       round's fixes, but not zero) -- not yet root-caused; could be `alpha`'s own
+       solve, or the vector-potential (`p_x`/`eta_x`/`p_beta`/`eta_beta`) Poisson
+       solves, which were spot-checked this round (`mg_cfc_vector_poisson.cpp`'s
+       `SmoothPack`/`CalculateDefectPack` correctly thread `src_` through their
+       shared `SmoothChannels`/`CalculateDefectChannels` helpers, unlike bug 1
+       above) but not fully ruled out.
+     - Verification diagnostic (`DebugCFCSolveAtT0`, reconstructed fresh again
+       this round from `cfc.cpp`'s `QueueCFCTasks()` ordering, same as round 13)
+       fully reverted after use (confirmed via `git diff --stat`: `dyngr_tov.cpp`/
+       `driver.cpp` show no diff), leaving only the two permanent fixes in
+       `mg_cfc_conformal_factor.cpp`/`mg_cfc_lapse.cpp`. Clean rebuild confirmed
+       both with and without the temporary diagnostic present.

@@ -134,7 +134,7 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleConformalMetric(...)
 
-void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi) {
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
@@ -145,7 +145,7 @@ void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi) 
   par_for("cfc_assemble_conformal_metric", DevExeSpace(),
           0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real psi_val = psi(m,0,k,j,i);
+    Real psi_val = delta_psi(m,0,k,j,i) + 1.0;
     Real psi4 = psi_val*psi_val*psi_val*psi_val;
     adm.psi4(m,k,j,i) = psi4;
     for (int a = 0; a < 3; ++a) {
@@ -159,8 +159,8 @@ void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi) 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleLapseShiftK(...)
 
-void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-                          const DvceArray5D<Real> &alpha_psi,
+void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                          const DvceArray5D<Real> &delta_alpha_psi,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u) {
   auto &indcs = pmbp->pmesh->mb_indcs;
@@ -172,14 +172,14 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
 
   par_for("cfc_assemble_lapse_shift_k", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real psi_val = psi(m,0,k,j,i);
+    Real psi_val = delta_psi(m,0,k,j,i) + 1.0;
     Real ipsi2 = 1.0/(psi_val*psi_val);
     for (int a = 0; a < 3; ++a) {
       for (int b = a; b < 3; ++b) {
         adm.vK_dd(m,a,b,k,j,i) = a_dd(m,a,b,k,j,i)*ipsi2;
       }
     }
-    adm.alpha(m,k,j,i) = alpha_psi(m,0,k,j,i)/psi_val;
+    adm.alpha(m,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + 1.0)/psi_val;
     for (int a = 0; a < 3; ++a) {
       adm.beta_u(m,a,k,j,i) = beta_u(m,a,k,j,i);
     }

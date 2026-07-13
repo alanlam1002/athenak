@@ -83,11 +83,13 @@ class MGCFCLapseDriver : public MultigridDriver {
     // this file's header comment (mg_cfc_lapse.cpp) for the full derivation. NOT
     // stored in src_ via Multigrid::LoadSource(): src_ is exactly what the generic
     // V-cycle machinery restricts *and* adds FAS tau-corrections into, which would
-    // corrupt K(x) (Finding B, plan addendum #3). u_plus_2s_tilde/psi/a_sq are all
-    // assumed padded to the same depth ngh -- the mesh's own NGHOST, not this
-    // driver's shallower ngh_ (plan addendum #4, Finding H).
+    // corrupt K(x) (Finding B, plan addendum #3). u_plus_2s_tilde/delta_psi/a_sq are
+    // all assumed padded to the same depth ngh -- the mesh's own NGHOST, not this
+    // driver's shallower ngh_ (plan addendum #4, Finding H). delta_psi is psi - 1
+    // (see cfc::CFC::delta_psi's doc comment, cfc.hpp) -- the physical psi that K(x)
+    // actually needs is reconstructed internally (+1.0).
     void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
-                                 const DvceArray5D<Real> &psi,
+                                 const DvceArray5D<Real> &delta_psi,
                                  const DvceArray5D<Real> &a_sq, int ngh);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.

@@ -2086,3 +2086,56 @@ src/cfc/
         intermediate build predating some of the fixes in this item (job started
         at 14:23:19, shared build directory last rebuilt 14:27:36), so it isn't
         by itself confirmation of the current code.
+13. **Store `delta_psi`/`delta_alpha_psi` (`psi - 1`, `alpha*psi - 1`), not the
+    physical `psi`/`alpha*psi`, as `cfc::CFC`'s persistent members.** Done.
+    Both fields asymptote to 1 far from the star, so a `Real` holding the
+    physical value loses precision exactly where the *deviation* is most
+    interesting (e.g. far-field metric perturbations many orders of magnitude
+    below 1) -- storing the deviation directly keeps those significant digits.
+    This is also exactly the unknown the multigrid solve already iterates on
+    internally (`RetrieveSolution` always handed back the raw deviation, see
+    item 3's Finding A / addendum #3), so this change also **removes** the
+    per-solve `+1.0` pointwise pass in `SolveConformalFactor`/`SolveLapse` that
+    used to convert it, rather than adding new work.
+    - Renamed `cfc::CFC::psi`/`alpha_psi` -> `delta_psi`/`delta_alpha_psi`
+      throughout `cfc.hpp`/`cfc.cpp` (constructor init list, task-graph
+      `Rest/Send/Recv/ProlongPsi`/`AlphaPsi` methods, `InitializeMetric`'s
+      convergence check -- a difference of two same-convention values, so
+      unaffected either way -- and the two one-shot seeding blocks in
+      `SolveConformalFactor`/`SolveLapse`, which already computed exactly this
+      delta and needed no formula change beyond the rename, except the
+      `alpha_psi` seed's `adm.alpha * psi` multiply, which now reconstructs
+      the physical `psi` with `+1.0` first). Constructor's flat-space initial
+      value changed from `deep_copy(psi, 1.0)` to `deep_copy(delta_psi, 0.0)`
+      to match.
+    - Every consumer that needs the physical field now reconstructs it inline
+      (`+1.0`) at the point of use -- a small, fixed set of call sites, found
+      by grepping every read of the old `psi`/`alpha_psi` members:
+      `AssembleConformalMetric`/`AssembleLapseShiftK` (`cfc_reconstruct.cpp`,
+      `psi^4`/`alpha=alpha_psi/psi`/`vK_dd=Adual/psi^2`), `AssembleVectorSource`'s
+      `for_shift=true` branch and `BuildShiftSource` (`cfc.cpp`, `alpha*psi^-6`
+      for the eq. 75 source), and `MGCFCLapseDriver::LoadReactionCoefficient`
+      (`mg_cfc_lapse.cpp`/`.hpp`, `K(x) = 2pi(Ũ+2S̃)psi^-2 + (7/8)Ahat^2 psi^-8`
+      needs the physical `psi`). `RescaleMatterSources` needed no change --
+      it already avoids `psi` entirely via the `psi^6 == sqrt(detg)` identity
+      (item from the previous simplification pass). `MGCFCConformalFactor`'s
+      own solve needed no change either -- it never took an external `psi`
+      argument; its nonlinear `psi^-7` terms are built from the local FAS
+      unknown `u+1` inside `mg_cfc_conformal_factor.cpp`, already exactly this
+      same delta convention.
+    - **Side effect, not the goal but worth noting**: `MeshBoundaryValues::
+      CFCScalarBCs`' `vacuum` physical-BC case hardcodes ghost cells to `0.0`
+      (`cfc_bcs.cpp`) -- correct for `eta_x`/`eta_beta` (Dirichlet-zero
+      potentials) but was silently wrong for `psi`/`alpha_psi` under the old
+      physical-value convention (should have been `~1`, not `0`, at a true
+      vacuum boundary) if that BC flag were ever actually selected there. This
+      refactor makes that case correct for `delta_psi`/`delta_alpha_psi` too,
+      as a side effect -- not otherwise exercised by any test in this
+      investigation (all use `reflect`/`diode`, whose zero-gradient copy is
+      convention-independent either way).
+    - **Verified**: rebuilt cleanly; grepped for every remaining bare `psi(`/
+      `alpha_psi(` member read across `src/cfc/` to confirm none were missed.
+      No behavior change intended for any already-passing test (the physical
+      values read back out via `+1.0` are bit-for-bit the same physics, just
+      relocated); not separately re-run against the AMR/stability tests from
+      item 12 as of this writing.

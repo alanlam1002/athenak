@@ -309,10 +309,12 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
 // comment for why restricting K(x) directly (rather than restricting psi/Ahat^2/
 // Utilde+2*Stilde separately and recombining them nonlinearly at every coarser
 // level) is required for a FAS-consistent coarse-grid operator. u_plus_2s_tilde/
-// psi/a_sq are assumed padded to the same depth ngh (mesh-NGHOST-deep CFC fields,
-// per cfc.cpp), not this driver's own (generally shallower) ngh_ -- Finding H.
+// delta_psi/a_sq are assumed padded to the same depth ngh (mesh-NGHOST-deep CFC
+// fields, per cfc.cpp), not this driver's own (generally shallower) ngh_ --
+// Finding H. delta_psi stores psi - 1 (see cfc::CFC::delta_psi's doc comment,
+// cfc.hpp); the physical psi LapseReactionCoeff needs is reconstructed (+1.0).
 void MGCFCLapseDriver::LoadReactionCoefficient(
-    const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &psi,
+    const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
     const DvceArray5D<Real> &a_sq, int ngh) {
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
@@ -327,7 +329,7 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
     Real u2s = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
-    Real psi_known = psi(m, 0, mk+off, mj+off, mi+off);
+    Real psi_known = delta_psi(m, 0, mk+off, mj+off, mi+off) + 1.0;
     Real ahat_sq = a_sq(m, 0, mk+off, mj+off, mi+off);
     cm_d(m, 0, mk, mj, mi) = LapseReactionCoeff(u2s, psi_known, ahat_sq);
   });

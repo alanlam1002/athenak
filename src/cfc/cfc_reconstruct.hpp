@@ -14,7 +14,10 @@
 //! alpha/beta_u/vK_dd -- see AssembleConformalMetric/AssembleLapseShiftK below).
 //!
 //! Vector/tensor arguments use AthenaTensor views (as in the z4c/adm modules); genuine
-//! scalars (eta, psi, alpha_psi) remain plain DvceArray5D<Real>.
+//! scalars (eta, psi, alpha_psi) remain plain DvceArray5D<Real>. AssembleConformalMetric/
+//! AssembleLapseShiftK take delta_psi = psi - 1 / delta_alpha_psi = alpha*psi - 1 (see
+//! cfc::CFC::delta_psi/delta_alpha_psi's doc comment in cfc.hpp for why), not the
+//! physical fields directly, and reconstruct the physical value internally (+1.0).
 
 #include "athena.hpp"
 #include "athena_tensor.hpp"
@@ -53,28 +56,31 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u);
 
 //----------------------------------------------------------------------------------------
-//! \fn void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi)
+//! \fn void AssembleConformalMetric(MeshBlockPack *pmbp,
+//!                                   const DvceArray5D<Real> &delta_psi)
 //! \brief Writes psi4 = psi^4 and g_dd = psi^4 * delta_ij into pmbp->padm->u_adm.
 //! Called right after the conformal factor psi is solved (XCFC step 3), *before*
 //! MHD_C2P -- dyn_grmhd's own per-stage con2prim task, queued to depend on
 //! CFC_SolvePsi (see cfc::CFC::QueueCFCTasks()) -- runs: PrimitiveSolverHydro::
 //! ConsToPrim (src/eos/primitive_solver_hyd.hpp) reads padm->adm.g_dd directly to
 //! invert conserved to primitive variables, so g_dd must already reflect the
-//! newly-solved psi by the time that con2prim call happens.
-void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi);
+//! newly-solved psi by the time that con2prim call happens. delta_psi = psi - 1
+//! (see cfc.hpp); psi = delta_psi + 1.0 is reconstructed internally.
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi);
 
 //----------------------------------------------------------------------------------------
-//! \fn void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-//!            const DvceArray5D<Real> &alpha_psi,
+//! \fn void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+//!            const DvceArray5D<Real> &delta_alpha_psi,
 //!            const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u)
 //! \brief Final step of the XCFC solve: writes vK_dd = psi^-2 * Adual_ij (maximal
 //! slicing, K=0), alpha = (alpha*psi)/psi, and beta_u into pmbp->padm->u_adm,
 //! matching the layout of adm::ADM::ADM_vars. psi4/g_dd are already set by
 //! AssembleConformalMetric() (called earlier, right after step 3) and are not
-//! rewritten here.
-void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-                          const DvceArray5D<Real> &alpha_psi,
+//! rewritten here. delta_psi/delta_alpha_psi = psi - 1 / alpha*psi - 1 (see
+//! cfc.hpp); the physical values are reconstructed internally (+1.0).
+void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                          const DvceArray5D<Real> &delta_alpha_psi,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u);
 

@@ -26,7 +26,7 @@
 //! Every multigrid solve here only converges its own (generally shallow) ghost width
 //! ngh_ -- shallower than the mesh's own NGHOST that cfc_reconstruct.cpp's finite
 //! differences need. Fields that get differentiated after a solve (p_x/eta_x/x_u,
-//! p_beta/eta_beta, psi/alpha_psi) therefore each get one MeshBoundaryValuesCC
+//! p_beta/eta_beta, delta_psi/delta_alpha_psi) therefore each get one MeshBoundaryValuesCC
 //! Rest->Send->Recv->Prolong round (mirroring z4c::Z4c::pbval_u/coarse_u0 exactly,
 //! is_z4c=false throughout) between RetrieveSolution() and whatever differentiates
 //! them next -- see QueueCFCTasks()'s dependency list below for exactly where each
@@ -75,8 +75,22 @@ class CFC {
   AthenaTensor<Real, TensorSymm::SYM2, 3, 2> a_dd;     // Adual^ij (Gmunu eq. 76)
 
   DvceArray5D<Real> a_sq;        // Ahat^2 = f_ik f_jl Adual^kl Adual^ij, scalar
-  DvceArray5D<Real> psi;         // psi (conformal factor), scalar
-  DvceArray5D<Real> alpha_psi;   // alpha*psi (lapse times conformal factor), scalar
+
+  // Store the deviation from the flat-space asymptotic value (1), not the physical
+  // field itself: delta_psi = psi - 1, delta_alpha_psi = alpha*psi - 1. This is
+  // exactly the unknown the multigrid solve already iterates on internally
+  // (RetrieveSolution hands back the raw deviation verbatim, see
+  // mg_cfc_conformal_factor.hpp/mg_cfc_lapse.hpp), so storing it here too -- rather
+  // than adding 1 back after every solve, as an earlier version of this code did --
+  // both drops that pointwise pass and keeps more significant digits in the
+  // (frequently tiny, far from the star) deviation than a Real holding ~1+1e-12
+  // ever could. Every consumer that needs the physical field reconstructs it inline
+  // (+1.0) at the point of use: AssembleConformalMetric/AssembleLapseShiftK
+  // (cfc_reconstruct.cpp), AssembleVectorSource's for_shift branch and
+  // BuildShiftSource (cfc.cpp), and MGCFCLapseDriver::LoadReactionCoefficient
+  // (mg_cfc_lapse.cpp).
+  DvceArray5D<Real> delta_psi;         // psi - 1, scalar
+  DvceArray5D<Real> delta_alpha_psi;   // alpha*psi - 1, scalar
 
   // matter source terms rescaled by the current psi^6 (Gmunu sec. 2.6, U-tilde etc.).
   // U and S_i are built directly from the evolved conserved state
@@ -181,7 +195,10 @@ class CFC {
   // tasks. p_x and eta_x need separate rounds (PackAndSendCC et al. take one
   // (fine,coarse) array pair at a time, so a 3-component vector and its paired
   // 1-component scalar can't share a call even though the Shibata decomposition
-  // treats them as one logical unit) -- likewise p_beta/eta_beta and psi/alpha_psi.
+  // treats them as one logical unit) -- likewise p_beta/eta_beta and
+  // delta_psi/delta_alpha_psi (the pbval_psi/coarse_psi names below are kept as-is,
+  // referring to "the psi field's exchange machinery" regardless of the delta-vs-
+  // physical storage convention the underlying array uses).
   MeshBoundaryValuesCC *pbval_px, *pbval_etax, *pbval_x;
   MeshBoundaryValuesCC *pbval_psi, *pbval_alpha_psi;
   MeshBoundaryValuesCC *pbval_pbeta, *pbval_etabeta;

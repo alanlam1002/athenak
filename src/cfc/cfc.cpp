@@ -39,8 +39,8 @@ namespace {
 //! Impl shape (file-local template + switch(indcs.ng) dispatch).
 
 template <int NGHOST>
-void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-                          const DvceArray5D<Real> &alpha_psi,
+void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                          const DvceArray5D<Real> &delta_alpha_psi,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
                           int mg_nghost) {
@@ -56,16 +56,17 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
 
   // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). Built as a genuine
   // scratch DvceArray5D over the FULL array extent (not just the interior) so
-  // Dx<NGHOST> below has valid neighbor data at every interior point -- both psi and
-  // alpha_psi are already ghost-exchanged by the time this runs (see
-  // CFC::QueueCFCTasks), so this pointwise pass is valid everywhere.
+  // Dx<NGHOST> below has valid neighbor data at every interior point -- both fields
+  // are already ghost-exchanged by the time this runs (see CFC::QueueCFCTasks), so
+  // this pointwise pass is valid everywhere. delta_psi/delta_alpha_psi store psi-1/
+  // alpha*psi-1 (see cfc.hpp), so the physical values are reconstructed with +1.0.
   DvceArray5D<Real> ap6("cfc_alpha_psi6", nmb, 1, ncells3, ncells2, ncells1);
   par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real psi_val = psi(m,0,k,j,i);
+    Real psi_val = delta_psi(m,0,k,j,i) + 1.0;
     Real psi7 = psi_val*psi_val*psi_val*psi_val*psi_val*psi_val*psi_val;
-    ap6(m,0,k,j,i) = alpha_psi(m,0,k,j,i)/psi7;
+    ap6(m,0,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + 1.0)/psi7;
   });
 
   AthenaTensor<Real, TensorSymm::NONE, 3, 0> ap6_view;
@@ -90,16 +91,19 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
   });
 }
 
-void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &psi,
-                      const DvceArray5D<Real> &alpha_psi,
+void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                      const DvceArray5D<Real> &delta_alpha_psi,
                       const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
                       int mg_nghost) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: BuildShiftSourceImpl<2>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
-    case 3: BuildShiftSourceImpl<3>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
-    case 4: BuildShiftSourceImpl<4>(pmbp, psi, alpha_psi, a_dd, p_src, mg_nghost); break;
+    case 2: BuildShiftSourceImpl<2>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
+                                     mg_nghost); break;
+    case 3: BuildShiftSourceImpl<3>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
+                                     mg_nghost); break;
+    case 4: BuildShiftSourceImpl<4>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
+                                     mg_nghost); break;
   }
 }
 
@@ -118,8 +122,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     u_beta("cfc_u_beta", 1, 1, 1, 1, 1),
     u_adual("cfc_u_adual", 1, 1, 1, 1, 1),
     a_sq("cfc_a_sq", 1, 1, 1, 1, 1),
-    psi("cfc_psi", 1, 1, 1, 1, 1),
-    alpha_psi("cfc_alpha_psi", 1, 1, 1, 1, 1),
+    delta_psi("cfc_delta_psi", 1, 1, 1, 1, 1),
+    delta_alpha_psi("cfc_delta_alpha_psi", 1, 1, 1, 1, 1),
     u_tilde("cfc_u_tilde", 1, 1, 1, 1, 1),
     u_stilde("cfc_u_stilde", 1, 1, 1, 1, 1),
     s_tilde("cfc_s_tilde", 1, 1, 1, 1, 1),
@@ -162,8 +166,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_beta,   nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_adual,  nmb, 6, ncells3, ncells2, ncells1);
   Kokkos::realloc(a_sq,     nmb, 1, ncells3, ncells2, ncells1);
-  Kokkos::realloc(psi,      nmb, 1, ncells3, ncells2, ncells1);
-  Kokkos::realloc(alpha_psi, nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(delta_psi,       nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(delta_alpha_psi, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_tilde,  nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_stilde, nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(s_tilde,  nmb, 1, ncells3, ncells2, ncells1);
@@ -172,15 +176,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_p_beta, nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(eta_beta, nmb, 1, ncells3, ncells2, ncells1);
 
-  // psi = alpha*psi = 1 (flat space) is the correct initial value for the very first
-  // solve of a run: psi/alpha_psi represent physical psi/(alpha*psi) directly (not
-  // the delta_psi = psi-1 the multigrid solvers themselves iterate on internally),
-  // and step 1's matter-source build (AssembleVectorSource) reads this stage's psi
-  // *before* this stage's own conformal-factor solve has produced a better one (the
-  // standard XCFC lagged-coefficient structure -- see plan addendum #4). Without
-  // this, the first stage's psi^6 factor would silently be 0.
-  Kokkos::deep_copy(psi, 1.0);
-  Kokkos::deep_copy(alpha_psi, 1.0);
+  // delta_psi = delta_alpha_psi = 0 (flat space, psi = alpha*psi = 1) is the correct
+  // initial value before the very first solve of a run has produced anything better
+  // -- both are placeholders anyway (item 10's one-shot seeding overwrites them from
+  // the problem generator's own ADM data on the first real SolveConformalFactor/
+  // SolveLapse call, before any consumer reads them), but zero-initializing here
+  // keeps the array in a physically-consistent state (delta=0 <-> psi=1) rather than
+  // Kokkos's default zero-init, which would silently mean psi=alpha_psi=0 if ever
+  // read before that first seeding.
+  Kokkos::deep_copy(delta_psi, 0.0);
+  Kokkos::deep_copy(delta_alpha_psi, 0.0);
 
   x_u.InitWithShallowSlice(u_x, 0, 2);
   beta_u.InitWithShallowSlice(u_beta, 0, 2);
@@ -472,11 +477,12 @@ void CFC::InitializeMetric(Driver *pdriver) {
   int nmb = pmy_pack->nmb_thispack;
 
   DvceArray5D<Real> psi_old("cfc_init_psi_old", nmb, 1,
-                             psi.extent_int(2), psi.extent_int(3), psi.extent_int(4));
+                             delta_psi.extent_int(2), delta_psi.extent_int(3),
+                             delta_psi.extent_int(4));
 
   bool converged = false;
   for (int iter = 0; iter < cfc_init_iter_max_; ++iter) {
-    Kokkos::deep_copy(psi_old, psi);
+    Kokkos::deep_copy(psi_old, delta_psi);
 
     // Refresh conserved variables from the fixed primitives + current metric
     // (padm->adm.g_dd, as of the previous iteration's AssembleConformalMetric, or
@@ -508,8 +514,11 @@ void CFC::InitializeMetric(Driver *pdriver) {
     ComputeADual();
     SolveConformalFactor(pdriver, 0);
 
+    // A difference of two same-convention values (both delta_psi, one from before
+    // this iteration's solve, one after), so it's unaffected by whether delta_psi
+    // stores psi-1 or psi itself.
     Real dpsi = 0.0;
-    auto &psi_ = psi;
+    auto &psi_ = delta_psi;
     auto &psi_old_ = psi_old;
     Kokkos::parallel_reduce("cfc_init_dpsi",
       Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
@@ -658,46 +667,46 @@ TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::RestPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(psi, coarse_psi, false);
+    pmy_pack->pmesh->pmr->RestrictCC(delta_psi, coarse_psi, false);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendPsiTask(Driver *pdriver, int stage) {
-  return pbval_psi->PackAndSendCC(psi, coarse_psi);
+  return pbval_psi->PackAndSendCC(delta_psi, coarse_psi);
 }
 TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_psi->RecvAndUnpackCC(psi, coarse_psi);
+  TaskStatus tstat = pbval_psi->RecvAndUnpackCC(delta_psi, coarse_psi);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, psi);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, delta_psi);
   }
   return tstat;
 }
 TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_psi->ProlongateCC(psi, coarse_psi, false);
+    pbval_psi->ProlongateCC(delta_psi, coarse_psi, false);
   }
   return TaskStatus::complete;
 }
 
 TaskStatus CFC::RestAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(alpha_psi, coarse_alpha_psi, false);
+    pmy_pack->pmesh->pmr->RestrictCC(delta_alpha_psi, coarse_alpha_psi, false);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendAlphaPsiTask(Driver *pdriver, int stage) {
-  return pbval_alpha_psi->PackAndSendCC(alpha_psi, coarse_alpha_psi);
+  return pbval_alpha_psi->PackAndSendCC(delta_alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_alpha_psi->RecvAndUnpackCC(alpha_psi, coarse_alpha_psi);
+  TaskStatus tstat = pbval_alpha_psi->RecvAndUnpackCC(delta_alpha_psi, coarse_alpha_psi);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, alpha_psi);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, delta_alpha_psi);
   }
   return tstat;
 }
 TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_alpha_psi->ProlongateCC(alpha_psi, coarse_alpha_psi, false);
+    pbval_alpha_psi->ProlongateCC(delta_alpha_psi, coarse_alpha_psi, false);
   }
   return TaskStatus::complete;
 }
@@ -970,22 +979,24 @@ void CFC::AssembleVectorSource(bool for_shift) {
     // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
     // using this stage's newly-solved psi/alpha_psi and the s_tilde_d step 1 already
     // built (not rebuilt here -- see cfc.hpp's s_tilde_d comment).
-    auto &psi_ = psi;
-    auto &alpha_psi_ = alpha_psi;
+    // delta_psi/delta_alpha_psi store psi-1/alpha*psi-1 (see cfc.hpp); reconstruct
+    // the physical values with +1.0 before using them in this formula.
+    auto &delta_psi_ = delta_psi;
+    auto &delta_alpha_psi_ = delta_alpha_psi;
     par_for("cfc_assemble_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
-      Real psi_val = psi_(m,0,k,j,i);
+      Real psi_val = delta_psi_(m,0,k,j,i) + 1.0;
       Real psi2 = psi_val*psi_val;
       Real psi7 = psi2*psi2*psi2*psi_val;
       // alpha*psi^-6 = (alpha_psi/psi)*psi^-6 = alpha_psi*psi^-7.
-      Real ap6 = alpha_psi_(m,0,k,j,i)/psi7;
+      Real ap6 = (delta_alpha_psi_(m,0,k,j,i) + 1.0)/psi7;
       for (int a = 0; a < 3; ++a) {
         p_src_(m,a,mk,mj,mi) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
       }
     });
     // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
-    BuildShiftSource(pmy_pack, psi, alpha_psi, a_dd, p_src, mg_nghost);
+    BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, a_dd, p_src, mg_nghost);
 
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
@@ -1072,10 +1083,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
   // initial guess from the problem generator's own ADM data (padm->adm.psi4,
   // already populated by pgen/restart by the time this runs -- CFC's constructor
   // runs before pgen, see psi_seeded_'s doc comment in cfc.hpp) instead of leaving
-  // the multigrid's own finest-level solution at its cold Kokkos-zero start. psi's
-  // own backing storage is reused as scratch for delta_psi = psi_guess - 1 here --
-  // RetrieveSolution a few lines below overwrites it with the genuinely-converged
-  // answer immediately after, so borrowing it is safe.
+  // the multigrid's own finest-level solution at its cold Kokkos-zero start.
   if (!psi_seeded_) {
     psi_seeded_ = true;
     int &is = indcs.is; int &ie = indcs.ie;
@@ -1083,38 +1091,23 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
     int &ks = indcs.ks; int &ke = indcs.ke;
     int nmb = pmy_pack->nmb_thispack;
     auto &adm = pmy_pack->padm->adm;
-    auto &psi_ = psi;
+    auto &psi_ = delta_psi;
     par_for("cfc_seed_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       psi_(m,0,k,j,i) = Kokkos::pow(adm.psi4(m,k,j,i), 0.25) - 1.0;
     });
-    pmgd_psi->SeedInitialGuess(psi, indcs.ng);
+    pmgd_psi->SeedInitialGuess(delta_psi, indcs.ng);
   }
 
   pmgd_psi->LoadMatterSource(u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
-  pmgd_psi->RetrieveSolution(psi);
+  // delta_psi member stores psi - 1, exactly the deviation RetrieveSolution() hands
+  // back verbatim (see cfc.hpp) -- no +1 offset pass needed (an earlier version of
+  // this code stored the physical psi here and added 1 back after every solve).
+  pmgd_psi->RetrieveSolution(delta_psi);
 
-  // psi member holds the physical psi, not delta_psi = psi - 1 the solver itself
-  // iterates on -- RetrieveSolution() hands back delta_psi verbatim (see plan
-  // addendum #4, Finding G), so a small pointwise pass adds the +1 back. Runs over
-  // the full array extent: cells outside what RetrieveResult actually filled
-  // (beyond this solver's own ngh_) are physically meaningless until CFC_ProlongPsi
-  // overwrites them from real neighbor data (see QueueCFCTasks), which always
-  // happens before anything differentiates psi -- so a stray 1.0 there is harmless.
-  int nmb = pmy_pack->nmb_thispack;
-  int ncells1 = psi.extent_int(4);
-  int ncells2 = psi.extent_int(3);
-  int ncells3 = psi.extent_int(2);
-  auto &psi_ = psi;
-  par_for("cfc_psi_offset", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
-          0, ncells1-1,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    psi_(m,0,k,j,i) += 1.0;
-  });
-
-  cfc::AssembleConformalMetric(pmy_pack, psi);
+  cfc::AssembleConformalMetric(pmy_pack, delta_psi);
   return;
 }
 
@@ -1220,36 +1213,30 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   // much later this same stage) times psi (this stage's own just-converged value
   // from SolveConformalFactor above, a better multiplier than re-deriving a guess
   // from padm->adm.psi4, which AssembleConformalMetric already overwrote earlier
-  // this stage). alpha_psi's own backing storage is reused as scratch for
-  // delta_(alpha*psi), same reasoning as psi's reuse above.
+  // this stage). delta_psi stores psi-1 (see cfc.hpp), so +1.0 reconstructs the
+  // physical psi needed for this multiply.
   if (!alpha_psi_seeded_) {
     alpha_psi_seeded_ = true;
     int &is = indcs.is; int &ie = indcs.ie;
     int &js = indcs.js; int &je = indcs.je;
     int &ks = indcs.ks; int &ke = indcs.ke;
     auto &adm = pmy_pack->padm->adm;
-    auto &psi_c = psi;
-    auto &alpha_psi_c = alpha_psi;
+    auto &psi_c = delta_psi;
+    auto &alpha_psi_c = delta_alpha_psi;
     par_for("cfc_seed_alpha_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      alpha_psi_c(m,0,k,j,i) = adm.alpha(m,k,j,i)*psi_c(m,0,k,j,i) - 1.0;
+      alpha_psi_c(m,0,k,j,i) = adm.alpha(m,k,j,i)*(psi_c(m,0,k,j,i) + 1.0) - 1.0;
     });
-    pmgd_alpha->SeedInitialGuess(alpha_psi, indcs.ng);
+    pmgd_alpha->SeedInitialGuess(delta_alpha_psi, indcs.ng);
   }
 
-  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, psi, a_sq, indcs.ng);
+  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, a_sq, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);
-  pmgd_alpha->RetrieveSolution(alpha_psi);
-
-  // delta_(alpha*psi) -> alpha*psi: same +1 offset reasoning as SolveConformalFactor
-  // (Finding G) -- alpha_psi's own ghost exchange (CFC_ProlongAlphaPsi) always runs
-  // before anything differentiates it.
-  auto &alpha_psi_ = alpha_psi;
-  par_for("cfc_alpha_psi_offset", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
-          0, ncells1-1,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    alpha_psi_(m,0,k,j,i) += 1.0;
-  });
+  // delta_alpha_psi member stores alpha*psi - 1, exactly the deviation
+  // RetrieveSolution() hands back verbatim (see cfc.hpp) -- no +1 offset pass needed
+  // (an earlier version of this code stored the physical alpha*psi here and added 1
+  // back after every solve).
+  pmgd_alpha->RetrieveSolution(delta_alpha_psi);
   return;
 }
 
@@ -1281,7 +1268,7 @@ void CFC::ReconstructShift() {
 //! \fn void CFC::AssembleADM()
 
 void CFC::AssembleADM() {
-  cfc::AssembleLapseShiftK(pmy_pack, psi, alpha_psi, a_dd, beta_u);
+  cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, a_dd, beta_u);
   return;
 }
 

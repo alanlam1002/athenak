@@ -779,7 +779,15 @@ TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
   return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
-  return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, coarse_u_adm);
+  TaskStatus tstat = pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, coarse_u_adm);
+  // 1/r^n physical-boundary falloff BC for u_adm (adm_bcs.cpp) -- see that file's doc
+  // comment. Was previously entirely absent: ghost cells at a genuine physical domain
+  // edge were left frozen at their t=0 pgen value forever, since RecvAndUnpackCC is a
+  // no-op there (no neighbor block to exchange with).
+  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
+  }
+  return tstat;
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {

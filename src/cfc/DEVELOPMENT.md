@@ -2139,3 +2139,68 @@ src/cfc/
       values read back out via `+1.0` are bit-for-bit the same physics, just
       relocated); not separately re-run against the AMR/stability tests from
       item 12 as of this writing.
+14. **Physical (non-block, non-periodic) boundary condition for `padm->u_adm`.**
+    Done. Closes a real gap surfaced by inspection (not a test failure): unlike
+    every other CC field in the codebase (`HydroBCs`, `Z4cBCs`, and CFC's own
+    `CFCScalarBCs`/`CFCVectorBCs`), `CFC::RecvADMTask` called
+    `RecvAndUnpackCC` with no follow-up physical-BC pass. `RecvAndUnpackCC` is a
+    no-op at a genuine physical domain edge (no neighbor block to exchange
+    with), and `AssembleConformalMetric`/`AssembleLapseShiftK` only ever write
+    the interior (`is..ie`), so `u_adm`'s physical-boundary ghost cells were
+    silently frozen at whatever the problem generator wrote there at t=0,
+    forever -- even as the interior metric evolved. Since `dyn_grmhd`'s
+    geometric source terms differentiate `alpha`/`g_dd`/`beta_u` right up to
+    the domain edge, a stale ghost value there contaminates those derivatives
+    with a spurious kink between the (evolving) interior and the (frozen)
+    ghost region.
+    - User's initial suggestion was to reuse z4c's Sommerfeld BC
+      (`z4c_Sbc.cpp`) directly. On inspection this doesn't port as-is:
+      `Z4cSommerfeld` injects an outgoing-radiation *RHS* at the
+      boundary-adjacent *interior* point (`rhs.vTheta`/`vKhat`/`vGam_u`/
+      `vA_dd`), consumed by the RK time-integrator -- it presupposes a
+      `du/dt = RHS` evolution equation. `u_adm` under CFC has none: every
+      channel is a pure algebraic output of the elliptic solve, rebuilt from
+      scratch each stage. There is no `rhs.u_adm` to inject into.
+    - **Final approach (per user)**: a direct ghost-cell power-law
+      extrapolation instead -- for a ghost cell at depth `n` past the last
+      interior (domain-boundary) cell, `f_ghost = f_flat + (f_interior -
+      f_flat)*(r_interior/r_ghost)^n`, using the true 3D coordinate radius
+      from the origin (`r = sqrt(x1v^2+x2v^2+x3v^2)`, the same pseudo-radial
+      convention `Z4cSommerfeld` itself uses) -- **not** chained ghost-to-
+      ghost; every ghost depth references the same single nearest interior
+      cell. `f_flat` and the falloff order `n` are channel-specific: `alpha`,
+      `psi4`, `g_dd` -> `f_flat=1` (`0` for `g_dd`'s off-diagonal
+      components), `n=1` (mass monopole, `~M/r`); `vK_dd`, `beta_u` ->
+      `f_flat=0`, `n=2` (`~1/r^2`, the next order for extrinsic
+      curvature/shift around a non-boosted, asymptotically-flat source).
+    - New `MeshBoundaryValues::ADMBCs(MeshBlockPack*, DvceArray5D<Real>)`
+      (`src/bvals/physics/adm_bcs.cpp`, registered in `CMakeLists.txt`,
+      declared in `bvals.hpp` alongside `CFCScalarBCs`/`CFCVectorBCs`), wired
+      into `CFC::RecvADMTask` (`cfc.cpp`) exactly as `CFCScalarBCs` is wired
+      into `RecvPsiTask`. `reflect` faces use the same explicit per-channel
+      parity enumeration `z4c_bcs.cpp`'s `Z4cBCs` already established: a
+      rank-2 tensor component (`g_dd`, `vK_dd`) flips sign iff exactly one of
+      its two indices is aligned with the reflected axis (`g_xy` odd under an
+      x1 reflection, `g_xx`/`g_yy`/`g_zz` even); a vector component
+      (`beta_u`) flips iff its own index is; scalars (`alpha`, `psi4`) never
+      flip -- implemented generically via a small per-channel lookup
+      (`GetADMChannelInfo`/`ChannelFlipsAtAxis`, anonymous namespace) rather
+      than z4c's hand-enumerated `if` chain, since `u_adm` has 17 channels
+      (vs. z4c's own conformal set) but the same 3 structural cases (scalar/
+      vector/rank-2-tensor) cover all of them. `outflow`/`diode`/`vacuum`/
+      `inflow`/`user` all get the same falloff extrapolation (no ADM
+      "inflow table" concept exists, matching `CFCScalarBCs`/`CFCVectorBCs`'s
+      own precedent of folding those four together).
+    - **Verified**: rebuilt cleanly (including the `CMakeLists.txt`
+      registration). Re-ran the existing single-level octant TOV control
+      input (`ix1/2/3_bc=reflect`, `ox1/2/3_bc=diode` -- exercises both new
+      branches on all three axes): completes all 3 cycles cleanly, zero NaN/
+      FATAL, and the `InitializeMetric` convergence trace is bit-for-bit
+      identical to the pre-change run (expected: `ADMBCs` only touches
+      `u_adm`'s ghosts, which `InitializeMetric`'s own X^i/psi loop never
+      reads). Not yet separately checked against a run where the boundary
+      ghost region's *value* actually visibly departs from its t=0
+      initialization (would need a longer run or a dedicated diagnostic dump
+      to confirm quantitatively; the qualitative check here is that the
+      mechanism runs, compiles against the right enum values, and doesn't
+      break anything already passing).

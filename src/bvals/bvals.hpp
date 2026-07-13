@@ -200,6 +200,7 @@ class MeshBoundaryValues {
                      DvceArray5D<Real> coarse_u0);
   static void CFCScalarBCs(MeshBlockPack *pp, DvceArray5D<Real> u0);
   static void CFCVectorBCs(MeshBlockPack *pp, DvceArray5D<Real> u0);
+  static void ADMBCs(MeshBlockPack *pp, DvceArray5D<Real> u0);
 
  protected:
   // must use pointer to MBPack and not parent physics module since parent can be one of

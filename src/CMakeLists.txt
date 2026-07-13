@@ -27,6 +27,7 @@ add_executable(
         bvals/physics/radiation_bcs.cpp
         bvals/physics/z4c_bcs.cpp
         bvals/physics/cfc_bcs.cpp
+        bvals/physics/adm_bcs.cpp
 
         cfc/cfc.cpp
         cfc/cfc_reconstruct.cpp

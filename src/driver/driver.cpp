@@ -25,6 +25,7 @@
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
+#include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -313,6 +314,14 @@ void Driver::ExecuteTaskList(Mesh *pm, std::string tl, int stage) {
 void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool res_flag) {
   //---- Step 1.  Set conserved variables in ghost zones for all physics
   InitBoundaryValuesAndPrimitives(pmesh);
+
+  //---- Step 1b. CFC only: converge the metric to the (fixed) initial primitives
+  // before anything else reads padm->adm -- see cfc::CFC::InitializeMetric's doc
+  // comment (cfc.hpp) for why this can't just reuse a normal per-stage CFC solve
+  // and why it's skipped on restarts (res_flag).
+  if (!res_flag && pmesh->pmb_pack->pcfc != nullptr) {
+    pmesh->pmb_pack->pcfc->InitializeMetric(this);
+  }
 
   //---- Step 2.  Compute time step (if problem involves time evolution)
   hydro::Hydro *phydro = pmesh->pmb_pack->phydro;

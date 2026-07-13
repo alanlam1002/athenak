@@ -1829,3 +1829,91 @@ src/cfc/
       (would require reverting and rebuilding a second time); the change is
       narrow enough (only the initial guess of an already-correct, already-
       converging solve) that this wasn't treated as blocking.
+
+11. ~~Converge `padm->adm` to the (fixed) initial primitives at t=0, instead of
+    using the problem generator's raw analytic metric guess as-is.~~ **Done.**
+    Item 10 established that CFC's task graph never runs before the t=0 output,
+    so the pgen's raw metric guess (e.g. a 1D TOV profile interpolated onto the
+    3D grid) is what the first timestep actually starts from -- not the true
+    self-consistent CFC solution for that matter distribution, causing a
+    mismatch that only gets corrected (lagged by one step) once evolution
+    begins. Fixed with a genuine fixed-point iteration, holding the primitives
+    (`pmhd->w0`) exactly as the pgen set them and iterating the *metric*:
+    - **Why iteration, not one pass**: conserved variables are metric-dependent
+      functions of the (fixed) primitives (`D = sqrt(gamma)*rho*W`,
+      `S_i = sqrt(gamma)*rho*h*W^2*v_i`), so refreshing `u0` from `w0` after a
+      metric update changes `u0`, which changes `X^i`'s source, which changes
+      `psi`, which changes the metric again.
+    - **Scope-narrowing insight**: only `{X^i, psi}` are mutually coupled (via
+      `cons`'s metric-dependence and `Adual^ij`); lapse and shift don't feed
+      back into either equation, so they're solved once, after `{X^i, psi}`
+      converge, exactly like the existing per-stage pipeline's ordering. Also,
+      since the recent `AssembleVectorSource` simplification, `U-tilde`/
+      `S-tilde_i` don't read `psi` at all anymore, so `psi` itself needs no
+      ghost exchange *during* the iteration -- only `p_x`/`eta_x` (before
+      `ReconstructVectorFromPotentials`) and `x_u` (before `ComputeADualFromX`)
+      do, since those are the only fields actually finite-differenced inside
+      the `{X^i, psi}` subsystem.
+    - **Mechanism**: `dyngr::DynGRMHD::PrimToConInit(is,ie,js,je,ks,ke)`
+      (`dyn_grmhd.cpp`, already existed for the pgen's own first conserved-
+      variable fill) is called once per iteration -- it reads
+      `padm->adm.g_dd` directly, so calling it again after each metric update
+      is exactly "update conservative variables instead (PrimToCons)". No
+      con2prim ever runs during this procedure, so it's immune to the
+      `cons_floor`/`cons_adjusted` staleness discussed earlier in round 19 --
+      primitives genuinely never change.
+    - **New `CFC::InitializeMetric(Driver *pdriver)`** (public; takes a real
+      `Driver*`, not `nullptr` -- the per-field multigrid solves' own internal
+      iteration-cap failure path writes `pdriver->nlim = ...`, which would
+      segfault on null): a hand-written loop calling CFC's existing private
+      step methods (`SolveVectorPotential`, `ReconstructVectorPotential`,
+      `ComputeADual`, `SolveConformalFactor`) and `Rest*/Send*/Recv*/Prolong*`
+      task methods directly, entirely outside the `NumericalRelativity` task
+      graph -- reusing `"stagen"` isn't possible here since a pass through it
+      also flux-updates/RK-evolves the hydro state, which must not happen
+      during this one-time initialization. `Recv*Task` calls are spun in a
+      `while (... != TaskStatus::complete) {}` busy-wait, since nothing else is
+      driving the retry the way the real task-list scheduler normally would.
+    - **A real deadlock hazard, designed around explicitly**: the existing
+      `CFC_InitRecv`/`ClearSend`/`ClearRecv` (round 19's earlier fix) post/wait
+      on all 8 `MeshBoundaryValuesCC` instances at once. `InitializeMetric`'s
+      loop only sends/receives 3 of them (`p_x`, `eta_x`, `x_u`) per iteration
+      -- reusing the all-8 versions would post `MPI_Irecv`s for the other 5
+      that never get a matching send that iteration, and `ClearRecv`'s
+      `MPI_Wait` on those would hang. Added two new scoped pairs instead:
+      `InitRecvXFields`/`ClearXFields` (3 fields, called once per iteration)
+      and `InitRecvTailFields`/`ClearTailFields` (the remaining 5, called once
+      for the one-shot lapse/shift/final tail).
+    - **Convergence check**: `max|psi_new - psi_old|` over the interior,
+      `MPI_Allreduce(..., MPI_MAX)`-reduced across ranks (mirrors
+      `MultigridDriver::CalculateDefectNorm`'s own reduction pattern) --
+      tracking `psi` alone was confirmed sufficient per discussion (it's the
+      one field both matter-coupling paths feed into). New `<cfc>` params:
+      `init_iter_max` (default 50 -- see below), `init_tol` (default `1e-10`),
+      `init_verbose` (default false, prints `max|delta psi|` per iteration).
+    - **Non-convergence is a warning, not fatal** (per discussion): prints a
+      `### WARNING` and proceeds with the current (non-converged) metric rather
+      than aborting the run.
+    - **Hooked into `Driver::Initialize()`** as a new "Step 1b", right after
+      `InitBoundaryValuesAndPrimitives` and before the timestep calculation
+      (so `NewTimeStep`'s light-crossing estimate sees the converged `alpha`,
+      not the raw guess) -- guarded by `!res_flag && pmb_pack->pcfc != nullptr`.
+      Restarts are untouched: a restart's checkpointed metric is already
+      self-consistent with its checkpointed conserved variables (built up by
+      ordinary evolution, not this procedure), so re-deriving it from
+      primitives at restart time would discard that consistency, not just
+      redundantly recompute it.
+    - **Verified**: rebuilt cleanly. Single-rank smoke test (`cfc_tov.athinput`,
+      `init_verbose=true`, `init_tol=1e-10`) converges to `max|delta psi| = 0`
+      in 24 iterations; a 2-rank pure-face-neighbor isolation test (mirroring
+      the one that originally exposed the round-19 ghost-exchange bug)
+      converges in 21 iterations with no deadlock, no `FATAL`, no `NaN`, and a
+      finite, sane t=0 mass. The initial default `init_iter_max=20` was in fact
+      too tight for this test case (residual `5.7e-7` at iteration 20, short of
+      `1e-10`) -- exercised the warn-and-continue path correctly, but prompted
+      raising the default to `50` for headroom. Convergence is geometric/linear
+      (ratio roughly `0.6-0.7` per iteration for this test), not quadratic --
+      consistent with a Picard-style (not Newton-style) fixed-point coupling
+      between `PrimToCons` and the CFC solve; matches the O(10-100)-iteration
+      initial-data convergence behavior reported by other XCFC codes, not a
+      sign of a bug.

@@ -20,6 +20,7 @@
 #include "utils/finite_diff.hpp"
 #include "bvals/bvals.hpp"
 #include "mhd/mhd.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "cfc.hpp"
@@ -254,6 +255,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::realloc(coarse_eta_beta,   nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_u_adm,      nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
   }
+
+  // Item 11 (DEVELOPMENT.md): X^i/psi fixed-point-iteration controls, used by
+  // InitializeMetric() only.
+  cfc_init_iter_max_ = pin->GetOrAddInteger("cfc", "init_iter_max", 50);
+  cfc_init_tol_ = pin->GetOrAddReal("cfc", "init_tol", 1.0e-10);
+  cfc_init_verbose_ = pin->GetOrAddBoolean("cfc", "init_verbose", false);
 }
 
 //----------------------------------------------------------------------------------------
@@ -401,6 +408,176 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::ClearSendTask, this, CFC_ClearSend, "CFC_ClearSend", Task_End);
   pnr->QueueTask(&CFC::ClearRecvTask, this, CFC_ClearRecv, "CFC_ClearRecv",
                  Task_End, {CFC_ClearSend});
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+// Item 11 (DEVELOPMENT.md): InitRecv/ClearSend/ClearRecv scoped to exactly the
+// fields InitializeMetric()'s two phases exercise -- see the doc comment on these
+// four declarations in cfc.hpp for why the all-8-field CFC_InitRecv/ClearSend/
+// ClearRecv tasks can't be reused here (would deadlock on the fields not sent that
+// iteration).
+
+void CFC::InitRecvXFields() {
+  pbval_px->InitRecv(3);
+  pbval_etax->InitRecv(1);
+  pbval_x->InitRecv(3);
+}
+void CFC::ClearXFields() {
+  pbval_px->ClearSend();
+  pbval_etax->ClearSend();
+  pbval_x->ClearSend();
+  pbval_px->ClearRecv();
+  pbval_etax->ClearRecv();
+  pbval_x->ClearRecv();
+}
+void CFC::InitRecvTailFields() {
+  pbval_psi->InitRecv(1);
+  pbval_alpha_psi->InitRecv(1);
+  pbval_pbeta->InitRecv(3);
+  pbval_etabeta->InitRecv(1);
+  pbval_adm->InitRecv(adm::ADM::nadm);
+}
+void CFC::ClearTailFields() {
+  pbval_psi->ClearSend();
+  pbval_alpha_psi->ClearSend();
+  pbval_pbeta->ClearSend();
+  pbval_etabeta->ClearSend();
+  pbval_adm->ClearSend();
+  pbval_psi->ClearRecv();
+  pbval_alpha_psi->ClearRecv();
+  pbval_pbeta->ClearRecv();
+  pbval_etabeta->ClearRecv();
+  pbval_adm->ClearRecv();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::InitializeMetric(Driver *pdriver)
+//! \brief Item 11 (DEVELOPMENT.md): see the public doc comment in cfc.hpp. Runs the
+//! X^i/psi fixed-point iteration (PrimToCons <-> vector-Poisson/conformal-factor
+//! solve) by hand, entirely outside the normal per-stage task graph -- reusing that
+//! graph isn't possible here since a pass through "stagen" would also flux-update/
+//! RK-evolve the hydro state, which must not happen during this one-time
+//! initialization. Once X^i/psi converge (tracked via psi alone -- it's the one
+//! field both matter-coupling paths, direct U-tilde and indirect via Adual^ij/X^i,
+//! feed into), solves lapse/shift once (they don't feed back into X^i/psi's own
+//! equations) and does the final padm->u_adm ghost exchange, mirroring the tail of
+//! QueueCFCTasks() exactly.
+
+void CFC::InitializeMetric(Driver *pdriver) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+
+  DvceArray5D<Real> psi_old("cfc_init_psi_old", nmb, 1,
+                             psi.extent_int(2), psi.extent_int(3), psi.extent_int(4));
+
+  bool converged = false;
+  for (int iter = 0; iter < cfc_init_iter_max_; ++iter) {
+    Kokkos::deep_copy(psi_old, psi);
+
+    // Refresh conserved variables from the fixed primitives + current metric
+    // (padm->adm.g_dd, as of the previous iteration's AssembleConformalMetric, or
+    // the pgen's own raw guess on the very first iteration).
+    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+
+    InitRecvXFields();
+
+    // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve
+    // P_i/eta_x, ghost-exchange both, reconstruct x_u, ghost-exchange it too.
+    SolveVectorPotential(pdriver, 0);
+    RestPXTask(pdriver, 0);    SendPXTask(pdriver, 0);
+    RestEtaXTask(pdriver, 0);  SendEtaXTask(pdriver, 0);
+    while (RecvPXTask(pdriver, 0) != TaskStatus::complete) {}
+    while (RecvEtaXTask(pdriver, 0) != TaskStatus::complete) {}
+    ProlongPXTask(pdriver, 0);
+    ProlongEtaXTask(pdriver, 0);
+
+    ReconstructVectorPotential();
+    RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
+    while (RecvXTask(pdriver, 0) != TaskStatus::complete) {}
+    ProlongXTask(pdriver, 0);
+
+    ClearXFields();
+
+    // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this is what
+    // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for the next
+    // iteration's PrimToConInit.
+    ComputeADual();
+    SolveConformalFactor(pdriver, 0);
+
+    Real dpsi = 0.0;
+    auto &psi_ = psi;
+    auto &psi_old_ = psi_old;
+    Kokkos::parallel_reduce("cfc_init_dpsi",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                            {nmb, ke+1, je+1, ie+1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+                    Real &local_max) {
+        local_max = Kokkos::fmax(local_max,
+                                  Kokkos::fabs(psi_(m,0,k,j,i) - psi_old_(m,0,k,j,i)));
+      }, Kokkos::Max<Real>(dpsi));
+#if MPI_PARALLEL_ENABLED
+    Real global_dpsi = 0.0;
+    MPI_Allreduce(&dpsi, &global_dpsi, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    dpsi = global_dpsi;
+#endif
+    if (cfc_init_verbose_ && global_variable::my_rank == 0) {
+      std::cout << "CFC::InitializeMetric iteration " << iter
+                << ": max|delta psi| = " << dpsi << std::endl;
+    }
+    if (dpsi < cfc_init_tol_) {
+      converged = true;
+      break;
+    }
+  }
+
+  if (!converged && global_variable::my_rank == 0) {
+    std::cout << "### WARNING in CFC::InitializeMetric" << std::endl
+              << "X^i/psi fixed-point iteration did not converge after "
+              << cfc_init_iter_max_ << " iterations (<cfc>/init_iter_max)."
+              << " Proceeding with the current (non-converged) metric -- increase"
+              << " init_iter_max or loosen <cfc>/init_tol if this is unexpected."
+              << std::endl;
+  }
+
+  // Final refresh: cons must reflect the fixed primitives against the FINAL
+  // (converged, or best-effort) metric before RescaleMatterSources/anything else
+  // reads pmy_pack->pmhd->u0.
+  pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+
+  // Lapse and shift don't feed back into X^i/psi's own equations, so they're
+  // solved once here rather than iterated -- mirrors QueueCFCTasks()'s tail.
+  RescaleMatterSources(pdriver, 0);
+  SolveLapse(pdriver, 0);
+
+  InitRecvTailFields();
+
+  RestPsiTask(pdriver, 0);       SendPsiTask(pdriver, 0);
+  RestAlphaPsiTask(pdriver, 0);  SendAlphaPsiTask(pdriver, 0);
+  while (RecvPsiTask(pdriver, 0) != TaskStatus::complete) {}
+  while (RecvAlphaPsiTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongPsiTask(pdriver, 0);
+  ProlongAlphaPsiTask(pdriver, 0);
+
+  SolveShift(pdriver, 0);
+  RestPBetaTask(pdriver, 0);    SendPBetaTask(pdriver, 0);
+  RestEtaBetaTask(pdriver, 0);  SendEtaBetaTask(pdriver, 0);
+  while (RecvPBetaTask(pdriver, 0) != TaskStatus::complete) {}
+  while (RecvEtaBetaTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongPBetaTask(pdriver, 0);
+  ProlongEtaBetaTask(pdriver, 0);
+
+  ReconstructShift();
+  AssembleADM();
+
+  RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
+  while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongADMTask(pdriver, 0);
+
+  ClearTailFields();
   return;
 }
 

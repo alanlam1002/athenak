@@ -166,6 +166,12 @@ class CFC {
   bool psi_seeded_ = false;
   bool alpha_psi_seeded_ = false;
 
+  // Item 11 (DEVELOPMENT.md): InitializeMetric()'s X^i/psi fixed-point-iteration
+  // controls -- see InitializeMetric's public doc comment above.
+  int cfc_init_iter_max_;
+  Real cfc_init_tol_;
+  bool cfc_init_verbose_;
+
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per
   // field that cfc_reconstruct.cpp later finite-differences (mirrors
   // z4c::Z4c::pbval_u/coarse_u0 exactly; is_z4c=false throughout since CFC is not
@@ -233,6 +239,23 @@ class CFC {
   // CFC_AssembleFinal as *optional* dependencies, so a single con2prim per stage
   // serves both dyn_grmhd's own needs and CFC's (no second con2prim call here).
   void QueueCFCTasks();
+
+  // Item 11 (DEVELOPMENT.md): one-time initialization. The problem generator sets
+  // padm->adm directly (e.g. a 1D TOV profile mapped onto the 3D grid) -- never
+  // passed through CFC's own constraint solve, so it's generally NOT the actual
+  // self-consistent CFC solution for that matter distribution. This converges it:
+  // holds the primitives (pmhd->w0) exactly as the pgen set them, and iterates
+  // X^i/psi (the only mutually-coupled pair -- alpha/beta don't feed back into
+  // either) via PrimToCons (metric-dependent) <-> CFC's vector-Poisson/conformal-
+  // factor solve, until psi stops changing. Called once from Driver::Initialize(),
+  // gated on !res_flag (a restart's checkpointed metric is already self-consistent
+  // with its checkpointed conserved variables -- re-deriving it from primitives
+  // would discard that, not just redundantly recompute it). Non-convergence within
+  // init_iter_max iterations is a warning, not fatal (see InitializeMetric's body).
+  // Takes a real Driver* (not nullptr): the per-field multigrid solves' own
+  // internal iteration caps use it to gracefully truncate the run on failure
+  // (pdriver->nlim = ...), which would segfault on a null pointer.
+  void InitializeMetric(Driver *pdriver);
 
   // Task-graph entry points (TaskStatus(Driver*, int) is the signature
   // NumericalRelativity::QueueTask requires). Each is a thin wrapper around the
@@ -366,6 +389,22 @@ class CFC {
   // cfc::AssembleLapseShiftK). psi4/g_dd were already written by
   // SolveConformalFactor(), right after step 3.
   void AssembleADM();
+
+  // Item 11 (DEVELOPMENT.md): InitializeMetric() runs its X^i/psi fixed-point loop
+  // entirely outside the normal per-stage task graph (it can't reuse it -- a single
+  // pass through "stagen" would also flux-update/RK-evolve the hydro state, which
+  // must NOT happen here), so it can't reuse CFC_InitRecv/ClearSend/ClearRecv
+  // either: those post/wait on all 8 MeshBoundaryValuesCC instances at once, but
+  // InitializeMetric's loop only ever sends/receives 3 of them (p_x, eta_x, x_u)
+  // per iteration -- calling the all-8 versions would post MPI_Irecv's for the
+  // other 5 that never get a matching send that iteration, and ClearRecv's
+  // MPI_Wait on those would hang. These two pairs scope InitRecv/ClearSend/
+  // ClearRecv to exactly the fields actually exercised in each of InitializeMetric's
+  // two phases (the iterated X^i/psi loop, and the one-shot lapse/shift/final tail).
+  void InitRecvXFields();
+  void ClearXFields();
+  void InitRecvTailFields();
+  void ClearTailFields();
 };
 
 }  // namespace cfc

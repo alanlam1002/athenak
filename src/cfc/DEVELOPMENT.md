@@ -533,7 +533,7 @@ src/cfc/
      `CalculateDefectOctet`/`CalculateFASRHSOctet` overrides exist only as
      `std::exit(EXIT_FAILURE)` stubs to satisfy the pure-virtual contract, since the
      `Solve()`-level guard means they should never actually be reached. See new open
-     item 3b below.
+     item 3b below (now being implemented -- see item 12's investigation and plan).
 3b. Extend `MGOctet` (`src/multigrid/multigrid.hpp`) with its own `coeff_`-style
     storage and restriction/boundary-exchange path so `MGCFCConformalFactor`/
     `MGCFCLapse` can support AMR-refined meshes (currently fatal-errors if
@@ -1917,3 +1917,172 @@ src/cfc/
       between `PrimToCons` and the CFC solve; matches the O(10-100)-iteration
       initial-data convergence behavior reported by other XCFC codes, not a
       sign of a bug.
+
+12. **AMR support for CFC (supersedes open item 3b).** In progress. Investigation
+    (re-reading the full octet/AMR machinery in `src/multigrid/` end to end, and
+    every CFC multigrid driver, not just re-stating item 3b's original note) found
+    the gap is narrower than 3b assumed, plus two additional bugs in *shared*
+    (non-CFC) code that item 3b's investigation hadn't surfaced.
+    - **Already AMR-capable, confirmed by reading the actual code, not assumed**:
+      `MGCFCVectorPoisson`/`MGCFCScalarPoisson` (the linear solvers backing `P_i`/
+      `eta` for both `X^i` and `beta^i`) already have real `SmoothOctet`/
+      `CalculateDefectOctet`/`CalculateFASRHSOctet` bodies (`mg_cfc_vector_
+      poisson.cpp`/`mg_cfc_scalar_poisson.cpp`) -- a direct port of gravity's
+      `OctLaplacian` pattern, generalized to 3 channels for the vector case, no
+      `nreflevel_` guard on `Solve()`. These equations (`Delta P^i = S^i`) have no
+      point-varying coefficient, so they never needed `coeff_` and were never
+      blocked by Finding D. CFC's own mesh-level ghost exchange for every field
+      (`p_x`/`eta_x`/`x_u`/`psi`/`alpha_psi`/`p_beta`/`eta_beta`/`u_adm`, via
+      `MeshBoundaryValuesCC`/`RestrictCC`/`ProlongateCC`) also already rides on the
+      same generic, already-AMR-capable machinery hydro/MHD/z4c use, with
+      `coarse_*` shadow arrays already gated on `multilevel`.
+    - **The real gap is isolated to the two nonlinear solvers** (`MGCFCConformal-
+      Factor` for `psi`, `MGCFCLapse` for `alpha*psi`) -- their equations have
+      genuinely point-varying coefficients (`Utilde`/`Ahat^2`/`K(x)`, in `coeff_`),
+      and `MGOctet` carries no coefficient storage at all (confirmed by reading its
+      full definition, `multigrid.hpp` -- only `u`/`def`/`src`/`uold` pointers).
+      Six concrete pieces, traced through the actual V-cycle call chain:
+      1. `MGOctet` has no `coeff` pointer/`Coeff()` accessor/`ncoeff` member.
+      2. `MultigridDriver::InitializeOctets()` allocates/wires `oct_u_buf_`/
+         `oct_def_buf_`/`oct_src_buf_`/`oct_uold_buf_` but nothing analogous for
+         coefficients.
+      3. `TransferCoeffToRoot()` (the CFC-local helper item 3's Finding C already
+         added, mirroring `MultigridDriver::TransferFromBlocksToRoot`) explicitly
+         has no octet-parented branch -- its own comment says so verbatim
+         (`// nreflevel_ == 0 is already guaranteed by Solve()'s guard ... no
+         octet-parented branch to handle`). `TransferFromBlocksToRoot` itself
+         *does* have this branch already (writes `oct.Src`/`oct.U` for blocks
+         refined past the root level) -- `TransferCoeffToRoot` needs the
+         `oct.Coeff(...)` equivalent.
+      4. No octet-level coefficient restriction exists. `u`/`src` restrict
+         octet-to-octet via `PreRestrictOctetU`/`RestrictOctetsBeforeTransfer`/
+         `RestrictOctets`, all built on free functions `RestrictOne`/
+         `RestrictOneSrc`/`RestrictOneDef` (simple 8-child averages,
+         `multigrid.hpp`). Since `coeff_` is static for the whole solve (loaded
+         once before `Solve()`, never touched by smoothing), it needs its own
+         **one-time** restriction pass (new `RestrictOneCoeff` + a loop mirroring
+         `PreRestrictOctetU`'s structure), run once right after
+         `TransferCoeffToRoot()`, not every V-cycle iteration. Confirmed `coeff_`
+         needs no boundary/ghost exchange at the octet level at all: every
+         existing `SmoothPack`/octet-`Smooth` reads `coeff`/`Src` only at the
+         exact point being updated, never at a neighbor offset (unlike `u`, the
+         only reason `cbuf_`/`SetBoundariesOctets` exist).
+      5. `SmoothOctet`/`CalculateDefectOctet`/`CalculateFASRHSOctet` are
+         `std::exit(EXIT_FAILURE)` stubs. The Newton math itself doesn't need
+         re-deriving: `ConformalFactorRHS(u, u_tilde, ahat_sq, &rhs, &drhs_du)`
+         and `LapseReactionCoeff(...)` are already plain `KOKKOS_INLINE_FUNCTION`s
+         taking scalars, not views -- reusable as-is at octet scale. Only
+         `ConformalFactorLap`/`LapseLap` (templated on a 5D view, `u(m,0,k,j,i)`)
+         need octet-indexed counterparts (`oct.U(0,k,j,i)`), mechanically
+         identical in shape to gravity's own `OctLaplacian`.
+      6. Remove the `nreflevel_ > 0` `FATAL` guards in both `Solve()`s once 1-5
+         land.
+    - **Two more gaps found, both in *shared* (non-CFC) code, not previously
+      recorded anywhere**:
+      - `Multigrid::ncoeff_` is never initialized in the base class constructor
+        (`multigrid.cpp:36-39`'s init list sets `nvar_` but not `ncoeff_`) -- for
+        gravity (which also never sets it) this is a genuinely uninitialized
+        `int`, implicitly relied on to "happen to be 0." Worth fixing regardless
+        of AMR.
+      - `Multigrid::ReallocateForAMR()` (the generic per-block-count-change
+        handler, called from `PrepareForAMR()` whenever AMR creates/destroys
+        MeshBlocks on a rank) resizes `u_`/`src_`/`def_`/`uold_` per level but
+        never `coeff_`. This is a real bug independent of octets entirely: if AMR
+        ever changes `nmmb_` while a CFC nonlinear solver is live, `coeff_`
+        silently stays the old size, and the next `LoadMatterSource`/
+        `LoadNonlinearCoefficient` call reads/writes out of bounds or stale data.
+        Two-line fix (`if (ncoeff_ > 0) Kokkos::realloc(coeff_[l], ...)` in the
+        existing per-level loop), safe for gravity since `ncoeff_` stays `0`
+        there -- but depends on the previous bullet's fix first, so the guard is
+        well-defined rather than reading garbage.
+    - **Plan / implementation order** (chosen so the one piece with blast radius
+      beyond CFC is validated in isolation first):
+      1. The two shared base-class fixes above, verified against a gravity AMR
+         smoke test before touching CFC at all.
+      2. `MGOctet`/`InitializeOctets` coefficient plumbing (points 1-2).
+      3. `TransferCoeffToRoot`'s octet branch + new `RestrictCoeffOctets`
+         (points 3-4).
+      4. Real `SmoothOctet`/`CalculateDefectOctet`/`CalculateFASRHSOctet` bodies +
+         guard removal for `MGCFCConformalFactor`, verified in isolation.
+      5. Repeat for `MGCFCLapse`.
+      6. An end-to-end AMR TOV test (no existing CFC `.athinput` sets
+         `multilevel`/refinement -- a new one is needed to exercise any of this).
+    - **Files**: `src/multigrid/multigrid.hpp`/`.cpp`/`multigrid_driver.cpp`
+      (shared -- `MGOctet`, `RestrictOneCoeff`, `oct_coeff_buf_`, `ncoeff_` init,
+      `ReallocateForAMR`); `src/cfc/mg_cfc_conformal_factor.hpp`/`.cpp`,
+      `src/cfc/mg_cfc_lapse.hpp`/`.cpp` (octet bodies, `TransferCoeffToRoot`,
+      `RestrictCoeffOctets`, guard removal); a new AMR-enabled `.athinput`.
+
+    - **Implemented, all 6 steps above.** Additional finding made partway through
+      step 4's verification, not anticipated in the original plan: `TransferCoeff-
+      ToRoot` only ever populated `mgroot_`'s own *finest* internal V-cycle level
+      (the root grid can itself span multiple levels, e.g. 4x4x4 -> 2x2x2 -> 1x1x1,
+      whenever there are enough root-level blocks/octets) -- every coarser root
+      level's `coeff_` was left at its post-construction default (0), corrupting
+      the FAS coarse-grid correction from those levels. Fixed by calling
+      `mgc_root->RestrictCoefficients()` (already-existing, generic `Multigrid`
+      method -- the same one `mglevels_->RestrictCoefficients()` already applies
+      to the per-block hierarchy) at the end of `TransferCoeffToRoot`, for both
+      drivers. Also added `<cfc>` `mg_npresmooth`/`mg_npostsmooth` (default 1,
+      matching the base class): AMR-refined meshes need more smoothing per level
+      to fully converge than a uniform mesh does, exactly matching
+      `binary_gravity.athinput`'s own top-of-file advice ("more smoothing
+      (npresmooth/npostsmooth = 2 or 3), or refinement = none") -- a known,
+      pre-existing characteristic of this multigrid implementation at refinement
+      boundaries, confirmed by observing gravity's own AMR test plateau
+      similarly (~3.9e-6) well before reaching a tight tolerance, using only the
+      base-class default of 1.
+    - **Open, not yet root-caused**: with `<cfc> init_tol=1e-10`/`mg_threshold=
+      1e-10` (both tuned for the uniform-resolution case), a small single/few-
+      octet AMR test's inner V-cycle solve (`psi`) plateaus at a *stable,
+      deterministic* residual (~1.4e-4, reproducibly the same value run to run,
+      not noise) regardless of `mg_npresmooth`/`mg_npostsmooth` (tried 1, 3, 6 --
+      partial improvement 1->3, none 3->6) -- suggestive of a small, bounded,
+      not-yet-understood discretization inconsistency at the refinement boundary,
+      separate from the `mgroot_` restriction bug above (still present after that
+      fix). Not chased further this round. Important context that *does*
+      distinguish "real bug" from "just needs a looser tolerance," though:
+      the **outer** `CFC::InitializeMetric` fixed-point loop (item 11) converges
+      smoothly through this the entire time (`max|delta psi|` geometric, ratio
+      ~0.577/iteration, matching the non-AMR case's ~0.6-0.7 almost exactly) --
+      i.e. the physics is still converging correctly overall, via an inexact-
+      Newton/Picard-style tolerance to the inner solve's own imprecision; the
+      residual floor is a property of the *inner* V-cycle only. Practical
+      consequence fixed regardless of root cause: `MultigridDriver::
+      SolveIterative`'s hard-coded 40-iteration soft-failure path sets
+      `pdriver->nlim = pmesh->ncycle`, meant to gracefully truncate the *main*
+      evolution loop -- but `InitializeMetric` runs *before* that loop starts, so
+      repeated inner failures there were silently zeroing `nlim` and terminating
+      the whole run after 0 cycles even though the metric itself converged fine.
+      Fixed with a save/restore of `nlim` around the `InitializeMetric` call in
+      `Driver::Initialize()` (`driver.cpp`), independent of whether the residual
+      floor itself ever gets root-caused.
+    - **Verified**: rebuilt cleanly. Gravity AMR regression (`binary_gravity.
+      athinput`, separate build/pgen, 232 MeshBlocks, 5 refinement levels) shows
+      identical defect norms before and after the two shared base-class fixes --
+      confirms no regression from touching `src/multigrid/`. New CFC AMR test
+      (`cfc_tov_amr*.athinput`, not yet committed to `inputs/`): 32^3 root mesh,
+      8^3 meshblock (4x4x4=64 root blocks), static refinement around the stellar
+      core --
+      - **1 refinement level** (1-8 octets depending on region size, with
+        `mg_threshold=5e-4`/`mg_npresmooth=mg_npostsmooth=2` to work around the
+        open residual-floor item above): completes all 3 requested cycles
+        cleanly, `nlim` intact, zero NaN/FATAL, only transient warnings, mass
+        conserved to ~0.06-0.09% (reasonable for this loose a tolerance on a
+        short, coarse test).
+      - **2 refinement levels** (`num_levels=3`, nested `refined_region1`/
+        `refined_region2`, "Octet level 0: 8 octets" + "Octet level 1: 8
+        octets"): the first real exercise of the octet-to-octet coefficient
+        restriction path (`RestrictCoeffOctets`'s actual loop body is a no-op
+        whenever `nreflevel_<=1`, so the 1-level test above never touched it).
+        Also completes all 3 cycles cleanly, no NaN/FATAL, mass sane.
+      - Not yet verified: the user's actual production configuration
+        (`inputs/.../cfc_tov_stability`-style setup via
+        `/sakura/ptmp/tlam/athenak_run/cfc_stability`, `num_levels=5`,
+        `refined_region1` at `level=4`) is far deeper than either test above
+        (4 refinement levels vs. 1-2) -- that specific run was observed to be
+        progressing cleanly (cycle 1295/tlim=100, mass drift ~6e-8 over 40 time
+        units, zero warnings in its log) but almost certainly under an
+        intermediate build predating some of the fixes in this item (job started
+        at 14:23:19, shared build directory last rebuilt 14:27:36), so it isn't
+        by itself confirmation of the current code.

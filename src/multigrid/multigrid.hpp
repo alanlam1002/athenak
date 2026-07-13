@@ -79,18 +79,30 @@ class MGOctet {
   LogicalLocation loc;
   bool fleaf;
   int nc, nvar;  // nc = 2 + 2*ngh
+  int ncoeff;    // 0 for every current user except cfc::MGCFCConformalFactor/
+                 // MGCFCLapse (item 12) -- 0 makes Coeff() unreachable/unsized,
+                 // matching Multigrid::ncoeff_'s own "0 = unused" convention.
   OctetNeighborInfo neighbors[27];
 
   // Raw pointers into contiguous per-level buffers managed by MultigridDriver.
   Real *u, *def, *src, *uold;
+  // Optional per-point coefficient storage (item 12) -- unlike u/def/src/uold,
+  // never restricted every V-cycle iteration (coeff_ is static for the whole
+  // solve) and never needs cross-octet ghost exchange (every SmoothOctet/
+  // CalculateDefectOctet/CalculateFASRHSOctet reads Coeff() only at the exact
+  // point being updated, never at a neighbor offset -- see MultigridDriver::
+  // RestrictCoeffOctets's doc comment). nullptr/size 0 when ncoeff == 0.
+  Real *coeff;
 
-  void Init(int nv, int ngh) {
+  void Init(int nv, int ngh, int nco = 0) {
     nc = 2 + 2*ngh;
     nvar = nv;
-    u = def = src = uold = nullptr;
+    ncoeff = nco;
+    u = def = src = uold = coeff = nullptr;
   }
 
   int size() const { return nvar * nc * nc * nc; }
+  int coeffsize() const { return ncoeff * nc * nc * nc; }
   void ZeroClearU() { std::memset(u, 0, size() * sizeof(Real)); }
   void ZeroClearSrc() { std::memset(src, 0, size() * sizeof(Real)); }
   void StoreOld() { std::memcpy(uold, u, size() * sizeof(Real)); }
@@ -107,6 +119,9 @@ class MGOctet {
   inline Real& Uold(int v, int k, int j, int i) {
     return uold[((v*nc + k)*nc + j)*nc + i];
   }
+  inline Real& Coeff(int c, int k, int j, int i) {
+    return coeff[((c*nc + k)*nc + j)*nc + i];
+  }
   inline const Real& U(int v, int k, int j, int i) const {
     return u[((v*nc + k)*nc + j)*nc + i];
   }
@@ -118,6 +133,9 @@ class MGOctet {
   }
   inline const Real& Uold(int v, int k, int j, int i) const {
     return uold[((v*nc + k)*nc + j)*nc + i];
+  }
+  inline const Real& Coeff(int c, int k, int j, int i) const {
+    return coeff[((c*nc + k)*nc + j)*nc + i];
   }
 };
 
@@ -419,6 +437,7 @@ class MultigridDriver {
   void ZeroClearOctets();
   void RestrictFMGSourceOctets();
   void PreRestrictOctetU();
+  void RestrictCoeffOctets();
   void RestrictOctetsBeforeTransfer();
   void SetOctetBoundariesBeforeTransfer(bool folddata);
   void SetOctetBoundarySameLevel(MGOctet &dst, const MGOctet &src,
@@ -560,6 +579,12 @@ class MultigridDriver {
   // Layout: octet_stride_ consecutive Reals per octet (nvar*nc*nc*nc).
   std::vector<Real> *oct_u_buf_, *oct_def_buf_, *oct_src_buf_, *oct_uold_buf_;
   int octet_stride_;  // elements per octet = nvar * nc^3
+
+  // Optional per-point coefficient storage (item 12), same contiguous-per-level-
+  // buffer pattern as oct_u_buf_ above. Zero-sized (harmless) unless a subclass
+  // sets ncoeff_ > 0 -- see MGOctet::coeff's doc comment.
+  std::vector<Real> *oct_coeff_buf_;
+  int octet_coeff_stride_;  // elements per octet = ncoeff_ * nc^3
 
   std::vector<Real> root_u_buf_, root_uold_buf_;
   int root_buf_nc_;
@@ -721,6 +746,17 @@ inline Real RestrictOneDef(const MGOctet &oct, int v, int fi, int fj, int fk) {
                +oct.Def(v, fk,   fj+1, fi)   + oct.Def(v, fk,   fj+1, fi+1)
                +oct.Def(v, fk+1, fj,   fi)   + oct.Def(v, fk+1, fj,   fi+1)
                +oct.Def(v, fk+1, fj+1, fi)   + oct.Def(v, fk+1, fj+1, fi+1));
+}
+
+// Item 12: coeff_-flavored counterpart of RestrictOne/RestrictOneSrc/
+// RestrictOneDef above, used by MultigridDriver::RestrictCoeffOctets() for a
+// one-time (not per-V-cycle) coefficient restriction through the octet
+// hierarchy -- coeff_ is static for the whole solve, unlike u_/src_.
+inline Real RestrictOneCoeff(const MGOctet &oct, int c, int fi, int fj, int fk) {
+  return 0.125*(oct.Coeff(c, fk,   fj,   fi)   + oct.Coeff(c, fk,   fj,   fi+1)
+               +oct.Coeff(c, fk,   fj+1, fi)   + oct.Coeff(c, fk,   fj+1, fi+1)
+               +oct.Coeff(c, fk+1, fj,   fi)   + oct.Coeff(c, fk+1, fj,   fi+1)
+               +oct.Coeff(c, fk+1, fj+1, fi)   + oct.Coeff(c, fk+1, fj+1, fi+1));
 }
 
 // access flat buffer of size (nvar, nc, nc, nc)

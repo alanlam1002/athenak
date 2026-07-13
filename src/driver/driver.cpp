@@ -320,7 +320,18 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // comment (cfc.hpp) for why this can't just reuse a normal per-stage CFC solve
   // and why it's skipped on restarts (res_flag).
   if (!res_flag && pmesh->pmb_pack->pcfc != nullptr) {
+    // Item 12: a per-field multigrid V-cycle's own soft-failure path (exceeding
+    // its internal iteration cap without reaching mg_threshold -- can happen on
+    // AMR-refined meshes, see DEVELOPMENT.md item 12's open residual-floor note)
+    // sets this->nlim = pmesh->ncycle, meant to gracefully truncate the *main*
+    // evolution loop. InitializeMetric runs before that loop even starts, so
+    // without this save/restore such a failure here would silently zero out
+    // nlim and terminate the whole run after 0 cycles, even though the metric
+    // itself converged fine (InitializeMetric's own outer loop has its own,
+    // independent convergence check via init_tol/init_iter_max).
+    int saved_nlim = nlim;
     pmesh->pmb_pack->pcfc->InitializeMetric(this);
+    nlim = saved_nlim;
   }
 
   //---- Step 2.  Compute time step (if problem involves time evolution)

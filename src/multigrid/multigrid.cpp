@@ -36,7 +36,13 @@
 Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
                      bool on_host):
   pmy_driver_(pmd), pmy_pack_(pmbp), pmy_mesh_(pmd->pmy_mesh_), ngh_(nghost),
-  nvar_(pmd->nvar_), defscale_(1.0), on_host_(on_host) {
+  nvar_(pmd->nvar_), ncoeff_(0), defscale_(1.0), on_host_(on_host) {
+  // ncoeff_ defaults to 0 (no coefficient storage) unless a subclass explicitly
+  // sets it and allocates coeff_ itself (e.g. cfc::MGCFCConformalFactor/MGCFCLapse
+  // -- see src/cfc/DEVELOPMENT.md item 3's Finding B). Previously left genuinely
+  // uninitialized here; gravity (which never sets it) implicitly relied on it
+  // "happening to be" 0. Needed as a well-defined guard for ReallocateForAMR's
+  // coeff_ resize below (item 12).
   if (pmy_pack_ != nullptr) {
     //Meshblock levels
     indcs_ = pmy_mesh_->mb_indcs;
@@ -249,6 +255,17 @@ void Multigrid::ReallocateForAMR() {
     Kokkos::realloc(u_[l],   nmmb_, nvar_, ncz, ncy, ncx);
     Kokkos::realloc(src_[l], nmmb_, nvar_, ncz, ncy, ncx);
     Kokkos::realloc(def_[l], nmmb_, nvar_, ncz, ncy, ncx);
+    // coeff_ is a subclass-owned, optional per-point coefficient array (see
+    // ncoeff_'s doc comment in the constructor above) -- gravity leaves ncoeff_
+    // at its default 0, so this is a no-op there. cfc::MGCFCConformalFactor/
+    // MGCFCLapse set ncoeff_ > 0 and allocate coeff_ themselves in their own
+    // constructors (matching the sizing here exactly), but never hooked into
+    // AMR-triggered reallocation before this: without this, coeff_ silently kept
+    // its pre-AMR size after nmmb_ changed, reading/writing out of bounds on the
+    // next LoadMatterSource/LoadNonlinearCoefficient call (item 12).
+    if (ncoeff_ > 0) {
+      Kokkos::realloc(coeff_[l], nmmb_, ncoeff_, ncz, ncy, ncx);
+    }
     if (l != nlevel_ - 1)
       Kokkos::realloc(uold_[l], nmmb_, nvar_, ncz, ncy, ncx);
   }

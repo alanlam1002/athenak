@@ -74,6 +74,14 @@ Real ConformalFactorLap(const ViewType &u, int m, int k, int j, int i) {
          - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
 }
 
+// Item 12: octet-indexed counterpart of ConformalFactorLap above (oct.U(0,k,j,i)
+// instead of u(m,0,k,j,i)) -- same 7-point stencil, mechanically identical in
+// shape to gravity::OctLaplacian / MGCFCVectorPoissonDriver's own OctLaplacian.
+inline Real OctConformalFactorLap(const MGOctet &oct, int k, int j, int i) {
+  return 6.0*oct.U(0,k,j,i) - oct.U(0,k+1,j,i) - oct.U(0,k,j+1,i) - oct.U(0,k,j,i+1)
+         - oct.U(0,k-1,j,i) - oct.U(0,k,j-1,i) - oct.U(0,k,j,i-1);
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -205,6 +213,14 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
+  // Item 12: AMR-refined meshes need more smoothing per level to fully converge
+  // than a uniform-resolution mesh does with the base-class default of 1 (matches
+  // binary_gravity.athinput's own top-of-file advice: "more smoothing (npresmooth/
+  // npostsmooth = 2 or 3), or refinement = none" -- a known, pre-existing
+  // characteristic of this multigrid implementation at refinement boundaries, not
+  // specific to CFC). Left at the base default (1) unless overridden.
+  npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
+  npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
 
@@ -277,16 +293,13 @@ MGCFCConformalFactorDriver::~MGCFCConformalFactorDriver() {
 
 void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
-  // Finding D: AMR octets carry no coeff_ storage at all -- guard rather than
-  // silently smooth against stale/garbage Utilde/Ahat^2 at refinement boundaries.
-  if (nreflevel_ > 0) {
-    std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::Solve" << std::endl
-              << "CFC's nonlinear multigrid solvers do not yet support AMR-refined "
-              << "meshes (see src/cfc/DEVELOPMENT.md, open item 3b)." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
+  // Item 12: one-time coefficient restriction through the octet hierarchy (a
+  // no-op when nreflevel_==0) -- must run after TransferCoeffToRoot has
+  // populated each octet level's own Coeff() from its real MeshBlock children,
+  // and before SetupMultigrid()/SolveMG() begins reading Coeff() at every level.
+  RestrictCoeffOctets();
 
   SetupMultigrid(dt, false);
 
@@ -383,10 +396,12 @@ void MGCFCConformalFactorDriver::SeedInitialGuess(const DvceArray5D<Real> &guess
 //! (mgroot_) via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer
 //! runs for any multi-meshblock mesh (not AMR-specific), so mgroot_ needs its own
 //! Utilde/Ahat^2 populated the same way before the V-cycle can reach the root level.
-//! Deliberately duplicates the relevant (non-refined-block) slice of that function's
-//! logic here rather than touching src/multigrid/ -- see plan addendum #3, Finding C.
-//! Guarded by Solve()'s nreflevel_==0 check, so every block here is at the root level
-//! (no octet-parented branch needed, unlike the original TransferFromBlocksToRoot).
+//! Deliberately duplicates the relevant logic here rather than touching
+//! src/multigrid/ -- see plan addendum #3, Finding C. Item 12 extended this with the
+//! octet-parented branch TransferFromBlocksToRoot itself already has (blocks refined
+//! past the root level write into their parent octet's Coeff() instead of the root
+//! grid) -- the nreflevel_==0 guard that used to make this branch unreachable is
+//! gone now that Solve() supports AMR.
 
 void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   const int nc = ncoeff_;
@@ -417,43 +432,117 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
 #endif
 
   const auto loc = pmy_mesh_->lloc_eachmb;
+  int rootlevel = locrootlevel_;
   int ngh = mgc_root->GetGhostCells();
   auto &coeff_root = mgc_root->CoeffAtLevel(mgc_root->GetNumberOfLevels()-1);
   auto root_coeff_h = coeff_root.h_view;
   for (int n = 0; n < nbtotal_; ++n) {
-    // nreflevel_ == 0 is already guaranteed by Solve()'s guard, so every block is
-    // at the root level here -- no octet-parented branch to handle.
     int i = static_cast<int>(loc[n].lx1);
     int j = static_cast<int>(loc[n].lx2);
     int k = static_cast<int>(loc[n].lx3);
-    for (int v = 0; v < nc; ++v) {
-      root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+    if (loc[n].level == rootlevel) {
+      for (int v = 0; v < nc; ++v) {
+        root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+      }
+    } else {
+      // Item 12: block refined past the root level -- write into its parent
+      // octet's Coeff() instead (mirrors TransferFromBlocksToRoot's identical
+      // else-branch for Src()/U()).
+      LogicalLocation oloc;
+      oloc.lx1 = (loc[n].lx1 >> 1);
+      oloc.lx2 = (loc[n].lx2 >> 1);
+      oloc.lx3 = (loc[n].lx3 >> 1);
+      oloc.level = loc[n].level - 1;
+      int olev = oloc.level - rootlevel;
+      int oid = octetmap_[olev][oloc];
+      int oi = (i & 1) + ngh;
+      int oj = (j & 1) + ngh;
+      int ok = (k & 1) + ngh;
+      MGOctet &oct = octets_[olev][oid];
+      for (int v = 0; v < nc; ++v) {
+        oct.Coeff(v, ok, oj, oi) = coeffbuf.h_view(v, n);
+      }
     }
   }
   if (!mgc_root->OnHost()) {
     Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
+  // Item 12 (found while debugging the AMR smoke test, not AMR-specific): the
+  // above only ever populates mgroot_'s OWN finest internal level (nrootlevel_-1
+  // -- the root grid can itself span multiple V-cycle levels, e.g. 4x4x4 -> 2x2x2
+  // -> 1x1x1, whenever there are enough root-level blocks/octets). Every coarser
+  // root level's coeff_ was left at its post-construction default (0) -- the
+  // Newton kernel there would then solve against a wrong (all-zero K(x)-ingredient)
+  // equation, corrupting the FAS coarse-grid correction fed back up and stalling
+  // convergence. mglevels_->RestrictCoefficients() (called by Solve() just before
+  // this function) only restricts the *per-block* hierarchy; mgroot_ needs the
+  // identical treatment applied to itself.
+  mgc_root->RestrictCoefficients();
   return;
 }
 
-void MGCFCConformalFactorDriver::SmoothOctet(MGOctet & /*oct*/, int /*rlev*/,
-                                             int /*color*/) {
-  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::SmoothOctet" << std::endl
-            << "AMR octets are not supported for CFC's nonlinear solvers "
-            << "(see DEVELOPMENT.md open item 3b); guarded in Solve()." << std::endl;
-  std::exit(EXIT_FAILURE);
+// Item 12: octet-scale Newton-Gauss-Seidel smoothing, exactly the same math as
+// MGCFCConformalFactor::SmoothPack (per-level) above -- ConformalFactorRHS is
+// reused verbatim (a pure scalar function, no view dependency); only the
+// Laplacian stencil and the u/src/coeff access pattern change (oct.U/Src/Coeff
+// instead of u_[lev]/src_[lev]/coeff_[lev] views). mg_omega_psi_/psi_floor_ are
+// this driver's own members, no static_cast needed (unlike SmoothPack, which is
+// a Multigrid, not MultigridDriver, method).
+void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real dx2 = dx * dx;
+  int c = color ^ coffset_;
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
+        Real u_old = oct.U(0,k,j,i);
+        Real rhs, drhs_du;
+        ConformalFactorRHS(u_old, oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                            &rhs, &drhs_du);
+        Real lap = OctConformalFactorLap(oct, k, j, i);
+        Real fprime = 6.0 - dx2*drhs_du;
+        Real u_new = u_old - mg_omega_psi_*(lap - (rhs + oct.Src(0,k,j,i))*dx2)/fprime;
+        if (u_new + 1.0 < psi_floor_) u_new = psi_floor_ - 1.0;
+        oct.U(0,k,j,i) = u_new;
+      }
+    }
+  }
 }
 
-void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet & /*oct*/, int /*rlev*/) {
-  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::CalculateDefectOctet"
-            << std::endl << "AMR octets are not supported for CFC's nonlinear "
-            << "solvers (see DEVELOPMENT.md open item 3b)." << std::endl;
-  std::exit(EXIT_FAILURE);
+void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real idx2 = 1.0 / (dx*dx);
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh; i <= ngh+1; ++i) {
+        Real rhs, drhs_du;
+        ConformalFactorRHS(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                            &rhs, &drhs_du);
+        Real lap = OctConformalFactorLap(oct, k, j, i);
+        oct.Def(0,k,j,i) = (rhs + oct.Src(0,k,j,i)) - lap*idx2;
+      }
+    }
+  }
 }
 
-void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet & /*oct*/, int /*rlev*/) {
-  std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::CalculateFASRHSOctet"
-            << std::endl << "AMR octets are not supported for CFC's nonlinear "
-            << "solvers (see DEVELOPMENT.md open item 3b)." << std::endl;
-  std::exit(EXIT_FAILURE);
+void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real idx2 = 1.0 / (dx*dx);
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh; i <= ngh+1; ++i) {
+        Real rhs, drhs_du;
+        ConformalFactorRHS(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                            &rhs, &drhs_du);
+        Real lap = OctConformalFactorLap(oct, k, j, i);
+        oct.Src(0,k,j,i) += lap*idx2 - rhs;
+      }
+    }
+  }
 }

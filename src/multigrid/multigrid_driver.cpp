@@ -50,6 +50,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     octets_(nullptr), octetmap_(nullptr), octetbflag_(nullptr), noctets_(nullptr),
     oct_u_buf_(nullptr), oct_def_buf_(nullptr),
     oct_src_buf_(nullptr), oct_uold_buf_(nullptr), octet_stride_(0),
+    oct_coeff_buf_(nullptr), octet_coeff_stride_(0),
     root_buf_nc_(0), root_flat_buf_stale_(true),
     root_sync_state_(RootSyncState::SYNCED),
     mask_radius_(-1.0), autompo_(false), nodipole_(false),
@@ -101,6 +102,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     oct_def_buf_  = new std::vector<Real>[maxreflevel_];
     oct_src_buf_  = new std::vector<Real>[maxreflevel_];
     oct_uold_buf_ = new std::vector<Real>[maxreflevel_];
+    oct_coeff_buf_ = new std::vector<Real>[maxreflevel_];
   }
 }
 
@@ -122,6 +124,7 @@ MultigridDriver::~MultigridDriver() {
   delete [] oct_def_buf_;
   delete [] oct_src_buf_;
   delete [] oct_uold_buf_;
+  delete [] oct_coeff_buf_;
 }
 
 
@@ -292,7 +295,7 @@ void MultigridDriver::InitializeOctets() {
 
         if (static_cast<int>(octets_[l].size()) <= oid) {
           octets_[l].resize(oid + 1);
-          octets_[l][oid].Init(nvar_, ngh);
+          octets_[l][oid].Init(nvar_, ngh, ncoeff_);
         }
         octets_[l][oid].loc = oloc;
         octets_[l][oid].fleaf = false;
@@ -304,19 +307,29 @@ void MultigridDriver::InitializeOctets() {
   {
     int nc = 2 + 2*ngh;
     octet_stride_ = nvar_ * nc * nc * nc;
+    // Item 12: 0 for every current user except cfc::MGCFCConformalFactor/
+    // MGCFCLapse -- oct_coeff_buf_[l] stays empty (total=0, .data() never
+    // dereferenced since ncoeff==0 makes Coeff() unreachable) for gravity and
+    // CFC's linear vector/scalar Poisson solvers.
+    octet_coeff_stride_ = ncoeff_ * nc * nc * nc;
     for (int l = 0; l < nreflevel_; ++l) {
       int noct = noctets_[l];
       std::size_t total = static_cast<std::size_t>(noct) * octet_stride_;
+      std::size_t ctotal = static_cast<std::size_t>(noct) * octet_coeff_stride_;
       oct_u_buf_[l].assign(total, 0.0);
       oct_def_buf_[l].assign(total, 0.0);
       oct_src_buf_[l].assign(total, 0.0);
       oct_uold_buf_[l].assign(total, 0.0);
+      oct_coeff_buf_[l].assign(ctotal, 0.0);
       for (int o = 0; o < noct; ++o) {
         std::size_t off = static_cast<std::size_t>(o) * octet_stride_;
+        std::size_t coff = static_cast<std::size_t>(o) * octet_coeff_stride_;
         octets_[l][o].u    = oct_u_buf_[l].data()    + off;
         octets_[l][o].def  = oct_def_buf_[l].data()  + off;
         octets_[l][o].src  = oct_src_buf_[l].data()   + off;
         octets_[l][o].uold = oct_uold_buf_[l].data() + off;
+        octets_[l][o].coeff = (octet_coeff_stride_ > 0)
+                                   ? (oct_coeff_buf_[l].data() + coff) : nullptr;
       }
     }
   }
@@ -1578,6 +1591,42 @@ void MultigridDriver::PreRestrictOctetU() {
       int ok = (static_cast<int>(floc.lx3) & 1) + ngh;
       for (int v = 0; v < nvar_; ++v)
         coct.U(v, ok, oj, oi) = RestrictOne(foct, v, ngh, ngh, ngh);
+    }
+  }
+}
+
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::RestrictCoeffOctets()
+//! \brief Item 12: one-time coefficient restriction through the octet hierarchy,
+//! mirroring PreRestrictOctetU's structure exactly but for Coeff() instead of U(),
+//! looped over ncoeff_ channels instead of nvar_. Unlike u_/src_, coeff_ is static
+//! for the whole solve (loaded once, before Solve() begins, never touched by
+//! smoothing) so this only needs to run once -- called right after the driver's
+//! own TransferCoeffToRoot() has populated the finest octet level's Coeff() values
+//! from the per-block coeff_ arrays, before SetupMultigrid()/SolveMG() begins. A
+//! no-op (single early return) for every current driver except cfc::
+//! MGCFCConformalFactorDriver/MGCFCLapseDriver, the only ones with ncoeff_ > 0.
+
+void MultigridDriver::RestrictCoeffOctets() {
+  if (ncoeff_ <= 0) return;
+  const int ngh = mgroot_->ngh_;
+  for (int l = nreflevel_ - 1; l >= 1; --l) {
+    for (int o = 0; o < noctets_[l]; ++o) {
+      MGOctet &foct = octets_[l][o];
+      const LogicalLocation &floc = foct.loc;
+      LogicalLocation cloc;
+      cloc.lx1 = (floc.lx1 >> 1);
+      cloc.lx2 = (floc.lx2 >> 1);
+      cloc.lx3 = (floc.lx3 >> 1);
+      cloc.level = floc.level - 1;
+      int oid = octetmap_[l-1][cloc];
+      MGOctet &coct = octets_[l-1][oid];
+      int oi = (static_cast<int>(floc.lx1) & 1) + ngh;
+      int oj = (static_cast<int>(floc.lx2) & 1) + ngh;
+      int ok = (static_cast<int>(floc.lx3) & 1) + ngh;
+      for (int c = 0; c < ncoeff_; ++c)
+        coct.Coeff(c, ok, oj, oi) = RestrictOneCoeff(foct, c, ngh, ngh, ngh);
     }
   }
 }

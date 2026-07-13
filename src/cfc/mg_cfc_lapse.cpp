@@ -85,6 +85,13 @@ Real LapseLap(const ViewType &u, int m, int k, int j, int i) {
          - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
 }
 
+// Item 12: octet-indexed counterpart of LapseLap above, mirroring
+// MGCFCConformalFactorDriver's OctConformalFactorLap.
+inline Real OctLapseLap(const MGOctet &oct, int k, int j, int i) {
+  return 6.0*oct.U(0,k,j,i) - oct.U(0,k+1,j,i) - oct.U(0,k,j+1,i) - oct.U(0,k,j,i+1)
+         - oct.U(0,k-1,j,i) - oct.U(0,k,j-1,i) - oct.U(0,k,j,i-1);
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -213,6 +220,10 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
+  // Item 12: see MGCFCConformalFactorDriver's identical comment -- AMR-refined
+  // meshes need more smoothing per level than the base-class default of 1.
+  npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
+  npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
 
   // Outer (non-periodic, non-reflecting) faces use MultigridDriver's own base-
   // constructor default, BoundaryFlag::mg_zerofixed, not mg_multipole -- see
@@ -269,16 +280,13 @@ MGCFCLapseDriver::~MGCFCLapseDriver() {
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
-  // Finding D: AMR octets carry no coeff_ storage at all -- guard rather than
-  // silently smooth against stale/garbage K(x) ingredients at refinement boundaries.
-  if (nreflevel_ > 0) {
-    std::cout << "### FATAL ERROR in MGCFCLapseDriver::Solve" << std::endl
-              << "CFC's nonlinear multigrid solvers do not yet support AMR-refined "
-              << "meshes (see src/cfc/DEVELOPMENT.md, open item 3b)." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
+  // Item 12: one-time coefficient restriction through the octet hierarchy (a
+  // no-op when nreflevel_==0) -- must run after TransferCoeffToRoot has
+  // populated each octet level's own Coeff() from its real MeshBlock children,
+  // and before SetupMultigrid()/SolveMG() begins reading Coeff() at every level.
+  RestrictCoeffOctets();
 
   SetupMultigrid(dt, false);
 
@@ -348,7 +356,8 @@ void MGCFCLapseDriver::SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh)
 //! \fn void MGCFCLapseDriver::TransferCoeffToRoot()
 //! \brief Finding C: see MGCFCConformalFactorDriver::TransferCoeffToRoot for the full
 //! rationale -- duplicated here (not shared) since each driver owns a distinct
-//! mgroot_/mglevels_ pair of a different concrete Multigrid subclass.
+//! mgroot_/mglevels_ pair of a different concrete Multigrid subclass. Item 12 added
+//! the octet-parented branch (see the conformal-factor driver's identical addition).
 
 void MGCFCLapseDriver::TransferCoeffToRoot() {
   const int nc = ncoeff_;
@@ -379,42 +388,104 @@ void MGCFCLapseDriver::TransferCoeffToRoot() {
 #endif
 
   const auto loc = pmy_mesh_->lloc_eachmb;
+  int rootlevel = locrootlevel_;
   int ngh = mgc_root->GetGhostCells();
   auto &coeff_root = mgc_root->CoeffAtLevel(mgc_root->GetNumberOfLevels()-1);
   auto root_coeff_h = coeff_root.h_view;
   for (int n = 0; n < nbtotal_; ++n) {
-    // nreflevel_ == 0 is already guaranteed by Solve()'s guard, so every block is
-    // at the root level here -- no octet-parented branch to handle.
     int i = static_cast<int>(loc[n].lx1);
     int j = static_cast<int>(loc[n].lx2);
     int k = static_cast<int>(loc[n].lx3);
-    for (int v = 0; v < nc; ++v) {
-      root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+    if (loc[n].level == rootlevel) {
+      for (int v = 0; v < nc; ++v) {
+        root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
+      }
+    } else {
+      // Item 12: block refined past the root level -- write into its parent
+      // octet's Coeff() instead (mirrors TransferFromBlocksToRoot's identical
+      // else-branch for Src()/U()).
+      LogicalLocation oloc;
+      oloc.lx1 = (loc[n].lx1 >> 1);
+      oloc.lx2 = (loc[n].lx2 >> 1);
+      oloc.lx3 = (loc[n].lx3 >> 1);
+      oloc.level = loc[n].level - 1;
+      int olev = oloc.level - rootlevel;
+      int oid = octetmap_[olev][oloc];
+      int oi = (i & 1) + ngh;
+      int oj = (j & 1) + ngh;
+      int ok = (k & 1) + ngh;
+      MGOctet &oct = octets_[olev][oid];
+      for (int v = 0; v < nc; ++v) {
+        oct.Coeff(v, ok, oj, oi) = coeffbuf.h_view(v, n);
+      }
     }
   }
   if (!mgc_root->OnHost()) {
     Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
+  // Item 12: see MGCFCConformalFactorDriver::TransferCoeffToRoot's identical
+  // comment -- mgroot_ can itself span multiple V-cycle levels, and only its
+  // finest one was ever populated above; every coarser root level's coeff_
+  // needs the same restriction mglevels_->RestrictCoefficients() already gives
+  // the per-block hierarchy.
+  mgc_root->RestrictCoefficients();
   return;
 }
 
-void MGCFCLapseDriver::SmoothOctet(MGOctet & /*oct*/, int /*rlev*/, int /*color*/) {
-  std::cout << "### FATAL ERROR in MGCFCLapseDriver::SmoothOctet" << std::endl
-            << "AMR octets are not supported for CFC's nonlinear solvers "
-            << "(see DEVELOPMENT.md open item 3b); guarded in Solve()." << std::endl;
-  std::exit(EXIT_FAILURE);
+// Item 12: octet-scale exact one-step Gauss-Seidel (Finding A -- this equation is
+// affine in u once psi/Ahat^2 are fixed, unlike the conformal factor's genuine
+// Newton iteration), exactly the same math as MGCFCLapse::SmoothPack (per-level)
+// above. K(x) is read directly from Coeff(0,...) (already fully evaluated by
+// LoadReactionCoefficient at load time, round 16 fix) -- LapseReactionCoeff itself
+// is never called here, same as the per-level Pack methods.
+void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real dx2 = dx * dx;
+  int c = color ^ coffset_;
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
+        Real kx = oct.Coeff(0,k,j,i);
+        Real lap = OctLapseLap(oct, k, j, i);
+        Real u_old = oct.U(0,k,j,i);
+        Real fval = lap + dx2*kx*(u_old + 1.0) - dx2*oct.Src(0,k,j,i);
+        Real fprime = 6.0 + dx2*kx;
+        oct.U(0,k,j,i) = u_old - fval/fprime;
+      }
+    }
+  }
 }
 
-void MGCFCLapseDriver::CalculateDefectOctet(MGOctet & /*oct*/, int /*rlev*/) {
-  std::cout << "### FATAL ERROR in MGCFCLapseDriver::CalculateDefectOctet" << std::endl
-            << "AMR octets are not supported for CFC's nonlinear solvers "
-            << "(see DEVELOPMENT.md open item 3b)." << std::endl;
-  std::exit(EXIT_FAILURE);
+void MGCFCLapseDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real idx2 = 1.0 / (dx*dx);
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh; i <= ngh+1; ++i) {
+        Real kx = oct.Coeff(0,k,j,i);
+        Real lap = OctLapseLap(oct, k, j, i);
+        oct.Def(0,k,j,i) = (-kx*(oct.U(0,k,j,i) + 1.0) + oct.Src(0,k,j,i)) - lap*idx2;
+      }
+    }
+  }
 }
 
-void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet & /*oct*/, int /*rlev*/) {
-  std::cout << "### FATAL ERROR in MGCFCLapseDriver::CalculateFASRHSOctet" << std::endl
-            << "AMR octets are not supported for CFC's nonlinear solvers "
-            << "(see DEVELOPMENT.md open item 3b)." << std::endl;
-  std::exit(EXIT_FAILURE);
+void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
+  int ngh = mgroot_->GetGhostCells();
+  Real root_dx = mgroot_->GetRootDx();
+  Real dx = root_dx / static_cast<Real>(1 << rlev);
+  Real idx2 = 1.0 / (dx*dx);
+  for (int k = ngh; k <= ngh+1; ++k) {
+    for (int j = ngh; j <= ngh+1; ++j) {
+      for (int i = ngh; i <= ngh+1; ++i) {
+        Real kx = oct.Coeff(0,k,j,i);
+        Real lap = OctLapseLap(oct, k, j, i);
+        oct.Src(0,k,j,i) += lap*idx2 + kx*(oct.U(0,k,j,i) + 1.0);
+      }
+    }
+  }
 }

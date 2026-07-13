@@ -757,25 +757,19 @@ void CFC::AssembleVectorSource(bool for_shift) {
   if (!for_shift) {
     // Step 1 (Gmunu eq. 72): U/S_i built directly from the evolved conserved state
     // (pmy_pack->pmhd->u0), mirroring dyn_grmhd.cpp's DynGRMHD::SetTmunu lines
-    // 472/474 exactly -- no primitives needed for these two. psi^6 here is the
-    // *previous* stage's converged psi (this stage's own psi doesn't exist yet;
-    // standard XCFC lagged-coefficient structure).
+    // 472/474 exactly -- no primitives needed for these two. cons is already
+    // densitized by sqrt(detg) (AthenaK's standard GRMHD convention), and
+    // psi^6 == sqrt(detg) exactly for the conformally-flat ansatz (g_dd =
+    // psi^4*delta_ij, always, everywhere -- AssembleConformalMetric's only
+    // writer) -- so U-tilde = psi^6*U = psi^6*cons/sqrt(detg) collapses to cons
+    // itself, and likewise for S-tilde_i: no detg/psi^6 computation needed here
+    // at all, it would just multiply and divide by the same value.
     auto &cons = pmy_pack->pmhd->u0;
     auto &u_tilde_ = u_tilde;
-    auto &psi_ = psi;
     par_for("cfc_assemble_vecX_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
-      Real detg = adm::SpatialDet(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                   adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                   adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i));
-      Real ivol = 1.0/sqrt(detg);
-      Real psi_val = psi_(m,0,k,j,i);
-      Real psi2 = psi_val*psi_val;
-      Real psi6 = psi2*psi2*psi2;
-
-      Real e_dens = (cons(m,IEN,k,j,i) + cons(m,IDN,k,j,i))*ivol;
-      u_tilde_(m,0,k,j,i) = psi6*e_dens;
+      u_tilde_(m,0,k,j,i) = cons(m,IEN,k,j,i) + cons(m,IDN,k,j,i);
 
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
@@ -787,7 +781,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
 
       Real eta_val = 0.0;
       for (int a = 0; a < 3; ++a) {
-        Real s_a = psi6*cons(m,IM1+a,k,j,i)*ivol;
+        Real s_a = cons(m,IM1+a,k,j,i);
         s_tilde_d_(m,a,k,j,i) = s_a;
         Real p_a = 8.0*M_PI*s_a;  // Gmunu eq. 72 rhs, f^ij = delta^ij (Cartesian)
         p_src_(m,a,mk,mj,mi) = p_a;
@@ -915,7 +909,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
     auto &psi_ = psi;
     par_for("cfc_seed_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      psi_(m,0,k,j,i) = pow(adm.psi4(m,k,j,i), 0.25) - 1.0;
+      psi_(m,0,k,j,i) = Kokkos::pow(adm.psi4(m,k,j,i), 0.25) - 1.0;
     });
     pmgd_psi->SeedInitialGuess(psi, indcs.ng);
   }
@@ -968,7 +962,6 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
   auto &prim = pmy_pack->pmhd->w0;
   auto &cons = pmy_pack->pmhd->u0;
   auto &bcc = pmy_pack->pmhd->bcc0;
-  auto &psi_ = psi;
   auto &s_tilde_ = s_tilde;
 
   par_for("cfc_rescale_matter_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
@@ -977,7 +970,8 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
     Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
     Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
     Real detg = adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz);
-    Real ivol = 1.0/sqrt(detg);
+    Real sqrtdetg = Kokkos::sqrt(detg);
+    Real ivol = 1.0/sqrtdetg;
     Real detginv = 1.0/detg;
 
     Real v_d[3] = {0.0};
@@ -990,7 +984,7 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
         B_d[a] += bcc(m, b, k, j, i)*adm.g_dd(m, a, b, k, j, i)*ivol;
       }
     }
-    iW = 1.0/sqrt(1. + iW);
+    iW = 1.0/Kokkos::sqrt(1. + iW);
     Real Bv = 0.0, Bsq = 0.0;
     for (int a = 0; a < 3; ++a) {
       Bv += bcc(m, a, k, j, i)*v_d[a]*ivol;
@@ -1012,10 +1006,10 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
                                S_dd[0][0], S_dd[0][1], S_dd[0][2],
                                S_dd[1][1], S_dd[1][2], S_dd[2][2]);
 
-    Real psi_val = psi_(m,0,k,j,i);
-    Real psi2 = psi_val*psi_val;
-    Real psi6 = psi2*psi2*psi2;
-    s_tilde_(m,0,k,j,i) = psi6*trace_S;
+    // psi^6 == sqrt(detg) exactly for the conformally-flat ansatz (g_dd =
+    // psi^4*delta_ij) -- reuse sqrtdetg already computed above instead of
+    // re-deriving the same value from psi.
+    s_tilde_(m,0,k,j,i) = sqrtdetg*trace_S;
   });
   return;
 }

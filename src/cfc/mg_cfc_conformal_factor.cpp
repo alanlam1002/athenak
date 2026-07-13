@@ -368,6 +368,15 @@ void MGCFCConformalFactorDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::SeedInitialGuess(...)
+
+void MGCFCConformalFactorDriver::SeedInitialGuess(const DvceArray5D<Real> &guess,
+                                                   int ngh) {
+  mglevels_->LoadFinestData(guess, 0, ngh);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::TransferCoeffToRoot()
 //! \brief Finding C: MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp)
 //! aggregates every rank's coarsest per-block cell into the distributed root grid

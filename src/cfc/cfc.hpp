@@ -151,6 +151,21 @@ class CFC {
   MGCFCConformalFactorDriver *pmgd_psi;
   MGCFCLapseDriver *pmgd_alpha;
 
+  // Item 10 (DEVELOPMENT.md): one-shot flags so the very first CFC_SolvePsi/
+  // CFC_SolveLapse call ever made seeds its V-cycle's initial guess from the
+  // problem generator's own ADM data (padm->adm.psi4/alpha) instead of a cold
+  // Kokkos-zero start -- see SolveConformalFactor/SolveLapse in cfc.cpp. False by
+  // construction (both a fresh run and a restart reconstruct CFC from scratch, and
+  // in both cases padm->adm holds a real, non-default metric guess -- the pgen's
+  // analytic profile on a fresh run, the checkpointed converged metric on a
+  // restart -- by the time the first real Solve() call happens; see cfc.cpp's
+  // doc comment on SolveConformalFactor for why seeding can't happen here in the
+  // constructor itself). Every subsequent call is left alone (its own natural
+  // multigrid warm start, whatever u_[finest] already holds from the previous
+  // stage/cycle, untouched by this).
+  bool psi_seeded_ = false;
+  bool alpha_psi_seeded_ = false;
+
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per
   // field that cfc_reconstruct.cpp later finite-differences (mirrors
   // z4c::Z4c::pbval_u/coarse_u0 exactly; is_z4c=false throughout since CFC is not
@@ -168,6 +183,23 @@ class CFC {
   DvceArray5D<Real> coarse_psi, coarse_alpha_psi;
   DvceArray5D<Real> coarse_u_pbeta, coarse_eta_beta;
 
+  // Round 19 fix: AssembleConformalMetric/AssembleLapseShiftK (cfc_reconstruct.cpp)
+  // only ever write pmy_pack->padm->u_adm's INTERIOR (is..ie) -- unlike z4c's
+  // Z4cToADM, which fills u_adm over the full ghost-inclusive extent by converting
+  // from z4c's own already-ghost-exchanged state (z4c_adm.cpp's explicit "sets the
+  // ADM variables everywhere in the MeshBlock" comment). CFC has no such implicit
+  // mechanism, so without this round u_adm's ghost cells were never updated past
+  // whatever the pgen set at t=0 -- invisible in every single-MeshBlock test this
+  // investigation ran (rounds 8-18), but silently wrong at every inter-MeshBlock
+  // boundary in a real multi-MeshBlock run (MHD_C2P/MHD_Flux both read u_adm over
+  // the full array extent, ghosts included). One combined round for the whole
+  // u_adm array (all adm::ADM::nadm channels: g_dd, vK_dd, psi4, alpha, beta_u --
+  // CFC never runs with z4c active, so none of these channels alias into a
+  // z4c-owned array the way adm::ADM::ADM(...) does when pz4c != nullptr), run
+  // once per stage right after CFC_AssembleFinal.
+  MeshBoundaryValuesCC *pbval_adm;
+  DvceArray5D<Real> coarse_u_adm;
+
   // Queues this module's tasks into the shared NumericalRelativity task graph
   // (pmy_pack->pnr), mirroring dyngr::DynGRMHD::QueueDynGRMHDTasks()/
   // z4c::Z4c::QueueZ4cTasks(). Called once, from NumericalRelativity::
@@ -175,7 +207,7 @@ class CFC {
   // called directly from Driver::Execute() the way gravity::Gravity is: CFC's steps
   // must interleave with dyn_grmhd's own hydro/con2prim tasks (see cfc.cpp and
   // tasklist/numerical_relativity.hpp's CFC_* TaskName values), which is only
-  // possible through the task graph. Full per-stage chain (32 nodes; see plan
+  // possible through the task graph. Full per-stage chain (36 nodes; see plan
   // addendum #4 for the complete dependency derivation):
   //   CFC_BuildSrcX      depends on {MHD_AddSrc} (post flux+source-update u0);
   //                      solves P_i/eta for X^i, retrieves into u_p_x/eta_x.
@@ -194,6 +226,9 @@ class CFC {
   //   CFC_ReconstructBeta   depends on {..ProlongPBeta, ..ProlongEtaBeta}; builds
   //                      beta_u.
   //   CFC_AssembleFinal  depends on {CFC_ReconstructBeta}; writes vK_dd/alpha/beta_u.
+  //   CFC_Rest/Send/Recv/ProlongADM  depends on {CFC_AssembleFinal}; ghost-exchanges
+  //                      the whole padm->u_adm array (round 19 fix -- see pbval_adm's
+  //                      doc comment above).
   // dyn_grmhd.cpp's MHD_C2P/MHD_Newdt tasks in turn take CFC_SolvePsi/
   // CFC_AssembleFinal as *optional* dependencies, so a single con2prim per stage
   // serves both dyn_grmhd's own needs and CFC's (no second con2prim call here).
@@ -244,6 +279,32 @@ class CFC {
   TaskStatus SendEtaBetaTask(Driver *pdriver, int stage);
   TaskStatus RecvEtaBetaTask(Driver *pdriver, int stage);
   TaskStatus ProlongEtaBetaTask(Driver *pdriver, int stage);
+  // Round 19 fix: ghost-exchange padm->u_adm after AssembleFinalTask -- see
+  // pbval_adm's doc comment above.
+  TaskStatus RestADMTask(Driver *pdriver, int stage);
+  TaskStatus SendADMTask(Driver *pdriver, int stage);
+  TaskStatus RecvADMTask(Driver *pdriver, int stage);
+  TaskStatus ProlongADMTask(Driver *pdriver, int stage);
+
+  // Round 19 fix: post the non-blocking MPI receives for all 8 ghost-exchange
+  // rounds above once, up front (Task_Start), and wait on the outstanding
+  // sends/receives once, at the very end (Task_End) -- mirrors z4c::Z4c::InitRecv/
+  // ClearSend/ClearRecv (z4c_tasks.cpp) exactly, just batched over CFC's 8 fields
+  // instead of z4c's single u0. Without these, PackAndSendCC still issues a real
+  // MPI_Isend (it self-builds its own buffer/offset metadata on first use), but
+  // RecvAndUnpackCC's completion check tests an MPI_Request that was never posted
+  // (stuck at MPI_REQUEST_NULL, which MPI_Test/MPI_Wait always report as complete
+  // on), so the "receive" silently unpacks whatever zero-initialized garbage sits
+  // in the never-actually-filled aggregate recv buffer instead of the neighbor's
+  // real data. Each of the 8 MeshBoundaryValuesCC instances owns its own
+  // MPI_Comm_dup'd communicator (bvals.cpp), so batching all 8 into one
+  // Task_Start/two Task_End tasks is safe -- no cross-field message collisions,
+  // and the before_stagen/stagen/after_stagen task-list phases already run as
+  // fully separate, sequential passes (driver.cpp), so Task_End is guaranteed to
+  // run only after every Task_Run task (including CFC_ProlongADM) has completed.
+  TaskStatus InitRecvTask(Driver *pdriver, int stage);
+  TaskStatus ClearSendTask(Driver *pdriver, int stage);
+  TaskStatus ClearRecvTask(Driver *pdriver, int stage);
 
  private:
   // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources into the member

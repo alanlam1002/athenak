@@ -98,6 +98,15 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
 
+    // seed the finest level's own solution array (the V-cycle's initial guess) from
+    // an externally-supplied delta_psi field, instead of leaving it at whatever it
+    // already held (a cold Kokkos-zero-initialized guess, on the very first call
+    // this driver's Solve() ever makes). Thin wrapper around Multigrid::
+    // LoadFinestData (mirrors gravity::MGGravityDriver::Solve()'s own
+    // mglevels_->LoadFinestData call) -- ngh is guess's own padding depth, same
+    // convention as LoadMatterSource/LoadNonlinearCoefficient above.
+    void SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh);
+
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;

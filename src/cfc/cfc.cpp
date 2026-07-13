@@ -6,6 +6,7 @@
 //! \file cfc.cpp
 //! \brief implementation of the CFC class
 
+#include <cmath>
 #include <iostream>
 
 #include "athena.hpp"
@@ -142,7 +143,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     coarse_psi("cfc_coarse_psi", 1, 1, 1, 1, 1),
     coarse_alpha_psi("cfc_coarse_alpha_psi", 1, 1, 1, 1, 1),
     coarse_u_pbeta("cfc_coarse_u_pbeta", 1, 1, 1, 1, 1),
-    coarse_eta_beta("cfc_coarse_eta_beta", 1, 1, 1, 1, 1) {
+    coarse_eta_beta("cfc_coarse_eta_beta", 1, 1, 1, 1, 1),
+    pbval_adm(nullptr),
+    coarse_u_adm("cfc_coarse_u_adm", 1, 1, 1, 1, 1) {
   int nmb = pmy_pack->nmb_thispack;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
@@ -228,6 +231,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pbval_etabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_etabeta->InitializeBuffers(1);
 
+  // Round 19 fix: ghost-exchange for padm->u_adm itself -- see pbval_adm's doc
+  // comment in cfc.hpp. adm::ADM::nadm channels (g_dd, vK_dd, psi4, alpha, beta_u):
+  // CFC never runs with z4c active, so u_adm always carries the full nadm channels
+  // (adm::ADM::ADM's constructor only shrinks it to nadm-4 and aliases alpha/beta_u
+  // into pz4c->u0 when pz4c != nullptr -- never true here).
+  pbval_adm = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_adm->InitializeBuffers(adm::ADM::nadm);
+
   // coarse_* shadow arrays: only needed with SMR/AMR (RestrictCC/ProlongateCC are
   // internal no-ops otherwise), matching z4c.cpp's identical multilevel guard.
   if (pmy_pack->pmesh->multilevel) {
@@ -241,6 +252,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::realloc(coarse_alpha_psi,  nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_u_pbeta,    nmb, 3, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_eta_beta,   nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_adm,      nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
   }
 }
 
@@ -261,16 +273,23 @@ CFC::~CFC() {
   delete pbval_alpha_psi;
   delete pbval_pbeta;
   delete pbval_etabeta;
+  delete pbval_adm;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::QueueCFCTasks()
 //! \brief queues CFC's tasks into the shared NumericalRelativity task graph. See
-//! cfc.hpp's doc comment for the full 32-node chain this builds.
+//! cfc.hpp's doc comment for the full 36-node chain this builds.
 
 void CFC::QueueCFCTasks() {
   using namespace numrel;  // NOLINT(build/namespaces)
   NumericalRelativity *pnr = pmy_pack->pnr;
+
+  // Round 19 fix: post all 8 fields' non-blocking MPI receives up front, before any
+  // of this stage's Send/Recv rounds run -- mirrors z4c::Z4c_Recv (Task_Start).
+  // See InitRecvTask's doc comment in cfc.hpp for why this is required for
+  // correctness, not just an optimization.
+  pnr->QueueTask(&CFC::InitRecvTask, this, CFC_InitRecv, "CFC_InitRecv", Task_Start);
 
   pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_BuildSrcX, "CFC_BuildSrcX",
                  Task_Run, {MHD_AddSrc});
@@ -359,6 +378,29 @@ void CFC::QueueCFCTasks() {
 
   pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
                  Task_Run, {CFC_ReconstructBeta});
+
+  // Round 19 fix: ghost-exchange padm->u_adm (see pbval_adm's doc comment in
+  // cfc.hpp) -- nothing else in this stage's task list depends on these completing,
+  // but the shared task-list machinery still awaits every queued task before the
+  // "stagen" list as a whole is considered done, so u_adm's ghosts are guaranteed
+  // valid by the time the next stage (or MHD_Newdt, this same stage) runs.
+  pnr->QueueTask(&CFC::RestADMTask, this, CFC_RestADM, "CFC_RestADM",
+                 Task_Run, {CFC_AssembleFinal});
+  pnr->QueueTask(&CFC::SendADMTask, this, CFC_SendADM, "CFC_SendADM",
+                 Task_Run, {CFC_RestADM});
+  pnr->QueueTask(&CFC::RecvADMTask, this, CFC_RecvADM, "CFC_RecvADM",
+                 Task_Run, {CFC_SendADM});
+  pnr->QueueTask(&CFC::ProlongADMTask, this, CFC_ProlongADM, "CFC_ProlongADM",
+                 Task_Run, {CFC_RecvADM});
+
+  // Round 19 fix: wait for every outstanding send/receive posted this stage before
+  // the "stagen" list is considered done -- mirrors z4c::Z4c_ClearS/Z4c_ClearR
+  // (Task_End). Must run after every Task_Run task (guaranteed by the before_stagen/
+  // stagen/after_stagen phase separation in driver.cpp, not by an explicit
+  // dependency edge -- see InitRecvTask's doc comment in cfc.hpp).
+  pnr->QueueTask(&CFC::ClearSendTask, this, CFC_ClearSend, "CFC_ClearSend", Task_End);
+  pnr->QueueTask(&CFC::ClearRecvTask, this, CFC_ClearRecv, "CFC_ClearRecv",
+                 Task_End, {CFC_ClearSend});
   return;
 }
 
@@ -526,6 +568,76 @@ TaskStatus CFC::ProlongEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
     pbval_etabeta->ProlongateCC(eta_beta, coarse_eta_beta, false);
   }
+  return TaskStatus::complete;
+}
+
+// Round 19 fix: ghost-exchange padm->u_adm itself, once per stage, right after
+// AssembleFinalTask writes its interior (see pbval_adm's doc comment in cfc.hpp).
+// No CFCScalarBCs/CFCVectorBCs-style physical-BC pass here, unlike the Recv*Tasks
+// above: those helpers assume a single scalar or a uniform-parity 3-vector, but
+// u_adm mixes scalars (psi4, alpha), a vector (beta_u), and rank-2 SYM2 tensors
+// (g_dd, vK_dd) with per-component reflection parity (e.g. g_xy flips sign under
+// an x-reflection, g_xx doesn't) -- reusing either existing helper across all
+// adm::ADM::nadm channels would silently mishandle a reflecting physical boundary.
+// This round therefore only fixes inter-MeshBlock/periodic communication (the
+// round-19 bug), not physical-boundary ghost cells for u_adm specifically; the
+// latter is a separate, pre-existing gap (same class as the one cfc_bcs.cpp
+// already fixes for CFC's own fields) left for a future pass.
+TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
+  return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, coarse_u_adm);
+}
+TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
+  return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, coarse_u_adm);
+}
+TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
+  if (pmy_pack->pmesh->multilevel) {
+    pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
+  }
+  return TaskStatus::complete;
+}
+
+// Round 19 fix: see the doc comment on these three declarations in cfc.hpp.
+// InitRecv/ClearSend/ClearRecv (bvals_tasks.cpp) all unconditionally
+// return TaskStatus::complete, so no incomplete-status propagation is needed --
+// matches z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape,
+// just looped over CFC's 8 MeshBoundaryValuesCC instances instead of one.
+TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
+  pbval_px->InitRecv(3);
+  pbval_etax->InitRecv(1);
+  pbval_x->InitRecv(3);
+  pbval_psi->InitRecv(1);
+  pbval_alpha_psi->InitRecv(1);
+  pbval_pbeta->InitRecv(3);
+  pbval_etabeta->InitRecv(1);
+  pbval_adm->InitRecv(adm::ADM::nadm);
+  return TaskStatus::complete;
+}
+TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
+  pbval_px->ClearSend();
+  pbval_etax->ClearSend();
+  pbval_x->ClearSend();
+  pbval_psi->ClearSend();
+  pbval_alpha_psi->ClearSend();
+  pbval_pbeta->ClearSend();
+  pbval_etabeta->ClearSend();
+  pbval_adm->ClearSend();
+  return TaskStatus::complete;
+}
+TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
+  pbval_px->ClearRecv();
+  pbval_etax->ClearRecv();
+  pbval_x->ClearRecv();
+  pbval_psi->ClearRecv();
+  pbval_alpha_psi->ClearRecv();
+  pbval_pbeta->ClearRecv();
+  pbval_etabeta->ClearRecv();
+  pbval_adm->ClearRecv();
   return TaskStatus::complete;
 }
 
@@ -784,6 +896,30 @@ void CFC::ComputeADual() {
 
 void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
+
+  // Item 10 (DEVELOPMENT.md): on the very first call ever, seed the V-cycle's
+  // initial guess from the problem generator's own ADM data (padm->adm.psi4,
+  // already populated by pgen/restart by the time this runs -- CFC's constructor
+  // runs before pgen, see psi_seeded_'s doc comment in cfc.hpp) instead of leaving
+  // the multigrid's own finest-level solution at its cold Kokkos-zero start. psi's
+  // own backing storage is reused as scratch for delta_psi = psi_guess - 1 here --
+  // RetrieveSolution a few lines below overwrites it with the genuinely-converged
+  // answer immediately after, so borrowing it is safe.
+  if (!psi_seeded_) {
+    psi_seeded_ = true;
+    int &is = indcs.is; int &ie = indcs.ie;
+    int &js = indcs.js; int &je = indcs.je;
+    int &ks = indcs.ks; int &ke = indcs.ke;
+    int nmb = pmy_pack->nmb_thispack;
+    auto &adm = pmy_pack->padm->adm;
+    auto &psi_ = psi;
+    par_for("cfc_seed_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      psi_(m,0,k,j,i) = pow(adm.psi4(m,k,j,i), 0.25) - 1.0;
+    });
+    pmgd_psi->SeedInitialGuess(psi, indcs.ng);
+  }
+
   pmgd_psi->LoadMatterSource(u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
@@ -906,6 +1042,29 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     u_plus_2s(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
   });
+
+  // Item 10 (DEVELOPMENT.md): same one-shot warm-start idea as SolveConformalFactor
+  // above, for alpha*psi. Uses padm->adm.alpha (still the pgen's/restart's raw
+  // value at this point -- AssembleLapseShiftK, the task that overwrites it, runs
+  // much later this same stage) times psi (this stage's own just-converged value
+  // from SolveConformalFactor above, a better multiplier than re-deriving a guess
+  // from padm->adm.psi4, which AssembleConformalMetric already overwrote earlier
+  // this stage). alpha_psi's own backing storage is reused as scratch for
+  // delta_(alpha*psi), same reasoning as psi's reuse above.
+  if (!alpha_psi_seeded_) {
+    alpha_psi_seeded_ = true;
+    int &is = indcs.is; int &ie = indcs.ie;
+    int &js = indcs.js; int &je = indcs.je;
+    int &ks = indcs.ks; int &ke = indcs.ke;
+    auto &adm = pmy_pack->padm->adm;
+    auto &psi_c = psi;
+    auto &alpha_psi_c = alpha_psi;
+    par_for("cfc_seed_alpha_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      alpha_psi_c(m,0,k,j,i) = adm.alpha(m,k,j,i)*psi_c(m,0,k,j,i) - 1.0;
+    });
+    pmgd_alpha->SeedInitialGuess(alpha_psi, indcs.ng);
+  }
 
   pmgd_alpha->LoadReactionCoefficient(u_plus_2s, psi, a_sq, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);

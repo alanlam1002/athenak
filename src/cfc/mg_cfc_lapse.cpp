@@ -337,6 +337,14 @@ void MGCFCLapseDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MGCFCLapseDriver::SeedInitialGuess(...)
+
+void MGCFCLapseDriver::SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh) {
+  mglevels_->LoadFinestData(guess, 0, ngh);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MGCFCLapseDriver::TransferCoeffToRoot()
 //! \brief Finding C: see MGCFCConformalFactorDriver::TransferCoeffToRoot for the full
 //! rationale -- duplicated here (not shared) since each driver owns a distinct

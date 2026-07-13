@@ -365,6 +365,28 @@ src/cfc/
   (`src/eos/primitive_solver_hyd.hpp:308`) reads `padm->adm.g_dd` directly, so `g_dd`
   must be written *before* `MHD_C2P` runs, not deferred to the final assembly step.
 
+- **CFC-only (no `<z4c>`) runs currently still use the speed-of-light CFL bound for
+  `dt`, not the true fluid characteristic speed -- known, deliberately deferred.**
+  `MHD::NewTimeStep` (`src/mhd/mhd_newdt.cpp:87-91`) hardcodes the characteristic
+  speed to `1.0` whenever `is_general_relativistic_` or `is_dynamical_relativistic_`
+  is true, instead of computing the true GRMHD fast-magnetosonic speed the way the
+  Newtonian/SR branches just below it do. `is_dynamical_relativistic` is true for
+  any CFC run (`coordinates.cpp:31`: true whenever `<adm>` or `<z4c>` exists), so
+  this branch always fires here. For z4c-based runs this is harmless -- `Z4c::
+  NewTimeStep` (`z4c_newdt.cpp:50-52`) independently imposes `dt ~ dx/1` anyway
+  (light-crossing CFL for the hyperbolic z4c system), so it was never the binding
+  constraint. **For CFC (no z4c), nothing else imposes a light-crossing
+  restriction, so `dt` ends up needlessly capped at the light-crossing scale**
+  rather than the physically-appropriate sound/fast-magnetosonic-crossing scale --
+  confirmed empirically (`dt` is bit-for-bit constant every cycle in a CFC TOV-star
+  run, `= cfl_number*dx/1.0`, never tracking density/pressure). **Decision (per
+  user direction): leave as-is for now** -- explicitly keep using the
+  `is_general_relativistic_`-style conservative bound for CFC runs too; computing
+  the actual GRMHD fast-magnetosonic characteristic speed is deferred to future
+  work, not part of the current CFC investigation. Revisit here first if CFC
+  performance ever needs improving (likely a large speedup, since fluid sound speed
+  is generally well below `c`).
+
 ## Integration points outside `src/cfc/`
 
 - `src/mesh/meshblock_pack.hpp` / `.cpp`: `MeshBlockPack::pcfc`, constructed when a
@@ -1740,10 +1762,70 @@ src/cfc/
        investigations under item 9 are now concluded.** All four fixes (FAS `src_`
        for psi, `RetrieveResult` ghost depth for both psi and alpha, FAS-consistent
        `K(x)` coefficient restriction for alpha, FAS `src_` for alpha) are
-       committed. No outstanding open follow-ups remain from this thread; a full
-       (non-isolated) run of `cfc_tov_full_2x.athinput` has not been re-checked
-       post-round-18 to confirm its "Failed to converge" count is now zero, but
-       given round 18's isolated-solve tests show zero failures at both
-       resolutions across repeated iterations, this is expected to also be
-       resolved -- worth a final confirmation run if/when convenient, not treated
-       as a live open item.
+       committed. **Confirmed**: a full (non-isolated), ordinary task-graph-driven
+       run of `cfc_tov_full_2x.athinput` (all 10 cycles, `128^3`) completes cleanly
+       with **zero** `"Failed to converge"` messages anywhere in the log -- the
+       fix holds under the real per-stage pipeline, not just the isolated
+       `DebugCFCSolveAtT0` replay. No outstanding open follow-ups remain from this
+       thread; item 9 is closed.
+
+10. ~~Seed the multigrid initial guess for `psi`/`alpha_psi` from the problem
+    generator's own ADM data, instead of always cold-starting from flat space.~~
+    **Done for `psi`/`alpha_psi`; deliberately skipped for `beta` -- see below.**
+    Confirmed (round 19 investigation) that `Driver::Initialize()` writes the t=0
+    output using the pgen's raw analytic metric (e.g. `dyngr_tov.cpp`'s
+    isotropic-gauge TOV solution, written directly into `padm->adm.alpha`/
+    `g_dd`/`psi4`/`beta_u`/`vK_dd`) -- CFC's task graph (`"stagen"`) hasn't run
+    even once at that point, so the *first* V-cycle CFC ever runs used to start
+    from a cold Kokkos-zero guess, ignoring that a much better guess (the pgen's
+    own `psi4^(1/4)`, `alpha`) was already sitting in `padm`.
+    - **Mechanism**: `Multigrid::LoadFinestData` (already used by
+      `gravity::MGGravityDriver::Solve()` for its own warm start, but never
+      wired up for CFC) copies a caller-supplied field straight into the
+      V-cycle's finest-level solution array. Added a one-line public wrapper,
+      `SeedInitialGuess(guess, ngh)`, to both `MGCFCConformalFactorDriver` and
+      `MGCFCLapseDriver` (`mg_cfc_conformal_factor.hpp/.cpp`,
+      `mg_cfc_lapse.hpp/.cpp`).
+    - **Where the seeding happens**: two new one-shot `bool` flags on `CFC`
+      (`psi_seeded_`, `alpha_psi_seeded_`, `cfc.hpp`), checked at the top of
+      `SolveConformalFactor`/`SolveLapse` (`cfc.cpp`) and never reset -- every
+      call after the very first is left alone (its own natural multigrid warm
+      start from whatever the previous stage/cycle converged to). Seeding can't
+      happen in `CFC`'s constructor: `pcfc` is constructed *before* the
+      problem generator runs (`meshblock_pack.cpp` vs. `main.cpp`'s
+      `new ProblemGenerator(...)` call), so `padm->adm` would still hold its own
+      pre-pgen default, not the real initial data. Waiting for the first actual
+      `SolveConformalFactor`/`SolveLapse` call (which only happens once the main
+      loop's `"stagen"` list runs, well after the pgen -- or after a restart
+      finishes loading its checkpoint) sidesteps that ordering problem for both
+      a fresh run and a restart alike, with no special-casing needed.
+    - **What's actually copied**: `psi`'s own backing array is reused as scratch
+      -- written with `delta_psi = pow(padm->adm.psi4, 0.25) - 1` over the
+      interior, handed to `SeedInitialGuess`, then immediately overwritten by
+      `RetrieveSolution`'s genuinely-converged answer a few lines later (safe,
+      since nothing reads the scratch value in between). `alpha_psi` mirrors
+      this with `delta_(alpha*psi) = padm->adm.alpha * psi - 1`, using
+      `padm->adm.alpha` (still the pgen's/restart's raw value -- 
+      `AssembleLapseShiftK`, the task that overwrites it, runs much later this
+      same stage) times `psi` (this *stage's* own just-converged value from
+      `SolveConformalFactor`, a strictly better multiplier than re-deriving a
+      guess from `padm->adm.psi4`, which `AssembleConformalMetric` already
+      overwrote earlier the same stage).
+    - **`beta` deliberately not seeded**: the multigrid unknowns for the shift
+      are `u_p_beta`/`eta_beta` (Shibata's `P_i`/`eta` potentials), not `beta^i`
+      itself -- there is no cheap pointwise inversion from a given `beta^i` back
+      to `(P_i, eta)` (that would require solving another elliptic-like problem,
+      defeating the purpose of a free warm start). For the TOV pgen this is moot
+      anyway: the initial data has `beta^i = 0` identically, which is already
+      exactly what `u_p_beta`/`eta_beta`'s existing cold-zero default produces
+      after reconstruction -- so there is currently nothing to gain here. Left
+      as a known gap for a future pgen with genuinely nonzero initial shift.
+    - **Verified**: rebuilt cleanly; a single-rank smoke test
+      (`cfc_tov.athinput`, `mg_verbose=2`, 3 cycles) shows every solve block
+      (including the now-seeded `psi`/`alpha_psi` ones) converging smoothly
+      with no `"Failed to converge"`/`FATAL` messages, e.g. the conformal-factor
+      solve's first call: initial defect `8.25e-04` -> `9.7e-11` in 11
+      iterations. Not yet A/B-benchmarked against the pre-seed iteration count
+      (would require reverting and rebuilding a second time); the change is
+      narrow enough (only the initial guess of an already-correct, already-
+      converging solve) that this wasn't treated as blocking.

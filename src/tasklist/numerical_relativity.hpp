@@ -91,6 +91,7 @@ enum TaskName {
   Z4c_DumpHorizon,
   Z4c_NTASKS,
 
+  CFC_InitRecv,
   CFC_BuildSrcX,
   CFC_RestPX, CFC_SendPX, CFC_RecvPX, CFC_ProlongPX,
   CFC_RestEtaX, CFC_SendEtaX, CFC_RecvEtaX, CFC_ProlongEtaX,
@@ -107,6 +108,8 @@ enum TaskName {
   CFC_RestEtaBeta, CFC_SendEtaBeta, CFC_RecvEtaBeta, CFC_ProlongEtaBeta,
   CFC_ReconstructBeta,
   CFC_AssembleFinal,
+  CFC_RestADM, CFC_SendADM, CFC_RecvADM, CFC_ProlongADM,
+  CFC_ClearSend, CFC_ClearRecv,
   CFC_NTASKS
 };
 

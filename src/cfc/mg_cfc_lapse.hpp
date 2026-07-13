@@ -93,6 +93,11 @@ class MGCFCLapseDriver : public MultigridDriver {
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
 
+    // seed the finest level's own solution array (the V-cycle's initial guess) from
+    // an externally-supplied delta_(alpha*psi) field -- see MGCFCConformalFactor-
+    // Driver::SeedInitialGuess's doc comment for the full rationale (same pattern).
+    void SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh);
+
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;

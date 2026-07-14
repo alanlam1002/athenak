@@ -43,6 +43,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -202,8 +203,8 @@ void MGCFCConformalFactor::CalculateFASRHSPack() {
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 2 (carries Utilde, Ahat^2); mg_multipole boundary
-//! conditions (Gmunu eq. 77, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 2 (carries Utilde, Ahat^2); mg_robin boundary
+//! conditions by default (Gmunu eq. 77, isolated/asymptotically-flat falloff).
 
 MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
                                                        ParameterInput *pin)
@@ -224,35 +225,56 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
 
-  // Outer (non-periodic, non-reflecting) faces use MultigridDriver's own base-
-  // constructor default, BoundaryFlag::mg_zerofixed (Dirichlet delta_psi=0, i.e.
-  // psi=1 exactly at the boundary) -- the leading-order truncation of Gmunu eq. 77's
-  // true isolated 1/r falloff. Multipole boundaries (mg_multipole) were tried first
-  // and found buggy: CalculateCenterOfMass()/CalculateMultipoleCoefficients()
-  // (multigrid_driver.cpp) integrate mglevels_->src_ as "the density," which is
-  // exactly what gravity puts there -- but this solver's own Utilde/Ahat^2 live in
-  // coeff_, not src_ (see this file's top-of-file comment), by design (so V-cycle
-  // FAS tau-corrections into src_ can't corrupt them). src_ is therefore always zero
-  // when Solve() calls these, so CalculateCenterOfMass's im = 1.0/totals[0] divides
-  // by zero, poisoning mpo_/mpcoeff_ with NaN/inf that MGRootBoundary's mg_multipole
-  // branch then evaluates directly into the domain's outer ghost cells on the very
-  // first V-cycle -- root cause of the boundary NaN documented in DEVELOPMENT.md item
-  // 9 (rounds 1-5). Sidestepped by not using mg_multipole here at all: with the
-  // domain boundary placed well outside the star (as in the current test case), the
-  // zerofixed approximation's O(M/r_boundary) error is an acceptable tradeoff versus
-  // fixing/duplicating the multipole moment integration to read coeff_ instead of
-  // src_. mporder_/autompo_/AllocateMultipoleCoefficients() below are left in place,
-  // inert, so multipole support can be revisited later without redoing this input
-  // parsing -- see DEVELOPMENT.md item 9 round 6.
+  // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin:
+  // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a purely local
+  // extrapolation that enforces Gmunu eq. 77's isolated 1/r^n falloff (n=1,
+  // mg_robin_order's default) for any leading coefficient, without ever needing to
+  // know that coefficient -- no matter integral, no MPI reduction, no dependence on
+  // src_/coeff_ at all. This replaces the earlier BoundaryFlag::mg_zerofixed
+  // (Dirichlet delta_psi=0) workaround, which was only the leading-order
+  // (monopole-zero) truncation of the true falloff -- see DEVELOPMENT.md item 9
+  // rounds 6-7 and the newer Robin BC entry for the full history. Multipole
+  // boundaries (mg_multipole) were tried before mg_zerofixed and found buggy:
+  // CalculateCenterOfMass()/CalculateMultipoleCoefficients() (multigrid_driver.cpp)
+  // integrate mglevels_->src_ as "the density," which is exactly what gravity puts
+  // there -- but this solver's own Utilde/Ahat^2 live in coeff_, not src_ (see this
+  // file's top-of-file comment), by design (so V-cycle FAS tau-corrections into
+  // src_ can't corrupt them). src_ is therefore always zero when Solve() calls
+  // these, so CalculateCenterOfMass's im = 1.0/totals[0] divides by zero, poisoning
+  // mpo_/mpcoeff_ with NaN/inf -- root cause of the boundary NaN documented in
+  // DEVELOPMENT.md item 9 (rounds 1-5). mg_robin sidesteps this bug class entirely
+  // rather than fixing it (no moments computed at all); mporder_/autompo_/
+  // AllocateMultipoleCoefficients() below are left in place, inert, so real
+  // multipole support (a strictly higher-order boundary condition, useful for
+  // shrinking the domain at fixed accuracy per Gmunu sec. 2.6.2) can still be
+  // revisited later without redoing this input parsing.
+  //
+  // <cfc> mg_outer_bc ("robin" [default] or "zerofixed") lets a run fall back to
+  // the old Dirichlet-zero behavior for direct A/B comparison without a rebuild.
   //
   // Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain's
   // inner symmetry planes) still need BoundaryFlag::mg_zerograd, not plain
   // BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state; MGRootBoundary's
-  // device path only recognizes periodic/mg_zerofixed/mg_zerograd, and a face left at
-  // ordinary BoundaryFlag::reflect falls through every branch silently).
+  // device path only recognizes periodic/mg_zerofixed/mg_zerograd/mg_robin, and a
+  // face left at ordinary BoundaryFlag::reflect falls through every branch
+  // silently).
+  robin_order_ = pin->GetOrAddInteger("cfc", "mg_robin_order", 1);
+  std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_outer_bc", "robin");
+  BoundaryFlag outer_bc;
+  if (outer_bc_str == "robin") {
+    outer_bc = BoundaryFlag::mg_robin;
+  } else if (outer_bc_str == "zerofixed") {
+    outer_bc = BoundaryFlag::mg_zerofixed;
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver" << std::endl
+              << "cfc/mg_outer_bc must be 'robin' or 'zerofixed'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (pmbp->pmesh->mesh_bcs[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = outer_bc;
     }
   }
   mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);

@@ -567,6 +567,12 @@ class MultigridDriver {
   bool nodipole_;   // suppress dipole moment (assume origin = center of mass)
   void SyncMultipoleToDevice();
 
+  // Robin (ghost = interior_anchor * (r_anchor/r_ghost)^robin_order_) boundary
+  // conditions -- an isolated 1/r^n falloff enforced locally, with no multipole-
+  // moment integral (and hence no dependence on src_/coeff_ or MPI reductions).
+  // Only active on faces a subclass sets to BoundaryFlag::mg_robin.
+  int robin_order_;
+
   // per-cell octets (Athena++ style)
   std::vector<MGOctet> *octets_;
   std::unordered_map<LogicalLocation, int, LogicalLocationHash> *octetmap_;

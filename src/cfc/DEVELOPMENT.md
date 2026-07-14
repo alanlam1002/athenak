@@ -2289,3 +2289,91 @@ src/cfc/
       old hardcoded `max_dv=1`. `gr_dt` unset still reproduces the unchanged
       `dt=6.4e-1` at every cycle including cycle 0, confirming zero regression
       for the default (off) path.
+16. **Robin outer boundary condition for `psi`/`alpha_psi`'s multigrid solves,
+    replacing the `mg_zerofixed` truncation (item 9 rounds 6-7).** Done (root grid
+    and per-MeshBlock V-cycle levels; AMR octets explicitly out of scope, see
+    below). `MGCFCConformalFactorDriver`/`MGCFCLapseDriver` had been left on
+    `BoundaryFlag::mg_zerofixed` (Dirichlet `delta_psi=0`/`delta_(alpha*psi)=0`
+    exactly at the domain edge) ever since item 9 round 6 found `mg_multipole`
+    divides by zero for these two solvers (`CalculateCenterOfMass`'s
+    `1.0/totals[0]`, since `Utilde`/`Ahat^2` live in `coeff_`, not `src_`, and
+    `CalculateMultipoleCoefficients()` only ever integrates `src_`). That was
+    always a known, explicitly-accepted accuracy tradeoff, not a fix: the true
+    asymptotic behavior (Gmunu eq. 77/78) is an isolated `~M/(2r)` falloff, not
+    zero, so `mg_zerofixed` is only the leading-order (monopole-zero) truncation
+    of the correct condition. (Round 7's suspicion that this mismatch was also
+    causing the "Failed to converge" messages was later falsified by round 8 --
+    those were four unrelated bugs, fixed by round 18 -- so this item is a pure
+    accuracy improvement to an already-converging solver, not a bugfix.)
+    - **User's request**: replace `mg_zerofixed` with a genuine Robin (mixed
+      value/derivative) condition, in the spirit of the `1/r^n` extrapolation
+      technique already implemented for `padm->u_adm`'s outer ghost cells (item
+      14, `src/bvals/physics/adm_bcs.cpp`). That technique *is* a discretized
+      Robin condition: for any field `u ~ C/r^n` asymptotically, `du/dr + n*u/r
+      = 0` holds for *any* `C`, so filling a ghost cell as `u_ghost = u_anchor *
+      (r_anchor/r_ghost)^n` enforces the correct falloff without ever needing to
+      know `C` -- no matter integral, no MPI reduction, no `src_`/`coeff_`
+      dependency at all. This sidesteps `mg_multipole`'s entire bug class here
+      rather than fixing it (fixing `CalculateCenterOfMass`/
+      `CalculateMultipoleCoefficients` to read `coeff_` instead of `src_` would
+      still need a from-scratch renormalization re-derivation, per item 9 round
+      6's own note -- not attempted here).
+    - **Scope decision (confirmed with user)**: the V-cycle touches the outer
+      boundary through three separate ghost-cell fillers --
+      `MultigridDriver::MGRootBoundary` (root grid), `MultigridDriver::
+      PhysicalBoundary` (per-MeshBlock levels, `multigrid_tasks.cpp`), and
+      `MultigridDriver::ApplyPhysicalBoundariesOctet` (AMR octets, item 12).
+      `ApplyPhysicalBoundariesOctet` has no physical-position math at all today
+      (pure index-space `sign=+-1` reflection; even `mg_multipole` skips real
+      position computation there, relying on inheriting values from the coarser
+      root grid) -- deriving an octet's physical position from its
+      `LogicalLocation` would be genuinely new arithmetic with nothing existing
+      to mirror. Every current CFC test input places mesh refinement near the
+      star, never at the domain edge, so no octet ever actually touches the
+      outer physical boundary. This pass implements Robin **only for the root
+      grid and per-MeshBlock levels**; `ApplyPhysicalBoundariesOctet` is
+      unchanged, with a comment (next to its existing multipole note)
+      documenting that any face marked `mg_robin` there silently falls back to
+      the same `sign=+1` (zerograd-like) reflection -- an accepted, narrowly
+      scoped gap, matching this codebase's precedent of flagging rather than
+      silently ignoring deferred octet work (item 3b, before item 12 closed
+      it). Revisit if a future input ever places refinement at the domain edge.
+    - New `BoundaryFlag::mg_robin` (`bvals.hpp`). New `int robin_order_` on the
+      base `MultigridDriver` (default `1`, next to `mporder_`) -- the falloff
+      power `n`, physically `1` for both solvers (Gmunu eq. 77/78's leading
+      monopole term) but exposed rather than hardcoded, matching `mporder_`/
+      `mg_omega_psi`/`psi_floor`'s existing precedent. Ghost fill uses raw mesh
+      coordinates (`pmy_mesh_->mesh_size` / `mb_size.d_view(m)`), deliberately
+      **not** the multipole origin `mpo_` -- fully decoupled from that separate
+      (still-inert) machinery, recomputed at whichever V-cycle level is
+      currently being smoothed (all three fillers are re-invoked every
+      red/black half-sweep at every level, confirmed by reading
+      `OneStepToFiner`/`OneStepToCoarser`/`SolveCoarsestGrid`/the
+      `mg_to_finer`/`mg_to_coarser` task-list wiring -- not just once at the
+      finest level).
+    - New `<cfc>` inputs (both drivers): `mg_outer_bc` (string, `"robin"`
+      default, `"zerofixed"` for A/B rollback -- mirrors gravity's own `mg_bc`
+      string precedent, `mg_gravity.cpp`) and `mg_robin_order` (int, default
+      `1`, sets `robin_order_`). The reflect-face -> `mg_zerograd` loop and
+      `mporder_`/`autompo_`/`nodipole_`/`AllocateMultipoleCoefficients()` (still
+      inert, still available for a future real multipole fix) are unchanged.
+    - **Files**: `src/bvals/bvals.hpp` (enum); `src/multigrid/multigrid.hpp`
+      (`robin_order_`); `src/multigrid/multigrid_driver.cpp`
+      (`MGRootBoundary`'s device+host Robin blocks, `ApplyPhysicalBoundariesOctet`'s
+      doc comment, constructor init list); `src/multigrid/multigrid_tasks.cpp`
+      (`PhysicalBoundary`'s 6 new `else if` branches); `src/cfc/mg_cfc_
+      conformal_factor.cpp`, `src/cfc/mg_cfc_lapse.cpp` (constructors).
+    - **Verification, no compiler in this sandbox (same recurring constraint as
+      every other CFC step)**: `cpplint`-clean plus manual cross-check against
+      the existing, battle-tested `mg_multipole` code at each of the two call
+      sites (same per-level `ncx/ncy/ncz`/`dx` pattern, same cell-center-
+      coordinate formula, same device+host duality). **Not yet run against a
+      real build** -- next step once built on Sakura: rerun `cfc_stability_v2`/
+      `cfc_tov.athinput` with the new default (`mg_outer_bc=robin`) against an
+      explicit `mg_outer_bc=zerofixed` control run of the same setup, confirm
+      no NaN/inf, `mg_threshold=1e-10` still converges with zero "Failed to
+      converge" messages (matching the zerofixed baseline item 9 established),
+      `psi`/`alpha_psi`'s boundary-adjacent values now differ smoothly from `1`
+      instead of being pinned exactly at it, and spot-check the converged
+      `psi`/`alpha` against `dyngr_tov.cpp`'s analytic isotropic-TOV profile
+      (the same diagnostic item 9 rounds 7-8 used).

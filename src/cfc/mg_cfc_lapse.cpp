@@ -58,6 +58,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -210,8 +211,8 @@ void MGCFCLapse::CalculateFASRHSPack() {
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
 //! \brief nvar_ = 1, ncoeff_ = 1 (K(x), precomputed at the finest level -- round 16
-//! fix, see this file's header comment); mg_multipole boundary conditions (Gmunu
-//! eq. 78, isolated/asymptotically-flat falloff).
+//! fix, see this file's header comment); mg_robin boundary conditions by default
+//! (Gmunu eq. 78, isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
@@ -225,21 +226,40 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
 
-  // Outer (non-periodic, non-reflecting) faces use MultigridDriver's own base-
-  // constructor default, BoundaryFlag::mg_zerofixed, not mg_multipole -- see
-  // mg_cfc_conformal_factor.cpp's constructor comment for the full rationale
+  // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin
+  // (local 1/r^n extrapolation, no multipole-moment integral) -- see
+  // mg_cfc_conformal_factor.cpp's constructor comment for the full rationale,
+  // including why mg_multipole was tried first and found buggy here
   // (CalculateCenterOfMass()/CalculateMultipoleCoefficients() integrate src_, which
   // this solver never populates -- Utilde+2*Stilde/psi/Ahat^2 all live in coeff_ --
   // so the multipole path divides by zero and poisons the outer ghost cells with
-  // NaN; DEVELOPMENT.md item 9, rounds 1-6). mporder_/autompo_/
-  // AllocateMultipoleCoefficients() below are left in place, inert.
+  // NaN; DEVELOPMENT.md item 9, rounds 1-6) and why mg_zerofixed (the interim
+  // workaround) was only the leading-order truncation of the true falloff.
+  // mporder_/autompo_/AllocateMultipoleCoefficients() below are left in place,
+  // inert. <cfc> mg_outer_bc ("robin" [default] or "zerofixed") allows falling
+  // back to the old Dirichlet-zero behavior for direct A/B comparison.
   //
   // Faces where the *mesh* itself is reflecting still need BoundaryFlag::mg_zerograd,
   // not plain BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state;
-  // MGRootBoundary's device path only recognizes periodic/mg_zerofixed/mg_zerograd).
+  // MGRootBoundary's device path only recognizes
+  // periodic/mg_zerofixed/mg_zerograd/mg_robin).
+  robin_order_ = pin->GetOrAddInteger("cfc", "mg_robin_order", 1);
+  std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_outer_bc", "robin");
+  BoundaryFlag outer_bc;
+  if (outer_bc_str == "robin") {
+    outer_bc = BoundaryFlag::mg_robin;
+  } else if (outer_bc_str == "zerofixed") {
+    outer_bc = BoundaryFlag::mg_zerofixed;
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCLapseDriver" << std::endl
+              << "cfc/mg_outer_bc must be 'robin' or 'zerofixed'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (pmbp->pmesh->mesh_bcs[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = outer_bc;
     }
   }
   mporder_ = pin->GetOrAddInteger("cfc", "mporder", 4);

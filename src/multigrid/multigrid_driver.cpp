@@ -54,7 +54,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     root_buf_nc_(0), root_flat_buf_stale_(true),
     root_sync_state_(RootSyncState::SYNCED),
     mask_radius_(-1.0), autompo_(false), nodipole_(false),
-    mporder_(-1), nmpcoeff_(0) {
+    mporder_(-1), nmpcoeff_(0), robin_order_(1) {
   mask_origin_[0] = mask_origin_[1] = mask_origin_[2] = 0.0;
   mpo_[0] = mpo_[1] = mpo_[2] = 0.0;
   std::memset(mpcoeff_, 0, sizeof(mpcoeff_));
@@ -1776,6 +1776,14 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
   // uses the same reflection approach (the root-level multipole already
   // sets the correct values; octets near the boundary inherit from the
   // root through the coarser-level boundary exchange).
+  // mg_robin falls into the same bucket as multipole here: the sign ternary below
+  // only special-cases mg_zerofixed, so any face marked mg_robin silently gets the
+  // sign=+1 (zerograd-like) reflection instead of the true 1/r^n falloff -- this
+  // function has no physical-position math at all (deriving one from loc/nrbx*_
+  // would be new, non-trivial arithmetic), and no current CFC input ever places
+  // refinement at the outer domain boundary (always concentrated near the star),
+  // so this gap is accepted, not fixed, for now. See DEVELOPMENT.md's Robin BC
+  // entry for the explicit scope decision.
 
   auto apply_bc = [&](Real *data, int nc) {
     auto ref = [&](int v, int k, int j, int i) -> Real& {
@@ -1887,6 +1895,12 @@ void MultigridDriver::MGRootBoundary() {
   BoundaryFlag bc_ox2 = mg_mesh_bcs_[BoundaryFace::outer_x2];
   BoundaryFlag bc_ix3 = mg_mesh_bcs_[BoundaryFace::inner_x3];
   BoundaryFlag bc_ox3 = mg_mesh_bcs_[BoundaryFace::outer_x3];
+  bool has_robin = (bc_ix1 == BoundaryFlag::mg_robin ||
+                    bc_ox1 == BoundaryFlag::mg_robin ||
+                    bc_ix2 == BoundaryFlag::mg_robin ||
+                    bc_ox2 == BoundaryFlag::mg_robin ||
+                    bc_ix3 == BoundaryFlag::mg_robin ||
+                    bc_ox3 == BoundaryFlag::mg_robin);
 
   if (!mgroot_->on_host_) {
     // ---- Device path: fill boundaries directly on d_view ----
@@ -2065,6 +2079,130 @@ void MultigridDriver::MGRootBoundary() {
         });
     }
 
+    // Robin (isolated 1/r^n falloff) boundaries on device -- ghost = interior
+    // anchor cell * (r_anchor/r_ghost)^robin_order_, using the true 3D coordinate
+    // radius from the mesh origin (no multipole-origin subtraction, no moment
+    // integral -- see BoundaryFlag::mg_robin's comment in bvals.hpp).
+    if (has_robin) {
+      int ncx = (mgroot_->indcs_.nx1 >> ll);
+      int ncy = (mgroot_->indcs_.nx2 >> ll);
+      int ncz = (mgroot_->indcs_.nx3 >> ll);
+      Real x1min_v = pmy_mesh_->mesh_size.x1min;
+      Real x1max_v = pmy_mesh_->mesh_size.x1max;
+      Real x2min_v = pmy_mesh_->mesh_size.x2min;
+      Real x2max_v = pmy_mesh_->mesh_size.x2max;
+      Real x3min_v = pmy_mesh_->mesh_size.x3min;
+      Real x3max_v = pmy_mesh_->mesh_size.x3max;
+      Real dx1 = (x1max_v - x1min_v) / static_cast<Real>(ncx);
+      Real dx2 = (x2max_v - x2min_v) / static_cast<Real>(ncy);
+      Real dx3 = (x3max_v - x3min_v) / static_cast<Real>(ncz);
+      Real rorder = static_cast<Real>(robin_order_);
+
+      Kokkos::parallel_for("MGRootBnd_robin",
+        Kokkos::RangePolicy<DevExeSpace>(0, 1),
+        KOKKOS_LAMBDA(const int) {
+          if (bc_ix1 == BoundaryFlag::mg_robin) {
+            Real xv_a = x1min_v + 0.5*dx1;
+            for (int k = ngh; k < ngh + ncz; ++k) {
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              for (int j = ngh; j < ngh + ncy; ++j) {
+                Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+                Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
+                Real u_a = u(0, 0, k, j, ngh);
+                for (int n = 0; n < ngh; ++n) {
+                  Real xv_g = x1min_v - (0.5 + n)*dx1;
+                  Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
+                  u(0, 0, k, j, ngh - 1 - n) =
+                      u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+          if (bc_ox1 == BoundaryFlag::mg_robin) {
+            Real xv_a = x1max_v - 0.5*dx1;
+            for (int k = ngh; k < ngh + ncz; ++k) {
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              for (int j = ngh; j < ngh + ncy; ++j) {
+                Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+                Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
+                Real u_a = u(0, 0, k, j, ngh+ncx-1);
+                for (int n = 0; n < ngh; ++n) {
+                  Real xv_g = x1max_v + (0.5 + n)*dx1;
+                  Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
+                  u(0,0,k,j,ngh+ncx+n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+          if (bc_ix2 == BoundaryFlag::mg_robin) {
+            Real yv_a = x2min_v + 0.5*dx2;
+            for (int k = ngh; k < ngh + ncz; ++k) {
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              for (int i = ngh; i < ngh + ncx; ++i) {
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
+                Real u_a = u(0, 0, k, ngh, i);
+                for (int n = 0; n < ngh; ++n) {
+                  Real yv_g = x2min_v - (0.5 + n)*dx2;
+                  Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
+                  u(0, 0, k, ngh - 1 - n, i) =
+                      u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+          if (bc_ox2 == BoundaryFlag::mg_robin) {
+            Real yv_a = x2max_v - 0.5*dx2;
+            for (int k = ngh; k < ngh + ncz; ++k) {
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              for (int i = ngh; i < ngh + ncx; ++i) {
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
+                Real u_a = u(0, 0, k, ngh+ncy-1, i);
+                for (int n = 0; n < ngh; ++n) {
+                  Real yv_g = x2max_v + (0.5 + n)*dx2;
+                  Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
+                  u(0,0,k,ngh+ncy+n,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+          if (bc_ix3 == BoundaryFlag::mg_robin) {
+            Real zv_a = x3min_v + 0.5*dx3;
+            for (int j = ngh; j < ngh + ncy; ++j) {
+              Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+              for (int i = ngh; i < ngh + ncx; ++i) {
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
+                Real u_a = u(0, 0, ngh, j, i);
+                for (int n = 0; n < ngh; ++n) {
+                  Real zv_g = x3min_v - (0.5 + n)*dx3;
+                  Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
+                  u(0, 0, ngh - 1 - n, j, i) =
+                      u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+          if (bc_ox3 == BoundaryFlag::mg_robin) {
+            Real zv_a = x3max_v - 0.5*dx3;
+            for (int j = ngh; j < ngh + ncy; ++j) {
+              Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+              for (int i = ngh; i < ngh + ncx; ++i) {
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
+                Real u_a = u(0, 0, ngh+ncz-1, j, i);
+                for (int n = 0; n < ngh; ++n) {
+                  Real zv_g = x3max_v + (0.5 + n)*dx3;
+                  Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
+                  u(0,0,ngh+ncz+n,j,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+                }
+              }
+            }
+          }
+        });
+    }
+
     MarkRootDeviceModified();
   } else {
     // ---- Host path: operate on h_view directly ----
@@ -2224,6 +2362,121 @@ void MultigridDriver::MGRootBoundary() {
             Real phis = eval_phi(x, y, z);
             for (int n = 0; n < ngh; ++n)
               u(0, 0, ngh+ncz+n, j, i) = 2.0*phis - u(0, 0, ngh+ncz-1-n, j, i);
+          }
+        }
+      }
+    }
+
+    // Robin (isolated 1/r^n falloff) boundaries on host -- same formula as the
+    // device path above.
+    if (has_robin) {
+      int ncx = (mgroot_->indcs_.nx1 >> ll);
+      int ncy = (mgroot_->indcs_.nx2 >> ll);
+      int ncz = (mgroot_->indcs_.nx3 >> ll);
+      Real x1min_v = pmy_mesh_->mesh_size.x1min;
+      Real x1max_v = pmy_mesh_->mesh_size.x1max;
+      Real x2min_v = pmy_mesh_->mesh_size.x2min;
+      Real x2max_v = pmy_mesh_->mesh_size.x2max;
+      Real x3min_v = pmy_mesh_->mesh_size.x3min;
+      Real x3max_v = pmy_mesh_->mesh_size.x3max;
+      Real dx1 = (x1max_v - x1min_v) / static_cast<Real>(ncx);
+      Real dx2 = (x2max_v - x2min_v) / static_cast<Real>(ncy);
+      Real dx3 = (x3max_v - x3min_v) / static_cast<Real>(ncz);
+      Real rorder = static_cast<Real>(robin_order_);
+
+      if (bc_ix1 == BoundaryFlag::mg_robin) {
+        Real xv_a = x1min_v + 0.5*dx1;
+        for (int k = ngh; k < ngh + ncz; ++k) {
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          for (int j = ngh; j < ngh + ncy; ++j) {
+            Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+            Real r_a = std::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
+            Real u_a = u(0, 0, k, j, ngh);
+            for (int n = 0; n < ngh; ++n) {
+              Real xv_g = x1min_v - (0.5 + n)*dx1;
+              Real r_g = std::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
+              u(0, 0, k, j, ngh - 1 - n) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
+          }
+        }
+      }
+      if (bc_ox1 == BoundaryFlag::mg_robin) {
+        Real xv_a = x1max_v - 0.5*dx1;
+        for (int k = ngh; k < ngh + ncz; ++k) {
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          for (int j = ngh; j < ngh + ncy; ++j) {
+            Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+            Real r_a = std::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
+            Real u_a = u(0, 0, k, j, ngh+ncx-1);
+            for (int n = 0; n < ngh; ++n) {
+              Real xv_g = x1max_v + (0.5 + n)*dx1;
+              Real r_g = std::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
+              u(0,0,k,j,ngh+ncx+n) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
+          }
+        }
+      }
+      if (bc_ix2 == BoundaryFlag::mg_robin) {
+        Real yv_a = x2min_v + 0.5*dx2;
+        for (int k = ngh; k < ngh + ncz; ++k) {
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          for (int i = ngh; i < ngh + ncx; ++i) {
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real r_a = std::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
+            Real u_a = u(0, 0, k, ngh, i);
+            for (int n = 0; n < ngh; ++n) {
+              Real yv_g = x2min_v - (0.5 + n)*dx2;
+              Real r_g = std::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
+              u(0, 0, k, ngh - 1 - n, i) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
+          }
+        }
+      }
+      if (bc_ox2 == BoundaryFlag::mg_robin) {
+        Real yv_a = x2max_v - 0.5*dx2;
+        for (int k = ngh; k < ngh + ncz; ++k) {
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          for (int i = ngh; i < ngh + ncx; ++i) {
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real r_a = std::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
+            Real u_a = u(0, 0, k, ngh+ncy-1, i);
+            for (int n = 0; n < ngh; ++n) {
+              Real yv_g = x2max_v + (0.5 + n)*dx2;
+              Real r_g = std::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
+              u(0,0,k,ngh+ncy+n,i) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
+          }
+        }
+      }
+      if (bc_ix3 == BoundaryFlag::mg_robin) {
+        Real zv_a = x3min_v + 0.5*dx3;
+        for (int j = ngh; j < ngh + ncy; ++j) {
+          Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+          for (int i = ngh; i < ngh + ncx; ++i) {
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real r_a = std::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
+            Real u_a = u(0, 0, ngh, j, i);
+            for (int n = 0; n < ngh; ++n) {
+              Real zv_g = x3min_v - (0.5 + n)*dx3;
+              Real r_g = std::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
+              u(0, 0, ngh - 1 - n, j, i) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
+          }
+        }
+      }
+      if (bc_ox3 == BoundaryFlag::mg_robin) {
+        Real zv_a = x3max_v - 0.5*dx3;
+        for (int j = ngh; j < ngh + ncy; ++j) {
+          Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+          for (int i = ngh; i < ngh + ncx; ++i) {
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real r_a = std::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
+            Real u_a = u(0, 0, ngh+ncz-1, j, i);
+            for (int n = 0; n < ngh; ++n) {
+              Real zv_g = x3max_v + (0.5 + n)*dx3;
+              Real r_g = std::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
+              u(0,0,ngh+ncz+n,j,i) = u_a * std::pow(r_a/(r_g+1.0e-30), rorder);
+            }
           }
         }
       }

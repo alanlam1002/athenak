@@ -559,9 +559,17 @@ class MultigridDriver {
 
   // Multipole expansion boundary conditions
   int mporder_;     // -1: disabled, 0: detected but not yet configured, 2 or 4: active
-  int nmpcoeff_;    // number of multipole coefficients
-  Real mpcoeff_[25]; // multipole coefficients (max 25 for l=4)
-  DvceArray1D<Real> d_mpcoeff_; // device copy of multipole coefficients
+  int nmpcoeff_;    // number of multipole coefficients (per channel)
+  // Per-channel moments, flat-indexed mpcoeff_[v*25+c] (fixed stride of 25 = the
+  // l=4 max regardless of nmpcoeff_'s actual value, matching the pre-existing
+  // single-channel convention). kMaxMultipoleChannels caps nvar_ for any driver
+  // that enables multipole BCs (gravity: 1; CFC's vector Poisson solver: 3).
+  static constexpr int kMaxMultipoleChannels = 4;
+  Real mpcoeff_[kMaxMultipoleChannels*25];
+  // Device copy, flat/1D (not 2D) so a raw v*25 pointer offset into it is always
+  // contiguous regardless of Kokkos layout -- mirrors MGOctet's own manual flat
+  // indexing for the same reason.
+  DvceArray1D<Real> d_mpcoeff_;
   Real mpo_[3];     // multipole expansion origin
   bool autompo_;    // automatically compute center of mass as origin
   bool nodipole_;   // suppress dipole moment (assume origin = center of mass)

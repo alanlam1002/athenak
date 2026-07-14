@@ -6,6 +6,10 @@
 //! \file mg_cfc_scalar_poisson.cpp
 //! \brief implementation of MGCFCScalarPoisson[Driver]
 
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
 #include "athena.hpp"
 #include "globals.hpp"
 #include "mesh/mesh.hpp"
@@ -89,16 +93,49 @@ void MGCFCScalarPoisson::CalculateFASRHSPack() {
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCScalarPoissonDriver::MGCFCScalarPoissonDriver(...)
 //! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 1.
-//! Restores BoundaryFlag::mg_zerograd (NOT plain BoundaryFlag::reflect -- see
+//! Defaults to BoundaryFlag::mg_multipole (via <cfc> mg_poisson_outer_bc) -- see
+//! mg_cfc_vector_poisson.cpp's constructor comment for the full rationale (eta's
+//! true outer boundary is an asymptotic ~1/r falloff, not exact zero at any finite
+//! radius; multipole is safe here since eta's source is a real, unmodified src_,
+//! unlike psi/alpha_psi's coeff_-based nonlinear equations). autompo_ is left false
+//! (fixed origin (0,0,0)) for the same reason as the vector driver. Restores
+//! BoundaryFlag::mg_zerograd (NOT plain BoundaryFlag::reflect -- see
 //! mg_cfc_vector_poisson.cpp's constructor comment for why) on any reflecting mesh
-//! face, after the MultigridDriver base constructor's blanket mg_zerofixed default.
+//! face.
 
 MGCFCScalarPoissonDriver::MGCFCScalarPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
+  autompo_ = false;
+  std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_poisson_outer_bc",
+                                                 "multipole");
+  BoundaryFlag outer_bc;
+  if (outer_bc_str == "multipole") {
+    outer_bc = BoundaryFlag::mg_multipole;
+    mporder_ = pin->GetOrAddInteger("cfc", "mg_poisson_mporder", 4);
+    if (mporder_ != 2 && mporder_ != 4) {
+      std::cout << "### FATAL ERROR in MGCFCScalarPoissonDriver" << std::endl
+                << "mg_poisson_mporder must be 2 (quadrupole) or 4 (hexadecapole)."
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    AllocateMultipoleCoefficients();
+  } else if (outer_bc_str == "zerofixed") {
+    outer_bc = BoundaryFlag::mg_zerofixed;
+  } else if (outer_bc_str == "robin") {
+    outer_bc = BoundaryFlag::mg_robin;
+    robin_order_ = pin->GetOrAddInteger("cfc", "mg_robin_order", 1);
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCScalarPoissonDriver" << std::endl
+              << "cfc/mg_poisson_outer_bc must be 'multipole', 'zerofixed', "
+              << "or 'robin'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (pmbp->pmesh->mesh_bcs[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = outer_bc;
     }
   }
   omega_ = pin->GetOrAddReal("cfc", "mg_omega", 1.15);
@@ -131,6 +168,12 @@ MGCFCScalarPoissonDriver::~MGCFCScalarPoissonDriver() {
 void MGCFCScalarPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
   SetupMultigrid(dt, false);
+  // autompo_ is always false here (see constructor comment), so no
+  // CalculateCenterOfMass() call -- mirrors gravity's own if(autompo_) gate.
+  if (mporder_ > 0) {
+    CalculateMultipoleCoefficients();
+    SyncMultipoleToDevice();
+  }
   SolveMG(pdriver);
   return;
 }

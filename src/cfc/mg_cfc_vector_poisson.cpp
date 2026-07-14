@@ -6,6 +6,9 @@
 //! \file mg_cfc_vector_poisson.cpp
 //! \brief implementation of MGCFCVectorPoisson[Driver]
 
+#include <cstdlib>
+#include <iostream>
+#include <string>
 #include <utility>
 
 #include "athena.hpp"
@@ -164,31 +167,74 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(...)
 //! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 3.
-//! The MultigridDriver base constructor defaults every non-periodic mg_mesh_bcs_[f]
-//! to BoundaryFlag::mg_zerofixed (multigrid_driver.cpp), which is exactly what P_i
-//! needs at the true outer/asymptotically-flat boundary (X^i|_rmax = 0, Gmunu eq.
-//! 80 / beta^i|_rmax = 0, eq. 79) -- but wrong for a reflecting symmetry-plane face
-//! (e.g. an octant-reduced domain like a single-star test): mg_zerofixed forces the
-//! solved quantity's *deviation* to extrapolate to zero there (an odd/antisymmetric
-//! mirror), when a symmetry plane needs an even/symmetric mirror instead. Use
-//! BoundaryFlag::mg_zerograd there, not the ordinary mesh BoundaryFlag::reflect:
-//! mg_mesh_bcs_ is multigrid-internal state read only by MultigridDriver's own
-//! boundary code (PhysicalBoundary, MGRootBoundary), and MGRootBoundary's device
-//! path (multigrid_driver.cpp) only has explicit cases for periodic/mg_zerofixed/
-//! mg_zerograd -- passing plain BoundaryFlag::reflect falls through every branch
-//! there silently, leaving that ghost cell untouched (confirmed: this was tried
-//! first and left the root grid's ghost cells at stale zero, seeding a NaN
-//! cascade through the Newton solve within the first V-cycle). mg_zerograd's
-//! ghost = interior formula is exactly the even mirror a symmetry plane needs, and
-//! it also satisfies PhysicalBoundary's sign=(bc==mg_zerofixed)?-1:1 check the
-//! same way reflect would have.
+//! P_i's true outer boundary (X^i -> 0 / beta^i -> 0 as r -> infinity, Gmunu eq.
+//! 79/80) is an *asymptotic* falloff (~1/r, like a Newtonian vector potential
+//! sourced by a compact S_i-tilde distribution), not an exact zero at any finite
+//! radius -- BoundaryFlag::mg_multipole (default here, via <cfc> mg_poisson_outer_bc)
+//! captures that falloff (with real angular structure up to mg_poisson_mporder);
+//! the previous default, mg_zerofixed (still available via mg_poisson_outer_bc=
+//! zerofixed), was only ever the leading-order (monopole-zero) truncation of it --
+//! see mg_cfc_conformal_factor.cpp's constructor comment and DEVELOPMENT.md item 9
+//! for why this same tradeoff mattered enough to fix (via Robin, there) for psi/
+//! alpha_psi. Multipole is safe here in a way it never was for psi/alpha_psi:
+//! P_i's source is a real, unmodified src_ (LoadPoissonSource's fac=1.0, loaded via
+//! the generic Multigrid::LoadSource -- no coeff_ involved, no custom Newton
+//! relaxation), so ScaleMultipoleCoefficients()'s normalization (the generic
+//! Green's-function constant for any -Delta u = src equation) applies with zero
+//! re-derivation. autompo_ is deliberately left false (fixed origin (0,0,0), the
+//! base constructor's own default) rather than exposed as an input: every current
+//! CFC test problem's star sits at the coordinate origin, and skipping
+//! CalculateCenterOfMass() avoids a second channel-0-only function this pass would
+//! otherwise also need to generalize (see multigrid_driver.cpp's per-channel
+//! CalculateMultipoleCoefficients()/ScaleMultipoleCoefficients()/SyncMultipoleToDevice()
+//! and both ghost-fill sites -- gravity's own nvar_=1 usage is unaffected, confirmed
+//! by construction: every new per-channel loop reduces to its original single
+//! iteration there).
+//!
+//! Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain like a
+//! single-star test) still need BoundaryFlag::mg_zerograd, not plain
+//! BoundaryFlag::reflect: mg_mesh_bcs_ is multigrid-internal state read only by
+//! MultigridDriver's own boundary code (PhysicalBoundary, MGRootBoundary), and
+//! MGRootBoundary's device path (multigrid_driver.cpp) has no case at all for plain
+//! BoundaryFlag::reflect -- passing it falls through every branch there silently,
+//! leaving that ghost cell untouched (confirmed: this was tried first and left the
+//! root grid's ghost cells at stale zero, seeding a NaN cascade through the Newton
+//! solve within the first V-cycle). mg_zerograd's ghost = interior formula is
+//! exactly the even mirror a symmetry plane needs.
 
 MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
     : MultigridDriver(pmbp, 3) {
+  autompo_ = false;
+  std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_poisson_outer_bc",
+                                                 "multipole");
+  BoundaryFlag outer_bc;
+  if (outer_bc_str == "multipole") {
+    outer_bc = BoundaryFlag::mg_multipole;
+    mporder_ = pin->GetOrAddInteger("cfc", "mg_poisson_mporder", 4);
+    if (mporder_ != 2 && mporder_ != 4) {
+      std::cout << "### FATAL ERROR in MGCFCVectorPoissonDriver" << std::endl
+                << "mg_poisson_mporder must be 2 (quadrupole) or 4 (hexadecapole)."
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    AllocateMultipoleCoefficients();
+  } else if (outer_bc_str == "zerofixed") {
+    outer_bc = BoundaryFlag::mg_zerofixed;
+  } else if (outer_bc_str == "robin") {
+    outer_bc = BoundaryFlag::mg_robin;
+    robin_order_ = pin->GetOrAddInteger("cfc", "mg_robin_order", 1);
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCVectorPoissonDriver" << std::endl
+              << "cfc/mg_poisson_outer_bc must be 'multipole', 'zerofixed', "
+              << "or 'robin'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   for (int f = 0; f < 6; ++f) {
     if (pmbp->pmesh->mesh_bcs[f] == BoundaryFlag::reflect) {
       mg_mesh_bcs_[f] = BoundaryFlag::mg_zerograd;
+    } else if (pmbp->pmesh->mesh_bcs[f] != BoundaryFlag::periodic) {
+      mg_mesh_bcs_[f] = outer_bc;
     }
   }
   omega_ = pin->GetOrAddReal("cfc", "mg_omega", 1.15);
@@ -223,6 +269,12 @@ MGCFCVectorPoissonDriver::~MGCFCVectorPoissonDriver() {
 void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
   SetupMultigrid(dt, false);
+  // autompo_ is always false here (see constructor comment), so no
+  // CalculateCenterOfMass() call -- mirrors gravity's own if(autompo_) gate.
+  if (mporder_ > 0) {
+    CalculateMultipoleCoefficients();
+    SyncMultipoleToDevice();
+  }
   SolveMG(pdriver);
   return;
 }

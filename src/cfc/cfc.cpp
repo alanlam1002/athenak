@@ -608,7 +608,7 @@ TaskStatus CFC::SendPXTask(Driver *pdriver, int stage) {
 TaskStatus CFC::RecvPXTask(Driver *pdriver, int stage) {
   TaskStatus tstat = pbval_px->RecvAndUnpackCC(u_p_x, coarse_u_px);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_x);
+    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_x, 1);
   }
   return tstat;
 }
@@ -631,7 +631,7 @@ TaskStatus CFC::SendEtaXTask(Driver *pdriver, int stage) {
 TaskStatus CFC::RecvEtaXTask(Driver *pdriver, int stage) {
   TaskStatus tstat = pbval_etax->RecvAndUnpackCC(eta_x, coarse_eta_x);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_x);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_x, 1);
   }
   return tstat;
 }
@@ -723,7 +723,7 @@ TaskStatus CFC::SendPBetaTask(Driver *pdriver, int stage) {
 TaskStatus CFC::RecvPBetaTask(Driver *pdriver, int stage) {
   TaskStatus tstat = pbval_pbeta->RecvAndUnpackCC(u_p_beta, coarse_u_pbeta);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_beta);
+    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_beta, 1);
   }
   return tstat;
 }
@@ -746,7 +746,7 @@ TaskStatus CFC::SendEtaBetaTask(Driver *pdriver, int stage) {
 TaskStatus CFC::RecvEtaBetaTask(Driver *pdriver, int stage) {
   TaskStatus tstat = pbval_etabeta->RecvAndUnpackCC(eta_beta, coarse_eta_beta);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_beta);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_beta, 1);
   }
   return tstat;
 }

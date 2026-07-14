@@ -2377,3 +2377,128 @@ src/cfc/
       instead of being pinned exactly at it, and spot-check the converged
       `psi`/`alpha` against `dyngr_tov.cpp`'s analytic isotropic-TOV profile
       (the same diagnostic item 9 rounds 7-8 used).
+17. **Multipole outer boundary condition for `P_i`/`eta`'s linear Poisson solves
+    (`X^i`/`beta^i`'s own decomposed vector-potential/scalar equations).** Done.
+    Following item 16 (Robin for `psi`/`alpha_psi`), checked whether the *linear*
+    Poisson solves that produce `P_i`/`eta` (`MGCFCVectorPoissonDriver`/
+    `MGCFCScalarPoissonDriver`) could use `BoundaryFlag::mg_multipole` instead of
+    their `mg_zerofixed` default, since (unlike `psi`/`alpha_psi`) these equations'
+    matter source is a real, unmodified `src_` (`LoadPoissonSource`'s `fac=1.0`,
+    loaded via the generic `Multigrid::LoadSource`, no `coeff_`, no custom Newton
+    relaxation -- both drivers reuse the *generic* `Smooth`/`CalculateDefect`
+    templates unmodified). Confirmed `ScaleMultipoleCoefficients()`'s normalization
+    constants (`c0=0.25/pi`, etc.) are the generic Green's-function/solid-harmonic
+    constants for *any* `-Delta u = src` equation (not a gravity-specific
+    `-4*pi*G*rho` calibration, despite the comment above them name-checking
+    gravity's convention) -- confirmed by reading `LoadSource`'s body (`src_ = fac *
+    argument`, `multigrid.cpp:306`) -- so no re-derivation was needed, unlike the
+    `psi`/`alpha_psi` case that motivated item 16's Robin approach instead.
+    - **Real gap found and fixed**: every current multipole user (gravity) is
+      `nvar_=1`; `CalculateMultipoleCoefficients`/`CalculateCenterOfMass`/both
+      ghost-fill sites (`MGRootBoundary`, `PhysicalBoundary`) all hardcoded channel
+      `0`. `P_i` (`nvar_=3`: `P_x,P_y,P_z`, fully decoupled) would have silently
+      gotten wrong/missing boundary data on channels 1-2 (`P_y`/`P_z`) without a
+      fix. `eta` (`nvar_=1`) had no such problem. Per user direction, generalized
+      the shared machinery to be per-channel (rather than splitting `P_i` into 3
+      independent `nvar_=1` scalar solves, which would have reused the already-
+      correct single-channel path unmodified but required restructuring `cfc.cpp`/
+      `cfc.hpp`'s existing, verified `P_i` ghost-exchange task chain instead) --
+      confirmed zero blast radius on gravity (`grep` shows `mg_gravity.{hpp,cpp}`
+      never reads `mpcoeff_`/`d_mpcoeff_` directly, and every new per-channel loop
+      below reduces to its original single iteration at `nvar_=1`).
+    - `multigrid.hpp`: `Real mpcoeff_[25]` -> `Real mpcoeff_[kMaxMultipoleChannels*25]`
+      (new `static constexpr int kMaxMultipoleChannels = 4`), flat-indexed
+      `mpcoeff_[v*25+c]` (fixed per-channel stride of 25 regardless of `nmpcoeff_`'s
+      actual value -- already the pre-existing convention for the single-channel
+      case). `d_mpcoeff_` kept as a flat `DvceArray1D<Real>` (not switched to 2D) so
+      a raw `v*25` pointer offset into it is always contiguous regardless of Kokkos
+      layout, mirroring `MGOctet`'s own manual flat indexing for the same reason;
+      just sized `nvar_*25` instead of the hardcoded `25`.
+    - `multigrid_driver.cpp`: `AllocateMultipoleCoefficients()` gained a
+      `nvar_ <= kMaxMultipoleChannels` fatal-error guard (the natural "multipole is
+      being activated" hook). `CalculateMultipoleCoefficients()` wrapped in a
+      `for (v=0; v<nvar_; ++v)` loop, `src(m,0,...)` -> `src(m,v,...)`,
+      `mpcoeff_[c]` -> `mpcoeff_[v*25+c]` -- **the `memset`/`MPI_Allreduce` extents
+      had to become `nvar_*25`, not `nvar_*nmpcoeff_`**, a bug caught and fixed
+      mid-implementation: since the storage stride is a fixed 25 regardless of
+      `nmpcoeff_` (9 when `mporder_=2`), a narrower `nvar_*nmpcoeff_` extent would
+      leave channel 1+'s region partly stale/uninitialized across stages whenever
+      `mporder_=2`. `ScaleMultipoleCoefficients()` similarly wrapped in a per-channel
+      loop (identical constants, `mc = &mpcoeff_[v*25]`). `SyncMultipoleToDevice()`
+      resizes/copies `nvar_*25` elements (was fixed `25`). `MGRootBoundary()`'s
+      multipole block (device *and* host paths) gained a `for (v=0; v<nvar; ++v)`
+      loop around the existing per-face logic, `u(0,0,...)` -> `u(0,v,...)`,
+      `EvalMultipolePhi(..., d_mpc.data(), order)` -> `(..., mc, order)` with
+      `mc = d_mpc.data() + v*25` (device) / `&mpcoeff_[v*25]` (host).
+      `CalculateCenterOfMass()` deliberately **not** touched -- see below.
+    - `multigrid_tasks.cpp` -- `PhysicalBoundary()`'s multipole block already looped
+      `for (v=0; v<nvar; ++v)` (finest-level per-MeshBlock case) but reused the
+      *same* single-channel `d_mpc.data()` for every `v`; fixed by sizing
+      `d_mpc`/copying `nvar_*25` elements (was `25`) and passing
+      `d_mpc.data() + v*25` into each `EvalMultipolePhi` call.
+    - `mg_cfc_vector_poisson.cpp`/`mg_cfc_scalar_poisson.cpp`: both constructors
+      gained new `<cfc>` inputs **distinct from** `psi`/`alpha_psi`'s
+      `mg_outer_bc`/`mg_robin_order` (item 16) -- a shared key can't express two
+      different defaults for two different call sites that both read it during the
+      same construction sequence (`GetOrAdd*` locks in whichever constructor reads
+      it first): `mg_poisson_outer_bc` (string, default `"multipole"`, also accepts
+      `"zerofixed"`/`"robin"` for rollback/comparison -- `"robin"` reuses item 16's
+      `robin_order_` machinery, already generic over `nvar_` in `PhysicalBoundary`,
+      needing only the same `MGRootBoundary` per-channel loop this item added
+      anyway) and `mg_poisson_mporder` (int, default `4`, independent of
+      `psi`/`alpha_psi`'s own `mporder`). Unlike `psi`/`alpha_psi`, `autompo_` is
+      forced `false` unconditionally (no `auto_mporigin` input read at all) --
+      every current CFC test star sits at the coordinate origin, so the base
+      constructor's own `mpo_=(0,0,0)` default is already correct, and skipping
+      `CalculateCenterOfMass()` (gated by `if(autompo_)`, mirroring gravity's own
+      `Solve()`) avoids generalizing a *third* channel-0-only function that isn't
+      actually needed. `Solve()` in both drivers gained
+      `if (mporder_>0) { CalculateMultipoleCoefficients(); SyncMultipoleToDevice(); }`
+      (mirroring `MGGravityDriver::Solve`), inserted after `SetupMultigrid`, before
+      `SolveMG` -- previously absent entirely (neither driver computed multipole
+      moments at all, since neither had ever set `mg_multipole` on any face before
+      this item).
+    - `bvals.hpp`/`cfc_bcs.cpp`: this is a *separate* BC layer from the
+      multigrid-internal one above (see item 16's own note on the same distinction
+      for `delta_psi`/`delta_alpha_psi`) -- the mesh-level ghost fill applied once
+      per stage to CFC's own field arrays after inter-block exchange, read by
+      `ComputeADualFromX`/`ReconstructVectorFromPotentials`'s finite differences.
+      Once `P_i`/`eta`'s multigrid solve gives them a real `~1/r` falloff at the
+      domain edge, their matching mesh-level ghost cells should too, rather than
+      staying at the previous crude zero-gradient copy (an artificial kink between
+      the correctly-falling-off interior and a flat ghost region right at the
+      boundary the finite differences read). `CFCScalarBCs`/`CFCVectorBCs` gained a
+      new `int order = 0` trailing parameter (default preserves every pre-existing
+      call site's exact behavior with no edits needed there): `order==0` keeps the
+      exact old zero-gradient copy; `order>0` uses the same `f_ghost =
+      f_interior_anchor * (r_anchor/r_ghost)^order` extrapolation `adm_bcs.cpp`'s
+      `ADMBCs` and item 16's Robin BC both already use (`flat=0` unconditionally,
+      unlike ADM's per-channel `(flat,order)` table -- none of these CFC potential
+      fields have a nonzero flat-space reference value). **Scope: only the 4 fields
+      that are themselves direct Poisson-solve outputs** -- `u_p_x`/`eta_x`/
+      `u_p_beta`/`eta_beta` (`cfc.cpp`'s `RecvPXTask`/`RecvEtaXTask`/`RecvPBetaTask`/
+      `RecvEtaBetaTask`, now passing `order=1`). **Not** `u_x` (algebraically
+      reconstructed from `p_x`/`eta_x`, not itself a solve output) or
+      `delta_psi`/`delta_alpha_psi` (already has its own dedicated Robin treatment
+      at the multigrid level from item 16; its mesh-level BC was deliberately left
+      alone there too -- same precedent, not revisited here).
+    - **Octet BC scope**: same decision as item 16, carried forward unchanged --
+      `ApplyPhysicalBoundariesOctet` still has no physical-position math for any BC
+      kind, no current CFC input refines mesh at the domain edge, and multipole at
+      octet granularity keeps whatever fallback it already had before this item
+      (unchanged by this item).
+    - **Verification, no compiler in this sandbox**: `cpplint`-clean (line length,
+      brace balance, checked directly) plus manual cross-check against gravity's
+      own already-proven `Solve()`/multipole sequence (`mg_gravity.cpp`) as the
+      reference for the per-channel generalization. **Not yet run against a real
+      build.** Once built on Sakura: rerun `cfc_stability_v2`/`cfc_tov.athinput`
+      with the new defaults (`mg_poisson_outer_bc=multipole` for `P_i`/`eta`,
+      `mg_outer_bc=robin` for `psi`/`alpha_psi`, unchanged from item 16) against a
+      `mg_poisson_outer_bc=zerofixed` control run -- no NaN/inf, `mg_threshold=
+      1e-10` convergence unaffected, and (the concrete signature multipole should
+      produce that `zerofixed`/`robin` can't) `P_i`/`eta`'s boundary values should
+      carry real non-spherically-symmetric angular structure (dipole/quadrupole,
+      per `mg_poisson_mporder`) rather than being pinned to zero or forced into a
+      purely isotropic `1/r` falloff -- **explicitly re-verify gravity's own
+      behavior is bit-for-bit unchanged** after these shared-code edits, since this
+      is the one part of this item with blast radius outside `src/cfc/`.

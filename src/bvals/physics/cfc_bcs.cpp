@@ -20,14 +20,19 @@
 //! Deliberately simpler than HydroBCs: no inflow table (CFC has no analog of
 //! u_in -- these are elliptic-equation potentials, not fluid state) and no
 //! diode-specific velocity clamping (no flux/flow concept for these fields either).
-//! outflow/diode/inflow/user all reduce to the same zero-gradient copy; only
-//! reflect and vacuum need special handling, exactly as for any other field with no
-//! preferred inflow value.
+//! reflect and vacuum always get special handling; outflow/diode/inflow/user reduce
+//! to a zero-gradient copy by default (order=0), or a 1/r^order extrapolation from
+//! the boundary-adjacent interior cell (order>0, flat=0) for fields that are
+//! themselves an isolated-system Poisson solve's own output (P_i/eta) -- mirrors
+//! adm_bcs.cpp's ADMBCs falloff technique (see its file doc comment for the
+//! physical rationale), simplified since none of these fields need a per-channel
+//! (flat, order) table the way ADM's alpha/psi4/g_dd/vK_dd/beta_u channels do.
 
 #include <cstdlib>
 
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/cell_locations.hpp"
 
 namespace {
 
@@ -49,9 +54,11 @@ Real ReflectedValue(Real interior_val, bool flip) {
 //! \brief Apply physical boundary conditions to a single-channel CFC field
 //! (eta_x, psi, alpha_psi, or eta_beta -- all scalars, even parity under reflection).
 
-void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
+void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0,
+                                      int order) {
   auto &pm = ppack->pmesh;
   auto &indcs = ppack->pmesh->mb_indcs;
+  auto &size = ppack->pmb->mb_size;
   int &ng = indcs.ng;
   auto &mb_bcs = ppack->pmb->mb_bcs;
 
@@ -59,11 +66,19 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
   int nmb = ppack->nmb_thispack;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
-    int &is = indcs.is; int &ie = indcs.ie;
     par_for("cfc_scalar_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (n3-1), 0, (n2-1),
     KOKKOS_LAMBDA(int m, int k, int j) {
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x1)) {
         case BoundaryFlag::reflect:
           for (int i=0; i<ng; ++i) { u0(m,0,k,j,is-i-1) = u0(m,0,k,j,is+i); }
@@ -73,7 +88,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int i=0; i<ng; ++i) { u0(m,0,k,j,is-i-1) = u0(m,0,k,j,is); }
+          if (order == 0) {
+            for (int i=0; i<ng; ++i) { u0(m,0,k,j,is-i-1) = u0(m,0,k,j,is); }
+          } else {
+            Real x1_i = CellCenterX(is-is, indcs.nx1, x1min, x1max);
+            Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+            Real f_i = u0(m,0,k,j,is);
+            for (int i=0; i<ng; ++i) {
+              Real x1_g = CellCenterX(is-i-1-is, indcs.nx1, x1min, x1max);
+              Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+              u0(m,0,k,j,is-i-1) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -86,7 +112,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int i=0; i<ng; ++i) { u0(m,0,k,j,ie+i+1) = u0(m,0,k,j,ie); }
+          if (order == 0) {
+            for (int i=0; i<ng; ++i) { u0(m,0,k,j,ie+i+1) = u0(m,0,k,j,ie); }
+          } else {
+            Real x1_i = CellCenterX(ie-is, indcs.nx1, x1min, x1max);
+            Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+            Real f_i = u0(m,0,k,j,ie);
+            for (int i=0; i<ng; ++i) {
+              Real x1_g = CellCenterX(ie+i+1-is, indcs.nx1, x1min, x1max);
+              Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+              u0(m,0,k,j,ie+i+1) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -95,9 +132,14 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   if (pm->one_d) return;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
-    int &js = indcs.js; int &je = indcs.je;
     par_for("cfc_scalar_bc_x2", DevExeSpace(), 0, (nmb-1), 0, (n3-1), 0, (n1-1),
     KOKKOS_LAMBDA(int m, int k, int i) {
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x2)) {
         case BoundaryFlag::reflect:
           for (int j=0; j<ng; ++j) { u0(m,0,k,js-j-1,i) = u0(m,0,k,js+j,i); }
@@ -107,7 +149,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int j=0; j<ng; ++j) { u0(m,0,k,js-j-1,i) = u0(m,0,k,js,i); }
+          if (order == 0) {
+            for (int j=0; j<ng; ++j) { u0(m,0,k,js-j-1,i) = u0(m,0,k,js,i); }
+          } else {
+            Real x2_i = CellCenterX(js-js, indcs.nx2, x2min, x2max);
+            Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+            Real f_i = u0(m,0,k,js,i);
+            for (int j=0; j<ng; ++j) {
+              Real x2_g = CellCenterX(js-j-1-js, indcs.nx2, x2min, x2max);
+              Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+              u0(m,0,k,js-j-1,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -120,7 +173,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int j=0; j<ng; ++j) { u0(m,0,k,je+j+1,i) = u0(m,0,k,je,i); }
+          if (order == 0) {
+            for (int j=0; j<ng; ++j) { u0(m,0,k,je+j+1,i) = u0(m,0,k,je,i); }
+          } else {
+            Real x2_i = CellCenterX(je-js, indcs.nx2, x2min, x2max);
+            Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+            Real f_i = u0(m,0,k,je,i);
+            for (int j=0; j<ng; ++j) {
+              Real x2_g = CellCenterX(je+j+1-js, indcs.nx2, x2min, x2max);
+              Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+              u0(m,0,k,je+j+1,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -129,9 +193,14 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   if (pm->two_d) return;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic) return;
-  int &ks = indcs.ks; int &ke = indcs.ke;
   par_for("cfc_scalar_bc_x3", DevExeSpace(), 0, (nmb-1), 0, (n2-1), 0, (n1-1),
   KOKKOS_LAMBDA(int m, int j, int i) {
+    Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+
     switch (mb_bcs.d_view(m,BoundaryFace::inner_x3)) {
       case BoundaryFlag::reflect:
         for (int k=0; k<ng; ++k) { u0(m,0,ks-k-1,j,i) = u0(m,0,ks+k,j,i); }
@@ -141,7 +210,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
         break;
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::inflow: case BoundaryFlag::user:
-        for (int k=0; k<ng; ++k) { u0(m,0,ks-k-1,j,i) = u0(m,0,ks,j,i); }
+        if (order == 0) {
+          for (int k=0; k<ng; ++k) { u0(m,0,ks-k-1,j,i) = u0(m,0,ks,j,i); }
+        } else {
+          Real x3_i = CellCenterX(ks-ks, indcs.nx3, x3min, x3max);
+          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+          Real f_i = u0(m,0,ks,j,i);
+          for (int k=0; k<ng; ++k) {
+            Real x3_g = CellCenterX(ks-k-1-ks, indcs.nx3, x3min, x3max);
+            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+            u0(m,0,ks-k-1,j,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+          }
+        }
         break;
       default: break;
     }
@@ -154,7 +234,18 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
         break;
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::inflow: case BoundaryFlag::user:
-        for (int k=0; k<ng; ++k) { u0(m,0,ke+k+1,j,i) = u0(m,0,ke,j,i); }
+        if (order == 0) {
+          for (int k=0; k<ng; ++k) { u0(m,0,ke+k+1,j,i) = u0(m,0,ke,j,i); }
+        } else {
+          Real x3_i = CellCenterX(ke-ks, indcs.nx3, x3min, x3max);
+          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+          Real f_i = u0(m,0,ke,j,i);
+          for (int k=0; k<ng; ++k) {
+            Real x3_g = CellCenterX(ke+k+1-ks, indcs.nx3, x3min, x3max);
+            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+            u0(m,0,ke+k+1,j,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+          }
+        }
         break;
       default: break;
     }
@@ -169,9 +260,11 @@ void MeshBoundaryValues::CFCScalarBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
 //! axis (n==0 on x1 faces, n==1 on x2, n==2 on x3); the other two channels and every
 //! non-reflect case match CFCScalarBCs' treatment exactly, per channel.
 
-void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
+void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0,
+                                      int order) {
   auto &pm = ppack->pmesh;
   auto &indcs = ppack->pmesh->mb_indcs;
+  auto &size = ppack->pmb->mb_size;
   int &ng = indcs.ng;
   auto &mb_bcs = ppack->pmb->mb_bcs;
 
@@ -180,12 +273,20 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
   int nmb = ppack->nmb_thispack;
   constexpr int nvar = 3;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
-    int &is = indcs.is; int &ie = indcs.ie;
     par_for("cfc_vector_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1),
             0, (n2-1),
     KOKKOS_LAMBDA(int m, int n, int k, int j) {
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x1)) {
         case BoundaryFlag::reflect:
           for (int i=0; i<ng; ++i) {
@@ -197,7 +298,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int i=0; i<ng; ++i) { u0(m,n,k,j,is-i-1) = u0(m,n,k,j,is); }
+          if (order == 0) {
+            for (int i=0; i<ng; ++i) { u0(m,n,k,j,is-i-1) = u0(m,n,k,j,is); }
+          } else {
+            Real x1_i = CellCenterX(is-is, indcs.nx1, x1min, x1max);
+            Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+            Real f_i = u0(m,n,k,j,is);
+            for (int i=0; i<ng; ++i) {
+              Real x1_g = CellCenterX(is-i-1-is, indcs.nx1, x1min, x1max);
+              Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+              u0(m,n,k,j,is-i-1) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -212,7 +324,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int i=0; i<ng; ++i) { u0(m,n,k,j,ie+i+1) = u0(m,n,k,j,ie); }
+          if (order == 0) {
+            for (int i=0; i<ng; ++i) { u0(m,n,k,j,ie+i+1) = u0(m,n,k,j,ie); }
+          } else {
+            Real x1_i = CellCenterX(ie-is, indcs.nx1, x1min, x1max);
+            Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+            Real f_i = u0(m,n,k,j,ie);
+            for (int i=0; i<ng; ++i) {
+              Real x1_g = CellCenterX(ie+i+1-is, indcs.nx1, x1min, x1max);
+              Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+              u0(m,n,k,j,ie+i+1) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -221,10 +344,15 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   if (pm->one_d) return;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
-    int &js = indcs.js; int &je = indcs.je;
     par_for("cfc_vector_bc_x2", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1),
             0, (n1-1),
     KOKKOS_LAMBDA(int m, int n, int k, int i) {
+      Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+      Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x2)) {
         case BoundaryFlag::reflect:
           for (int j=0; j<ng; ++j) {
@@ -236,7 +364,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int j=0; j<ng; ++j) { u0(m,n,k,js-j-1,i) = u0(m,n,k,js,i); }
+          if (order == 0) {
+            for (int j=0; j<ng; ++j) { u0(m,n,k,js-j-1,i) = u0(m,n,k,js,i); }
+          } else {
+            Real x2_i = CellCenterX(js-js, indcs.nx2, x2min, x2max);
+            Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+            Real f_i = u0(m,n,k,js,i);
+            for (int j=0; j<ng; ++j) {
+              Real x2_g = CellCenterX(js-j-1-js, indcs.nx2, x2min, x2max);
+              Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+              u0(m,n,k,js-j-1,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -251,7 +390,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
           break;
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::inflow: case BoundaryFlag::user:
-          for (int j=0; j<ng; ++j) { u0(m,n,k,je+j+1,i) = u0(m,n,k,je,i); }
+          if (order == 0) {
+            for (int j=0; j<ng; ++j) { u0(m,n,k,je+j+1,i) = u0(m,n,k,je,i); }
+          } else {
+            Real x2_i = CellCenterX(je-js, indcs.nx2, x2min, x2max);
+            Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+            Real f_i = u0(m,n,k,je,i);
+            for (int j=0; j<ng; ++j) {
+              Real x2_g = CellCenterX(je+j+1-js, indcs.nx2, x2min, x2max);
+              Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+              u0(m,n,k,je+j+1,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+            }
+          }
           break;
         default: break;
       }
@@ -260,10 +410,15 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
   if (pm->two_d) return;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic) return;
-  int &ks = indcs.ks; int &ke = indcs.ke;
   par_for("cfc_vector_bc_x3", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n2-1),
           0, (n1-1),
   KOKKOS_LAMBDA(int m, int n, int j, int i) {
+    Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+
     switch (mb_bcs.d_view(m,BoundaryFace::inner_x3)) {
       case BoundaryFlag::reflect:
         for (int k=0; k<ng; ++k) {
@@ -275,7 +430,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
         break;
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::inflow: case BoundaryFlag::user:
-        for (int k=0; k<ng; ++k) { u0(m,n,ks-k-1,j,i) = u0(m,n,ks,j,i); }
+        if (order == 0) {
+          for (int k=0; k<ng; ++k) { u0(m,n,ks-k-1,j,i) = u0(m,n,ks,j,i); }
+        } else {
+          Real x3_i = CellCenterX(ks-ks, indcs.nx3, x3min, x3max);
+          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+          Real f_i = u0(m,n,ks,j,i);
+          for (int k=0; k<ng; ++k) {
+            Real x3_g = CellCenterX(ks-k-1-ks, indcs.nx3, x3min, x3max);
+            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+            u0(m,n,ks-k-1,j,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+          }
+        }
         break;
       default: break;
     }
@@ -290,7 +456,18 @@ void MeshBoundaryValues::CFCVectorBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0
         break;
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::inflow: case BoundaryFlag::user:
-        for (int k=0; k<ng; ++k) { u0(m,n,ke+k+1,j,i) = u0(m,n,ke,j,i); }
+        if (order == 0) {
+          for (int k=0; k<ng; ++k) { u0(m,n,ke+k+1,j,i) = u0(m,n,ke,j,i); }
+        } else {
+          Real x3_i = CellCenterX(ke-ks, indcs.nx3, x3min, x3max);
+          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+          Real f_i = u0(m,n,ke,j,i);
+          for (int k=0; k<ng; ++k) {
+            Real x3_g = CellCenterX(ke+k+1-ks, indcs.nx3, x3min, x3max);
+            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+            u0(m,n,ke+k+1,j,i) = f_i * Kokkos::pow(r_i/(r_g+1.0e-30), order);
+          }
+        }
         break;
       default: break;
     }

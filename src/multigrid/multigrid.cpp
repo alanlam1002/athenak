@@ -718,7 +718,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_max) {
-          local_max = std::max(local_max, std::abs(def(m, v, k, j, i)));
+          local_max = Kokkos::max(local_max, Kokkos::fabs(def(m, v, k, j, i)));
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {
@@ -727,7 +727,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_sum) {
-          local_sum += std::abs(def(m, v, k, j, i));
+          local_sum += Kokkos::fabs(def(m, v, k, j, i));
         }, Kokkos::Sum<Real>(norm));
     } else {
       Kokkos::parallel_reduce("MG::DefectNorm_L2",
@@ -747,7 +747,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_max) {
-          local_max = std::max(local_max, std::abs(def(m, v, k, j, i)));
+          local_max = Kokkos::max(local_max, Kokkos::fabs(def(m, v, k, j, i)));
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {
@@ -756,7 +756,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_sum) {
-          local_sum += std::abs(def(m, v, k, j, i));
+          local_sum += Kokkos::fabs(def(m, v, k, j, i));
         }, Kokkos::Sum<Real>(norm));
     } else {
       Kokkos::parallel_reduce("MG::DefectNorm_L2",

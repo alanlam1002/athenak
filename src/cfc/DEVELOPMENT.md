@@ -2204,3 +2204,88 @@ src/cfc/
       to confirm quantitatively; the qualitative check here is that the
       mechanism runs, compiles against the right enum values, and doesn't
       break anything already passing).
+15. **Relax the timestep's speed-of-light restriction for dynamical-GR MHD (the
+    path CFC uses).** Done. `mhd::MHD::NewTimeStep` (`mhd_newdt.cpp`) hardcodes
+    `max_dv=1` (the speed of light) for every `is_dynamical_relativistic_` run --
+    always correct but far more conservative than necessary once a real fast
+    magnetosonic speed can be computed. Upstream PR #698
+    (github.com/IAS-Astrophysics/athenak/pull/698) closes this gap for the
+    *static*-background GR path only (`is_general_relativistic_`, e.g. a fixed
+    Kerr-Schild metric) behind a new `<time>/gr_dt` flag, using `mhd`'s
+    ideal-gas-only `EquationOfState::IdealGRMHDFastSpeeds` and a closed-form
+    background metric (`ComputeMetricAndInverse`) -- it does not touch
+    `is_dynamical_relativistic_` at all.
+    - Couldn't reuse that PR's approach verbatim: dyn_grmhd's metric is the
+      actual solved/evolved pointwise ADM data (`padm->adm.g_dd/beta_u/alpha`),
+      not a fixed analytic background -- there's no closed-form metric to
+      evaluate at an arbitrary point the way `ComputeMetricAndInverse` does.
+      dyn_grmhd also uses the primitive-solver EOS infrastructure
+      (`PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>`, supporting piecewise-
+      polytrope/tabulated/hybrid EOS, not just ideal gas), so the wavespeed
+      calculation must go through `PrimitiveSolverHydro::
+      GetGRFastMagnetosonicSpeeds` -- already used identically by this
+      module's own Riemann solvers (`rsolvers/{llf,hlle}_dyn_grmhd.hpp`) --
+      rather than `EquationOfState::IdealGRMHDFastSpeeds`.
+    - New `dyngr::DynGRMHD::NewTimeStep` (pure virtual, `dyn_grmhd.hpp`),
+      implemented in `DynGRMHDPS<EOSPolicy, ErrorPolicy>`
+      (`src/dyn_grmhd/dyn_grmhd_newdt.cpp`, registered in `CMakeLists.txt`),
+      replacing `&MHD::NewTimeStep` for the `MHD_Newdt` task
+      (`dyn_grmhd.cpp`'s `QueueDynGRMHDTasks()`). Gated on a new `gr_dt` member
+      read from `<time>/gr_dt` (same input key/default=false as PR #698, for a
+      single consistent knob across both GR paths) -- `false` preserves the
+      old `max_dv=1` behavior exactly; `true` computes the real per-direction
+      fast magnetosonic speed pointwise from `w0`/`bcc0`/`padm->adm` (undensitizing
+      `bcc0` via `isdetg`, computing the comoving-frame `b^2` the same way
+      `SingleStateFlux` does, and the per-direction inverse-metric diagonal
+      `gii` the same way `{llf,hlle}_dyn_grmhd.hpp` do) via
+      `PrimitiveSolverHydro::GetGRFastMagnetosonicSpeeds`.
+    - **Bug found while wiring this up (before any run)**: a direct
+      `#include "eos/primitive_solver_hyd.hpp"` before `#include "dyn_grmhd.hpp"`
+      failed to compile (`PrimitiveSolverHydro` reported as an incomplete/wrong
+      type) -- `dyn_grmhd.hpp` and `eos/primitive_solver_hyd.hpp` include each
+      other (the latter needs `DynGRMHDPS`, the former needs
+      `PrimitiveSolverHydro` for `DynGRMHDPS::eos`'s member declaration), so
+      whichever is included *first* in a translation unit determines whether
+      the other sees a fully-defined `PrimitiveSolverHydro` by the time it's
+      needed. `dyn_grmhd_fluxes.cpp` already gets this right (includes
+      `dyn_grmhd.hpp` before anything primitive-solver-related, and doesn't
+      include `eos/primitive_solver_hyd.hpp` directly at all, relying on the
+      transitive include); `dyn_grmhd_newdt.cpp` now follows the same order.
+    - **Verified**: rebuilt cleanly. Ran the existing octant TOV control input
+      unmodified (`gr_dt` unset, defaults false): bit-for-bit identical
+      `dt`/`time` trace to every prior run of this test (`dt=6.4e-1`,
+      `time=1.92` after 3 cycles) -- confirms zero behavior change when the
+      flag is off. Same input with `<time> gr_dt = true` added: completes all
+      3 cycles cleanly, zero NaN/FATAL/warnings, and `dt` grows to `2.313`
+      (`time=4.377` after 3 cycles) -- roughly 3.6x larger than the
+      speed-of-light bound, as physically expected for a fast magnetosonic
+      speed well below `c` in this non-relativistic-velocity static star.
+    - Renamed to `dyn_grmhd_newdt.cpp` (was `dyngr_mhd_newdt.cpp`) to match
+      this directory's `dyn_grmhd_*.cpp` convention (`dyn_grmhd_fluxes.cpp`,
+      `dyn_grmhd_fofc.cpp`) rather than introducing a new `dyngr_*` prefix.
+    - **Bug found by the user, cycle-0-only**: a real production `gr_dt=true`
+      run (`/sakura/ptmp/tlam/athenak_run/cfc_stability_v2`) still showed the
+      old speed-of-light `dt` at cycle 0. Root cause: `Driver::Initialize()`
+      (`driver.cpp`) primes `pmesh->dt` *before* the main evolution loop (and
+      hence before the task graph's own `MHD_Newdt` task ever runs) by calling
+      `pmesh->pmb_pack->pmhd->NewTimeStep(this, nexp_stages)` directly --
+      `mhd::MHD::NewTimeStep` is **not virtual**, so this call always ran the
+      base (hardcoded `max_dv=1`) version through the plain `pmhd` pointer,
+      completely bypassing `dyngr::DynGRMHDPS::NewTimeStep` regardless of
+      `gr_dt`. `MeshRefinement::AdaptiveMeshRefinement()` (`mesh_refinement.cpp`)
+      has the exact same priming call, run after every AMR regrid event, with
+      the identical bug. Both fixed by dispatching through
+      `pmy_pack->pdyngr->NewTimeStep(...)` instead of `pmhd->NewTimeStep(...)`
+      whenever `pdyngr != nullptr` (dyn_grmhd active) -- the task graph's own
+      `MHD_Newdt` task was never affected (it's queued directly against
+      `&DynGRMHDPS<...>::NewTimeStep`, see above), so every cycle *after* the
+      first (or after the first post-refinement cycle) already had the
+      correct, larger `dt`; only these two one-time priming calls were stuck
+      on the conservative fallback.
+    - **Verified**: rebuilt cleanly. Re-ran the octant TOV control input with
+      `<time> gr_dt = true`: cycle 0 now shows `dt=2.749`, consistent with
+      cycles 1-3's `dt~2.3-2.6` -- confirms the priming call now picks up the
+      real fast-magnetosonic speed from the very first cycle instead of the
+      old hardcoded `max_dv=1`. `gr_dt` unset still reproduces the unchanged
+      `dt=6.4e-1` at every cycle including cycle 0, confirming zero regression
+      for the default (off) path.

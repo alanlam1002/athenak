@@ -149,6 +149,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   scalar_pplimiter = pin->GetOrAddBoolean("mhd", "scalar_pplimiter", true);
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
+  gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
 
   // allocate memory for temperature
   {
@@ -245,8 +246,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   }
   // CFC_AssembleFinal is optional for the same reason: MHD_Newdt should see the final
   // lapse/shift when cfc is active, but is unaffected when it isn't.
-  pnr->QueueTask(&MHD::NewTimeStep, pmhd, MHD_Newdt, "MHD_Newdt", Task_Run, {MHD_C2P},
-                 {CFC_AssembleFinal});
+  // dyn_grmhd_newdt.cpp's NewTimeStep replaces mhd::MHD::NewTimeStep here -- the
+  // latter hardcodes max_dv=1 (speed of light) for any is_dynamical_relativistic_ run,
+  // this module's own version can instead use the real GR fast magnetosonic speed
+  // (gated on <time>/gr_dt) via this module's primitive-solver EOS.
+  pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep, this, MHD_Newdt,
+                 "MHD_Newdt", Task_Run, {MHD_C2P}, {CFC_AssembleFinal});
 
   // End task list
   pnr->QueueTask(&MHD::ClearSend, pmhd, MHD_ClearS, "MHD_ClearS", Task_End);

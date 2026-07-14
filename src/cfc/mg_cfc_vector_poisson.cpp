@@ -33,7 +33,7 @@ namespace {
 
 //----------------------------------------------------------------------------------------
 // Multigrid::Smooth/CalculateDefect/CalculateFASRHS (multigrid.hpp) hardcode variable
-// index 0, so a nvar_=3 solver like MGCFCVectorPoisson must call them once per channel,
+// index 0, so a nvar_=4 solver like MGCFCVectorPoisson must call them once per channel,
 // each time on a rank-preserving Kokkos::subview restricted to that one channel -- the
 // same idiom AthenaTensor<...,1>::InitWithShallowSlice (athena_tensor.hpp) uses to
 // slice N contiguous variable channels while keeping the view 5D.
@@ -53,8 +53,8 @@ template <typename StencilOp>
 void SmoothChannels(Multigrid *mg, DualArray5D<Real> &u_lv, DualArray5D<Real> &src_lv,
                     const StencilOp &stencil, int rlev,
                     int il, int iu, int jl, int ju, int kl, int ku,
-                    int color, bool on_host) {
-  for (int v = 0; v < 3; ++v) {
+                    int color, bool on_host, int nchan) {
+  for (int v = 0; v < nchan; ++v) {
     auto vr = std::make_pair(v, v + 1);
     if (on_host) {
       auto u = Kokkos::subview(u_lv.h_view, Kokkos::ALL, vr,
@@ -79,8 +79,8 @@ void CalculateDefectChannels(Multigrid *mg, DualArray5D<Real> &def_lv,
                              DualArray5D<Real> &u_lv, DualArray5D<Real> &src_lv,
                              const StencilOp &stencil, int rlev,
                              int il, int iu, int jl, int ju, int kl, int ku,
-                             bool on_host) {
-  for (int v = 0; v < 3; ++v) {
+                             bool on_host, int nchan) {
+  for (int v = 0; v < nchan; ++v) {
     auto vr = std::make_pair(v, v + 1);
     if (on_host) {
       auto def = Kokkos::subview(def_lv.h_view, Kokkos::ALL, vr,
@@ -108,8 +108,8 @@ template <typename StencilOp>
 void CalculateFASRHSChannels(Multigrid *mg, DualArray5D<Real> &src_lv,
                              DualArray5D<Real> &u_lv, const StencilOp &stencil,
                              int rlev, int il, int iu, int jl, int ju, int kl, int ku,
-                             bool on_host) {
-  for (int v = 0; v < 3; ++v) {
+                             bool on_host, int nchan) {
+  for (int v = 0; v < nchan; ++v) {
     auto vr = std::make_pair(v, v + 1);
     if (on_host) {
       auto src = Kokkos::subview(src_lv.h_view, Kokkos::ALL, vr,
@@ -139,7 +139,7 @@ void MGCFCVectorPoisson::SmoothPack(int color) {
   CFCVectorPoissonStencil stencil{
       static_cast<MGCFCVectorPoissonDriver*>(pmy_driver_)->omega_/6.0};
   SmoothChannels(this, u_[current_level_], src_[current_level_],
-                stencil, -ll, is, ie, js, je, ks, ke, color, on_host_);
+                stencil, -ll, is, ie, js, je, ks, ke, color, on_host_, nvar_);
 }
 
 void MGCFCVectorPoisson::CalculateDefectPack() {
@@ -150,7 +150,7 @@ void MGCFCVectorPoisson::CalculateDefectPack() {
   CFCVectorPoissonStencil stencil{0.0};
   CalculateDefectChannels(this, def_[current_level_], u_[current_level_],
                           src_[current_level_], stencil, -ll,
-                          is, ie, js, je, ks, ke, on_host_);
+                          is, ie, js, je, ks, ke, on_host_, nvar_);
 }
 
 void MGCFCVectorPoisson::CalculateFASRHSPack() {
@@ -160,28 +160,29 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
   int ks = ngh_, ke = ks+(indcs_.nx3>>ll)-1;
   CFCVectorPoissonStencil stencil{0.0};
   CalculateFASRHSChannels(this, src_[current_level_], u_[current_level_],
-                          stencil, -ll, is, ie, js, je, ks, ke, on_host_);
+                          stencil, -ll, is, ie, js, je, ks, ke, on_host_, nvar_);
 }
 
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(...)
-//! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 3.
-//! P_i's true outer boundary (X^i -> 0 / beta^i -> 0 as r -> infinity, Gmunu eq.
-//! 79/80) is an *asymptotic* falloff (~1/r, like a Newtonian vector potential
-//! sourced by a compact S_i-tilde distribution), not an exact zero at any finite
-//! radius -- BoundaryFlag::mg_multipole (default here, via <cfc> mg_poisson_outer_bc)
-//! captures that falloff (with real angular structure up to mg_poisson_mporder);
-//! the previous default, mg_zerofixed (still available via mg_poisson_outer_bc=
-//! zerofixed), was only ever the leading-order (monopole-zero) truncation of it --
-//! see mg_cfc_conformal_factor.cpp's constructor comment and DEVELOPMENT.md item 9
-//! for why this same tradeoff mattered enough to fix (via Robin, there) for psi/
-//! alpha_psi. Multipole is safe here in a way it never was for psi/alpha_psi:
-//! P_i's source is a real, unmodified src_ (LoadPoissonSource's fac=1.0, loaded via
-//! the generic Multigrid::LoadSource -- no coeff_ involved, no custom Newton
-//! relaxation), so ScaleMultipoleCoefficients()'s normalization (the generic
-//! Green's-function constant for any -Delta u = src equation) applies with zero
-//! re-derivation. autompo_ is deliberately left false (fixed origin (0,0,0), the
+//! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 4
+//! (P_i packed at channels 0-2, eta packed at channel 3 -- see mg_cfc_vector_poisson.
+//! hpp's file-level comment). P_i/eta's true outer boundary (X^i -> 0 / beta^i -> 0
+//! as r -> infinity, Gmunu eq. 79/80) is an *asymptotic* falloff (~1/r, like a
+//! Newtonian vector potential sourced by a compact S_i-tilde distribution), not an
+//! exact zero at any finite radius -- BoundaryFlag::mg_multipole (default here, via
+//! <cfc> mg_poisson_outer_bc) captures that falloff (with real angular structure up
+//! to mg_poisson_mporder); the previous default, mg_zerofixed (still available via
+//! mg_poisson_outer_bc=zerofixed), was only ever the leading-order (monopole-zero)
+//! truncation of it -- see mg_cfc_conformal_factor.cpp's constructor comment and
+//! DEVELOPMENT.md item 9 for why this same tradeoff mattered enough to fix (via
+//! Robin, there) for psi/alpha_psi. Multipole is safe here in a way it never was for
+//! psi/alpha_psi: P_i/eta's source is a real, unmodified src_ (LoadPoissonSource's
+//! fac=1.0, loaded via the generic Multigrid::LoadSource -- no coeff_ involved, no
+//! custom Newton relaxation), so ScaleMultipoleCoefficients()'s normalization (the
+//! generic Green's-function constant for any -Delta u = src equation) applies with
+//! zero re-derivation. autompo_ is deliberately left false (fixed origin (0,0,0), the
 //! base constructor's own default) rather than exposed as an input: every current
 //! CFC test problem's star sits at the coordinate origin, and skipping
 //! CalculateCenterOfMass() avoids a second channel-0-only function this pass would
@@ -189,7 +190,8 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
 //! CalculateMultipoleCoefficients()/ScaleMultipoleCoefficients()/SyncMultipoleToDevice()
 //! and both ghost-fill sites -- gravity's own nvar_=1 usage is unaffected, confirmed
 //! by construction: every new per-channel loop reduces to its original single
-//! iteration there).
+//! iteration there; nvar_=4 is exactly at kMaxMultipoleChannels, confirmed safe via
+//! AllocateMultipoleCoefficients()'s guard).
 //!
 //! Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain like a
 //! single-star test) still need BoundaryFlag::mg_zerograd, not plain
@@ -204,7 +206,7 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
 
 MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
-    : MultigridDriver(pmbp, 3) {
+    : MultigridDriver(pmbp, 4) {
   autompo_ = false;
   std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_poisson_outer_bc",
                                                  "multipole");
@@ -260,11 +262,12 @@ MGCFCVectorPoissonDriver::~MGCFCVectorPoissonDriver() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt)
-//! \brief run the V-cycle solve on P_i's right-hand side. Assumes LoadPoissonSource()
-//! was already called for this cycle. Unlike gravity::MGGravityDriver::Solve(), this
-//! does not load its own source/initial-guess or retrieve its own result -- cfc::CFC
-//! drives those explicitly via LoadPoissonSource()/RetrieveSolution() since this one
-//! driver is reused for two physically distinct equations (X^i's and beta^i's P_i).
+//! \brief run the V-cycle solve on the packed (P_i, eta) right-hand side. Assumes
+//! LoadPoissonSource() was already called for this cycle. Unlike
+//! gravity::MGGravityDriver::Solve(), this does not load its own source/initial-guess
+//! or retrieve its own result -- cfc::CFC drives those explicitly via
+//! LoadPoissonSource()/RetrieveSolution() since one instance of this driver is used
+//! for X^i and a separate instance for beta^i.
 
 void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
@@ -297,8 +300,9 @@ void MGCFCVectorPoissonDriver::RetrieveSolution(DvceArray5D<Real> &p_dst) {
 
 //----------------------------------------------------------------------------------------
 // Host-side octet physics for MGCFCVectorPoissonDriver. Same 7-point Laplacian as
-// gravity::MGGravityDriver's octet functions, generalized to loop over the 3
-// independent P_i channels instead of gravity's hardcoded single channel (v=0).
+// gravity::MGGravityDriver's octet functions, generalized to loop over all nvar_ (4:
+// P_i's 3 components plus eta) independent channels instead of gravity's hardcoded
+// single channel (v=0).
 
 namespace {
 inline Real OctLaplacian(const MGOctet &o, int v, int k, int j, int i) {
@@ -315,7 +319,7 @@ void MGCFCVectorPoissonDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
   Real dx2 = dx * dx;
   Real isix = omega_ / 6.0;
   int c = color ^ coffset_;
-  for (int v = 0; v < 3; ++v) {
+  for (int v = 0; v < nvar_; ++v) {
     for (int k = ngh; k <= ngh+1; ++k) {
       for (int j = ngh; j <= ngh+1; ++j) {
         for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
@@ -332,7 +336,7 @@ void MGCFCVectorPoissonDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
   Real root_dx = mgroot_->GetRootDx();
   Real dx = root_dx / static_cast<Real>(1 << rlev);
   Real idx2 = 1.0 / (dx * dx);
-  for (int v = 0; v < 3; ++v) {
+  for (int v = 0; v < nvar_; ++v) {
     for (int k = ngh; k <= ngh+1; ++k) {
       for (int j = ngh; j <= ngh+1; ++j) {
         for (int i = ngh; i <= ngh+1; ++i) {
@@ -348,7 +352,7 @@ void MGCFCVectorPoissonDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
   Real root_dx = mgroot_->GetRootDx();
   Real dx = root_dx / static_cast<Real>(1 << rlev);
   Real idx2 = 1.0 / (dx * dx);
-  for (int v = 0; v < 3; ++v) {
+  for (int v = 0; v < nvar_; ++v) {
     for (int k = ngh; k <= ngh+1; ++k) {
       for (int j = ngh; j <= ngh+1; ++j) {
         for (int i = ngh; i <= ngh+1; ++i) {

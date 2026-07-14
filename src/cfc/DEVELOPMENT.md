@@ -2502,3 +2502,166 @@ src/cfc/
       purely isotropic `1/r` falloff -- **explicitly re-verify gravity's own
       behavior is bit-for-bit unchanged** after these shared-code edits, since this
       is the one part of this item with blast radius outside `src/cfc/`.
+18. **Merge `P_i`/`eta` into one `nvar_=4` Poisson solve per Shibata pair
+    (`X^i`/`beta^i`), retiring `MGCFCScalarPoissonDriver`.** Done. User observation:
+    since `P_i` (`nvar_=3`) and `eta` (`nvar_=1`) are independent flat Poisson
+    equations with already-independent source terms (both built in the same
+    `AssembleVectorSource` pass), the two separate sequential multigrid solves per
+    Shibata pair could be combined into one. Made cheap by two pieces of
+    infrastructure item 17 already built: the per-channel multipole generalization
+    (`kMaxMultipoleChannels=4`, already exactly `nvar_`'s new value) and the shared
+    `mg_poisson_outer_bc`/`mg_poisson_mporder` `<cfc>` keys (already read
+    identically by both drivers, so merging loses no configurability).
+    - **Why a real storage merge was required, not just "call `Solve()` once"**:
+      `Multigrid::LoadSource(src, ns, ngh, fac)`/`RetrieveResult(dst, ns, ngh)`
+      always populate the driver's *entire* internal channel range `v=0..nvar_-1`
+      in one call -- `ns` only offsets which channels of the *caller's* array are
+      read from/written to, it does not let two separate calls each fill a
+      different sub-range of the driver's own internal storage. So a merged
+      `nvar_=4` driver cannot be fed by two independent 3-channel/1-channel calls;
+      `p_src`/`p_x`/`p_beta` and their paired `eta` arrays had to become genuinely
+      merged 4-channel arrays (`P_i` at channels 0-2, `eta` at channel 3), reusing
+      the existing names (`u_p_src`/`u_p_x`/`u_p_beta`, just resized 3->4) rather
+      than inventing new ones. The separate `eta_x`/`eta_beta`/`eta_src`
+      `DvceArray5D<Real>` members are gone entirely -- every place that read or
+      wrote them now reads/writes channel 3 of the merged array directly (no
+      dedicated view needed, since nothing besides raw indexing and two functions
+      below ever needed a distinct "eta view").
+    - `mg_cfc_vector_poisson.{hpp,cpp}`: base-class ctor arg `MultigridDriver(pmbp,
+      3)` -> `(pmbp, 4)`. The stencil (`CFCVectorPoissonStencil`) was already
+      channel-agnostic (plain decoupled 7-point Laplacian per channel) -- `eta`
+      obeys the identical flat Laplacian as `P_i`, just with its own RHS, so
+      extending to 4 channels needed no stencil change. The 3 file-local
+      `*Channels` helper templates (`SmoothChannels`/`CalculateDefectChannels`/
+      `CalculateFASRHSChannels`) hardcoded `for (v=0; v<3; ++v)` -- changed to an
+      explicit `int nchan` parameter, with the 3 `MGCFCVectorPoisson::*Pack`
+      methods passing their own `nvar_` (a `Multigrid`-protected member already
+      directly accessible). The 3 `Octet` methods (`MGCFCVectorPoissonDriver`
+      members) hardcoded the same `v<3` loop -- changed to `v<nvar_` directly (no
+      parameter needed, already a member). `LoadPoissonSource`/`RetrieveSolution`
+      needed **no signature change** -- they already took a single
+      `DvceArray5D<Real>&` and passed `ns=0`, which now naturally means "all 4
+      channels of the caller's merged array."
+    - `mg_cfc_scalar_poisson.{hpp,cpp}`: deleted entirely (confirmed via `grep` --
+      no other user in the tree besides `cfc.{hpp,cpp}`/this file). Removed from
+      `src/CMakeLists.txt`'s source list.
+    - `cfc_reconstruct.{hpp,cpp}`: `ReconstructVectorFromPotentials` took `eta` as
+      `const DvceArray5D<Real>&` and internally did `eta_view.InitWithShallowSlice
+      (eta, 0)` -- hardcoded channel 0. Added a trailing `int eta_chan = 0`
+      parameter (default preserves old behavior), threaded through to
+      `InitWithShallowSlice(eta, eta_chan)`. Call sites now pass the merged array
+      itself plus `eta_chan=3` -- e.g. `ReconstructVectorFromPotentials(pmy_pack,
+      p_x, u_p_x, x_u, 3)` -- no separate `eta_x`/`eta_beta` array needed.
+    - `bvals.hpp`/`cfc_bcs.cpp`: `CFCScalarBCs`/`CFCVectorBCs` hardcoded channel 0
+      (`u0(m,0,...)`, ~28 call sites) / looped `n=0..nvar-1` with `u0(m,n,...)`
+      (`constexpr int nvar=3`, axis-parity checks on `n` itself). Added a trailing
+      `int chan0 = 0` parameter to both; mechanically offset every array access
+      (`u0(m,0,` -> `u0(m,chan0,` in `CFCScalarBCs`, scripted substitution over
+      exactly the function's line range, verified 30/30 occurrences moved and zero
+      un-offset survivors afterward; `u0(m,n,` -> `u0(m,chan0+n,` in
+      `CFCVectorBCs`, same verification, 30/30) -- **critically, the loop variable
+      `n` itself stays 0..2** so the existing `n==0`/`n==1`/`n==2` axis-alignment
+      parity checks stay correct relative to the vector's own local components,
+      not the absolute channel index (confirmed unchanged via `grep` after the
+      substitution). `cfc.cpp`'s merged `RecvPiEtaXTask`/`RecvPiEtaBetaTask` call
+      both functions against the same merged array: `CFCVectorBCs(pmy_pack,
+      u_p_x, 1)` (implicit `chan0=0`) and `CFCScalarBCs(pmy_pack, u_p_x, 1, 3)`.
+    - `cfc.hpp`/`cfc.cpp`: collapsed each `(vector driver, scalar driver)` and
+      `(vector pbval, scalar pbval)` pair into one -- `pmgd_px`+`pmgd_etax` ->
+      `pmgd_pietax` (and `pmgd_pbeta`+`pmgd_etabeta` -> `pmgd_pietabeta`);
+      `pbval_px`+`pbval_etax` -> `pbval_pietax`/`coarse_u_pietax`
+      (`InitializeBuffers(4)`, and the beta equivalent) -- drops the `pbval_*`
+      instance count from 8 to 6 (`pietax`, `x`, `psi`, `alpha_psi`, `pietabeta`,
+      `adm`). `SolveVectorPotential`/`SolveShift` shrank from 6 lines (two
+      Load/Solve/Retrieve sequences) to 3 (one). `AssembleVectorSource`'s two
+      `eta_src_(m,0,...)` writes became `u_p_src_(m,3,...)` writes directly (no
+      alias needed for a removed member); `BuildShiftSource`/`BuildShiftSourceImpl`
+      needed no change (only ever touch `p_src`, the 3-channel view, never `eta`).
+      Task graph (`QueueCFCTasks()`): collapsed the 8-task `PX`+`EtaX` group
+      (previously both depending only on `{CFC_BuildSrcX}` and running in
+      parallel, joined at `CFC_ReconstructX`'s 2-dependency wait) into a single
+      4-task `CFC_RestPiEtaX -> CFC_SendPiEtaX -> CFC_RecvPiEtaX ->
+      CFC_ProlongPiEtaX` chain, `CFC_ReconstructX` now depending on just
+      `{CFC_ProlongPiEtaX}` -- identical collapse for the beta side. This removed
+      8 `TaskName` enumerators from `numerical_relativity.hpp` (`CFC_NTASKS`
+      shrinks by 8 -- confirmed via `grep` that nothing outside
+      `numerical_relativity.{hpp,cpp}` depends on its specific numeric value, only
+      ordinal comparison `task < CFC_NTASKS`/`Phys_CFC` classification).
+      `InitRecvXFields`/`ClearXFields`/`InitRecvTailFields`/`ClearTailFields` (used
+      by `InitializeMetric`, item 11) and `InitRecvTask`/`ClearSendTask`/
+      `ClearRecvTask` (the task-graph versions) all collapsed their paired
+      `InitRecv(3)`/`InitRecv(1)` calls into one `InitRecv(4)` call per merged
+      field. **`InitializeMetric`'s hand-rolled task sequence** (`cfc.cpp`,
+      duplicates `QueueCFCTasks()`'s wiring outside the normal task graph, easy to
+      miss since it's not driven by the same code) was updated in the same pass --
+      flagged explicitly here since it's the one place a merge like this is easy
+      to apply in only one of the two places it's needed.
+    - **Verification, no compiler in this sandbox**: `cpplint`-clean (line length,
+      brace balance -- both checked directly via `awk`/Python after every edit)
+      plus careful manual cross-checking, since this touches already-implemented,
+      already-committed code (item 4's task graph, item 17's multipole work) more
+      than any prior single item in this log. Explicitly re-checked: (1) the
+      `cfc_bcs.cpp` channel-offset substitution is exhaustive (scripted, then
+      grep-verified zero un-offset survivors within the modified functions); (2)
+      `InitializeMetric`'s hand-rolled sequence was updated, not just
+      `QueueCFCTasks()`; (3) `AllocateMultipoleCoefficients()`'s `nvar_ >
+      kMaxMultipoleChannels` guard still passes at exactly `nvar_=4` (`4 > 4` is
+      false, confirmed already true before this item since `kMaxMultipoleChannels`
+      was set to 4 specifically anticipating this merge). **Not yet run against a
+      real build.** Once built on Sakura: rerun `cfc_tov.athinput`/
+      `cfc_stability_v2` and confirm `P_i`/`eta`'s converged values are
+      bit-for-bit (or numerically identical within roundoff) to a pre-merge run --
+      this is a pure refactor with no intended physics change, so any difference
+      beyond roundoff indicates a bug in the merge, not an expected side effect.
+19. **Merge `CFCScalarBCs`/`CFCVectorBCs` (`bvals/physics/cfc_bcs.cpp`) into one
+    shared implementation; fix `vacuum` to use the `order>0` Robin falloff, matching
+    `user`, instead of a hard zero.** Done. User observation: the two functions
+    were structurally near-identical (same 6-face zero-gradient/falloff logic, same
+    `CellCenterX`/`r_i`/`r_g` setup) apart from whether a per-channel loop existed at
+    all and `reflect`'s parity flip (`CFCScalarBCs`: never; `CFCVectorBCs`: only the
+    channel aligned with the face's own axis). Also flagged: `vacuum` was hard-
+    zeroed in both, unlike `outflow`/`diode`/`inflow`/`user`, which already use the
+    `order>0` falloff.
+    - **Precedent confirms the `vacuum` fix**: `adm_bcs.cpp`'s `ADMBCs` -- the
+      function this file's own doc comment cites as the model for its falloff
+      technique -- already groups `vacuum` with `outflow`/`diode`/`inflow`/`user`
+      under *one* case block, unconditionally (confirmed by reading
+      `adm_bcs.cpp:127-140`; no separate hard-zero path for `vacuum` exists there
+      at all). `cfc_bcs.cpp`'s hard-zero-for-`vacuum` was therefore a real
+      inconsistency relative to its own cited model, not a recorded design choice --
+      and the same class of bug the `order>0` falloff itself exists to fix (a
+      hard-zero ghost cell creates an artificial kink between a smoothly
+      falling-off interior and a flat-clamped ghost region, right where
+      `cfc_reconstruct.cpp`'s finite differences read across the boundary).
+      `vacuum` is a common outer-boundary choice for GRMHD runs, so this is a real,
+      reachable case.
+    - **Behavior change, stated explicitly**: merging `vacuum` into the shared
+      case block makes its behavior order-dependent everywhere, matching `user`
+      exactly -- at `order==0` (`u_x`/`delta_psi`/`delta_alpha_psi`'s calls),
+      `vacuum` changes from hard `0.0` to the same zero-gradient copy `user`
+      already gets at `order==0`; at `order>0` (`u_p_x`/`u_p_beta`'s calls,
+      `order=1`), `vacuum` changes from hard `0.0` to the same `1/r^order`
+      extrapolation. This is the correct, consistent choice (matches `ADMBCs`'
+      own unconditional treatment), not a partial fix gated on `order>0` only.
+    - **Merge implementation**: one file-local `CFCBCsImpl(ppack, u0, order, chan0,
+      nvar)` (anonymous namespace, alongside the existing `ReflectedValue` helper)
+      contains the full 6-face body, with `reflect`'s parity flip generalized to
+      `bool flip = (nvar==3) && (n==axis)` (`axis` = 0/1/2 for x1/x2/x3 faces) --
+      for `nvar=1` this is always `false` (matches `CFCScalarBCs`'s exact previous
+      behavior, since `(nvar==3)` is false regardless of `n`/axis), for `nvar=3`
+      with axis alignment it matches `CFCVectorBCs`'s exact previous behavior.
+      `CFCScalarBCs`/`CFCVectorBCs` stay as public 3-line wrappers
+      (`CFCBCsImpl(ppack, u0, order, chan0, 1)` / `(..., 3)`) with **unchanged
+      signatures**, so all 7 existing call sites in `cfc.cpp` needed zero edits --
+      confirmed via `grep` after the merge. Net: ~430 lines of near-duplicated
+      per-face bodies collapsed to one ~230-line shared implementation plus two
+      3-line wrappers.
+    - **Verification, no compiler in this sandbox**: `cpplint`-clean (line length,
+      brace balance, checked via `awk`/Python) plus manual re-derivation of the
+      `flip = (nvar==3) && (n==axis)` formula against both original functions'
+      exact behavior, and a `grep` confirming all 6 faces' `vacuum` case is now
+      inside the shared falloff block (not a separate hard-zero case) and all 7
+      `cfc.cpp` call sites are unaffected. **Not yet run against a real build.**
+      Once built on Sakura: exercise a run with `vacuum` set on an outer mesh face
+      and confirm no NaN/inf and no visible kink in `P_i`/`eta`/`psi`/`alpha_psi`
+      near that boundary, compared to the previous hard-zero behavior.

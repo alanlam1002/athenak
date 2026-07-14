@@ -205,9 +205,14 @@ class MeshBoundaryValues {
   // order=0 (default): zero-gradient copy of the last interior cell, unchanged
   // behavior. order>0: 1/r^order extrapolation from the boundary-adjacent interior
   // cell (flat=0), matching ADMBCs' falloff technique -- used for fields that are
-  // themselves outputs of an isolated-system Poisson solve (P_i/eta).
-  static void CFCScalarBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0);
-  static void CFCVectorBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0);
+  // themselves outputs of an isolated-system Poisson solve (P_i/eta). chan0=0
+  // (default): operate on u0's own channel(s) starting at 0, unchanged behavior.
+  // chan0>0: operate starting at channel chan0 instead -- used when u0 is a packed
+  // multi-field array (e.g. P_i at channels 0-2, eta at channel 3 of the same array).
+  static void CFCScalarBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0,
+                           int chan0 = 0);
+  static void CFCVectorBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0,
+                           int chan0 = 0);
   static void ADMBCs(MeshBlockPack *pp, DvceArray5D<Real> u0);
 
  protected:

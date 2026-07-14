@@ -42,18 +42,21 @@ void ComputeADualFromX(MeshBlockPack *pmbp,
 //! \fn void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
 //!            const DvceArray5D<Real> &eta,
-//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u)
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan = 0)
 //! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k),
-//! reconstructing a vector field from the decomposed vector potential P_i (solved
-//! first, see mg_cfc_vector_poisson.hpp) and scalar potential eta (solved second,
-//! see mg_cfc_scalar_poisson.hpp). Used for both X^i (internal, feeds
-//! ComputeADualFromX) and beta^i (written to the ADM shift).
-//! p_i: P_i (vector). eta: eta (scalar). v_u: reconstructed vector, e.g. X^i/beta^i.
+//! reconstructing a vector field from the decomposed vector potential P_i and scalar
+//! potential eta (both solved together, packed into one nvar_=4 array -- P_i at
+//! channels 0-2, eta at channel 3 -- see mg_cfc_vector_poisson.hpp). Used for both
+//! X^i (internal, feeds ComputeADualFromX) and beta^i (written to the ADM shift).
+//! p_i: P_i (vector). eta: the array eta_chan is sliced from -- typically the same
+//! packed array p_i's own backing storage is a view of, with eta_chan=3. v_u:
+//! reconstructed vector, e.g. X^i/beta^i.
 void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
                                           &p_i,
                                       const DvceArray5D<Real> &eta,
-                                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u);
+                                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u,
+                                      int eta_chan = 0);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleConformalMetric(MeshBlockPack *pmbp,

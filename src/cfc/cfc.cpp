@@ -128,27 +128,20 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     u_stilde("cfc_u_stilde", 1, 1, 1, 1, 1),
     s_tilde("cfc_s_tilde", 1, 1, 1, 1, 1),
     u_p_x("cfc_u_p_x", 1, 1, 1, 1, 1),
-    eta_x("cfc_eta_x", 1, 1, 1, 1, 1),
     u_p_beta("cfc_u_p_beta", 1, 1, 1, 1, 1),
-    eta_beta("cfc_eta_beta", 1, 1, 1, 1, 1),
     u_p_src("cfc_u_p_src", 1, 1, 1, 1, 1),
-    eta_src("cfc_eta_src", 1, 1, 1, 1, 1),
-    pmgd_px(nullptr),
-    pmgd_etax(nullptr),
-    pmgd_pbeta(nullptr),
-    pmgd_etabeta(nullptr),
+    pmgd_pietax(nullptr),
+    pmgd_pietabeta(nullptr),
     pmgd_psi(nullptr),
     pmgd_alpha(nullptr),
-    pbval_px(nullptr), pbval_etax(nullptr), pbval_x(nullptr),
+    pbval_pietax(nullptr), pbval_x(nullptr),
     pbval_psi(nullptr), pbval_alpha_psi(nullptr),
-    pbval_pbeta(nullptr), pbval_etabeta(nullptr),
-    coarse_u_px("cfc_coarse_u_px", 1, 1, 1, 1, 1),
-    coarse_eta_x("cfc_coarse_eta_x", 1, 1, 1, 1, 1),
+    pbval_pietabeta(nullptr),
+    coarse_u_pietax("cfc_coarse_u_pietax", 1, 1, 1, 1, 1),
     coarse_u_x("cfc_coarse_u_x", 1, 1, 1, 1, 1),
     coarse_psi("cfc_coarse_psi", 1, 1, 1, 1, 1),
     coarse_alpha_psi("cfc_coarse_alpha_psi", 1, 1, 1, 1, 1),
-    coarse_u_pbeta("cfc_coarse_u_pbeta", 1, 1, 1, 1, 1),
-    coarse_eta_beta("cfc_coarse_eta_beta", 1, 1, 1, 1, 1),
+    coarse_u_pietabeta("cfc_coarse_u_pietabeta", 1, 1, 1, 1, 1),
     pbval_adm(nullptr),
     coarse_u_adm("cfc_coarse_u_adm", 1, 1, 1, 1, 1) {
   int nmb = pmy_pack->nmb_thispack;
@@ -171,10 +164,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_tilde,  nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_stilde, nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(s_tilde,  nmb, 1, ncells3, ncells2, ncells1);
-  Kokkos::realloc(u_p_x,    nmb, 3, ncells3, ncells2, ncells1);
-  Kokkos::realloc(eta_x,    nmb, 1, ncells3, ncells2, ncells1);
-  Kokkos::realloc(u_p_beta, nmb, 3, ncells3, ncells2, ncells1);
-  Kokkos::realloc(eta_beta, nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_p_x,    nmb, 4, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_p_beta, nmb, 4, ncells3, ncells2, ncells1);
 
   // delta_psi = delta_alpha_psi = 0 (flat space, psi = alpha*psi = 1) is the correct
   // initial value before the very first solve of a run has produced anything better
@@ -194,7 +185,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   p_x.InitWithShallowSlice(u_p_x, 0, 2);
   p_beta.InitWithShallowSlice(u_p_beta, 0, 2);
 
-  // u_p_src/eta_src: pure LoadPoissonSource inputs, read pointwise once, never
+  // u_p_src: pure LoadPoissonSource input, read pointwise once, never
   // differentiated or ghost-exchanged -- genuinely sized at this solver's own
   // (generally shallower) multigrid ghost width, not mesh-NGHOST depth (plan
   // addendum #4, Finding H's contrast). Read directly here (not via
@@ -207,35 +198,30 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   int mncells1 = indcs.nx1 + 2*mg_nghost;
   int mncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*mg_nghost) : 1;
   int mncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*mg_nghost) : 1;
-  Kokkos::realloc(u_p_src, nmb, 3, mncells3, mncells2, mncells1);
-  Kokkos::realloc(eta_src, nmb, 1, mncells3, mncells2, mncells1);
+  Kokkos::realloc(u_p_src, nmb, 4, mncells3, mncells2, mncells1);
   p_src.InitWithShallowSlice(u_p_src, 0, 2);
 
-  // 6 multigrid solvers: one per distinct elliptic equation.
-  pmgd_px      = new MGCFCVectorPoissonDriver(pmbp, pin);
-  pmgd_etax    = new MGCFCScalarPoissonDriver(pmbp, pin);
-  pmgd_pbeta   = new MGCFCVectorPoissonDriver(pmbp, pin);
-  pmgd_etabeta = new MGCFCScalarPoissonDriver(pmbp, pin);
-  pmgd_psi     = new MGCFCConformalFactorDriver(pmbp, pin);
-  pmgd_alpha   = new MGCFCLapseDriver(pmbp, pin);
+  // 4 multigrid solvers: one per distinct elliptic equation. pmgd_pietax/
+  // pmgd_pietabeta each solve the packed (P_i, eta) nvar_=4 system for their
+  // Shibata pair in one call (see mg_cfc_vector_poisson.hpp).
+  pmgd_pietax    = new MGCFCVectorPoissonDriver(pmbp, pin);
+  pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
+  pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
+  pmgd_alpha     = new MGCFCLapseDriver(pmbp, pin);
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp later differentiates, mirroring
   // z4c::Z4c::pbval_u/coarse_u0 exactly (is_z4c=false throughout -- see cfc.hpp).
-  pbval_px = new MeshBoundaryValuesCC(pmbp, pin, false);
-  pbval_px->InitializeBuffers(3);
-  pbval_etax = new MeshBoundaryValuesCC(pmbp, pin, false);
-  pbval_etax->InitializeBuffers(1);
+  pbval_pietax = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_pietax->InitializeBuffers(4);
   pbval_x = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_x->InitializeBuffers(3);
   pbval_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_psi->InitializeBuffers(1);
   pbval_alpha_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_alpha_psi->InitializeBuffers(1);
-  pbval_pbeta = new MeshBoundaryValuesCC(pmbp, pin, false);
-  pbval_pbeta->InitializeBuffers(3);
-  pbval_etabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
-  pbval_etabeta->InitializeBuffers(1);
+  pbval_pietabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_pietabeta->InitializeBuffers(4);
 
   // Round 19 fix: ghost-exchange for padm->u_adm itself -- see pbval_adm's doc
   // comment in cfc.hpp. adm::ADM::nadm channels (g_dd, vK_dd, psi4, alpha, beta_u):
@@ -251,14 +237,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     int nccells1 = indcs.cnx1 + 2*(indcs.ng);
     int nccells2 = (indcs.cnx2 > 1) ? (indcs.cnx2 + 2*(indcs.ng)) : 1;
     int nccells3 = (indcs.cnx3 > 1) ? (indcs.cnx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(coarse_u_px,       nmb, 3, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_eta_x,      nmb, 1, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_u_x,        nmb, 3, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_psi,        nmb, 1, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_alpha_psi,  nmb, 1, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_u_pbeta,    nmb, 3, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_eta_beta,   nmb, 1, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_u_adm,      nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_pietax,    nmb, 4, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_x,         nmb, 3, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_psi,         nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_alpha_psi,   nmb, 1, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_pietabeta, nmb, 4, nccells3, nccells2, nccells1);
+    Kokkos::realloc(coarse_u_adm, nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
   }
 
   // Item 11 (DEVELOPMENT.md): X^i/psi fixed-point-iteration controls, used by
@@ -272,32 +256,28 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 //! \fn CFC::~CFC()
 
 CFC::~CFC() {
-  delete pmgd_px;
-  delete pmgd_etax;
-  delete pmgd_pbeta;
-  delete pmgd_etabeta;
+  delete pmgd_pietax;
+  delete pmgd_pietabeta;
   delete pmgd_psi;
   delete pmgd_alpha;
-  delete pbval_px;
-  delete pbval_etax;
+  delete pbval_pietax;
   delete pbval_x;
   delete pbval_psi;
   delete pbval_alpha_psi;
-  delete pbval_pbeta;
-  delete pbval_etabeta;
+  delete pbval_pietabeta;
   delete pbval_adm;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::QueueCFCTasks()
 //! \brief queues CFC's tasks into the shared NumericalRelativity task graph. See
-//! cfc.hpp's doc comment for the full 36-node chain this builds.
+//! cfc.hpp's doc comment for the full chain this builds.
 
 void CFC::QueueCFCTasks() {
   using namespace numrel;  // NOLINT(build/namespaces)
   NumericalRelativity *pnr = pmy_pack->pnr;
 
-  // Round 19 fix: post all 8 fields' non-blocking MPI receives up front, before any
+  // Round 19 fix: post all 6 fields' non-blocking MPI receives up front, before any
   // of this stage's Send/Recv rounds run -- mirrors z4c::Z4c_Recv (Task_Start).
   // See InitRecvTask's doc comment in cfc.hpp for why this is required for
   // correctness, not just an optimization.
@@ -306,26 +286,17 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_BuildSrcX, "CFC_BuildSrcX",
                  Task_Run, {MHD_AddSrc});
 
-  pnr->QueueTask(&CFC::RestPXTask, this, CFC_RestPX, "CFC_RestPX",
+  pnr->QueueTask(&CFC::RestPiEtaXTask, this, CFC_RestPiEtaX, "CFC_RestPiEtaX",
                  Task_Run, {CFC_BuildSrcX});
-  pnr->QueueTask(&CFC::SendPXTask, this, CFC_SendPX, "CFC_SendPX",
-                 Task_Run, {CFC_RestPX});
-  pnr->QueueTask(&CFC::RecvPXTask, this, CFC_RecvPX, "CFC_RecvPX",
-                 Task_Run, {CFC_SendPX});
-  pnr->QueueTask(&CFC::ProlongPXTask, this, CFC_ProlongPX, "CFC_ProlongPX",
-                 Task_Run, {CFC_RecvPX});
-
-  pnr->QueueTask(&CFC::RestEtaXTask, this, CFC_RestEtaX, "CFC_RestEtaX",
-                 Task_Run, {CFC_BuildSrcX});
-  pnr->QueueTask(&CFC::SendEtaXTask, this, CFC_SendEtaX, "CFC_SendEtaX",
-                 Task_Run, {CFC_RestEtaX});
-  pnr->QueueTask(&CFC::RecvEtaXTask, this, CFC_RecvEtaX, "CFC_RecvEtaX",
-                 Task_Run, {CFC_SendEtaX});
-  pnr->QueueTask(&CFC::ProlongEtaXTask, this, CFC_ProlongEtaX, "CFC_ProlongEtaX",
-                 Task_Run, {CFC_RecvEtaX});
+  pnr->QueueTask(&CFC::SendPiEtaXTask, this, CFC_SendPiEtaX, "CFC_SendPiEtaX",
+                 Task_Run, {CFC_RestPiEtaX});
+  pnr->QueueTask(&CFC::RecvPiEtaXTask, this, CFC_RecvPiEtaX, "CFC_RecvPiEtaX",
+                 Task_Run, {CFC_SendPiEtaX});
+  pnr->QueueTask(&CFC::ProlongPiEtaXTask, this, CFC_ProlongPiEtaX, "CFC_ProlongPiEtaX",
+                 Task_Run, {CFC_RecvPiEtaX});
 
   pnr->QueueTask(&CFC::ReconstructXTask, this, CFC_ReconstructX, "CFC_ReconstructX",
-                 Task_Run, {CFC_ProlongPX, CFC_ProlongEtaX});
+                 Task_Run, {CFC_ProlongPiEtaX});
 
   pnr->QueueTask(&CFC::RestXTask, this, CFC_RestX, "CFC_RestX",
                  Task_Run, {CFC_ReconstructX});
@@ -367,26 +338,17 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::SolveShiftTask, this, CFC_BuildSrcBeta, "CFC_BuildSrcBeta",
                  Task_Run, {CFC_ProlongPsi, CFC_ProlongAlphaPsi});
 
-  pnr->QueueTask(&CFC::RestPBetaTask, this, CFC_RestPBeta, "CFC_RestPBeta",
+  pnr->QueueTask(&CFC::RestPiEtaBetaTask, this, CFC_RestPiEtaBeta, "CFC_RestPiEtaBeta",
                  Task_Run, {CFC_BuildSrcBeta});
-  pnr->QueueTask(&CFC::SendPBetaTask, this, CFC_SendPBeta, "CFC_SendPBeta",
-                 Task_Run, {CFC_RestPBeta});
-  pnr->QueueTask(&CFC::RecvPBetaTask, this, CFC_RecvPBeta, "CFC_RecvPBeta",
-                 Task_Run, {CFC_SendPBeta});
-  pnr->QueueTask(&CFC::ProlongPBetaTask, this, CFC_ProlongPBeta, "CFC_ProlongPBeta",
-                 Task_Run, {CFC_RecvPBeta});
-
-  pnr->QueueTask(&CFC::RestEtaBetaTask, this, CFC_RestEtaBeta, "CFC_RestEtaBeta",
-                 Task_Run, {CFC_BuildSrcBeta});
-  pnr->QueueTask(&CFC::SendEtaBetaTask, this, CFC_SendEtaBeta, "CFC_SendEtaBeta",
-                 Task_Run, {CFC_RestEtaBeta});
-  pnr->QueueTask(&CFC::RecvEtaBetaTask, this, CFC_RecvEtaBeta, "CFC_RecvEtaBeta",
-                 Task_Run, {CFC_SendEtaBeta});
-  pnr->QueueTask(&CFC::ProlongEtaBetaTask, this, CFC_ProlongEtaBeta, "CFC_ProlongEtaBeta",
-                 Task_Run, {CFC_RecvEtaBeta});
+  pnr->QueueTask(&CFC::SendPiEtaBetaTask, this, CFC_SendPiEtaBeta, "CFC_SendPiEtaBeta",
+                 Task_Run, {CFC_RestPiEtaBeta});
+  pnr->QueueTask(&CFC::RecvPiEtaBetaTask, this, CFC_RecvPiEtaBeta, "CFC_RecvPiEtaBeta",
+                 Task_Run, {CFC_SendPiEtaBeta});
+  pnr->QueueTask(&CFC::ProlongPiEtaBetaTask, this, CFC_ProlongPiEtaBeta,
+                 "CFC_ProlongPiEtaBeta", Task_Run, {CFC_RecvPiEtaBeta});
 
   pnr->QueueTask(&CFC::ReconstructBetaTask, this, CFC_ReconstructBeta,
-                 "CFC_ReconstructBeta", Task_Run, {CFC_ProlongPBeta, CFC_ProlongEtaBeta});
+                 "CFC_ReconstructBeta", Task_Run, {CFC_ProlongPiEtaBeta});
 
   pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
                  Task_Run, {CFC_ReconstructBeta});
@@ -419,40 +381,34 @@ void CFC::QueueCFCTasks() {
 //----------------------------------------------------------------------------------------
 // Item 11 (DEVELOPMENT.md): InitRecv/ClearSend/ClearRecv scoped to exactly the
 // fields InitializeMetric()'s two phases exercise -- see the doc comment on these
-// four declarations in cfc.hpp for why the all-8-field CFC_InitRecv/ClearSend/
+// four declarations in cfc.hpp for why the all-6-field CFC_InitRecv/ClearSend/
 // ClearRecv tasks can't be reused here (would deadlock on the fields not sent that
 // iteration).
 
 void CFC::InitRecvXFields() {
-  pbval_px->InitRecv(3);
-  pbval_etax->InitRecv(1);
+  pbval_pietax->InitRecv(4);
   pbval_x->InitRecv(3);
 }
 void CFC::ClearXFields() {
-  pbval_px->ClearSend();
-  pbval_etax->ClearSend();
+  pbval_pietax->ClearSend();
   pbval_x->ClearSend();
-  pbval_px->ClearRecv();
-  pbval_etax->ClearRecv();
+  pbval_pietax->ClearRecv();
   pbval_x->ClearRecv();
 }
 void CFC::InitRecvTailFields() {
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
-  pbval_pbeta->InitRecv(3);
-  pbval_etabeta->InitRecv(1);
+  pbval_pietabeta->InitRecv(4);
   pbval_adm->InitRecv(adm::ADM::nadm);
 }
 void CFC::ClearTailFields() {
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
-  pbval_pbeta->ClearSend();
-  pbval_etabeta->ClearSend();
+  pbval_pietabeta->ClearSend();
   pbval_adm->ClearSend();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
-  pbval_pbeta->ClearRecv();
-  pbval_etabeta->ClearRecv();
+  pbval_pietabeta->ClearRecv();
   pbval_adm->ClearRecv();
 }
 
@@ -491,15 +447,12 @@ void CFC::InitializeMetric(Driver *pdriver) {
 
     InitRecvXFields();
 
-    // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve
-    // P_i/eta_x, ghost-exchange both, reconstruct x_u, ghost-exchange it too.
+    // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve the
+    // packed (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
     SolveVectorPotential(pdriver, 0);
-    RestPXTask(pdriver, 0);    SendPXTask(pdriver, 0);
-    RestEtaXTask(pdriver, 0);  SendEtaXTask(pdriver, 0);
-    while (RecvPXTask(pdriver, 0) != TaskStatus::complete) {}
-    while (RecvEtaXTask(pdriver, 0) != TaskStatus::complete) {}
-    ProlongPXTask(pdriver, 0);
-    ProlongEtaXTask(pdriver, 0);
+    RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
+    while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
+    ProlongPiEtaXTask(pdriver, 0);
 
     ReconstructVectorPotential();
     RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
@@ -572,12 +525,9 @@ void CFC::InitializeMetric(Driver *pdriver) {
   ProlongAlphaPsiTask(pdriver, 0);
 
   SolveShift(pdriver, 0);
-  RestPBetaTask(pdriver, 0);    SendPBetaTask(pdriver, 0);
-  RestEtaBetaTask(pdriver, 0);  SendEtaBetaTask(pdriver, 0);
-  while (RecvPBetaTask(pdriver, 0) != TaskStatus::complete) {}
-  while (RecvEtaBetaTask(pdriver, 0) != TaskStatus::complete) {}
-  ProlongPBetaTask(pdriver, 0);
-  ProlongEtaBetaTask(pdriver, 0);
+  RestPiEtaBetaTask(pdriver, 0);  SendPiEtaBetaTask(pdriver, 0);
+  while (RecvPiEtaBetaTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongPiEtaBetaTask(pdriver, 0);
 
   ReconstructShift();
   AssembleADM();
@@ -596,48 +546,26 @@ void CFC::InitializeMetric(Driver *pdriver) {
 // (RestrictCC/ProlongateCC are internal no-ops without SMR/AMR; is_z4c=false
 // throughout since CFC is not z4c).
 
-TaskStatus CFC::RestPXTask(Driver *pdriver, int stage) {
+TaskStatus CFC::RestPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_px, false);
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_pietax, false);
   }
   return TaskStatus::complete;
 }
-TaskStatus CFC::SendPXTask(Driver *pdriver, int stage) {
-  return pbval_px->PackAndSendCC(u_p_x, coarse_u_px);
+TaskStatus CFC::SendPiEtaXTask(Driver *pdriver, int stage) {
+  return pbval_pietax->PackAndSendCC(u_p_x, coarse_u_pietax);
 }
-TaskStatus CFC::RecvPXTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_px->RecvAndUnpackCC(u_p_x, coarse_u_px);
+TaskStatus CFC::RecvPiEtaXTask(Driver *pdriver, int stage) {
+  TaskStatus tstat = pbval_pietax->RecvAndUnpackCC(u_p_x, coarse_u_pietax);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_x, 1);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, u_p_x, 1, 3);
   }
   return tstat;
 }
-TaskStatus CFC::ProlongPXTask(Driver *pdriver, int stage) {
+TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_px->ProlongateCC(u_p_x, coarse_u_px, false);
-  }
-  return TaskStatus::complete;
-}
-
-TaskStatus CFC::RestEtaXTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(eta_x, coarse_eta_x, false);
-  }
-  return TaskStatus::complete;
-}
-TaskStatus CFC::SendEtaXTask(Driver *pdriver, int stage) {
-  return pbval_etax->PackAndSendCC(eta_x, coarse_eta_x);
-}
-TaskStatus CFC::RecvEtaXTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_etax->RecvAndUnpackCC(eta_x, coarse_eta_x);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_x, 1);
-  }
-  return tstat;
-}
-TaskStatus CFC::ProlongEtaXTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    pbval_etax->ProlongateCC(eta_x, coarse_eta_x, false);
+    pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, false);
   }
   return TaskStatus::complete;
 }
@@ -711,48 +639,26 @@ TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 
-TaskStatus CFC::RestPBetaTask(Driver *pdriver, int stage) {
+TaskStatus CFC::RestPiEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pbeta, false);
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pietabeta, false);
   }
   return TaskStatus::complete;
 }
-TaskStatus CFC::SendPBetaTask(Driver *pdriver, int stage) {
-  return pbval_pbeta->PackAndSendCC(u_p_beta, coarse_u_pbeta);
+TaskStatus CFC::SendPiEtaBetaTask(Driver *pdriver, int stage) {
+  return pbval_pietabeta->PackAndSendCC(u_p_beta, coarse_u_pietabeta);
 }
-TaskStatus CFC::RecvPBetaTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_pbeta->RecvAndUnpackCC(u_p_beta, coarse_u_pbeta);
+TaskStatus CFC::RecvPiEtaBetaTask(Driver *pdriver, int stage) {
+  TaskStatus tstat = pbval_pietabeta->RecvAndUnpackCC(u_p_beta, coarse_u_pietabeta);
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_beta, 1);
+    MeshBoundaryValues::CFCScalarBCs(pmy_pack, u_p_beta, 1, 3);
   }
   return tstat;
 }
-TaskStatus CFC::ProlongPBetaTask(Driver *pdriver, int stage) {
+TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_pbeta->ProlongateCC(u_p_beta, coarse_u_pbeta, false);
-  }
-  return TaskStatus::complete;
-}
-
-TaskStatus CFC::RestEtaBetaTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(eta_beta, coarse_eta_beta, false);
-  }
-  return TaskStatus::complete;
-}
-TaskStatus CFC::SendEtaBetaTask(Driver *pdriver, int stage) {
-  return pbval_etabeta->PackAndSendCC(eta_beta, coarse_eta_beta);
-}
-TaskStatus CFC::RecvEtaBetaTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_etabeta->RecvAndUnpackCC(eta_beta, coarse_eta_beta);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, eta_beta, 1);
-  }
-  return tstat;
-}
-TaskStatus CFC::ProlongEtaBetaTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    pbval_etabeta->ProlongateCC(eta_beta, coarse_eta_beta, false);
+    pbval_pietabeta->ProlongateCC(u_p_beta, coarse_u_pietabeta, false);
   }
   return TaskStatus::complete;
 }
@@ -800,47 +706,42 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
 // InitRecv/ClearSend/ClearRecv (bvals_tasks.cpp) all unconditionally
 // return TaskStatus::complete, so no incomplete-status propagation is needed --
 // matches z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape,
-// just looped over CFC's 8 MeshBoundaryValuesCC instances instead of one.
+// just looped over CFC's 6 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
-  pbval_px->InitRecv(3);
-  pbval_etax->InitRecv(1);
+  pbval_pietax->InitRecv(4);
   pbval_x->InitRecv(3);
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
-  pbval_pbeta->InitRecv(3);
-  pbval_etabeta->InitRecv(1);
+  pbval_pietabeta->InitRecv(4);
   pbval_adm->InitRecv(adm::ADM::nadm);
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
-  pbval_px->ClearSend();
-  pbval_etax->ClearSend();
+  pbval_pietax->ClearSend();
   pbval_x->ClearSend();
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
-  pbval_pbeta->ClearSend();
-  pbval_etabeta->ClearSend();
+  pbval_pietabeta->ClearSend();
   pbval_adm->ClearSend();
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
-  pbval_px->ClearRecv();
-  pbval_etax->ClearRecv();
+  pbval_pietax->ClearRecv();
   pbval_x->ClearRecv();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
-  pbval_pbeta->ClearRecv();
-  pbval_etabeta->ClearRecv();
+  pbval_pietabeta->ClearRecv();
   pbval_adm->ClearRecv();
   return TaskStatus::complete;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage)
-//! \brief step 1: X^i's P_i/eta right-hand side, solved (not yet reconstructed into
-//! x_u -- needs p_x/eta_x's own ghost exchange first, see CFC_ReconstructX). Runs
-//! after MHD_AddSrc, i.e. once this stage's hydro flux+source update has produced
-//! the conserved state AssembleVectorSource reads from.
+//! \brief step 1: X^i's packed (P_i, eta) right-hand side, solved (not yet
+//! reconstructed into x_u -- needs u_p_x's own ghost exchange first, see
+//! CFC_ReconstructX). Runs after MHD_AddSrc, i.e. once this stage's hydro
+//! flux+source update has produced the conserved state AssembleVectorSource reads
+//! from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   SolveVectorPotential(pdriver, stage);
@@ -849,8 +750,8 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage)
-//! \brief CFC_ReconstructX: build x_u from p_x/eta_x once their ghost exchange has
-//! completed.
+//! \brief CFC_ReconstructX: build x_u from u_p_x (packed P_i, eta) once its ghost
+//! exchange has completed.
 
 TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage) {
   ReconstructVectorPotential();
@@ -896,9 +797,10 @@ TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage)
-//! \brief step 6: beta^i's P_i/eta right-hand side, solved (not yet reconstructed --
-//! needs p_beta/eta_beta's own ghost exchange first, see CFC_ReconstructBeta). Runs
-//! after psi/alpha_psi's own ghost exchange (both needed by the eq. 75 source term).
+//! \brief step 6: beta^i's packed (P_i, eta) right-hand side, solved (not yet
+//! reconstructed -- needs u_p_beta's own ghost exchange first, see
+//! CFC_ReconstructBeta). Runs after psi/alpha_psi's own ghost exchange (both needed
+//! by the eq. 75 source term).
 
 TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
   SolveShift(pdriver, stage);
@@ -907,8 +809,8 @@ TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
 
 //----------------------------------------------------------------------------------------
 //! \fn TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage)
-//! \brief CFC_ReconstructBeta: build beta_u from p_beta/eta_beta once their ghost
-//! exchange has completed.
+//! \brief CFC_ReconstructBeta: build beta_u from u_p_beta (packed P_i, eta) once its
+//! ghost exchange has completed.
 
 TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
   ReconstructShift();
@@ -927,8 +829,9 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::AssembleVectorSource(bool for_shift)
 //! \brief Gmunu eq. 72 (for_shift=false) / eq. 75 (for_shift=true) right-hand sides,
-//! plus Shibata eq. 3.11's eta source, built from the same S_i either way. See plan
-//! addendum #4's "Matter-source algebra" section for the full per-step derivation.
+//! plus Shibata eq. 3.11's eta source (packed at channel 3 of u_p_src), built from
+//! the same S_i either way. See plan addendum #4's "Matter-source algebra" section
+//! for the full per-step derivation.
 
 void CFC::AssembleVectorSource(bool for_shift) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -941,11 +844,13 @@ void CFC::AssembleVectorSource(bool for_shift) {
   auto &adm = pmy_pack->padm->adm;
   auto s_tilde_d_ = s_tilde_d;
   auto p_src_ = p_src;
-  auto &eta_src_ = eta_src;
-  // p_src_/eta_src_ are allocated at this solver's own (shallower) mg_nghost_ depth,
+  auto &u_p_src_ = u_p_src;
+  // p_src_/u_p_src_ are allocated at this solver's own (shallower) mg_nghost_ depth,
   // not mesh-NGHOST depth like everything else this function touches (cfc.hpp's
-  // u_p_src/eta_src comment) -- every write to them below needs the loop's
-  // mesh-indexed (k,j,i) translated into their own index space first.
+  // u_p_src comment) -- every write to them below needs the loop's mesh-indexed
+  // (k,j,i) translated into their own index space first. eta's source is channel 3
+  // of u_p_src_ (packed alongside p_src_'s channels 0-2), written via u_p_src_
+  // directly since eta has no dedicated AthenaTensor view.
   int mg_nghost = mg_nghost_;
 
   if (!for_shift) {
@@ -981,7 +886,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
         p_src_(m,a,mk,mj,mi) = p_a;
         eta_val -= p_a*xk[a];  // Shibata eq. 3.11: eta_src = -S_i x^i
       }
-      eta_src_(m,0,mk,mj,mi) = eta_val;
+      u_p_src_(m,3,mk,mj,mi) = eta_val;
     });
   } else {
     // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
@@ -1022,7 +927,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
       for (int a = 0; a < 3; ++a) {
         eta_val -= p_src_(m,a,mk,mj,mi)*xk[a];
       }
-      eta_src_(m,0,mk,mj,mi) = eta_val;
+      u_p_src_(m,3,mk,mj,mi) = eta_val;
     });
   }
   return;
@@ -1034,13 +939,9 @@ void CFC::AssembleVectorSource(bool for_shift) {
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/false);
 
-  pmgd_px->LoadPoissonSource(u_p_src);
-  pmgd_px->Solve(pdriver, stage);
-  pmgd_px->RetrieveSolution(u_p_x);
-
-  pmgd_etax->LoadPoissonSource(eta_src);
-  pmgd_etax->Solve(pdriver, stage);
-  pmgd_etax->RetrieveSolution(eta_x);
+  pmgd_pietax->LoadPoissonSource(u_p_src);
+  pmgd_pietax->Solve(pdriver, stage);
+  pmgd_pietax->RetrieveSolution(u_p_x);
   return;
 }
 
@@ -1048,7 +949,7 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
 //! \fn void CFC::ReconstructVectorPotential()
 
 void CFC::ReconstructVectorPotential() {
-  cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, eta_x, x_u);
+  cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, u_p_x, x_u, 3);
   return;
 }
 
@@ -1254,13 +1155,9 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 void CFC::SolveShift(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/true);
 
-  pmgd_pbeta->LoadPoissonSource(u_p_src);
-  pmgd_pbeta->Solve(pdriver, stage);
-  pmgd_pbeta->RetrieveSolution(u_p_beta);
-
-  pmgd_etabeta->LoadPoissonSource(eta_src);
-  pmgd_etabeta->Solve(pdriver, stage);
-  pmgd_etabeta->RetrieveSolution(eta_beta);
+  pmgd_pietabeta->LoadPoissonSource(u_p_src);
+  pmgd_pietabeta->Solve(pdriver, stage);
+  pmgd_pietabeta->RetrieveSolution(u_p_beta);
   return;
 }
 
@@ -1268,7 +1165,7 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
 //! \fn void CFC::ReconstructShift()
 
 void CFC::ReconstructShift() {
-  cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, eta_beta, beta_u);
+  cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3);
   return;
 }
 

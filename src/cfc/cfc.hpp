@@ -10,7 +10,7 @@
 //!
 //! Mirrors gravity::Gravity in that it's a thin physics-facing orchestrator that owns
 //! a set of Multigrid/MultigridDriver subclass pairs (see mg_cfc_vector_poisson.hpp,
-//! mg_cfc_scalar_poisson.hpp, mg_cfc_conformal_factor.hpp, mg_cfc_lapse.hpp) driving
+//! mg_cfc_conformal_factor.hpp, mg_cfc_lapse.hpp) driving
 //! them through the 6-step XCFC algorithm (Cheong et al. 2021 [arXiv:2012.07322]
 //! sec. 2.6). Unlike gravity::Gravity, CFC does NOT call Driver::Execute() directly:
 //! its steps must interleave with dyn_grmhd's own per-stage task graph (hydro
@@ -25,12 +25,14 @@
 //!
 //! Every multigrid solve here only converges its own (generally shallow) ghost width
 //! ngh_ -- shallower than the mesh's own NGHOST that cfc_reconstruct.cpp's finite
-//! differences need. Fields that get differentiated after a solve (p_x/eta_x/x_u,
-//! p_beta/eta_beta, delta_psi/delta_alpha_psi) therefore each get one MeshBoundaryValuesCC
+//! differences need. Fields that get differentiated after a solve (u_p_x/x_u,
+//! u_p_beta, delta_psi/delta_alpha_psi) therefore each get one MeshBoundaryValuesCC
 //! Rest->Send->Recv->Prolong round (mirroring z4c::Z4c::pbval_u/coarse_u0 exactly,
 //! is_z4c=false throughout) between RetrieveSolution() and whatever differentiates
 //! them next -- see QueueCFCTasks()'s dependency list below for exactly where each
-//! round sits in the per-stage pipeline.
+//! round sits in the per-stage pipeline. u_p_x/u_p_beta each pack P_i (channels 0-2)
+//! and its paired scalar eta (channel 3) into one array, one solve, and one ghost
+//! round (see mg_cfc_vector_poisson.hpp).
 
 // Athenak headers
 #include "../athena.hpp"
@@ -40,7 +42,6 @@
 #include "../tasklist/task_list.hpp"
 #include "../bvals/bvals.hpp"
 #include "mg_cfc_vector_poisson.hpp"
-#include "mg_cfc_scalar_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
 
@@ -107,61 +108,62 @@ class CFC {
 
   // Shibata (1999) sec. 3 decomposition: each vector equation (X^i, beta^i) reduces
   // to one vector potential P_i (eq. 3.10: Delta P_i = S_i) plus one scalar
-  // potential eta (eq. 3.11: Delta eta = -S_i x^i) -- P_i is a genuine vector
-  // (AthenaTensor), eta is a genuine scalar (plain DvceArray5D<Real>, like
-  // psi/alpha_psi above). P_x, P_y, P_z, and eta are all mutually independent
-  // equations, but P_i is solved first (MGCFCVectorPoissonDriver) and eta is solved
-  // afterward (MGCFCScalarPoissonDriver), since eta's source is assembled from the
-  // same known vector source S_i used for P_i. Both are reconstructed into
-  // x_u/beta_u by cfc::ReconstructVectorFromPotentials.
+  // potential eta (eq. 3.11: Delta eta = -S_i x^i). P_i and eta are mutually
+  // independent equations sharing the same known vector source S_i, so both are
+  // packed into one nvar_=4 array (P_i at channels 0-2, eta at channel 3) and solved
+  // together in a single MGCFCVectorPoissonDriver::Solve() call (see
+  // mg_cfc_vector_poisson.hpp) -- there is no separate eta storage or eta-specific
+  // driver. p_x is a 3-component AthenaTensor shallow-slice over channels 0-2 of
+  // u_p_x; eta itself has no dedicated view, it's read/written as channel 3 of
+  // u_p_x directly (see AssembleVectorSource/ReconstructVectorFromPotentials in
+  // cfc.cpp). Reconstructed into x_u/beta_u by
+  // cfc::ReconstructVectorFromPotentials.
   //
-  // Unlike u_p_src/eta_src below, these are the OUTPUTS of a multigrid solve that
+  // Unlike u_p_src below, these are the OUTPUTS of a multigrid solve that
   // cfc_reconstruct.cpp then finite-differences -- sized at mesh-NGHOST depth (like
   // x_u/psi above), NOT this solver's own (shallower) ngh_ depth, and given their
-  // own post-RetrieveSolution MeshBoundaryValuesCC round (pbval_px/pbval_etax below)
+  // own post-RetrieveSolution MeshBoundaryValuesCC round (pbval_pietax below)
   // before ReconstructVectorFromPotentials touches them (plan addendum #4, Finding
-  // F). MGCFCVectorPoissonDriver::RetrieveSolution/MGCFCScalarPoissonDriver::
-  // RetrieveSolution already account for this size mismatch internally.
-  DvceArray5D<Real> u_p_x;                            // storage backing p_x (3 comp.)
-  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_x;     // P_i for the X^i decomposition
-  DvceArray5D<Real> eta_x;                            // eta for the X^i decomposition
+  // F). MGCFCVectorPoissonDriver::RetrieveSolution already accounts for this size
+  // mismatch internally.
+  DvceArray5D<Real> u_p_x;                        // storage backing p_x AND eta (ch.
+                                                   // 0-2 = P_i, ch. 3 = eta), 4 comp.
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_x; // P_i view (ch. 0-2 of u_p_x)
 
-  DvceArray5D<Real> u_p_beta;                         // storage backing p_beta (3 comp.)
-  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_beta;  // P_i for the beta^i decomposition
-  DvceArray5D<Real> eta_beta;                         // eta for the beta^i decomposition
+  DvceArray5D<Real> u_p_beta;                     // storage backing p_beta AND eta
+                                                   // (ch. 0-2 = P_i, ch. 3 = eta)
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_beta;  // P_i view (ch. 0-2 of u_p_beta)
 
-  // P_i/eta's own right-hand sides (eq. 72/75's S_i, and -S_i.x^i), built by
-  // AssembleVectorSource() and consumed by LoadPoissonSource() on the two multigrid
-  // drivers below. Genuinely ngh_-deep (this solver's own multigrid ghost width, via
-  // GetGhostCells()), NOT mesh-NGHOST-deep like u_p_x/eta_x above: these are pure
-  // LoadSource() inputs, read pointwise on the interior+ngh_ ring only, never
-  // finite-differenced and never ghost-exchanged (contrast with u_p_x/eta_x's
-  // opposite sizing, immediately above -- easy to conflate, hence the explicit
-  // contrast here). p_src needs its own storage separate from x_u/p_x/etc. (rather
-  // than a local temporary inside AssembleVectorSource) because
+  // P_i/eta's own packed right-hand side (eq. 72/75's S_i at channels 0-2, and
+  // -S_i.x^i at channel 3), built by AssembleVectorSource() and consumed by
+  // LoadPoissonSource() on the multigrid driver below. Genuinely ngh_-deep (this
+  // solver's own multigrid ghost width, via GetGhostCells()), NOT mesh-NGHOST-deep
+  // like u_p_x above: this is a pure LoadSource() input, read pointwise on the
+  // interior+ngh_ ring only, never finite-differenced and never ghost-exchanged
+  // (contrast with u_p_x's opposite sizing, immediately above -- easy to conflate,
+  // hence the explicit contrast here). p_src needs its own storage separate from
+  // x_u/p_x/etc. (rather than a local temporary inside AssembleVectorSource) because
   // MGCFCVectorPoissonDriver::LoadPoissonSource() takes a raw DvceArray5D<Real>&, not
   // an AthenaTensor -- an AthenaTensor's backing storage is a Kokkos::subview result,
   // a different type that does not bind to Multigrid::LoadSource()'s (non-templated)
-  // parameter. eta_src is declared alongside it for the same persistent-storage
-  // reasoning (avoiding a per-stage Kokkos::realloc), even though its type was never
-  // mismatched. Both are shared sequentially by the X^i and beta^i solves (never
-  // needed simultaneously).
-  DvceArray5D<Real> u_p_src;                          // storage backing p_src (3 comp.)
-  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_src;   // S_i, P_i's vector source
-  DvceArray5D<Real> eta_src;                          // -S_i.x^i, eta's scalar source
-  // Ghost width u_p_src/eta_src were allocated with (the "cfc"/"mg_nghost" input
+  // parameter. eta's source (channel 3) is written/read as a raw index into u_p_src
+  // directly, no dedicated view. Shared sequentially by the X^i and beta^i solves
+  // (never needed simultaneously).
+  DvceArray5D<Real> u_p_src;                        // storage backing p_src AND eta's
+                                                     // source (ch. 0-2 = S_i, ch. 3 =
+                                                     // -S_i.x^i), 4 comp.
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> p_src; // S_i view (ch. 0-2 of u_p_src)
+  // Ghost width u_p_src was allocated with (the "cfc"/"mg_nghost" input
   // parameter, cached here since AssembleVectorSource/BuildShiftSource need it on
   // every call to translate mesh-NGHOST-indexed loop indices into this shallower
   // array's own index space -- see AssembleVectorSource's definition.
   int mg_nghost_;
 
-  // multigrid solvers, one per distinct elliptic equation (shared classes for the
-  // two vector solves and the two scalar solves -- see mg_cfc_vector_poisson.hpp /
-  // mg_cfc_scalar_poisson.hpp)
-  MGCFCVectorPoissonDriver *pmgd_px;      // solves for X^i's P_i (first)
-  MGCFCScalarPoissonDriver *pmgd_etax;    // solves for X^i's eta (second)
-  MGCFCVectorPoissonDriver *pmgd_pbeta;   // solves for beta^i's P_i (first)
-  MGCFCScalarPoissonDriver *pmgd_etabeta; // solves for beta^i's eta (second)
+  // multigrid solvers, one per distinct elliptic equation (one MGCFCVectorPoisson-
+  // Driver per Shibata pair, packing P_i+eta into a single nvar_=4 solve -- see
+  // mg_cfc_vector_poisson.hpp)
+  MGCFCVectorPoissonDriver *pmgd_pietax;      // solves X^i's packed (P_i, eta)
+  MGCFCVectorPoissonDriver *pmgd_pietabeta;   // solves beta^i's packed (P_i, eta)
   MGCFCConformalFactorDriver *pmgd_psi;
   MGCFCLapseDriver *pmgd_alpha;
 
@@ -192,19 +194,18 @@ class CFC {
   // z4c). coarse_* arrays are only sized when pmy_pack->pmesh->multilevel (see
   // cfc.cpp's constructor, matching z4c.cpp's identical guard) -- RestrictCC/
   // ProlongateCC are internally no-ops otherwise, same as z4c's own Rest/Prolong
-  // tasks. p_x and eta_x need separate rounds (PackAndSendCC et al. take one
-  // (fine,coarse) array pair at a time, so a 3-component vector and its paired
-  // 1-component scalar can't share a call even though the Shibata decomposition
-  // treats them as one logical unit) -- likewise p_beta/eta_beta and
+  // tasks. u_p_x (P_i packed with eta) gets one round covering all 4 channels at
+  // once (PackAndSendCC et al. take one (fine,coarse) array pair, and both channel
+  // ranges now live in the same array) -- likewise u_p_beta and
   // delta_psi/delta_alpha_psi (the pbval_psi/coarse_psi names below are kept as-is,
   // referring to "the psi field's exchange machinery" regardless of the delta-vs-
   // physical storage convention the underlying array uses).
-  MeshBoundaryValuesCC *pbval_px, *pbval_etax, *pbval_x;
+  MeshBoundaryValuesCC *pbval_pietax, *pbval_x;
   MeshBoundaryValuesCC *pbval_psi, *pbval_alpha_psi;
-  MeshBoundaryValuesCC *pbval_pbeta, *pbval_etabeta;
-  DvceArray5D<Real> coarse_u_px, coarse_eta_x, coarse_u_x;
+  MeshBoundaryValuesCC *pbval_pietabeta;
+  DvceArray5D<Real> coarse_u_pietax, coarse_u_x;
   DvceArray5D<Real> coarse_psi, coarse_alpha_psi;
-  DvceArray5D<Real> coarse_u_pbeta, coarse_eta_beta;
+  DvceArray5D<Real> coarse_u_pietabeta;
 
   // Round 19 fix: AssembleConformalMetric/AssembleLapseShiftK (cfc_reconstruct.cpp)
   // only ever write pmy_pack->padm->u_adm's INTERIOR (is..ie) -- unlike z4c's
@@ -230,12 +231,14 @@ class CFC {
   // called directly from Driver::Execute() the way gravity::Gravity is: CFC's steps
   // must interleave with dyn_grmhd's own hydro/con2prim tasks (see cfc.cpp and
   // tasklist/numerical_relativity.hpp's CFC_* TaskName values), which is only
-  // possible through the task graph. Full per-stage chain (36 nodes; see plan
-  // addendum #4 for the complete dependency derivation):
+  // possible through the task graph. Full per-stage chain (see plan addendum #3 for
+  // the packed-(P_i,eta) merge that collapsed the PX+EtaX and PBeta+EtaBeta ghost-
+  // exchange groups down to one PiEtaX/PiEtaBeta group each, and addendum #4 for the
+  // complete original dependency derivation):
   //   CFC_BuildSrcX      depends on {MHD_AddSrc} (post flux+source-update u0);
-  //                      solves P_i/eta for X^i, retrieves into u_p_x/eta_x.
-  //   CFC_Rest/Send/Recv/ProlongPX, ...EtaX   ghost-exchange u_p_x, eta_x (parallel).
-  //   CFC_ReconstructX   depends on {..ProlongPX, ..ProlongEtaX}; builds x_u.
+  //                      solves the packed (P_i, eta) for X^i, retrieves into u_p_x.
+  //   CFC_Rest/Send/Recv/ProlongPiEtaX   ghost-exchange u_p_x (all 4 channels).
+  //   CFC_ReconstructX   depends on {CFC_ProlongPiEtaX}; builds x_u.
   //   CFC_Rest/Send/Recv/ProlongX             ghost-exchange x_u.
   //   CFC_ComputeADual   depends on {..ProlongX}; builds a_dd/a_sq.
   //   CFC_SolvePsi       depends on {CFC_ComputeADual}; writes psi4/g_dd.
@@ -243,11 +246,10 @@ class CFC {
   //                      runs, queued to depend on CFC_SolvePsi -- see below).
   //   CFC_SolveLapse     depends on {CFC_RescaleSrc}.
   //   CFC_Rest/Send/Recv/ProlongPsi, ...AlphaPsi   ghost-exchange psi, alpha_psi.
-  //   CFC_BuildSrcBeta   depends on {..ProlongPsi, ..ProlongAlphaPsi}; solves P_i/eta
-  //                      for beta^i, retrieves into u_p_beta/eta_beta.
-  //   CFC_Rest/Send/Recv/ProlongPBeta, ...EtaBeta   ghost-exchange (parallel).
-  //   CFC_ReconstructBeta   depends on {..ProlongPBeta, ..ProlongEtaBeta}; builds
-  //                      beta_u.
+  //   CFC_BuildSrcBeta   depends on {..ProlongPsi, ..ProlongAlphaPsi}; solves the
+  //                      packed (P_i, eta) for beta^i, retrieves into u_p_beta.
+  //   CFC_Rest/Send/Recv/ProlongPiEtaBeta   ghost-exchange u_p_beta (all 4 channels).
+  //   CFC_ReconstructBeta   depends on {CFC_ProlongPiEtaBeta}; builds beta_u.
   //   CFC_AssembleFinal  depends on {CFC_ReconstructBeta}; writes vK_dd/alpha/beta_u.
   //   CFC_Rest/Send/Recv/ProlongADM  depends on {CFC_AssembleFinal}; ghost-exchanges
   //                      the whole padm->u_adm array (round 19 fix -- see pbval_adm's
@@ -291,14 +293,10 @@ class CFC {
   // Ghost-exchange task-graph entry points, one Rest/Send/Recv/Prolong quartet per
   // field (see the MeshBoundaryValuesCC members above). Each is a thin one-liner
   // mirroring z4c::Z4c::RestrictU/SendU/RecvU/Prolongate's exact shape.
-  TaskStatus RestPXTask(Driver *pdriver, int stage);
-  TaskStatus SendPXTask(Driver *pdriver, int stage);
-  TaskStatus RecvPXTask(Driver *pdriver, int stage);
-  TaskStatus ProlongPXTask(Driver *pdriver, int stage);
-  TaskStatus RestEtaXTask(Driver *pdriver, int stage);
-  TaskStatus SendEtaXTask(Driver *pdriver, int stage);
-  TaskStatus RecvEtaXTask(Driver *pdriver, int stage);
-  TaskStatus ProlongEtaXTask(Driver *pdriver, int stage);
+  TaskStatus RestPiEtaXTask(Driver *pdriver, int stage);
+  TaskStatus SendPiEtaXTask(Driver *pdriver, int stage);
+  TaskStatus RecvPiEtaXTask(Driver *pdriver, int stage);
+  TaskStatus ProlongPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus RestXTask(Driver *pdriver, int stage);
   TaskStatus SendXTask(Driver *pdriver, int stage);
   TaskStatus RecvXTask(Driver *pdriver, int stage);
@@ -311,14 +309,10 @@ class CFC {
   TaskStatus SendAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus RecvAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus ProlongAlphaPsiTask(Driver *pdriver, int stage);
-  TaskStatus RestPBetaTask(Driver *pdriver, int stage);
-  TaskStatus SendPBetaTask(Driver *pdriver, int stage);
-  TaskStatus RecvPBetaTask(Driver *pdriver, int stage);
-  TaskStatus ProlongPBetaTask(Driver *pdriver, int stage);
-  TaskStatus RestEtaBetaTask(Driver *pdriver, int stage);
-  TaskStatus SendEtaBetaTask(Driver *pdriver, int stage);
-  TaskStatus RecvEtaBetaTask(Driver *pdriver, int stage);
-  TaskStatus ProlongEtaBetaTask(Driver *pdriver, int stage);
+  TaskStatus RestPiEtaBetaTask(Driver *pdriver, int stage);
+  TaskStatus SendPiEtaBetaTask(Driver *pdriver, int stage);
+  TaskStatus RecvPiEtaBetaTask(Driver *pdriver, int stage);
+  TaskStatus ProlongPiEtaBetaTask(Driver *pdriver, int stage);
   // Round 19 fix: ghost-exchange padm->u_adm after AssembleFinalTask -- see
   // pbval_adm's doc comment above.
   TaskStatus RestADMTask(Driver *pdriver, int stage);
@@ -326,18 +320,18 @@ class CFC {
   TaskStatus RecvADMTask(Driver *pdriver, int stage);
   TaskStatus ProlongADMTask(Driver *pdriver, int stage);
 
-  // Round 19 fix: post the non-blocking MPI receives for all 8 ghost-exchange
+  // Round 19 fix: post the non-blocking MPI receives for all 6 ghost-exchange
   // rounds above once, up front (Task_Start), and wait on the outstanding
   // sends/receives once, at the very end (Task_End) -- mirrors z4c::Z4c::InitRecv/
-  // ClearSend/ClearRecv (z4c_tasks.cpp) exactly, just batched over CFC's 8 fields
+  // ClearSend/ClearRecv (z4c_tasks.cpp) exactly, just batched over CFC's 6 fields
   // instead of z4c's single u0. Without these, PackAndSendCC still issues a real
   // MPI_Isend (it self-builds its own buffer/offset metadata on first use), but
   // RecvAndUnpackCC's completion check tests an MPI_Request that was never posted
   // (stuck at MPI_REQUEST_NULL, which MPI_Test/MPI_Wait always report as complete
   // on), so the "receive" silently unpacks whatever zero-initialized garbage sits
   // in the never-actually-filled aggregate recv buffer instead of the neighbor's
-  // real data. Each of the 8 MeshBoundaryValuesCC instances owns its own
-  // MPI_Comm_dup'd communicator (bvals.cpp), so batching all 8 into one
+  // real data. Each of the 6 MeshBoundaryValuesCC instances owns its own
+  // MPI_Comm_dup'd communicator (bvals.cpp), so batching all 6 into one
   // Task_Start/two Task_End tasks is safe -- no cross-field message collisions,
   // and the before_stagen/stagen/after_stagen task-list phases already run as
   // fully separate, sequential passes (driver.cpp), so Task_End is guaranteed to
@@ -347,25 +341,25 @@ class CFC {
   TaskStatus ClearRecvTask(Driver *pdriver, int stage);
 
  private:
-  // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources into the member
-  // arrays p_src (P_i's vector right-hand side S_i) and eta_src (eta's scalar
-  // right-hand side -S_i x^i, built from that same S_i) -- for either the X^i solve
-  // (for_shift=false, built directly from the post-source-update conserved momentum
-  // pmy_pack->pmhd->u0 per eq. 72) or the beta^i solve (for_shift=true, built from
-  // alpha, psi, Adual^ij, S-tilde_i per eq. 75). P_i and eta are independent
-  // equations; SolveVectorPotential/SolveShift solve P_i to completion first and eta
-  // second (see below), rather than solving them simultaneously.
+  // shared helper: build the Shibata (1999) eq. 3.10-3.11 sources into the packed
+  // member array u_p_src/p_src (P_i's vector right-hand side S_i at channels 0-2,
+  // eta's scalar right-hand side -S_i x^i at channel 3, built from that same S_i) --
+  // for either the X^i solve (for_shift=false, built directly from the
+  // post-source-update conserved momentum pmy_pack->pmhd->u0 per eq. 72) or the
+  // beta^i solve (for_shift=true, built from alpha, psi, Adual^ij, S-tilde_i per
+  // eq. 75). P_i and eta are independent equations sharing one source array and one
+  // solve (see SolveVectorPotential/SolveShift below).
   void AssembleVectorSource(bool for_shift);
 
   // Step 1: build the eq. 72 source directly from pmy_pack->pmhd->u0 (the conserved
   // state right after this stage's hydro flux+source update -- see AssembleVectorSource),
-  // solve pmgd_px for P_i (p_x) first, then solve pmgd_etax for eta (eta_x). Does NOT
-  // reconstruct x_u itself (needs p_x/eta_x's own ghost exchange first -- see
-  // ReconstructVectorPotential, CFC_ReconstructX).
+  // solve pmgd_pietax for the packed (P_i, eta) (u_p_x). Does NOT reconstruct x_u
+  // itself (needs u_p_x's own ghost exchange first -- see ReconstructVectorPotential,
+  // CFC_ReconstructX).
   void SolveVectorPotential(Driver *pdriver, int stage);
 
-  // CFC_ReconstructX: cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, eta_x, x_u)
-  // once p_x/eta_x's post-solve ghost exchange (pbval_px/pbval_etax) has completed.
+  // CFC_ReconstructX: cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, u_p_x, x_u,
+  // 3) once u_p_x's post-solve ghost exchange (pbval_pietax) has completed.
   void ReconstructVectorPotential();
 
   // Step 2: Adual^ij from X^i (eq. 76), then Ahat^2 (cfc_reconstruct.hpp). Runs after
@@ -392,14 +386,13 @@ class CFC {
   void SolveLapse(Driver *pdriver, int stage);
 
   // Step 6: build the eq. 75 source (needs psi/alpha_psi's own ghost exchange
-  // first, see QueueCFCTasks), solve pmgd_pbeta for P_i (p_beta) first, then solve
-  // pmgd_etabeta for eta (eta_beta). Does NOT reconstruct beta_u itself (needs
-  // p_beta/eta_beta's own ghost exchange first -- see ReconstructShift,
-  // CFC_ReconstructBeta).
+  // first, see QueueCFCTasks), solve pmgd_pietabeta for the packed (P_i, eta)
+  // (u_p_beta). Does NOT reconstruct beta_u itself (needs u_p_beta's own ghost
+  // exchange first -- see ReconstructShift, CFC_ReconstructBeta).
   void SolveShift(Driver *pdriver, int stage);
 
   // CFC_ReconstructBeta: cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta,
-  // eta_beta, beta_u) once p_beta/eta_beta's post-solve ghost exchange has completed.
+  // u_p_beta, beta_u, 3) once u_p_beta's post-solve ghost exchange has completed.
   void ReconstructShift();
 
   // Final assembly: vK_dd, alpha, beta_u -> pmy_pack->padm->u_adm (via
@@ -411,10 +404,10 @@ class CFC {
   // entirely outside the normal per-stage task graph (it can't reuse it -- a single
   // pass through "stagen" would also flux-update/RK-evolve the hydro state, which
   // must NOT happen here), so it can't reuse CFC_InitRecv/ClearSend/ClearRecv
-  // either: those post/wait on all 8 MeshBoundaryValuesCC instances at once, but
-  // InitializeMetric's loop only ever sends/receives 3 of them (p_x, eta_x, x_u)
-  // per iteration -- calling the all-8 versions would post MPI_Irecv's for the
-  // other 5 that never get a matching send that iteration, and ClearRecv's
+  // either: those post/wait on all 6 MeshBoundaryValuesCC instances at once, but
+  // InitializeMetric's loop only ever sends/receives 2 of them (u_p_x, x_u)
+  // per iteration -- calling the all-6 versions would post MPI_Irecv's for the
+  // other 4 that never get a matching send that iteration, and ClearRecv's
   // MPI_Wait on those would hang. These two pairs scope InitRecv/ClearSend/
   // ClearRecv to exactly the fields actually exercised in each of InitializeMetric's
   // two phases (the iterated X^i/psi loop, and the one-shot lapse/shift/final tail).

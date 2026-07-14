@@ -58,14 +58,16 @@ void ComputeADualFromXImpl(MeshBlockPack *pmbp,
 //----------------------------------------------------------------------------------------
 //! \fn void ReconstructVectorFromPotentialsImpl<NGHOST>(...)
 //! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k).
-//! eta is a plain DvceArray5D<Real> (single component), so it's locally shallow-sliced
-//! into a rank-0 AthenaTensor to reuse the generic Dx<NGHOST> scalar overload.
+//! eta is a plain DvceArray5D<Real> whose eta_chan'th channel holds the scalar
+//! potential (typically channel 3 of the same packed array p_i's own backing storage
+//! is a view of), so it's locally shallow-sliced into a rank-0 AthenaTensor to reuse
+//! the generic Dx<NGHOST> scalar overload.
 
 template <int NGHOST>
 void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
     const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
     const DvceArray5D<Real> &eta,
-    AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u) {
+    AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -74,7 +76,7 @@ void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
   int nmb = pmbp->nmb_thispack;
 
   AthenaTensor<Real, TensorSymm::NONE, 3, 0> eta_view;
-  eta_view.InitWithShallowSlice(eta, 0);
+  eta_view.InitWithShallowSlice(eta, eta_chan);
 
   par_for("cfc_vec_reconstruct", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -122,12 +124,13 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
                                           &p_i,
                                       const DvceArray5D<Real> &eta,
-                                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u) {
+                                      AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u,
+                                      int eta_chan) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: ReconstructVectorFromPotentialsImpl<2>(pmbp, p_i, eta, v_u); break;
-    case 3: ReconstructVectorFromPotentialsImpl<3>(pmbp, p_i, eta, v_u); break;
-    case 4: ReconstructVectorFromPotentialsImpl<4>(pmbp, p_i, eta, v_u); break;
+    case 2: ReconstructVectorFromPotentialsImpl<2>(pmbp, p_i, eta, v_u, eta_chan); break;
+    case 3: ReconstructVectorFromPotentialsImpl<3>(pmbp, p_i, eta, v_u, eta_chan); break;
+    case 4: ReconstructVectorFromPotentialsImpl<4>(pmbp, p_i, eta, v_u, eta_chan); break;
   }
 }
 

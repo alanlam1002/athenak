@@ -54,7 +54,7 @@ void RadiationM1::AssembleRadiationM1Tasks(
   // assemble "stagen" task list
   id.M1_copyu = tl["opsplit_stagen"]->AddTask(&RadiationM1::CopyCons, this, none, "RadiationM1::CopyU");
   id.M1_closure =
-      tl["opsplit_stagen"]->AddTask(&RadiationM1::CalcClosure, this, id.M1_copyu, "RadiationM1::CalcClosure");
+      tl["opsplit_stagen"]->AddTask(&RadiationM1::FloorAndCalcClosure, this, id.M1_copyu, "RadiationM1::FloorAndCalcClosure");
 
   // decide what type of opacities to compute
   if (!params.matter_sources) {
@@ -193,7 +193,7 @@ TaskStatus RadiationM1::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   if (pmy_pack->pmesh->strictly_periodic) return TaskStatus::complete;
 
   // physical BCs
-  pbval_u->RadiationM1BCs((pmy_pack), (pbval_u->u_in), u0);
+  pbval_u->RadiationM1BCs((pmy_pack), (pbval_u->u_in), u0, coarse_u0);
 
   // user BCs
   if (pmy_pack->pmesh->pgen->user_bcs) {

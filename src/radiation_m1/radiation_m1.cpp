@@ -127,7 +127,7 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
     nurates_params.use_brem = pin->GetOrAddBoolean("bns_nurates", "use_brem", true);
     nurates_params.use_iso = pin->GetOrAddBoolean("bns_nurates", "use_iso", true);
     nurates_params.use_inelastic_scatt =
-        pin->GetOrAddBoolean("bns_nurates", "use_inelastic_scatt", true);
+        pin->GetOrAddBoolean("bns_nurates", "use_inelastic_scatt", false);
     nurates_params.use_WM_ab = pin->GetOrAddBoolean("bns_nurates", "use_WM_ab", true);
     nurates_params.use_WM_sc = pin->GetOrAddBoolean("bns_nurates", "use_WM_sc", true);
     nurates_params.use_dU = pin->GetOrAddBoolean("bns_nurates", "use_dU", true);
@@ -135,7 +135,7 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
     nurates_params.use_equilibrium_distribution =
         pin->GetOrAddBoolean("bns_nurates", "use_equilibrium_distribution", true);
     nurates_params.use_kirchhoff_law =
-        pin->GetOrAddBoolean("bns_nurates", "use_kirchoff_law", true);
+        pin->GetOrAddBoolean("bns_nurates", "use_kirchhoff_law", true);
     nurates_params.use_NN_medium_corr =
         pin->GetOrAddBoolean("bns_nurates", "use_NN_medium_corr", true);
     nurates_params.neglect_blocking =
@@ -228,7 +228,7 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
 
   // allocate Eddington factor
   Kokkos::realloc(chi, nmb, nspecies, ncells3, ncells2, ncells1);
-  
+
   // allocate opacities
   Kokkos::realloc(eta_0, nmb, nspecies, ncells3, ncells2, ncells1);
   Kokkos::realloc(abs_0, nmb, nspecies, ncells3, ncells2, ncells1);
@@ -239,7 +239,7 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
   // radiation mask
   Kokkos::realloc(radiation_mask, nmb, ncells3, ncells2, ncells1);
   Kokkos::deep_copy(radiation_mask, false);
-  
+
   nspecies = M1_TOTAL_NUM_SPECIES;
 
   // allocate fake fluid quantities if not using MHD

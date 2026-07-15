@@ -13,6 +13,7 @@
 #include "eos/primitive-solver/unit_system.hpp"
 #include "hydro/hydro.hpp"
 #include "radiation/radiation_opacities.hpp"
+#include "radiation_m1/radiation_m1_tensors.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "units/units.hpp"
 
@@ -42,10 +43,85 @@ TaskStatus RadiationM1::CalcOpacityPhotons(Driver *pdrive, int stage) {
                                Primitive::ResetFloor>(pdrive, stage);
   }
 
-  std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-            << std::endl;
-  std::cout << "Unsupported EOS type!\n";
-  abort();
+  // Fallthrough for ideal gas or any EOS without a <units> block.
+  // kappa_s/kappa_a/kappa_p must be given in code units; temperature-dependent
+  // (Kramers) opacities are not supported on this path.
+  return CalcOpacityPhotons_IdealGas_(pdrive, stage);
+}
+
+TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) {
+  assert(nspecies == 1);
+
+  RegionIndcs &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is, &ie = indcs.ie;
+  int &js = indcs.js, &je = indcs.je;
+  int &ks = indcs.ks, &ke = indcs.ke;
+
+  auto nmb1 = pmy_pack->nmb_thispack - 1;
+  auto nvars_ = nvars;
+  auto &adm = pmy_pack->padm->adm;
+  auto &m1_params_ = params;
+  auto &eta_1_ = eta_1;
+  auto &abs_1_ = abs_1;
+  auto &scat_1_ = scat_1;
+  auto &u0_ = u0;
+  auto &chi_ = chi;
+  auto &radiation_mask_ = radiation_mask;
+
+  DvceArray5D<Real> w0_ = w0;  // placeholder density array owned by RadiationM1
+  if (ismhd) {
+    w0_ = pmy_pack->pmhd->w0;
+  } else if (ishydro) {
+    w0_ = pmy_pack->phydro->w0;
+  }
+
+  // All scales are 1 in code units (no <units> block needed).
+  // kappa_s, kappa_a, kappa_p must be pre-converted to code units.
+  bool power_opacity_ = photon_op_params.is_power_opacity;
+  if (power_opacity_) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl;
+    std::cout << "power_opacity requires a <units> block and EOSCompOSE\n";
+    abort();
+  }
+  Real kappa_s_ = photon_op_params.kappa_s;
+  Real kappa_a_ = photon_op_params.kappa_a;
+  Real kappa_p_ = photon_op_params.kappa_p;
+  Real arad_ = photon_op_params.arad;
+
+  Real gm1_{};
+  if (ishydro) {
+    gm1_ = pmy_pack->phydro->peos->eos_data.gamma - 1.0;
+  } else if (ismhd) {
+    gm1_ = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
+  }
+
+  par_for(
+      "radiation_m1_calc_opacity_photons_idealgas", DevExeSpace(), 0, nmb1, ks,
+      ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        if (radiation_mask_(m, k, j, i)) {
+          abs_1_(m, 0, k, j, i) = 0;
+          eta_1_(m, 0, k, j, i) = 0;
+          scat_1_(m, 0, k, j, i) = 0;
+          //u0_(m, CombinedIdx(0, M1_E_IDX , nvars_), k, j, i) = params.rad_E_floor;
+          //u0_(m, CombinedIdx(0, M1_FX_IDX, nvars_), k, j, i) = 0;
+          //u0_(m, CombinedIdx(0, M1_FY_IDX, nvars_), k, j, i) = 0;
+          //u0_(m, CombinedIdx(0, M1_FZ_IDX, nvars_), k, j, i) = 0;
+        } else {
+          Real wdn = w0_(m, IDN, k, j, i);
+          Real wen = w0_(m, IEN, k, j, i);
+          Real pgas = gm1_ * wen;
+          Real tgas = pgas / wdn;
+          // sigma = kappa * rho, all in code units (scales = 1)
+          // eta = kappa_p * a_rad * T^4 (LTE emission); abs is the bare opacity
+          eta_1_(m, 0, k, j, i) = wdn * kappa_p_ * arad_ * SQR(SQR(tgas));
+          abs_1_(m, 0, k, j, i) = wdn * kappa_p_;
+          scat_1_(m, 0, k, j, i) = wdn * (kappa_s_ + kappa_a_);
+        }
+      });
+
+  return TaskStatus::complete;
 }
 
 template <class EOSPolicy, class ErrorPolicy>
@@ -105,6 +181,7 @@ TaskStatus RadiationM1::CalcOpacityPhotons_(Driver *pdrive, int stage) {
   Real kappa_a_ = photon_op_params.kappa_a;
   Real kappa_s_ = photon_op_params.kappa_s;
   Real kappa_p_ = photon_op_params.kappa_p;
+  Real arad_ = photon_op_params.arad;
 
   Real gm1{};
   if (ishydro) {
@@ -221,7 +298,8 @@ TaskStatus RadiationM1::CalcOpacityPhotons_(Driver *pdrive, int stage) {
                           sigma_p);
 
           // compute opacities from sigma_a, sigma_s, sigma_p
-          eta_1_loc = sigma_p;
+          // eta = kappa_p * a_rad * T^4 (LTE emission); abs is the bare opacity
+          eta_1_loc = sigma_p * arad_ * SQR(SQR(tgas));
           abs_1_loc = sigma_p;
           scat_1_loc = sigma_s + sigma_a;
 

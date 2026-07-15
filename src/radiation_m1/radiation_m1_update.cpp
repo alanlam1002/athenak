@@ -84,6 +84,26 @@ TaskStatus RadiationM1::TimeUpdate(Driver *pdrive, int stage) {
     }
   }
 
+  // Fallthrough for ideal gas or any non-EOSCompOSE EOS.
+  // The EOS cast inside TimeUpdate_ is guarded by (nspecies > 1), so for
+  // photons (nspecies == 1) the cast is never reached and any EOSPolicy works.
+  if (ismhd || ishydro) {
+    switch (indcs.ng) {
+      case 2:
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 2>(pdrive, stage);
+        break;
+      case 3:
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 3>(pdrive, stage);
+        break;
+      case 4:
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 4>(pdrive, stage);
+        break;
+    }
+  }
+
   std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
             << std::endl;
   std::cout << "Unsupported EOS type!\n";
@@ -136,8 +156,10 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   auto &BrentFunc_ = pmy_pack->pradm1->BrentFunc;
   auto &HybridsjFunc_ = pmy_pack->pradm1->HybridsjFunc;
 
+  // mb is only used for lepton tracking (nspecies > 1).
+  // For photons (nspecies == 1) the EOS cast is skipped entirely.
   Real mb{};
-  if (ismhd || ishydro) {
+  if ((ismhd || ishydro) && nspecies > 1) {
     Primitive::EOS<EOSPolicy, ErrorPolicy> &eos =
         static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy> *>(
             pmy_pack->pdyngr)
@@ -557,7 +579,10 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
           if (params_.theta_limiter && params_.source_limiter >= 0) {
             const Real tau = (ismhd_ || ishydro_) ? umhd0_(m, IEN, k, j, i) : 0.;
             const Real dens = (ismhd_ || ishydro_) ? w0_(m, IDN, k, j, i) : 0.;
-            const Real Y_e = (ismhd_ || ishydro_) ? w0_(m, IYF, k, j, i) : 0.;
+            // IYF=5 only exists when nscalars>=1 (e.g. EOSCompOSE with Ye).
+            // For photons (nspecies==1) Y_e is never used, so skip the read.
+            const Real Y_e = ((ismhd_ || ishydro_) && nspecies_ > 1)
+                                 ? w0_(m, IYF, k, j, i) : 0.;
 
             theta = 1.0;
             Real DTau_sum = 0.0;

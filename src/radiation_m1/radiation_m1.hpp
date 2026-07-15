@@ -134,6 +134,8 @@ class RadiationM1 {
   template <class EOSPolicy, class ErrorPolicy, int M1_NGHOST>
   TaskStatus TimeUpdate_(Driver* d, int stage);
 
+  TaskStatus CalcOpacityPhotons_IdealGas_(Driver* d, int stage);
+
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack
 };

@@ -84,6 +84,7 @@ class ProblemGenerator {
   void RadiationM1SingleZoneTest(ParameterInput *pin, const bool restart);
   template <class EOSPolicy, class ErrorPolicy>
   void RadiationM1SingleZoneTest_(ParameterInput *pin, const bool restart);
+  void RadiationM1PhotonSingleZoneTest(ParameterInput *pin, const bool restart);
 
   // Generic error output function (using difference u0-u1)
   void OutputErrors(ParameterInput *pin, Mesh *pm);

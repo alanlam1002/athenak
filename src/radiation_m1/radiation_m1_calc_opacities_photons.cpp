@@ -89,13 +89,6 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
   Real kappa_p_ = photon_op_params.kappa_p;
   Real arad_ = photon_op_params.arad;
 
-  Real gm1_{};
-  if (ishydro) {
-    gm1_ = pmy_pack->phydro->peos->eos_data.gamma - 1.0;
-  } else if (ismhd) {
-    gm1_ = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
-  }
-
   par_for(
       "radiation_m1_calc_opacity_photons_idealgas", DevExeSpace(), 0, nmb1, ks,
       ke, js, je, is, ie,
@@ -111,8 +104,9 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
         } else {
           Real wdn = w0_(m, IDN, k, j, i);
           Real wen = w0_(m, IEN, k, j, i);
-          Real pgas = gm1_ * wen;
-          Real tgas = pgas / wdn;
+          // IEN==IPR==ITM (athena.hpp), i.e. wen is pressure P; for Primitive::IdealGas
+          // (mb=1) T = P/n = P/rho, with no extra (gamma-1) factor.
+          Real tgas = wen / wdn;
           // sigma = kappa * rho, all in code units (scales = 1)
           // eta = kappa_p * a_rad * T^4 (LTE emission); abs is the bare opacity
           eta_1_(m, 0, k, j, i) = wdn * kappa_p_ * arad_ * SQR(SQR(tgas));

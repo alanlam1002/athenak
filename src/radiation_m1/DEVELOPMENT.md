@@ -26,16 +26,21 @@ is the target application).
 - Compton energy exchange, **`Primitive::IdealGas` path only** (scope decision —
   see "Compton implementation" below). The EOSCompOSE path hard-errors if
   `compton=true` rather than silently ignoring it.
-- Two single-zone (homogeneous, 0-D-equivalent) tests: LTE relaxation via true
-  Planck absorption/emission (`rad_m1_photon_singlezone`, pre-existing) and via
-  Compton alone (`rad_m1_photon_compton_singlezone`, added this round). Both pass
-  against closed-form analytic solutions — see "The single-zone test" below.
+- Four single-zone (homogeneous, 0-D-equivalent) tests, all passing against
+  closed-form analytic solutions — see "The single-zone test" below: LTE
+  relaxation via true Planck absorption/emission (`rad_m1_photon_singlezone`,
+  pre-existing), via Compton alone (`rad_m1_photon_compton_singlezone`), a
+  scattering-only null test confirming `E` stays pinned at its floor with no
+  energy-exchange channel (`rad_m1_photon_scattering_singlezone`), and a
+  finite-`v_x` boosted-LTE test validating the lab-frame↔comoving-frame boost
+  in the source solver against an independently-derived closed-form
+  equilibrium (`rad_m1_photon_vx_singlezone`).
 
 **Not yet done** (see "Stage 2 plan" below): anything exercising spatial transport
 (fluxes/closure) together with real photon opacities — diffusion, free-streaming,
-finite-velocity frame effects, radiation-pressure backreaction — and CI wiring.
-Kramers/`power_opacity` and the EOSCompOSE branch have no dedicated test yet either
-(deprioritized alongside EOSCompOSE Compton — see below).
+radiation-pressure backreaction — and CI wiring. Kramers/`power_opacity` and the
+EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
+EOSCompOSE Compton — see below).
 
 **Scope decision — IdealGas only, for now:** Compton and the newer single-zone
 tests all target `Primitive::IdealGas`, not `Primitive::EOSCompOSE`. This was an
@@ -170,18 +175,34 @@ at a time, each isolating one new piece of physics, still scoped to
 `Primitive::IdealGas` (per the Stage 1 scope decision above) unless noted.
 Recommended order (cheapest / fewest new mechanisms first):
 
-1. **Single-zone extensions (cheap, no new transport)**
-   - *Scattering-only null test*: `kappa_s>0`, `kappa_p=kappa_a=0`, `compton=false`.
-     With no energy-exchange channel at all, `E` should stay pinned at its floor
-     — it must **not** drift toward `a_rad*T^4`. This is a cheap regression guard
-     against the classic bug of accidentally letting `kscat` leak into the
-     `kabs*J` emission-driving term.
-   - *Finite `v_x`*: uniform nonzero fluid velocity, still homogeneous (so still a
-     pure source-term test, no reconstruction/Riemann solver involved) but now
-     exercising the boost from lab-frame `(E,F_i)` to comoving-frame `J` inside
-     the source solver (`u_u`, `W`, `proj_ud`). Comoving-frame `J` should still
-     relax to `a_rad*T^4`; lab-frame `E` should track the known boosted-blackbody
-     relation. Isolates frame-transform correctness from transport correctness.
+1. **Single-zone extensions (cheap, no new transport) — done**
+   - [x] *Scattering-only null test* (`rad_m1_photon_scattering_singlezone`):
+     `kappa_s=1, kappa_p=kappa_a=0, compton=false`. Verified `E(t)` stays
+     **bit-for-bit identical** to `E(0)` (its floor value) for the entire run
+     (max relative deviation exactly `0.0`) — confirms `kscat` never leaks into
+     the `kabs*J` emission-driving term. Analytically expected: with
+     `eta=kabs=0` exactly, `source_update_ll`'s non-stiff explicit branch
+     (`radiation_m1_sources.hpp:154`) gives `Edot=0` identically (verified via
+     Explore-agent code read before implementing — no division by `kabs`/`eta`
+     anywhere in this path, so no risk of NaN/inf at exactly-zero opacities
+     either).
+   - [x] *Finite `v_x`* (`rad_m1_photon_vx_singlezone`, `v_x=0.3`, `W≈1.048`):
+     still homogeneous (no reconstruction/Riemann solver involved) but now
+     exercises the lab-frame↔comoving-frame boost inside the source solver
+     (`u_u`, `W`, `proj_ud`). Checked the **final-time equilibrium** only (not
+     the full trajectory, unlike the static tests — the transient would need
+     re-deriving the intermediate-time boost algebra by hand, which wasn't
+     independently verified) against a closed-form prediction derived from,
+     and cross-checked line-by-line against,
+     `assemble_rT`/`calc_J_from_rT`/`calc_H_from_rT`
+     (`radiation_m1_helpers.hpp`) and the Eddington closure pinning `chi=1/3`
+     exactly (`radiation_m1_closure.hpp:22-23`, which zeroes the anisotropic
+     `F_aF_b/|F|^2` closure term completely — `helpers.hpp:216-229`):
+     `E_eq = J_eq*(4W²-1)/3`, `F_x,eq = J_eq*(4/3)*W²*v_x`. Measured final
+     relative error: `1.7×10⁻⁴` (`E`), `3.2×10⁻⁴` (`F_x`) — both within the
+     `10⁻³` tolerance and consistent with RK2 truncation error at this `cfl`.
+     First M1 test in the repo to output `rad_m1_F` (columns `Fx:0`/`Fy:0`/`Fz:0`,
+     `basetype_output.cpp:736-753`).
 
 2. **Optically-thick diffusion test (real opacities, first genuine transport
    test).** Real-physics analogue of the existing toy-opacity

@@ -20,14 +20,13 @@ using the same <photons>/<problem> parameters as the athinput. Update the
 constants below if you change the athinput.
 """
 import argparse
-import glob
 import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "vis", "python"))
-import athena_read  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
+from m1_tab_utils import load_series  # noqa: E402
 
 # Must match inputs/tests/rad_m1_photon_singlezone.athinput
 RHO = 1.0
@@ -41,21 +40,6 @@ J_EQ = ARAD * TEMP**4
 ABS_1_EXPECTED = KAPPA_P * RHO
 
 
-def load_series(tab_dir, file_id, column):
-    pattern = os.path.join(tab_dir, "{}.{}.*.tab".format(BASENAME, file_id))
-    files = sorted(glob.glob(pattern))
-    if not files:
-        raise SystemExit("No files matched {} -- run AthenaK first".format(pattern))
-    times, values = [], []
-    for fname in files:
-        data = athena_read.tab(fname)
-        times.append(data["time"])
-        # spatially uniform box: average over the (periodic, identical) cells
-        values.append(np.mean(data[column]))
-    order = np.argsort(times)
-    return np.array(times)[order], np.array(values)[order]
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
@@ -63,8 +47,8 @@ def main():
                         help="relative tolerance on late-time E vs J_eq")
     args = parser.parse_args()
 
-    t, E = load_series(args.tab_dir, "rad_m1_E", "E:0")
-    _, abs_1 = load_series(args.tab_dir, "rad_m1_abs_1", "abs_1:0")
+    t, E = load_series(args.tab_dir, BASENAME, "rad_m1_E", "E:0")
+    _, abs_1 = load_series(args.tab_dir, BASENAME, "rad_m1_abs_1", "abs_1:0")
 
     print("J_eq = a_rad * T^4 = {:.6e}".format(J_EQ))
     print("expected abs_1 = kappa_p * rho = {:.6e}".format(ABS_1_EXPECTED))

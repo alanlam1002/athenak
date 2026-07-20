@@ -75,8 +75,10 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
     w0_ = pmy_pack->phydro->w0;
   }
 
-  // All scales are 1 in code units (no <units> block needed).
-  // kappa_s, kappa_a, kappa_p must be pre-converted to code units.
+  // All scales are 1 in code units (no <units> block needed), except for the
+  // Compton term below, which needs <units> to convert k_B*T_gas to units of
+  // m_e*c^2; this is why is_compton requires isunits at parse time (see
+  // RadiationM1 constructor).
   bool power_opacity_ = photon_op_params.is_power_opacity;
   if (power_opacity_) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -88,6 +90,13 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
   Real kappa_a_ = photon_op_params.kappa_a;
   Real kappa_p_ = photon_op_params.kappa_p;
   Real arad_ = photon_op_params.arad;
+
+  bool is_compton_ = photon_op_params.is_compton;
+  Real inv_t_electron_ = 0.0;
+  if (is_compton_) {
+    inv_t_electron_ =
+        pmy_pack->punit->temperature_cgs() / pmy_pack->punit->electron_rest_mass_energy_cgs;
+  }
 
   par_for(
       "radiation_m1_calc_opacity_photons_idealgas", DevExeSpace(), 0, nmb1, ks,
@@ -108,9 +117,18 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
           // (mb=1) T = P/n = P/rho, with no extra (gamma-1) factor.
           Real tgas = wen / wdn;
           // sigma = kappa * rho, all in code units (scales = 1)
-          // eta = kappa_p * a_rad * T^4 (LTE emission); abs is the bare opacity
-          eta_1_(m, 0, k, j, i) = wdn * kappa_p_ * arad_ * SQR(SQR(tgas));
-          abs_1_(m, 0, k, j, i) = wdn * kappa_p_;
+          // eta = kappa_p * a_rad * T^4 (LTE emission); abs is the bare opacity.
+          // Compton (grey, Kompaneets zeroth-order): electron scattering exchanges
+          // energy with matter at a rate ~ kappa_s * 4*k_B*T_gas/(m_e*c^2), driving J
+          // toward a_rad*T_gas^4 just like true absorption; fold it into eta/abs as an
+          // extra effective Planck-like channel on top of kappa_p. kappa_s remains
+          // (unmodified) in scat_1 for the elastic flux-damping term.
+          Real sigma_p = wdn * kappa_p_;
+          Real sigma_compton =
+              is_compton_ ? wdn * kappa_s_ * 4.0 * tgas * inv_t_electron_ : 0.0;
+          eta_1_(m, 0, k, j, i) =
+              (sigma_p + sigma_compton) * arad_ * SQR(SQR(tgas));
+          abs_1_(m, 0, k, j, i) = sigma_p + sigma_compton;
           scat_1_(m, 0, k, j, i) = wdn * (kappa_s_ + kappa_a_);
         }
       });
@@ -176,6 +194,13 @@ TaskStatus RadiationM1::CalcOpacityPhotons_(Driver *pdrive, int stage) {
   Real kappa_s_ = photon_op_params.kappa_s;
   Real kappa_p_ = photon_op_params.kappa_p;
   Real arad_ = photon_op_params.arad;
+
+  if (photon_op_params.is_compton) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl;
+    std::cout << "compton is only implemented for Primitive::IdealGas\n";
+    abort();
+  }
 
   Real gm1{};
   if (ishydro) {

@@ -298,11 +298,35 @@ void calc_rF_source(const Real &alp,
 //----------------------------------------------------------------------------------------
 //! \fn void radiationm1::apply_floor
 //  \brief Enforce that E > rad_E_floor and F_a F^a < (1 - rad_eps) E^2
+//
+//  Also guards against non-finite (E, F_d) -- e.g. left behind by a failed
+//  implicit source solve -- and zeroes F_d whenever E was at or below the
+//  floor: at floor density there is no meaningful flux, and letting a stale
+//  or near-zero F_d survive there is what previously let the Hybridsj Newton
+//  solve hunt across ~100+ orders of magnitude in the subnormal range at
+//  such cells (E pinned at floor, F insensitive to the residual) until an
+//  intermediate quantity underflowed and a subsequent division produced
+//  Inf/NaN, which this same floor (comparing F2 > lim) used to let through
+//  unchanged because any comparison against a NaN is false.
 KOKKOS_INLINE_FUNCTION
 void apply_floor(const AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> &g_uu, Real &E,
                  AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> &F_d,
                  const RadiationM1Params &params) {
+  bool at_floor = !Kokkos::isfinite(E) || E <= params.rad_E_floor;
+  for (int a = 0; a < 4; ++a) {
+    if (!Kokkos::isfinite(F_d(a))) {
+      at_floor = true;
+    }
+  }
+
   E = Kokkos::max(params.rad_E_floor, E);
+
+  if (at_floor) {
+    for (int a = 0; a < 4; ++a) {
+      F_d(a) = 0.;
+    }
+    return;
+  }
 
   const Real F2 = tensor_dot(g_uu, F_d, F_d);
   const Real lim = E * E * (1 - params.rad_eps);

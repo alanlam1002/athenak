@@ -36,12 +36,17 @@ is the target application).
   in the source solver against an independently-derived closed-form
   equilibrium (`rad_m1_photon_vx_singlezone`).
 
-**In progress, one open bug**: the optically-thick diffusion test (item 2 below)
-works well at `kappa_s=5` (sub-1% error, cross-validated against the reference
-discrete-ordinate module) after fixing a "zero-flux spin-up transient" IC issue,
-but the *same* corrected IC causes `E` to collapse to the floor everywhere at
-`kappa_s=200` (the stiff/implicit source-solver regime) — a real crash, not yet
-root-caused. See item 2's writeup for the full investigation trail.
+**In progress, crash fixed, one accuracy question still open**: the
+optically-thick diffusion test (item 2 below) works well at `kappa_s=5`
+(sub-1% error, cross-validated against the reference discrete-ordinate module)
+after fixing a "zero-flux spin-up transient" IC issue. That same corrected IC
+used to make `E` collapse to the floor everywhere at `kappa_s=200` (the
+stiff/implicit source-solver regime); this has been root-caused and fixed (a
+latent Newton-solver/floor interaction — see `apply_floor()` in
+`radiation_m1_helpers.hpp` and item 2's writeup). What remains open: `E` at
+`kappa_s=200` still spreads ~27-34% faster than the analytic diffusion law
+predicts, the same discrepancy that originally motivated the cross-check
+against the discrete-ordinate module — not yet explained.
 
 **Not yet done** (see "Stage 2 plan" below): free-streaming and
 radiation-pressure-backreaction transport tests, and CI wiring. Kramers/
@@ -211,7 +216,7 @@ Recommended order (cheapest / fewest new mechanisms first):
      `basetype_output.cpp:736-753`).
 
 2. **Optically-thick diffusion test (real opacities, first genuine transport
-   test) — IN PROGRESS, one open bug found.** Real-physics analogue of the
+   test) — IN PROGRESS, crash fixed, one accuracy question open.** Real-physics analogue of the
    existing toy-opacity `rad_m1_diffusiontest.cpp` (which prescribes `D`
    directly via `ToyOpacityModel::Diffusion{Explicit,Implicit}`); extended
    that same pgen (rather than writing a new one) to also support
@@ -244,18 +249,58 @@ Recommended order (cheapest / fewest new mechanisms first):
      `cdt*kscat≈0.19`): error dropped to sub-1% by mid-run (was 3-8% before
      the fix), consistent with a decaying transient, not a bug — matches the
      DO module's own precision.
-   - **New bug found, NOT YET ROOT-CAUSED**: at `kappa_s=200` (stiff/implicit
-     source-solver branch, `cdt*kscat≈7.5`) with the *same* corrected IC, `E`
-     collapses to the floor value **everywhere** (including the former peak)
-     by the first output time and total energy vanishes
-     (`integral/integral(0)≈0`) — a real crash, not an accuracy issue. This
-     combination (nonzero-flux IC × stiff/Newton-solver regime) had never
-     been exercised by any prior M1 test (every earlier test used `F=0`
-     ICs). `kappa_s=200` with the *old* `F=0` IC did not crash (just showed
-     the 27-34% accuracy error). Leading suspect: the Hybridsj Newton solver
-     failing to converge (`SrcFail`) or producing NaNs for this flux/energy
-     combination, silently masked by flooring. **Not yet investigated
-     further** — paused here at your request to look at it directly.
+   - **Crash at `kappa_s=200` — ROOT-CAUSED AND FIXED.** With the corrected
+     nonzero-flux IC, at `kappa_s=200` (stiff/implicit source-solver branch,
+     `cdt*kscat≈7.5`) `E` used to collapse to the floor value **everywhere**
+     (including the former peak) by the first output time, with total energy
+     vanishing (`integral/integral(0)≈0`). Root-caused via a debug build
+     (`CMAKE_BUILD_TYPE=Debug` enables the existing `DEBUG_BUILD`
+     solver-failure printfs) plus temporary instrumentation (not committed):
+     the failure starts at the domain-edge cells, where `E` has decayed into
+     the Gaussian tail and gets clamped to `rad_E_floor=1e-30` while the
+     diffusive-flux IC still assigns a correspondingly tiny nonzero `F_x`
+     there. With `E` pinned at the floor, the Hybridsj Newton solve's
+     residual becomes essentially insensitive to `F_x` at these scales:
+     instead of converging, it chases `F_x` chaotically across 100+ orders of
+     magnitude in the subnormal range (captured directly, e.g.
+     `F_x` bouncing between `-6e-154`, `-1.3e-100`, `+5e-24` within a single
+     failing solve) until an intermediate value underflows to exact `0.0`, a
+     subsequent division produces `Inf`, and that becomes `NaN`
+     (`x=[1e-30,-nan,-nan,-nan]` appears already at Newton iteration 1 of the
+     failing call). `source_update_ll` returns `SrcFail` but leaves
+     `Enew`/`Fnew_d` at that NaN-contaminated value (the clean assignment
+     only happens on the success path,
+     `radiation_m1_sources.hpp::source_update_ll`); the caller never checks
+     the returned signal (`radiation_m1_update.cpp`); and the old
+     `apply_floor()` didn't sanitize it either, since it only rescaled `F_d`
+     `if (F2 > lim)` and a NaN comparison is always `false` in IEEE-754, so
+     the NaN passed straight through into the conserved state and spread via
+     the ordinary hyperbolic flux update (~8 more contaminated cells/cycle),
+     eventually corrupting the whole domain. This was a **latent fragility**
+     in the Newton-solver/floor interaction for near-floor states with tiny
+     nonzero flux — never triggered before because every earlier M1 test used
+     an exact `F=0` IC (a trivial fixed point needing zero iterations); the
+     diffusive-flux IC fix above is what first seeds nonzero flux at
+     floor-level cells.
+     **Fix** (`apply_floor()`, `radiation_m1_helpers.hpp`): reset `(E,F_d)` to
+     `(rad_E_floor, 0)` whenever either is non-finite, and zero `F_d`
+     whenever `E` was at or below the floor before clamping — physically
+     correct (no meaningful flux at floor density) and removes the
+     ill-conditioned Newton hunt at its source, not just its symptom.
+     Verified: the full `kappa_s=200` run (`tlim=200`) now completes with no
+     NaNs and exact energy conservation (`integral/integral(0)=1.0` at every
+     output); all four single-zone tests and the `kappa_s=5` diffusion test
+     re-ran clean with unchanged results (no regression).
+   - **Still open, NOT the crash — a genuine accuracy question**: with the
+     crash fixed, `kappa_s=200` now runs to completion but its `sigma²(t)`
+     still spreads ~27-34% faster than `sigma0²+2Dt` predicts, matching the
+     *original* discrepancy that motivated cross-checking against the
+     discrete-ordinate module in the first place (the diffusive-flux IC fix
+     resolved `kappa_s=5` but evidently not this regime). Not yet
+     investigated — possibly a genuine breakdown of strict diffusion-limit
+     validity at this optical depth per cell (`kappa_s*dx≈18.75`, with the
+     pulse width `sigma0` only ~2.5 cells wide), or a separate scheme issue
+     specific to the stiff/implicit branch.
 
 3. **Free-streaming/beam test with photon opacities.** Reuse
    `rad_m1_beams.cpp`/`radiation_m1_beams.cpp` with `opacity_type=photons` and

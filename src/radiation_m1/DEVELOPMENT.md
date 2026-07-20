@@ -36,11 +36,17 @@ is the target application).
   in the source solver against an independently-derived closed-form
   equilibrium (`rad_m1_photon_vx_singlezone`).
 
-**Not yet done** (see "Stage 2 plan" below): anything exercising spatial transport
-(fluxes/closure) together with real photon opacities — diffusion, free-streaming,
-radiation-pressure backreaction — and CI wiring. Kramers/`power_opacity` and the
-EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
-EOSCompOSE Compton — see below).
+**In progress, one open bug**: the optically-thick diffusion test (item 2 below)
+works well at `kappa_s=5` (sub-1% error, cross-validated against the reference
+discrete-ordinate module) after fixing a "zero-flux spin-up transient" IC issue,
+but the *same* corrected IC causes `E` to collapse to the floor everywhere at
+`kappa_s=200` (the stiff/implicit source-solver regime) — a real crash, not yet
+root-caused. See item 2's writeup for the full investigation trail.
+
+**Not yet done** (see "Stage 2 plan" below): free-streaming and
+radiation-pressure-backreaction transport tests, and CI wiring. Kramers/
+`power_opacity` and the EOSCompOSE branch have no dedicated test yet either
+(deprioritized alongside EOSCompOSE Compton — see below).
 
 **Scope decision — IdealGas only, for now:** Compton and the newer single-zone
 tests all target `Primitive::IdealGas`, not `Primitive::EOSCompOSE`. This was an
@@ -205,17 +211,51 @@ Recommended order (cheapest / fewest new mechanisms first):
      `basetype_output.cpp:736-753`).
 
 2. **Optically-thick diffusion test (real opacities, first genuine transport
-   test).** Real-physics analogue of the existing toy-opacity
-   `rad_m1_diffusiontest.cpp` (which prescribes the diffusion coefficient `D`
-   directly via `ToyOpacityModel::Diffusion{Explicit,Implicit}` rather than
-   deriving it from `kappa_a`). Set up a Gaussian (or step) pulse of `E` in a
-   static, uniform, optically thick (`kappa*rho*L >> 1`) medium with
-   `backreact=false`, and check the pulse spreads as
-   `sigma^2(t) = sigma_0^2 + 2*D*t`, `D = 1/(3*abs_1)` (code units, `c=1`) — the
-   standard radiative-diffusion limit, valid once the M1 closure has relaxed to
-   `chi -> 1/3`. Bonus cross-check: run the identical physical setup through the
-   already-validated non-M1 `radiation` (discrete-ordinate) module and confirm
-   the two independently-implemented codes agree on the spreading rate.
+   test) — IN PROGRESS, one open bug found.** Real-physics analogue of the
+   existing toy-opacity `rad_m1_diffusiontest.cpp` (which prescribes `D`
+   directly via `ToyOpacityModel::Diffusion{Explicit,Implicit}`); extended
+   that same pgen (rather than writing a new one) to also support
+   `opacity_type=photons` via a real `<mhd>`+`dyn_grmhd` fluid (guarded by
+   `params.opacity_type`, so the toy path is untouched) — see
+   `rad_m1_photon_diffusion.athinput`, `check_rad_m1_photon_diffusion.py`.
+   Physics setup: `kappa_s>0` alone (`kappa_p=kappa_a=0, compton=false` — the
+   exact configuration already validated by item 1's scattering-only null
+   test, so `abs_1=0` exactly and there's no competing local-relaxation
+   physics), giving pure diffusion `dE/dt=D*d²E/dx²`,
+   `D=1/(3*kappa_s*rho)`. Checked via the E-weighted variance of the
+   `E(x)` profile against `sigma²(t)=sigma0²+2Dt` (`m1_tab_utils.py`'s new
+   `read_profile()`).
+   - **Cross-checked against the reference discrete-ordinate module**
+     (`src/pgen/rad_diffusion.cpp`/`inputs/radiation/rad_diffusion.athinput`,
+     from arXiv:2302.04283, already existing/unmodified in this repo) with
+     matched parameters (`inputs/radiation/rad_diffusion_m1crosscheck.athinput`):
+     it reproduces the analytic diffusion law to ~0.6-1.2%, confirming the
+     target formula is right and isolating the M1 scheme as the source of an
+     initially much larger (3-34%) M1 discrepancy.
+   - **Root cause found (partially fixed)**: the M1 pgen initialized `F_x=0`
+     everywhere, but the reference module's *exact* diffusion-equation
+     solution has a nonzero flux even in the static case
+     (`F(x,0)=-D*dE/dx`, Fick's law — `rad_diffusion.cpp:112-116`). Starting
+     from `F=0` forces a "spin-up" transient (~`1/kscat`) before flux and
+     gradient reach the right relation, contaminating early-time spreading-rate
+     measurements. Fixed by initializing `F_x` from the diffusive relation
+     instead (only in the Gaussian branch, only for the photon path).
+     **Result at `kappa_s=5`** (non-stiff/explicit source-solver branch,
+     `cdt*kscat≈0.19`): error dropped to sub-1% by mid-run (was 3-8% before
+     the fix), consistent with a decaying transient, not a bug — matches the
+     DO module's own precision.
+   - **New bug found, NOT YET ROOT-CAUSED**: at `kappa_s=200` (stiff/implicit
+     source-solver branch, `cdt*kscat≈7.5`) with the *same* corrected IC, `E`
+     collapses to the floor value **everywhere** (including the former peak)
+     by the first output time and total energy vanishes
+     (`integral/integral(0)≈0`) — a real crash, not an accuracy issue. This
+     combination (nonzero-flux IC × stiff/Newton-solver regime) had never
+     been exercised by any prior M1 test (every earlier test used `F=0`
+     ICs). `kappa_s=200` with the *old* `F=0` IC did not crash (just showed
+     the 27-34% accuracy error). Leading suspect: the Hybridsj Newton solver
+     failing to converge (`SrcFail`) or producing NaNs for this flux/energy
+     combination, silently masked by flooring. **Not yet investigated
+     further** — paused here at your request to look at it directly.
 
 3. **Free-streaming/beam test with photon opacities.** Reuse
    `rad_m1_beams.cpp`/`radiation_m1_beams.cpp` with `opacity_type=photons` and

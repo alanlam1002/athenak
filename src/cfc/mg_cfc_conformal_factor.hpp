@@ -119,6 +119,12 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
     Real mg_omega_psi_, psi_floor_;
 
+    // Relative-change convergence check (DEVELOPMENT.md item 20) -- tried, found
+    // no measurable improvement over the base class's defect-norm SolveMG(), and
+    // reverted (see Solve()'s doc comment in the .cpp for the still-present,
+    // commented-out implementation). u_prev_ is unused while that's reverted.
+    // DvceArray5D<Real> u_prev_;
+
     // MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp) aggregates
     // every rank's coarsest per-block cell into the distributed root grid (mgroot_)
     // via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer runs

@@ -112,6 +112,12 @@ class MGCFCLapseDriver : public MultigridDriver {
     // slice of that logic locally rather than touching src/multigrid/. See
     // MGCFCConformalFactorDriver::TransferCoeffToRoot for the full rationale.
     void TransferCoeffToRoot();
+
+    // Relative-change convergence check (DEVELOPMENT.md item 20) -- tried, found
+    // no measurable improvement over the base class's defect-norm SolveMG(), and
+    // reverted (see Solve()'s doc comment in the .cpp for the still-present,
+    // commented-out implementation). u_prev_ is unused while that's reverted.
+    // DvceArray5D<Real> u_prev_;
 };
 
 #endif  // CFC_MG_CFC_LAPSE_HPP_

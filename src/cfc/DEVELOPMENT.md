@@ -2665,3 +2665,93 @@ src/cfc/
       Once built on Sakura: exercise a run with `vacuum` set on an outer mesh face
       and confirm no NaN/inf and no visible kink in `P_i`/`eta`/`psi`/`alpha_psi`
       near that boundary, compared to the previous hard-zero behavior.
+20. **`psi`/`alpha_psi`'s multigrid convergence check switched to relative
+    solution change, not defect norm.** Implemented, then **reverted** (user:
+    no measurable improvement found in practice) -- `Solve()` in both drivers
+    calls the base-class `SolveMG()` again, exactly as before this item. The
+    tried implementation (described in full below) is kept commented out
+    in-place immediately after each `SolveMG(pdriver); Kokkos::fence();` call
+    (`mg_cfc_conformal_factor.cpp`/`mg_cfc_lapse.cpp`), and the `u_prev_`
+    member/its doc comment are commented out in both `.hpp` files, rather than
+    deleted outright, in case the approach is worth revisiting later (e.g. with
+    a different norm or a genuine test case where it matters) -- avoids
+    re-deriving the `Kokkos::parallel_reduce`/`MPI_Allreduce` shape from
+    scratch. The `eps_ = pin->GetOrAddReal(...)` lines in both constructors are
+    back to their original (pre-item-20) wording, since `eps_` is once again
+    only the base class's defect-norm threshold.
+    `MGCFCConformalFactorDriver`/
+    `MGCFCLapseDriver::Solve()` previously called the shared base-class
+    `MultigridDriver::SolveMG()`, which loops V-cycles until the L2 defect/
+    residual norm (`CalculateDefectNorm`) drops below `eps_` (`<cfc>`
+    `mg_threshold`). User request: switch these two solvers specifically to
+    `max_i |u_i - u_old_i| / |u_old_i|` between successive V-cycles instead,
+    evaluated pointwise (with a `+1.0e-30` denominator floor, matching the same
+    idiom already used for the Robin BC's `r_i/(r_g+1.0e-30)`). Physical
+    motivation: `delta_psi = psi - 1` falls off as `~M/r` at large radius (Gmunu
+    eq. 77, `M` the ADM mass), so a pointwise relative-change check directly
+    controls the accuracy of that leading-order coefficient, which a defect-norm
+    threshold doesn't guarantee as tightly. **Scope: only these two nonlinear
+    drivers** -- gravity and `MGCFCVectorPoissonDriver` (`P_i`/`eta`) keep their
+    existing defect-norm convergence check completely unchanged.
+    - **No changes to `src/multigrid/`.** `SolveMG`/`SolveIterative`/
+      `SolveVCycle` (`multigrid_driver.cpp`) are `protected`, non-virtual
+      `MultigridDriver` members (confirmed via `multigrid.hpp`'s access-specifier
+      layout) -- both drivers' `Solve()` now call `SolveVCycle` directly in a
+      self-contained loop, bypassing `SolveMG`/`SolveIterative` entirely, with
+      zero blast radius on gravity or the P_i/eta solver.
+      `Multigrid::GetCurrentData()` (`return u_[current_level_].d_view;`,
+      already a public one-liner) exposes the finest level's raw internal
+      solution array directly -- no need to go through `RetrieveSolution`'s
+      mesh-NGHOST-depth copy-out machinery, since this check only needs the
+      multigrid's own internal representation.
+    - **New storage**: one new `private:` member per driver,
+      `DvceArray5D<Real> u_prev_;` (`mg_cfc_conformal_factor.hpp`/
+      `mg_cfc_lapse.hpp`), lazily (re)sized on first use (handles AMR-triggered
+      resizing automatically, same lazy-realloc idiom
+      `MultigridDriver::SyncMultipoleToDevice()` already uses). Deliberately
+      **not** the base class's own `uold_` (used internally for FMG's
+      coarse-grid-correction bookkeeping across every level, mutated at points
+      not aligned with "start vs. end of one full V-cycle at the finest level" --
+      reusing it would risk interfering with semantics not worth reasoning
+      through in depth for this change; a dedicated new array is trivially safe
+      to reason about instead).
+    - **Loop shape**: mirrors `SolveIterative`'s existing robustness (a
+      `fshowdef_ >= 2`-gated per-iteration log, a 40-iteration cap with the same
+      fatal-error/`pdriver->nlim` truncation behavior on non-convergence) so
+      switching criteria doesn't regress observability or safety. The
+      `Kokkos::parallel_reduce`/`MPI_Allreduce(..., MPI_MAX, ...)` shape mirrors
+      `CFC::InitializeMetric`'s existing `dpsi` convergence check (`cfc.cpp`)
+      exactly, just computing a ratio instead of an absolute difference, over
+      the multigrid's own internal array (channel `v=0` only, `nvar_=1` for
+      both drivers) rather than `delta_psi`/`delta_alpha_psi`'s mesh-shaped
+      storage. No new `#include`s needed (`globals.hpp`/`athena.hpp`, which
+      supply `global_variable::my_rank`/`MPI_ATHENA_REAL`/
+      `MPI_PARALLEL_ENABLED`, were already included in both files).
+    - **Reuses the existing `mg_threshold` `<cfc>` key** (already read into
+      `eps_` in both constructors) rather than adding a new input parameter --
+      same "how tightly converged do you want this solve" semantic label, now
+      measuring relative solution change instead of defect norm for these two
+      drivers specifically (doc comment on the `eps_ = ...` line updated in both
+      constructors to note this; the line itself is otherwise unchanged).
+    - **No shared helper factored out**: the convergence loop is duplicated,
+      nearly verbatim, between `mg_cfc_conformal_factor.cpp` and
+      `mg_cfc_lapse.cpp` -- matches this module's existing precedent (each
+      nonlinear solver already has its own fully independent hand-written
+      Newton-Gauss-Seidel kernels, no shared base beyond `MultigridDriver`
+      itself) rather than introducing a new shared utility file for two ~25-line
+      call sites.
+    - **Verification, no compiler in this sandbox**: `cpplint`-clean (line
+      length, brace balance, checked via `awk`/Python) plus manual re-derivation
+      of the `Kokkos::MDRangePolicy` bounds and the `MPI_Allreduce` reduction
+      shape against the `InitializeMetric` precedent it mirrors; confirmed
+      `SolveVCycle`/`GetCurrentData` are reachable (protected/public
+      respectively) from both driver subclasses via `multigrid.hpp`'s
+      access-specifier layout. **Not yet run against a real build.** Once built
+      on Sakura: rerun `cfc_tov.athinput`/`cfc_stability_v2` and confirm both
+      solvers still converge (no "Failed to converge" messages) within the
+      40-iteration cap; compare the converged `psi`/`alpha_psi` fields against a
+      previous defect-norm-based run (expect small differences from the
+      different stopping criterion, not a qualitative change) and specifically
+      check the near-star region (where the `M/r` coefficient this change
+      targets is best resolved) against the analytic isotropic-TOV profile (the
+      same diagnostic DEVELOPMENT.md item 9 already used).

@@ -312,6 +312,15 @@ MGCFCConformalFactorDriver::~MGCFCConformalFactorDriver() {
 //! \fn void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt)
 //! \brief run the FAS V-cycle solve for delta_psi. Assumes LoadMatterSource()/
 //! LoadNonlinearCoefficient() were already called for this stage.
+//!
+//! A relative-solution-change convergence criterion (max_i |u_i-u_old_i|/|u_old_i|,
+//! bypassing SolveMG/SolveIterative via direct SolveVCycle calls) was tried here in
+//! place of the base class's defect-norm check, motivated by delta_psi's ~M/r
+//! falloff (Gmunu eq. 77) -- see DEVELOPMENT.md item 20. No measurable improvement
+//! was found in practice, so it's reverted to the base-class SolveMG() call below;
+//! the tried implementation is kept commented out immediately after, in case it's
+//! worth revisiting (e.g. with a different norm/threshold) rather than re-deriving
+//! it from scratch.
 
 void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
@@ -320,7 +329,8 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // Item 12: one-time coefficient restriction through the octet hierarchy (a
   // no-op when nreflevel_==0) -- must run after TransferCoeffToRoot has
   // populated each octet level's own Coeff() from its real MeshBlock children,
-  // and before SetupMultigrid()/SolveMG() begins reading Coeff() at every level.
+  // and before SetupMultigrid()/the V-cycle loop below begins reading Coeff() at
+  // every level.
   RestrictCoeffOctets();
 
   SetupMultigrid(dt, false);
@@ -334,6 +344,60 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
   SolveMG(pdriver);
   Kokkos::fence();
+
+  // Reverted relative-change convergence loop (DEVELOPMENT.md item 20) -- kept for
+  // reference in case it's worth revisiting; not currently compiled.
+  // auto u_now = mglevels_->GetCurrentData();
+  // if (u_prev_.extent_int(0) != u_now.extent_int(0) ||
+  //     u_prev_.extent_int(2) != u_now.extent_int(2) ||
+  //     u_prev_.extent_int(3) != u_now.extent_int(3) ||
+  //     u_prev_.extent_int(4) != u_now.extent_int(4)) {
+  //   Kokkos::realloc(u_prev_, u_now.extent_int(0), u_now.extent_int(1),
+  //                   u_now.extent_int(2), u_now.extent_int(3), u_now.extent_int(4));
+  // }
+  // Kokkos::deep_copy(u_prev_, u_now);
+  //
+  // int n = 0;
+  // Real relchange;
+  // do {
+  //   SolveVCycle(pdriver, npresmooth_, npostsmooth_);
+  //   u_now = mglevels_->GetCurrentData();
+  //   auto u_prev = u_prev_;
+  //   relchange = 0.0;
+  //   Kokkos::parallel_reduce("mg_cfc_psi_relchange",
+  //     Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0},
+  //         {u_now.extent_int(0), u_now.extent_int(2), u_now.extent_int(3),
+  //          u_now.extent_int(4)}),
+  //     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+  //                   Real &local_max) {
+  //       Real diff = Kokkos::fabs(u_now(m,0,k,j,i) - u_prev(m,0,k,j,i));
+  //       Real denom = Kokkos::fabs(u_prev(m,0,k,j,i)) + 1.0e-30;
+  //       local_max = Kokkos::fmax(local_max, diff/denom);
+  //     }, Kokkos::Max<Real>(relchange));
+  // #if MPI_PARALLEL_ENABLED
+  //   Real global_relchange = 0.0;
+  //   MPI_Allreduce(&relchange, &global_relchange, 1, MPI_ATHENA_REAL, MPI_MAX,
+  //                 MPI_COMM_WORLD);
+  //   relchange = global_relchange;
+  // #endif
+  //   Kokkos::deep_copy(u_prev_, u_now);
+  //   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
+  //     std::cout << "MG iteration " << n << ": relative change = " << relchange
+  //               << std::endl;
+  //   }
+  //   ++n;
+  //   if (n >= 40) {
+  //     if (global_variable::my_rank == 0) {
+  //       std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::Solve"
+  //                 << std::endl << "Failed to converge after " << n
+  //                 << " iterations (relative change = " << relchange
+  //                 << ", threshold = " << eps_ << ")" << std::endl;
+  //     }
+  //     pdriver->nlim = pmy_mesh_->ncycle;
+  //     break;
+  //   }
+  // } while (relchange > eps_);
+  // Kokkos::fence();
 
   // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s convention
   // (item 2): the caller (cfc::CFC::SolveConformalFactor) calls RetrieveSolution()

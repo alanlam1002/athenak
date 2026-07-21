@@ -22,6 +22,7 @@
 #include "z4c/tmunu.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "z4c/z4c.hpp"
+#include "scalar_field/scalar_field.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "z4c/cce/cce.hpp"
 #include "diffusion/viscosity.hpp"
@@ -57,6 +58,7 @@ MeshBlockPack::~MeshBlockPack() {
   if (pnr    != nullptr) {delete pnr;}
   if (pdyngr != nullptr) {delete pdyngr;}
   if (ptmunu != nullptr) {delete ptmunu;}
+  if (pscalarfield != nullptr) {delete pscalarfield;}
   if (padm   != nullptr) {delete padm;}
   if (pz4c   != nullptr) {
     delete pz4c;
@@ -210,6 +212,22 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     } else {
       padm = nullptr;
     }
+  }
+
+  // (7.5) SCALAR FIELD (massive scalar-tensor gravity sector)
+  // Requires full Z4c evolution, not just a static <adm> background.
+  if (pin->DoesBlockExist("scalarfield")) {
+    if (pz4c == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<scalarfield> block requires a <z4c> block "
+                << "(scalar-tensor gravity needs full Z4c evolution, not a static "
+                << "<adm> background)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    pscalarfield = new scalarfield::ScalarField(this, pin);
+    nphysics++;
+  } else {
+    pscalarfield = nullptr;
   }
 
   // (8) Dynamical Spacetime and Matter (MHD TODO)

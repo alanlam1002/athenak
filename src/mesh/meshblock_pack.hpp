@@ -36,6 +36,7 @@ namespace adm {class ADM;}
 namespace particles {class Particles;}
 namespace units {class Units;}
 namespace gravity {class Gravity;}
+namespace scalarfield {class ScalarField;}
 
 //----------------------------------------------------------------------------------------
 //! \class MeshBlockPack
@@ -68,6 +69,7 @@ class MeshBlockPack {
   adm::ADM *padm=nullptr;
   Tmunu *ptmunu=nullptr;
   z4c::Z4c *pz4c=nullptr;
+  scalarfield::ScalarField *pscalarfield=nullptr;
   dyngr::DynGRMHD *pdyngr=nullptr;
   numrel::NumericalRelativity *pnr=nullptr;
   ion_neutral::IonNeutral *pionn=nullptr;

@@ -151,6 +151,11 @@ add_executable(
         radiation/radiation_tetrad.cpp
         radiation/radiation_update.cpp
 
+        scalar_field/scalar_field.cpp
+        scalar_field/scalar_field_calcrhs.cpp
+        scalar_field/scalar_field_tasks.cpp
+        scalar_field/scalar_field_update.cpp
+
         shearing_box/orbital_advection.cpp
         shearing_box/orbital_advection_cc.cpp
         shearing_box/orbital_advection_fc.cpp

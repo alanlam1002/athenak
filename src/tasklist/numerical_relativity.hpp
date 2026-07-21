@@ -22,6 +22,7 @@
 // Forward declarations
 namespace z4c {class Z4c;}
 namespace dyngr {class DynGRMHD;}
+namespace scalarfield {class ScalarField;}
 class ADM;
 class Tmunu;
 class MeshBlockPack;
@@ -88,13 +89,30 @@ enum TaskName {
   Z4c_FastFlow,
   Z4c_CCE,
   Z4c_DumpHorizon,
-  Z4c_NTASKS
+  Z4c_NTASKS,
+
+  // ScalarField (massive scalar-tensor gravity sector). Phase 0: no back-reaction tasks
+  // yet (RescaleTmunu, ImpRKUpdate, ... to be added in later phases, see
+  // src/scalar_field/DEVELOPMENT_NOTES.md).
+  SF_Recv,
+  SF_CopyU,
+  SF_CalcRHS,
+  SF_ExplRK,
+  SF_RestU,
+  SF_SendU,
+  SF_RecvU,
+  SF_BCS,
+  SF_Prolong,
+  SF_ClearS,
+  SF_ClearR,
+  SF_NTASKS
 };
 
 enum PhysicsDependency {
   Phys_None,
   Phys_MHD,
-  Phys_Z4c
+  Phys_Z4c,
+  Phys_ScalarField
 };
 
 enum TaskLocation {

@@ -303,6 +303,11 @@ class Multigrid {
   // need the finest (or any specific) level's coeff_ array without depending on
   // current_level_'s transient state (which V-cycle progress mutates).
   DualArray5D<Real>& CoeffAtLevel(int lev) { return coeff_[lev]; }
+  // Temporary diagnostic support (see cfc::MGCFCConformalFactorDriver::
+  // DebugReportDefectByLevel, mg_cfc_conformal_factor.cpp) -- mirrors
+  // GetCurrentData()/GetCurrentData_h() exactly, just for def_ instead of u_.
+  auto GetCurrentDefect() { return def_[current_level_].d_view; }
+  auto GetCurrentDefect_h() { return def_[current_level_].h_view; }
   auto GetCurrentData_h() { return u_[current_level_].h_view; }
   auto GetCurrentSource_h() { return src_[current_level_].h_view; }
   auto GetCurrentOldData_h() { return uold_[current_level_].h_view; }

@@ -31,6 +31,9 @@
 //! would corrupt these fields' physical values where RHS(u) needs them pristine (see
 //! mg_cfc_conformal_factor.cpp's file-level comment for the full derivation).
 
+// C++ headers
+#include <string>
+
 // Athenak headers
 #include "../athena.hpp"
 #include "../multigrid/multigrid.hpp"
@@ -134,6 +137,46 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // TransferFromBlocksToRoot's logic locally, restricted to the non-refined
     // (octet-free) case, since AMR+CFC is guarded against in Solve() (see .cpp).
     void TransferCoeffToRoot();
+
+    // Temporary diagnostic (2026-07-20, plan addendum): reports this rank's
+    // worst-converged (max |defect|) cell, split by whether it belongs to a
+    // root-level or a refined MeshBlock, to help root-cause the AMR
+    // refinement-boundary residual-floor issue (DEVELOPMENT.md item 12). Gated
+    // on mg_debug_defect_by_level_ (default false, <cfc> mg_debug_defect_by_level
+    // input) -- meant to be deleted once the root-cause question is answered, not
+    // kept as a permanent feature (see DEVELOPMENT.md's new item for this).
+    bool mg_debug_defect_by_level_;
+    void DebugReportDefectByLevel();
+
+    // Shared worst-cell-finder used by both DebugReportDefectByLevel and
+    // DebugAnalyticResidualTest below -- recomputes def_ at the finest level,
+    // prints this rank's worst |defect| cell split by root/refined (label
+    // prepended to both printed lines), and hands back the worst REFINED cell's
+    // (m,k,j,i,gid) so callers that need it (e.g. the stencil dump) don't have to
+    // redo the search. ref_gid is left at -1 if this rank owns no refined blocks.
+    void DebugReportWorstDefect(const std::string &label, int &ref_m, int &ref_k,
+                                int &ref_j, int &ref_i, int &ref_gid);
+
+    // Temporary diagnostic (2026-07-21): seeds delta_psi at every cell -- including
+    // every ghost cell, at the refinement boundary too -- from the exact analytic
+    // isotropic TOV solution (same tov::TOVStar/PolytropeEOS machinery dyngr_tov.cpp
+    // itself uses), measures the discrete residual with no smoother involved at all,
+    // then replaces just the ghost cells with one real ghost-communication round
+    // (the same FillCoarseBoundary/.../ProlongateFCBoundary sequence the V-cycle's
+    // finest level uses) and measures again. Distinguishes "the ghost-fill machinery
+    // itself introduces a large error at the coarse-fine interface" from "the Newton
+    // relaxation is the problem" -- see DEVELOPMENT.md's entry for this addendum.
+    // Gated on mg_debug_analytic_residual_test_ (default false); PolytropeEOS-only;
+    // to be deleted alongside the rest of this investigation's diagnostics.
+    bool mg_debug_analytic_residual_test_;
+    ParameterInput *pin_;
+    void DebugAnalyticResidualTest();
+
+    // Temporary diagnostic (2026-07-21): confirmation instrumentation for the
+    // "stale coarse_buf_ slot at the high-child transverse edge" hypothesis --
+    // see the .cpp doc comment for the full index trace. Called from
+    // DebugAnalyticResidualTest, not separately gated.
+    void DebugDumpCoarseBuf();
 };
 
 #endif  // CFC_MG_CFC_CONFORMAL_FACTOR_HPP_

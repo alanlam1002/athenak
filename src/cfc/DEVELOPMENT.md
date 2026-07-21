@@ -2755,3 +2755,191 @@ src/cfc/
       check the near-star region (where the `M/r` coefficient this change
       targets is best resolved) against the analytic isotropic-TOV profile (the
       same diagnostic DEVELOPMENT.md item 9 already used).
+
+21. **Temporary diagnostic added to `psi`'s solver to root-cause item 12's
+    AMR refinement-boundary residual floor** (2026-07-20). Not yet resolved --
+    in progress. A user-run investigation (TOV star, low-resolution static-
+    refined corner block, dx=0.8/0.4 and dx=0.4/0.2 variants, both compared
+    against a matching uniform-resolution control) found `psi`'s multigrid
+    solve converges 10-50x worse (defect norm) when a refinement boundary is
+    present than the identical uniform-resolution control, and the field-level
+    `psi4`/`alpha` jump across the coarse/fine interface does not fully resolve
+    even with `mg_npresmooth`/`mg_npostsmooth` raised to 3 -- directly
+    reproducing this item's residual-floor note with concrete field/log
+    evidence, not just the original round's single stalled-defect number.
+    - An extensive read-through of every piece of AMR/octet machinery specific
+      to the nonlinear solvers' `coeff_` handling (`MGOctet` storage,
+      `SmoothOctet`/`CalculateDefectOctet`/`CalculateFASRHSOctet` in both
+      `mg_cfc_conformal_factor.cpp`/`mg_cfc_lapse.cpp`, `TransferCoeffToRoot`'s
+      octet-parented branch, `RestrictCoeffOctets`, the `root_flat_buf_stale_`
+      cache invalidation sites, and the composite-grid FAS relax/restrict
+      sequence in `multigrid_driver.cpp`'s `OneStepToCoarser`/`OneStepToFiner`)
+      found nothing provably wrong -- every piece traced correctly against
+      either a proven shared pattern (gravity's own octet code) or an
+      internally-consistent duplicate of `TransferFromBlocksToRoot`'s existing
+      logic. Leading hypothesis: genuine nonlinear-FAS-at-a-resolution-
+      transition sensitivity (a Newton relaxation's coarse-grid correction
+      isn't exact the way a linear equation's is, unlike gravity/`P_i`/`eta`),
+      not a wiring bug -- but not yet confirmed.
+    - **Added, to distinguish the two**: `Multigrid::GetCurrentDefect()`/
+      `GetCurrentDefect_h()` (`multigrid.hpp`, 2-line pure-additive accessors
+      mirroring the existing `GetCurrentData()`/`GetCurrentData_h()` pair
+      exactly -- zero behavior change for any existing caller) and
+      `MGCFCConformalFactorDriver::DebugReportDefectByLevel()`
+      (`mg_cfc_conformal_factor.{hpp,cpp}`, private, called once at the end of
+      `Solve()`, gated on a new `<cfc>` `mg_debug_defect_by_level` boolean
+      input, default `false`/zero cost). Recomputes `def_` at the finest level
+      (`mglevels_->CalculateDefectPack()`, the same call `CalculateDefectNorm`
+      already makes internally), then reports this rank's own worst |defect|
+      cell and its physical `(x1,x2,x3)` location, split by whether the owning
+      MeshBlock is at the mesh's root level or a refined level (via
+      `pmy_mesh_->lloc_eachmb[gid].level` vs. `locrootlevel_`, the same
+      comparison `TransferCoeffToRoot` already uses). Deliberately no
+      `MPI_Allreduce` -- reports only this rank's local worst cell per
+      category (skipping a category entirely if this rank owns no MeshBlocks
+      of that kind), since the question is *where* the residual concentrates,
+      not a single global number.
+    - **Explicitly temporary**: unlike item 20's reverted-but-kept-commented-out
+      code (which has future value), this diagnostic is meant to be deleted
+      outright once the root-cause question below is answered, not preserved.
+    - **Run (2026-07-20, job 248058, `cfc_tov_amr_ghosttest_v2_debug`)**: the
+      REFINED-block worst cell is *not* diffuse -- it is pinned persistently to
+      the same two octet cells across dozens of solves (`gid=1` at
+      `(6.2,0.6,0.2)`, `gid=4` at `(0.6,0.2,6.2)`), plateauing at `~0.044-0.045`
+      (ticking up slightly, not down) while ROOT-block worst defects are
+      `1e3-1e4`x smaller. This single cell dominates the global L2 defect norm,
+      which is exactly why `mg_verbose` reports `"defect ratio = 1"` (no
+      progress) for dozens of consecutive V-cycles. This reverses the leading
+      hypothesis above: the residual is concentrated right at a specific
+      location, not diffuse FAS sensitivity. Both worst cells sit at the
+      intersection of the coarse/fine interface (the `6.2`-vs-6.4 axis) *and*
+      a reflecting-boundary-adjacent corner (the other two axes are `0.2`/`0.6`,
+      i.e. the octet's own corner nearest a reflecting wall) -- a real,
+      localized defect, still not root-caused to a specific line.
+    - **Code paths checked this pass and NOT the bug** (static reading, no
+      compiler): `InitializeOctets`'s per-axis neighbor classification correctly
+      marks any edge/corner direction touching a non-periodic domain boundary as
+      `{-2,-2}` (physical boundary) before ever considering a coarse-neighbor
+      lookup, so there's no periodic-wrap contamination at these
+      reflecting-adjacent corners. `ApplyPhysicalBoundariesOctet`'s reflect
+      handling uses the correct `sign=+1` (zerograd) for CFC's reflecting faces.
+      `SetOctetBoundaryFromCoarser`/`ProlongateOctetBoundaries` (root->octet u_
+      fill) and `ProlongateFCMG` (the regular per-MeshBlock coarse-fine ghost
+      fill, shared with gravity) are both refreshed every red-black half-sweep,
+      not stale. One real-but-likely-inconsequential quirk found:
+      `ApplyPhysicalBoundariesOctet`'s sequential x1->x2->x3 reflection order can
+      leave stale data in the octet's own *diagonal/corner* ghost cells (x1's
+      pass reads edge-ghost rows before x2's pass has refreshed them this call)
+      -- but the 7-point stencil never reads diagonal ghost cells directly, so
+      this doesn't explain the observed stall by itself.
+    - **Follow-up diagnostic added and run**: `DebugReportDefectByLevel` also
+      dumps, at the single worst REFINED cell only, its own `U`/`Coeff(0)`/
+      `Coeff(1)` and its 6 face-neighbor `U` values. Result: hand-computing the
+      discrete Laplacian from the printed neighbor values (`sum_neighbors -
+      6*U ~ -0.0075`, `/dx^2 ~ -0.047`) against the physical RHS
+      (`2*pi*Utilde/psi ~ -0.0028`, `Ahat^2=0` since this is a static
+      configuration) reproduces the printed defect almost exactly -- so the
+      reported residual is numerically self-consistent, not a diagnostic
+      artifact, and none of the raw neighbor `U` values are anomalous (no
+      NaN/zero/wrong sign; the one place a neighbor exactly equals the cell's
+      own `U` is the *correct* zero-gradient reflecting-BC behavior for a
+      1-cell-wide multigrid ghost, not a bug).
+    - **Decisive follow-up experiment**: temporarily bumped the hardcoded
+      40-iteration `SolveIterative` cap (`multigrid_driver.cpp`, then reverted)
+      to 400 with `mg_verbose=2` (per-iteration defect printing) to test
+      "genuinely stuck" vs. "just needs more iterations." Result: the L2 defect
+      norm (and the worst-REFINED-cell defect) drops for the first ~5
+      iterations, then becomes **bit-for-bit identical for the remaining ~380
+      iterations** (`0.00204167` repeated exactly). This rules out "slow but
+      real convergence" -- Newton-Gauss-Seidel has reached an exact numerical
+      fixed point that is *not* a root of the discrete equation at this cell
+      (the cell's own defect, computed by the same `ConformalFactorRHS`/
+      `ConformalFactorLap` the smoother itself uses, would have to be ~0 if the
+      smoother's own Newton step there were genuinely converged). This is now
+      strong evidence of a real bug -- most likely something that freezes this
+      specific cell's update (or its ghost input) after the first few
+      iterations, rather than a "stiff but working" relaxation.
+    - **Decisive analytic-ghost test (2026-07-21, job 248069,
+      `cfc_tov_amr_analytic_test`)**: added `DebugAnalyticResidualTest()` (same
+      files), gated on `mg_debug_analytic_residual_test`, run *before* `SolveMG`
+      so no smoother iterations occur in either measurement. Seeds `delta_psi`
+      at every cell -- including every ghost cell at the refinement boundary --
+      from the exact analytic isotropic TOV solution
+      (`tov::TOVStar::ConstructTOV`/`PolytropeEOS`, the same machinery
+      `dyngr_tov.cpp` itself uses), measures the residual, then overwrites just
+      the ghost cells with one real ghost-communication round (`FillCoarseBoundary`
+      -> `StartReceive` -> `SendBoundary` -> `RecvBoundary` -> `PhysicalBoundary`
+      -> `ProlongateFCBoundary`, called directly -- the same sequence
+      `SetMGTaskListToFiner`'s flag==2 block uses) and measures again. Result:
+      worst REFINED-block defect goes from `~0.00036` (pure analytic, matching
+      ordinary O(dx^2) truncation error at dx=0.4) to `~0.0028-0.0038` (**~8-10x
+      larger**) after just one ghost-comm round -- with zero smoother
+      involvement in either number. ROOT-block defects barely move (`~1e-7` to
+      `~1e-6` in both cases). The worst point after ghost-comm lands in the same
+      "coarse-fine interface (x1~6.2), small x2/x3" neighborhood the actual
+      stuck Newton solve pins to. **This conclusively shifts the root cause from
+      the nonlinear relaxation to the ghost-communication/coarse-fine
+      prolongation machinery itself** (`FillCoarseMG`/`ProlongateFCMG` in
+      `multigrid_bvals.cpp`, or the ghost depth `ngh_` used there) -- the
+      smoother was never able to converge because it's being fed bad ghost data
+      every iteration, not a nonlinear-solver-specific issue. Not yet narrowed
+      to a specific line within that ghost-fill code -- next step would be
+      comparing, cell by cell, the analytic ghost value against what
+      `ProlongateFCMG`'s flux-conserving formula actually produces there.
+    - **Root cause found and FIXED (2026-07-21, `multigrid_bvals.cpp`,
+      `ProlongateFCMG`)**: `fc_childx_`/`fc_childy_`/`fc_childz_` (each fine
+      MeshBlock's octant parity relative to its refined parent) are computed and
+      loaded at the top of `ProlongateFCMG`'s kernel but were never used in the
+      coarse-face prolongation branches. Traced via `ComputePerLevelIndices`'
+      `compute_recv` `icoar` logic: for a face message, a "low" child (parity
+      bit 0) receives one extra transverse overlap cell on the HIGH edge of its
+      window; a "high" child (parity bit 1) receives it on the LOW edge instead
+      -- the reverse. But the transverse-gradient clamp bounds in all three face
+      branches (`ox1!=0`/`ox2!=0`/`ox3!=0`) were hardcoded to the low-child
+      layout regardless of parity, so high children never read their own valid
+      low-edge overlap cell (using a degraded one-sided difference there
+      instead). Confirmed directly (not just by index arithmetic) with a
+      ghost-vs-analytic dump (`DebugDumpCoarseBuf`, added this session, gated
+      inside `DebugAnalyticResidualTest`): for a high child (`gid=3`,
+      `child_y=1`), the low-edge fine-cell pair showed diffs of `4-5e-4` against
+      the true analytic ghost value, 5-15x the `3-8e-5` seen everywhere else.
+      **First fix attempt made things worse**: narrowing the HIGH bound too
+      (mirroring the low-bound shift) broke a previously-fine high edge --
+      confirmed by the SAME ghost-vs-analytic check moving its error to the
+      other corner (`fi=7,8`, diff `~4e-4`) after that attempt. The high edge
+      apparently already reads something usable regardless of child parity
+      (likely `FillCoarseMG`'s own leftover self-restriction at that exact
+      slot, which is close enough given how smooth the field is) and must not
+      be clamped away. **Final fix**: only the LOW bound is now child-parity-
+      dependent (`ngh_l-1` for a high child in that axis, else `ngh_l`
+      unchanged); the HIGH bound is left unconditionally at `ngh_l+half` in all
+      three branches, matching the original code. Verified via the same
+      ghost-vs-analytic dump: both edges now show uniformly small errors
+      (`~3e-5` to `1e-4`) for high children on both the `+x1` and `+x2`
+      directions. The analytic-test worst-REFINED-defect (after one ghost-comm
+      round, no smoother) dropped from `~0.0028-0.0038` to `~0.0009` -- close to
+      the `~0.00036` pure-truncation baseline.
+    - **This fix is real and confirmed, but does NOT explain the REAL solve's
+      non-convergence** -- rerunning the actual iterated solve
+      (`cfc_tov_amr_fix_verify_realsolve`) still shows "Failed to converge"
+      every stage, defect stuck at `~0.0022` (essentially unchanged from
+      `~0.00204` before the fix). The worst-defect location/value from
+      `DebugReportDefectByLevel` is *also* unchanged: still exactly `gid=1`
+      (a LOW child, `child_y=0,child_z=0`) at `(6.2,0.6,0.2)`, same stencil
+      values to 4-5 significant figures as every prior run, before or after
+      this fix. This makes sense in hindsight: low children's clamp bounds were
+      never touched by the fix (they already matched the confirmed-valid
+      window), so nothing about their ghost fill could have changed. Directly
+      checked with the SAME ghost-vs-analytic dump, extended to cover low
+      children too: `gid=1`'s own `+x1` ghost fill is uniformly accurate
+      (`~1-1.4e-4` diff, no outlier) both before and after the fix -- so the
+      stuck residual at `gid=1` is **not** a bad ghost value at all. The actual
+      cause of the low-child plateau (and hence of the real solve's
+      non-convergence) is still open -- candidates not yet checked: the
+      Newton-Gauss-Seidel smoother itself at this specific cell, the RHS/coeff_
+      values it reads, or a different piece of the multigrid machinery (e.g.
+      octet-level code in `multigrid_driver.cpp`, though that shouldn't be in
+      play for a plain MeshBlock-to-MeshBlock coarse-fine pair at `nreflevel_=1`
+      as used here). The `ProlongateFCMG` fix should be kept regardless (it is
+      a genuine, verified correctness improvement for high children), but the
+      investigation is not finished.

@@ -1219,16 +1219,32 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int si  = (ox1 < 0) ? ngh_l - 1 : ngh_l + half;
                     int sj0 = ngh_l;
                     int sk0 = ngh_l;
+                    // Low-edge valid-read bound depends on which half of the coarse
+                    // neighbor's face this child actually received (compute_recv's icoar
+                    // block, ComputePerLevelIndices): a "high" child (fc_childy_/
+                    // fc_childz_ == 1) receives one extra overlap cell on the LOW side
+                    // that the original fixed (ngh_l) bound never read, degrading the
+                    // gradient at that edge to a wasted one-sided difference. The high
+                    // bound is deliberately left unconditional (always ngh_l+half): an
+                    // earlier attempt that also narrowed it for high children (mirroring
+                    // the low-edge fix) made things WORSE there -- confirmed by direct
+                    // ghost-vs-analytic comparison -- so whatever cbuf holds one past the
+                    // nominal high edge is apparently still useful and must not be
+                    // clamped away. Only the low edge was ever actually wasted.
+                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
+                    int y_hi = ngh_l + half;
+                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
+                    int z_hi = ngh_l + half;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sk = sk0; sk < sk0 + half; ++sk) {
                         for (int sj = sj0; sj < sj0 + half; ++sj) {
                           int fj = ngh_l + 2*(sj - sj0);
                           int fk = ngh_l + 2*(sk - sk0);
                           Real cc = cbuf(m,v,sk,sj,si);
-                          int sjm = (sj > ngh_l) ? sj-1 : sj;
-                          int sjp = (sj < ngh_l+half) ? sj+1 : sj;
-                          int skm = (sk > ngh_l) ? sk-1 : sk;
-                          int skp = (sk < ngh_l+half) ? sk+1 : sk;
+                          int sjm = (sj > y_lo) ? sj-1 : sj;
+                          int sjp = (sj < y_hi) ? sj+1 : sj;
+                          int skm = (sk > z_lo) ? sk-1 : sk;
+                          int skp = (sk < z_hi) ? sk+1 : sk;
                           Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
                           Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
                           u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
@@ -1244,16 +1260,23 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int sj  = (ox2 < 0) ? ngh_l - 1 : ngh_l + half;
                     int si0 = ngh_l;
                     int sk0 = ngh_l;
+                    // See the ox1!=0 branch above for why the low bound depends on child
+                    // parity (fc_childx_/fc_childz_ here, since x,z are transverse to y)
+                    // while the high bound stays unconditional.
+                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
+                    int x_hi = ngh_l + half;
+                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
+                    int z_hi = ngh_l + half;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sk = sk0; sk < sk0 + half; ++sk) {
                         for (int si = si0; si < si0 + half; ++si) {
                           int fi = ngh_l + 2*(si - si0);
                           int fk = ngh_l + 2*(sk - sk0);
                           Real cc = cbuf(m,v,sk,sj,si);
-                          int sim = (si > ngh_l) ? si-1 : si;
-                          int sip = (si < ngh_l+half) ? si+1 : si;
-                          int skm = (sk > ngh_l) ? sk-1 : sk;
-                          int skp = (sk < ngh_l+half) ? sk+1 : sk;
+                          int sim = (si > x_lo) ? si-1 : si;
+                          int sip = (si < x_hi) ? si+1 : si;
+                          int skm = (sk > z_lo) ? sk-1 : sk;
+                          int skp = (sk < z_hi) ? sk+1 : sk;
                           Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
                           Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
                           u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
@@ -1269,16 +1292,23 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int sk  = (ox3 < 0) ? ngh_l - 1 : ngh_l + half;
                     int si0 = ngh_l;
                     int sj0 = ngh_l;
+                    // See the ox1!=0 branch above for why the low bound depends on child
+                    // parity (fc_childx_/fc_childy_ here, since x,y are transverse to z)
+                    // while the high bound stays unconditional.
+                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
+                    int x_hi = ngh_l + half;
+                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
+                    int y_hi = ngh_l + half;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sj = sj0; sj < sj0 + half; ++sj) {
                         for (int si = si0; si < si0 + half; ++si) {
                           int fi = ngh_l + 2*(si - si0);
                           int fj = ngh_l + 2*(sj - sj0);
                           Real cc = cbuf(m,v,sk,sj,si);
-                          int sim = (si > ngh_l) ? si-1 : si;
-                          int sip = (si < ngh_l+half) ? si+1 : si;
-                          int sjm = (sj > ngh_l) ? sj-1 : sj;
-                          int sjp = (sj < ngh_l+half) ? sj+1 : sj;
+                          int sim = (si > x_lo) ? si-1 : si;
+                          int sip = (si < x_hi) ? si+1 : si;
+                          int sjm = (sj > y_lo) ? sj-1 : sj;
+                          int sjp = (sj < y_hi) ? sj+1 : sj;
                           Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
                           Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
                           u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));

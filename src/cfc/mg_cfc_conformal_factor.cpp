@@ -47,9 +47,13 @@
 
 #include "athena.hpp"
 #include "globals.hpp"
+#include "coordinates/cell_locations.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/nghbr_index.hpp"
 #include "parameter_input.hpp"
 #include "multigrid/multigrid.hpp"
+#include "utils/tov/tov.hpp"
+#include "utils/tov/tov_polytrope.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 
 namespace {
@@ -224,6 +228,17 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
+  // Temporary diagnostic (2026-07-20, plan addendum) -- see DebugReportDefectByLevel's
+  // doc comment below. Default false, zero cost/behavior change when left off.
+  mg_debug_defect_by_level_ = pin->GetOrAddBoolean("cfc", "mg_debug_defect_by_level",
+                                                    false);
+  // Temporary diagnostic (2026-07-21) -- see DebugAnalyticResidualTest's doc
+  // comment. Default false, zero cost/behavior change when left off. pin_ is
+  // stashed only so this diagnostic can (re)construct the analytic TOV solution
+  // on demand; nothing else in this class needs to keep pin around.
+  mg_debug_analytic_residual_test_ = pin->GetOrAddBoolean(
+      "cfc", "mg_debug_analytic_residual_test", false);
+  pin_ = pin;
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin:
   // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a purely local
@@ -342,8 +357,24 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // producing an inf/NaN internally every call. Skipped entirely rather than left in
   // as unused-but-still-computed.
 
+  // Temporary diagnostic (2026-07-21) -- runs BEFORE SolveMG so no smoother
+  // iterations occur in either of its two measurements. See DebugAnalyticResidualTest's
+  // doc comment (mg_cfc_conformal_factor.hpp). The real solve below still proceeds
+  // afterward so the run continues normally.
+  if (mg_debug_analytic_residual_test_) {
+    DebugAnalyticResidualTest();
+  }
+
   SolveMG(pdriver);
   Kokkos::fence();
+
+  // Temporary diagnostic (2026-07-20, plan addendum) -- see DebugReportDefectByLevel's
+  // doc comment. Runs regardless of whether SolveMG converged or hit its cap: this is
+  // a post-mortem report on wherever the V-cycle actually landed, not a convergence
+  // criterion itself.
+  if (mg_debug_defect_by_level_) {
+    DebugReportDefectByLevel();
+  }
 
   // Reverted relative-change convergence loop (DEVELOPMENT.md item 20) -- kept for
   // reference in case it's worth revisiting; not currently compiled.
@@ -565,6 +596,383 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   // identical treatment applied to itself.
   mgc_root->RestrictCoefficients();
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugReportDefectByLevel()
+//! \brief Temporary diagnostic (2026-07-20, plan addendum): reports this rank's
+//! worst |defect| cell at the finest per-block level, split by whether it belongs
+//! to a root-level (unrefined) or a refined MeshBlock -- meant to show whether the
+//! AMR refinement-boundary residual-floor issue (DEVELOPMENT.md item 12) is
+//! localized right at the coarse/fine interface (supports a real, still-unspotted
+//! bug) or spread through the refined patch regardless of distance from the
+//! boundary (supports the leading nonlinear-FAS-sensitivity explanation). Reports
+//! only THIS rank's local worst cell in each category -- no MPI_Allreduce -- since
+//! this is a one-shot diagnostic, not a convergence criterion, and the whole point
+//! is to see which physical region the worst cell sits in, not a single global
+//! number. A category is skipped (no line printed) if this rank owns no
+//! MeshBlocks of that kind. To be deleted once the root-cause question this
+//! exists to answer is settled (see DEVELOPMENT.md's entry for this addendum).
+
+void MGCFCConformalFactorDriver::DebugReportDefectByLevel() {
+  int ref_m, ref_k, ref_j, ref_i, ref_gid;
+  DebugReportWorstDefect("", ref_m, ref_k, ref_j, ref_i, ref_gid);
+
+  if (ref_gid >= 0) {
+    // Follow-up (2026-07-20, same addendum): dump the actual stencil inputs at
+    // the worst refined-block cell -- its own U/Coeff and its 6 face-neighbor U
+    // values -- so a numeric inconsistency (e.g. a neighbor U that doesn't match
+    // what the coarse block should be feeding in) can be spotted directly,
+    // rather than inferred from further source reading. Uses the same
+    // GetCurrentData()/CoeffAtLevel() accessors DebugReportWorstDefect already
+    // relies on; also temporary, to be deleted alongside the rest of this
+    // diagnostic once the root cause is settled.
+    auto u_d = mglevels_->GetCurrentData();
+    auto u_h = Kokkos::create_mirror_view(u_d);
+    Kokkos::deep_copy(u_h, u_d);
+    auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+    auto coeff_h = Kokkos::create_mirror_view(cm.d_view);
+    Kokkos::deep_copy(coeff_h, cm.d_view);
+
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: stencil at "
+              << "worst REFINED cell (gid=" << ref_gid << ", m=" << ref_m
+              << ", k=" << ref_k << ", j=" << ref_j << ", i=" << ref_i << "):"
+              << " U=" << u_h(ref_m, 0, ref_k, ref_j, ref_i)
+              << " Coeff0(Utilde)=" << coeff_h(ref_m, 0, ref_k, ref_j, ref_i)
+              << " Coeff1(Ahat2)=" << coeff_h(ref_m, 1, ref_k, ref_j, ref_i)
+              << " U(i-1)=" << u_h(ref_m, 0, ref_k, ref_j, ref_i-1)
+              << " U(i+1)=" << u_h(ref_m, 0, ref_k, ref_j, ref_i+1)
+              << " U(j-1)=" << u_h(ref_m, 0, ref_k, ref_j-1, ref_i)
+              << " U(j+1)=" << u_h(ref_m, 0, ref_k, ref_j+1, ref_i)
+              << " U(k-1)=" << u_h(ref_m, 0, ref_k-1, ref_j, ref_i)
+              << " U(k+1)=" << u_h(ref_m, 0, ref_k+1, ref_j, ref_i)
+              << std::endl;
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugReportWorstDefect(...)
+//! \brief Shared worst-cell-finder factored out of DebugReportDefectByLevel so
+//! DebugAnalyticResidualTest (below) can reuse it without duplicating the
+//! root/refined classification loop. See mg_cfc_conformal_factor.hpp's doc comment.
+
+void MGCFCConformalFactorDriver::DebugReportWorstDefect(const std::string &label,
+                                                         int &ref_m, int &ref_k,
+                                                         int &ref_j, int &ref_i,
+                                                         int &ref_gid) {
+  mglevels_->CalculateDefectPack();
+  auto def_d = mglevels_->GetCurrentDefect();
+  auto def_h = Kokkos::create_mirror_view(def_d);
+  Kokkos::deep_copy(def_h, def_d);
+
+  int ngh = mglevels_->GetGhostCells();
+  int ncx = def_h.extent_int(4), ncy = def_h.extent_int(3), ncz = def_h.extent_int(2);
+  int is = ngh, ie = ncx - ngh - 1;
+  int js = ngh, je = ncy - ngh - 1;
+  int ks = ngh, ke = ncz - ngh - 1;
+  int nx1 = ie - is + 1, nx2 = je - js + 1, nx3 = ke - ks + 1;
+  int nmb = pmy_pack_->nmb_thispack;
+
+  auto &size = pmy_pack_->pmb->mb_size;
+  auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+  const auto loc = pmy_mesh_->lloc_eachmb;
+
+  Real root_max = 0.0, ref_max = 0.0;
+  int root_gid = -1;
+  Real root_x1 = 0.0, root_x2 = 0.0, root_x3 = 0.0;
+  Real ref_x1 = 0.0, ref_x2 = 0.0, ref_x3 = 0.0;
+  ref_gid = -1;
+  ref_m = ref_i = ref_j = ref_k = -1;
+
+  for (int m = 0; m < nmb; ++m) {
+    int gid = gid_h(m);
+    bool refined = (loc[gid].level > locrootlevel_);
+    for (int k = ks; k <= ke; ++k) {
+      for (int j = js; j <= je; ++j) {
+        for (int i = is; i <= ie; ++i) {
+          Real val = Kokkos::fabs(def_h(m, 0, k, j, i));
+          Real &cur_max = refined ? ref_max : root_max;
+          if (val > cur_max) {
+            cur_max = val;
+            Real x1v = CellCenterX(i-is, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+            Real x2v = CellCenterX(j-js, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+            Real x3v = CellCenterX(k-ks, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+            if (refined) {
+              ref_gid = gid; ref_x1 = x1v; ref_x2 = x2v; ref_x3 = x3v;
+              ref_m = m; ref_i = i; ref_j = j; ref_k = k;
+            } else {
+              root_gid = gid; root_x1 = x1v; root_x2 = x2v; root_x3 = x3v;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (root_gid >= 0) {
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: " << label
+              << "worst |defect| on ROOT blocks    = " << root_max << " at gid="
+              << root_gid << " (x1,x2,x3)=(" << root_x1 << "," << root_x2 << ","
+              << root_x3 << ")" << std::endl;
+  }
+  if (ref_gid >= 0) {
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: " << label
+              << "worst |defect| on REFINED blocks = " << ref_max << " at gid="
+              << ref_gid << " (x1,x2,x3)=(" << ref_x1 << "," << ref_x2 << ","
+              << ref_x3 << ")" << std::endl;
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugAnalyticResidualTest()
+//! \brief Temporary diagnostic (2026-07-21) -- see mg_cfc_conformal_factor.hpp's doc
+//! comment for the full rationale. Seeds delta_psi = psi_analytic - 1 at every cell
+//! of the finest per-block level, including every ghost cell (evaluated at that
+//! ghost cell's own physical position, not communicated from anywhere), measures the
+//! residual with CalculateDefectPack (no smoother involved at all), then overwrites
+//! just the ghost cells with one real ghost-communication round and measures again.
+
+void MGCFCConformalFactorDriver::DebugAnalyticResidualTest() {
+  tov::PolytropeEOS eos(pin_);
+  tov::TOVStar tov_star = tov::TOVStar::ConstructTOV(pin_, eos, false);
+
+  auto u_d = mglevels_->GetCurrentData();
+  auto u_h = Kokkos::create_mirror_view(u_d);
+  Kokkos::deep_copy(u_h, u_d);
+
+  int ngh = mglevels_->GetGhostCells();
+  int ncx = u_h.extent_int(4), ncy = u_h.extent_int(3), ncz = u_h.extent_int(2);
+  int is = ngh, ie = ncx - ngh - 1;
+  int js = ngh, je = ncy - ngh - 1;
+  int ks = ngh, ke = ncz - ngh - 1;
+  int nx1 = ie - is + 1, nx2 = je - js + 1, nx3 = ke - ks + 1;
+  int nmb = pmy_pack_->nmb_thispack;
+  auto &size = pmy_pack_->pmb->mb_size;
+
+  // Seed EVERY cell (0..ncx/y/z-1, i.e. interior AND every ghost depth), evaluating
+  // the analytic solution at that cell's own physical position -- CellCenterX is
+  // linear in the cell index, so passing i-is for i outside [is,ie] correctly
+  // extrapolates into the ghost region rather than needing special-casing.
+  for (int m = 0; m < nmb; ++m) {
+    for (int k = 0; k < ncz; ++k) {
+      Real x3v = CellCenterX(k-ks, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+      for (int j = 0; j < ncy; ++j) {
+        Real x2v = CellCenterX(j-js, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+        for (int i = 0; i < ncx; ++i) {
+          Real x1v = CellCenterX(i-is, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+          Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+          Real rho, p, mass, alp;
+          tov_star.GetPrimitivesAtIsoPoint(eos, r, rho, p, mass, alp);
+          Real psi = 1.0;
+          if (r > 0.0) {
+            Real r_schw = tov_star.FindSchwarzschildR(r, mass);
+            psi = std::sqrt(r_schw / r);
+          }
+          u_h(m, 0, k, j, i) = psi - 1.0;
+        }
+      }
+    }
+  }
+  Kokkos::deep_copy(u_d, u_h);
+
+  int m0, k0, j0, i0, g0;
+  DebugReportWorstDefect("analytic test, ANALYTIC ghosts (no comm, no smoother): ",
+                         m0, k0, j0, i0, g0);
+
+  // One real ghost-communication round, bypassing the smoother entirely -- mirrors
+  // SetMGTaskListToFiner's flag==2 "final boundary exchange" block (multigrid_tasks.
+  // cpp) exactly, called directly instead of through the task-list machinery since
+  // this is a one-shot diagnostic, not part of a real V-cycle. ClearSend/ClearRecv at
+  // the end leave MPI state clean for the real SolveMG() call that follows this in
+  // Solve().
+  pmg = mglevels_;
+  FillCoarseBoundary(nullptr, 0);
+  StartReceive(nullptr, 0);
+  SendBoundary(nullptr, 0);
+  while (RecvBoundary(nullptr, 0) == TaskStatus::incomplete) {}
+  PhysicalBoundary(nullptr, 0);
+  ProlongateFCBoundary(nullptr, 0);
+
+  // Confirmation instrumentation (2026-07-21): before touching MPI state, dump
+  // coarse_buf_'s raw content for the specific transverse edge the diagnosis
+  // above flags as suspect (see DebugDumpCoarseBuf's own doc comment).
+  DebugDumpCoarseBuf();
+
+  ClearSend(nullptr, 0);
+  ClearRecv(nullptr, 0);
+
+  DebugReportWorstDefect("analytic test, AFTER one MG ghost-comm round: ",
+                         m0, k0, j0, i0, g0);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugDumpCoarseBuf()
+//! \brief Temporary diagnostic (2026-07-21): confirmation instrumentation for the
+//! hypothesis that ProlongateFCMG's coarse-face transverse gradient (multigrid_bvals.
+//! cpp) reads a STALE, self-restricted coarse_buf_ slot instead of the true coarse-
+//! neighbor value, specifically for "high" children (fc_childy_/fc_childz_ == 1) at
+//! the far transverse edge of their received window. Index trace: for a +x1 coarse
+//! face neighbor, ComputePerLevelIndices' compute_recv icoar block gives the received
+//! transverse (j) window as [ngh_l-1, ngh_l+half-1] for a high child (f1==1) -- NOT
+//! including ngh_l+half. But ProlongateFCMG's sjp clamp (`sj < ngh_l+half ? sj+1 :
+//! sj`) reads exactly cbuf(...,ngh_l+half,...) at the last loop iteration (sj =
+//! ngh_l+half-1) regardless of child parity. That slot was last written by
+//! FillCoarseMG's own face-restriction of THIS block's own data (used when this block
+//! supplies a same/finer neighbor), never overwritten by the coarse neighbor's real
+//! data for a high child. This function dumps cbuf's full transverse row at the
+//! coarse-facing index for every high-child block with a real coarser +x1 neighbor,
+//! alongside what FillCoarseMG's own self-restriction formula would give at each
+//! slot, so the "stale self-value" claim can be checked by eye rather than asserted.
+//! To be deleted alongside the rest of this investigation's diagnostics.
+
+void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
+  auto *pbval = mglevels_->pbval;
+  auto cbuf_d = pbval->coarse_buf_;
+  auto cbuf_h = Kokkos::create_mirror_view(cbuf_d);
+  Kokkos::deep_copy(cbuf_h, cbuf_d);
+
+  auto u_d = mglevels_->GetCurrentData();
+  auto u_h = Kokkos::create_mirror_view(u_d);
+  Kokkos::deep_copy(u_h, u_d);
+
+  int ngh_l = mglevels_->GetGhostCells();
+  int shift = mglevels_->GetLevelShift();
+  int ncells_l = mglevels_->GetSize() >> shift;
+  int half = ncells_l / 2;
+
+  int nmb = pmy_pack_->nmb_thispack;
+  auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+  const auto loc = pmy_mesh_->lloc_eachmb;
+  auto &nghbr_h = pmy_pack_->pmb->nghbr;
+  auto &mblev_h = pmy_pack_->pmb->mb_lev;
+  int nnghbr = pmy_pack_->pmb->nnghbr;
+
+  for (int m = 0; m < nmb; ++m) {
+    int gid = gid_h(m);
+    if (loc[gid].level <= locrootlevel_) continue;  // only refined blocks
+    int child_x = static_cast<int>(loc[gid].lx1) & 1;
+    int child_y = static_cast<int>(loc[gid].lx2) & 1;
+    int child_z = static_cast<int>(loc[gid].lx3) & 1;
+    // Follow-up (2026-07-21, after the clamp-bound fix): the fix left low
+    // children (child_y==0 && child_z==0) untouched, and the REAL iterated solve's
+    // worst defect is STILL pinned at a low child (gid=1/gid=4), unchanged by the
+    // fix -- so check low children's ghost fill too, not just high ones, to see
+    // if a separate bug is hiding there.
+
+    // A fine block's single coarser neighbor is registered at slot
+    // NeighborIndex(n,0,0,myfx2,myfx3) -- using THIS block's own child parity as
+    // the subface index -- not (0,0) (meshblock.cpp::SetNeighbors, "neighbor at
+    // coarser level" branches). Corrected after the first dump run found nothing.
+    int n = NeighborIndex(1, 0, 0, child_y, child_z);
+    if (n < 0 || n >= nnghbr) continue;
+    if (nghbr_h.h_view(m, n).gid < 0) continue;
+    int nlev = nghbr_h.h_view(m, n).lev;
+    if (nlev >= mblev_h.h_view(m)) continue;  // only if +x1 neighbor is actually coarser
+
+    int si = ngh_l + half;
+    int sk = ngh_l;
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: coarse_buf_ "
+              << "dump gid=" << gid << " (child_y=" << child_y << ",child_z=" << child_z
+              << ") +x1 coarser neighbor, si=" << si << " sk=" << sk << ":";
+    for (int sj = ngh_l - 1; sj <= ngh_l + half; ++sj) {
+      std::cout << " cbuf[sj=" << sj << "]=" << cbuf_h(m, 0, sk, sj, si);
+    }
+    std::cout << std::endl;
+
+    // Self-restriction comparison: FillCoarseMG's own face-average formula (this
+    // block's OWN u, not the neighbor's), evaluated at the same (sk, sj, si) slots
+    // it would have written before RecvAndUnpackMG ran. Only defined for sj in
+    // [ngh_l, ngh_l+half-1] (FillCoarseMG's own valid ci=ngh_l+half range) -- the
+    // hypothesis is that cbuf[sj=ngh_l+half-1]'s neighbor read (sjp) at ngh_l+half
+    // does NOT correspond to any valid self-restriction slot at all (out of range),
+    // so this loop only covers the slots FillCoarseMG could have written, for context.
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: self-restrict "
+              << "gid=" << gid << " (this block's own +x1 face average) fi="
+              << (ngh_l + ncells_l - 1) << ":";
+    int fi = ngh_l + ncells_l - 1;
+    for (int sj = ngh_l; sj <= ngh_l + half; ++sj) {
+      int fj = ngh_l + 2*(sj - ngh_l);
+      int fk = ngh_l;  // sk = ngh_l fixed above -> c1 = 0 -> fk = ngh_l
+      if (fj+1 >= u_h.extent_int(3) || fk+1 >= u_h.extent_int(2)) {
+        std::cout << " self[sj=" << sj << "]=<out-of-range>";
+        continue;
+      }
+      Real self_val = 0.25*(u_h(m,0,fk,  fj,  fi) + u_h(m,0,fk,  fj+1,fi) +
+                             u_h(m,0,fk+1,fj,  fi) + u_h(m,0,fk+1,fj+1,fi));
+      std::cout << " self[sj=" << sj << "]=" << self_val;
+    }
+    std::cout << std::endl;
+
+    // Direct ghost-vs-analytic comparison (2026-07-21, same confirmation pass):
+    // u_h was mirrored from GetCurrentData() at the TOP of this function, which
+    // runs AFTER ProlongateFCBoundary already filled the +x1 ghost cells -- so
+    // u_h(m,0,fk,fj,fig) below is the ACTUAL post-prolongation ghost value. Compare
+    // it, per fine cell, against the true analytic psi-1 at that cell's own
+    // physical position (same tov_star evaluator the seeding loop used). If the
+    // error is concentrated at fj=ngh_l+ncells_l-2, ngh_l+ncells_l-1 (the last pair,
+    // fed by the suspect sjp=ngh_l+half read) while the other 6 fine cells (fed by
+    // the confirmed-valid sj=0..half-1 window) are accurate, that pins the fault on
+    // that one read, regardless of what cbuf[sj=ngh_l+half] actually contains.
+    int fig = ngh_l + ncells_l;
+    tov::PolytropeEOS eos2(pin_);
+    tov::TOVStar tov_star2 = tov::TOVStar::ConstructTOV(pin_, eos2, false);
+    auto &size = pmy_pack_->pmb->mb_size;
+    int ncx = u_h.extent_int(4), ncy = u_h.extent_int(3), ncz = u_h.extent_int(2);
+    int is = ngh_l, ie = ncx - ngh_l - 1, js = ngh_l, je = ncy - ngh_l - 1;
+    int ks = ngh_l, ke = ncz - ngh_l - 1;
+    int nx1 = ie - is + 1, nx2 = je - js + 1, nx3 = ke - ks + 1;
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: ghost-vs-"
+              << "analytic gid=" << gid << " fig=" << fig << ":";
+    for (int fk = ngh_l; fk <= ngh_l + 1; ++fk) {
+      Real x3v = CellCenterX(fk-ks, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+      for (int fj = ngh_l; fj <= ngh_l + ncells_l - 1; ++fj) {
+        Real x1v = CellCenterX(fig-is, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+        Real x2v = CellCenterX(fj-js, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+        Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+        Real rho, p, mass, alp;
+        tov_star2.GetPrimitivesAtIsoPoint(eos2, r, rho, p, mass, alp);
+        Real r_schw = tov_star2.FindSchwarzschildR(r, mass);
+        Real analytic = std::sqrt(r_schw / r) - 1.0;
+        Real actual = u_h(m, 0, fk, fj, fig);
+        std::cout << " [fk=" << fk << ",fj=" << fj << "] actual=" << actual
+                  << " analytic=" << analytic << " diff=" << (actual-analytic);
+      }
+    }
+    std::cout << std::endl;
+
+    // Follow-up (2026-07-21, after the ProlongateFCMG fix): this child may ALSO
+    // border a coarser neighbor in +x2 (it's a corner child of the refined patch,
+    // touching the unrefined region in more than one direction) -- check that
+    // ghost fill too, since the new worst-defect location after the fix moved to
+    // (x1,x2,x3)=(6.2,6.2,0.2)-like points, suggesting the OTHER interface, not a
+    // regression in this one.
+    int n2 = NeighborIndex(0, 1, 0, child_x, child_z);
+    if (n2 >= 0 && n2 < nnghbr && nghbr_h.h_view(m, n2).gid >= 0 &&
+        nghbr_h.h_view(m, n2).lev < mblev_h.h_view(m)) {
+      int fjg = ngh_l + ncells_l;
+      std::cout << "CFC debug [rank " << global_variable::my_rank << "]: ghost-vs-"
+                << "analytic gid=" << gid << " (+x2 neighbor) fjg=" << fjg << ":";
+      for (int fk = ngh_l; fk <= ngh_l + 1; ++fk) {
+        Real x3v = CellCenterX(fk-ks, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+        for (int fi = ngh_l; fi <= ngh_l + ncells_l - 1; ++fi) {
+          Real x1v = CellCenterX(fi-is, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+          Real x2v = CellCenterX(fjg-js, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+          Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+          Real rho, p, mass, alp;
+          tov_star2.GetPrimitivesAtIsoPoint(eos2, r, rho, p, mass, alp);
+          Real r_schw = tov_star2.FindSchwarzschildR(r, mass);
+          Real analytic = std::sqrt(r_schw / r) - 1.0;
+          Real actual = u_h(m, 0, fk, fjg, fi);
+          std::cout << " [fk=" << fk << ",fi=" << fi << "] actual=" << actual
+                    << " analytic=" << analytic << " diff=" << (actual-analytic);
+        }
+      }
+      std::cout << std::endl;
+    }
+  }
 }
 
 // Item 12: octet-scale Newton-Gauss-Seidel smoothing, exactly the same math as

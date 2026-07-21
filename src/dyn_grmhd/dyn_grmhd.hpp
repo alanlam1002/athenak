@@ -94,6 +94,17 @@ class DynGRMHD {
   virtual void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                              const Real dt, DvceArray5D<Real> &u0, int nghost) = 0;
 
+  // dyn_grmhd_newdt.cpp: replaces mhd::MHD::NewTimeStep (which hardcodes the speed of
+  // light, max_dv=1, for any is_dynamical_relativistic_ run) with a timestep based on
+  // the actual GR fast magnetosonic speed -- computed via this module's own
+  // primitive-solver EOS (PrimitiveSolverHydro::GetGRFastMagnetosonicSpeeds, not the
+  // ideal-gas-only EquationOfState used by plain mhd/hydro) and the current dynamical
+  // ADM metric (padm->adm, pointwise -- not a fixed analytic background the way
+  // PR #698's is_general_relativistic_/gr_dt path uses ComputeMetricAndInverse for a
+  // static Kerr-Schild spacetime). Gated on gr_dt (below): false (default) preserves
+  // the old, maximally conservative max_dv=1 behavior.
+  virtual TaskStatus NewTimeStep(Driver *pdrive, int stage) = 0;
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;
@@ -110,6 +121,10 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
+  // <time>/gr_dt (default false): opt-in to the real GR fast-magnetosonic-speed
+  // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
+  // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.
+  bool gr_dt;
 };
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -140,6 +155,9 @@ class DynGRMHDPS : public DynGRMHD {
 
   virtual void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                              const Real dt, DvceArray5D<Real> &u0, int nghost);
+
+  // dyn_grmhd_newdt.cpp
+  virtual TaskStatus NewTimeStep(Driver *pdrive, int stage);
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,

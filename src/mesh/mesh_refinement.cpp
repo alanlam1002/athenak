@@ -26,6 +26,7 @@
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "coordinates/adm.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_amr.hpp"
 #include "prolongation.hpp"
@@ -127,7 +128,16 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
       (void) pmbp->phydro->NewTimeStep(pdriver, pdriver->nexp_stages);
     }
     if (pmbp->pmhd != nullptr) {
-      (void) pmbp->pmhd->NewTimeStep(pdriver, pdriver->nexp_stages);
+      // See the identical comment in Driver::Initialize() (driver.cpp): mhd::MHD::
+      // NewTimeStep is not virtual, so this priming call must go through pdyngr
+      // (dyngr::DynGRMHDPS::NewTimeStep, dyn_grmhd_newdt.cpp) when dyn_grmhd is
+      // active, or the post-refinement dt estimate would silently fall back to the
+      // conservative max_dv=1 speed-of-light bound regardless of <time>/gr_dt.
+      if (pmbp->pdyngr != nullptr) {
+        (void) pmbp->pdyngr->NewTimeStep(pdriver, pdriver->nexp_stages);
+      } else {
+        (void) pmbp->pmhd->NewTimeStep(pdriver, pdriver->nexp_stages);
+      }
     }
     if (pmbp->prad != nullptr) {
       (void) pmbp->prad->NewTimeStep(pdriver, pdriver->nexp_stages);

@@ -323,7 +323,18 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
       (void) pmesh->pmb_pack->phydro->NewTimeStep(this, nexp_stages);
     }
     if (pmhd != nullptr) {
-      (void) pmesh->pmb_pack->pmhd->NewTimeStep(this, nexp_stages);
+      // dyn_grmhd (CFC/z4c) overrides mhd::MHD::NewTimeStep's own priming call here:
+      // MHD::NewTimeStep is not virtual, so calling it through the plain pmhd pointer
+      // would always run the base (hardcoded max_dv=1) version regardless of which
+      // NewTimeStep the MHD_Newdt task itself uses later -- silently making this one,
+      // pre-loop dt estimate (and hence pmesh->dt/the very first cycle's step) more
+      // conservative than every subsequent cycle once dyngr::DynGRMHDPS::NewTimeStep
+      // (dyn_grmhd_newdt.cpp) takes over inside the task graph.
+      if (pmesh->pmb_pack->pdyngr != nullptr) {
+        (void) pmesh->pmb_pack->pdyngr->NewTimeStep(this, nexp_stages);
+      } else {
+        (void) pmesh->pmb_pack->pmhd->NewTimeStep(this, nexp_stages);
+      }
     }
     if (prad != nullptr) {
       (void) pmesh->pmb_pack->prad->NewTimeStep(this, nexp_stages);

@@ -204,14 +204,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   if (pmy_pack->pmesh->three_d) { pmhd->dtnew = std::min(pmhd->dtnew, dt3); }
 
   // compute timestep for diffusion/source terms, exactly as mhd::MHD::NewTimeStep does
+  // (this branch's Viscosity/Resistivity don't expose a NewTimeStep method, unlike the
+  // branch this was ported from -- mirroring mhd_newdt.cpp's own pcond/psrc-only calls)
   if (pmhd->pcond != nullptr) {
     pmhd->pcond->NewTimeStep(pmhd->w0, pmhd->peos->eos_data);
-  }
-  if (pmhd->pvisc != nullptr) {
-    pmhd->pvisc->NewTimeStep(pmhd->w0, pmhd->peos->eos_data);
-  }
-  if (pmhd->presist != nullptr) {
-    pmhd->presist->NewTimeStep(pmhd->w0, pmhd->peos->eos_data);
   }
   if (pmhd->psrc != nullptr) {
     pmhd->psrc->NewTimeStep(pmhd->w0, pmhd->peos->eos_data);
@@ -237,5 +233,23 @@ INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NormalLogs>,
                           Primitive::ResetFloor)
 INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NQTLogs>,
                           Primitive::ResetFloor)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NormalLogs>,
+                          Primitive::ResetFloor)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NQTLogs>,
+                          Primitive::ResetFloor)
+INSTANTIATE_NEW_TIME_STEP(Primitive::IdealGas, Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                          Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                          Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NormalLogs>,
+                          Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NQTLogs>,
+                          Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NormalLogs>,
+                          Primitive::ResetFloorZlaBag)
+INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NQTLogs>,
+                          Primitive::ResetFloorZlaBag)
 
 }  // namespace dyngr

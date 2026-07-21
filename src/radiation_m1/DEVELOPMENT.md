@@ -62,6 +62,12 @@ harness (item 5 below): 5 single-zone `_cpu` tests plus `_cpu`/`_mpicpu`
 variants of the diffusion and beam tests (9 test files total), verified
 end-to-end through the harness's own `run_test_suite.py` entrypoint.
 
+Stage 3 (the `dyngr_bhstar.cpp` capstone application, see below) is also
+done: the pgen turned out to be an unfinished TOV-pgen copy-paste with a
+real density-normalization bug, now fixed, with a genuine hydro-only mode
+added, first-ever athinputs, and a two-tier (exact IC regression + physical
+sanity) validation script — both passing on Sakura.
+
 **Not yet done** (see "Stage 2 plan" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -503,12 +509,113 @@ Recommended order (cheapest / fewest new mechanisms first):
      `CXX`/`CC` environment variables instead of passing `-D` flags, no
      harness code changed.
 
-## Stage 3 (later) — capstone application
+## Stage 3 — capstone application — DONE
 
-Bring `dyngr_bhstar.cpp` (quasi-star/BH-star Bondi accretion + LTE radiation
-initial data) to a validated run: confirm the Bondi profile is recovered in
-hydro-only mode first, then turn on radiation and confirm the LTE profile /
-accretion luminosity are physically sane.
+Goal: bring `dyngr_bhstar.cpp` (quasi-star/BH-star Bondi accretion + LTE
+radiation initial data) to a validated run: confirm the Bondi profile is
+recovered in hydro-only mode first, then turn on radiation and confirm the
+LTE profile/accretion luminosity are physically sane.
+
+**Phase A — hydro-only Bondi baseline (no code changes).** Re-ran the
+existing, already-validated `gr_bondi` pgen (`src/pgen/tests/gr_bondi.cpp`,
+the exact Hawley-Smarr-Wilson 1984 GR Bondi solution) via
+`tst/test_suite/gr/test_gr_bondi_mpicpu.py` on Sakura: passes cleanly, L1 RMS
+error under the established `2.5e-6` tolerance. This directly satisfies
+"confirm the Bondi profile is recovered in hydro-only mode" using the
+codebase's own already-correct solution, independent of `dyngr_bhstar.cpp`'s
+own (much rougher) approximation.
+
+**Phase B — `dyngr_bhstar.cpp` was far less finished than the plan wording
+implied.** Investigation found it was an unconverted copy-paste of
+`dyngr_tov.cpp` (TOV star): file header/compile-instruction comments still
+said "TOV"; three dead `<problem>` parameters (`jmom`, `minkowski`, `mdot`)
+plus a fourth dead-in-practice one (`s0_atmosphere`, gated behind
+`constexpr bool use_ye = false`); a genuine density-normalization bug (the
+vector-potential/magnetization-envelope constant `rhoc` and its two
+duplicated inline copies in `A1`/`A2` used `0.625/(2*bondi_rs)^1.5`, but the
+actual density field uses `rho = 0.0625/(rsch*bondi_rs)^1.5` — a
+missing-leading-zero typo, confirmed by direct algebraic cross-check: at the
+inner cutoff `r=0.5` where `rsch=2`, `rhoc` must equal the density field
+evaluated there); no way to run without radiation (`UserProblem()`
+unconditionally fatal-errored if `<radiation_m1>` was absent); and no
+existing athinput anywhere in the repo. Fixed all of the above:
+  - Renamed the TOV-era internals (`TOVHistory`→`BHStarHistory`,
+    `FinalizeTOV`→`FinalizeBHStar`, kernel names, file header/compile
+    instruction), removed the dead parameters and an unused
+    `Kokkos::Random_XorShift64_Pool` (also dead — never referenced).
+  - Fixed the `0.625`→`0.0625` typo at all three call sites.
+  - Added `<problem>/enable_radiation` (default `true`, preserving prior
+    behavior when set): split the single monolithic initial-condition kernel
+    into a hydro kernel (always runs) and a radiation kernel (only runs, and
+    only dereferences `pmbp->pradm1`, when `enable_radiation=true`) — giving
+    this pgen a genuine hydro-only mode for the first time. Also added
+    `pmbp->pmhd`/`pmbp->pdyngr` null guards (previously would segfault
+    rather than fail cleanly without `<mhd>`+`dyn_grmhd`).
+  - Confirmed via `pgen.cpp`/`CMakeLists.txt` that this pgen intentionally
+    uses the separate `-D PROBLEM=<file>` CMake mechanism (like `dyngr_tov`,
+    `z4c_two_puncture`, etc.), not the runtime `built_in_pgens` string
+    dispatch — so no dispatch-table registration was needed, only the
+    compile-instruction comment fix above.
+  - Wrote the first-ever athinputs: `inputs/tests/dyngr_bhstar_hydro.athinput`
+    (`enable_radiation=false`) and `inputs/tests/dyngr_bhstar_radiation.athinput`
+    (`enable_radiation=true`), both 3D (`32³`, domain `[-10,10]³`),
+    `bondi_rs=8` (matching `gr_bondi.athinput`'s `r_crit=8` for qualitative
+    comparability), magnetic field disabled (`b_norm=0` — Stage 3 is about
+    the Bondi+radiation profile, not MHD).
+  - **Found and documented a real structural limitation while validating**:
+    unlike `gr_bondi.cpp` (which registers a `FixedBondiInflow` boundary
+    condition re-imposing the analytic solution at the domain edge every
+    step), `dyngr_bhstar.cpp` has no custom BC and no runtime horizon
+    masking — the IC only zeroes `rho`/`p` inside `r<=0.5` once, at `t=0`.
+    Under plain `outflow` BCs with a supersonically infalling flow and
+    nothing absorbing matter at the center, density grows without bound
+    over long integrations (measured ~27x at the outer edge by `t=30` in an
+    initial `tlim=30` trial). Rather than writing a new inflow-BC function
+    (real new scope, deferred as future work below), both athinputs use a
+    short `tlim=3` window: confirmed the bulk/outer region (`|x1v|>=2`)
+    stays within `1.19x`-`2.38x` of its `t=0` value over this window (a
+    modest, boundary-artifact-driven drift, not runaway), while the
+    near-horizon region (`|x1v|<2`) undergoes a fast (~1M), self-limiting
+    local adjustment (`3.1x`-`6.5x`, increments shrinking over time, not
+    diverging) — a separate, distinct finding from the boundary-drift one,
+    intrinsic to extending the isotropic-Schwarzschild metric formula past
+    the horizon without genuine excision or horizon-penetrating coordinates.
+  - **Validation script** `inputs/tests/check_dyngr_bhstar_radiation.py`
+    (two tiers, since the radiation IC is an ad hoc thick/thin optical-depth
+    blend with no closed-form solution to check the dynamical evolution
+    against):
+    1. An **exact** regression check of the `t=0` initial data against the
+       C++ IC formula (`rsch`, `vr`, `lfac`, `tau`, `f_tau`, `Fr_hat`,
+       `Fr_lab`, `apply_floor`) transcribed line-for-line in Python — max
+       relative error `2.6e-6` (dens/press, floating-point/math-library
+       rounding) and `2.4e-6` (Fx), well within the `1e-4` tolerance.
+       Finding a bug in this transcription (not the C++) along the way is
+       worth recording: an early version used the flat Euclidean
+       `Fx²+Fy²+Fz²` for the `apply_floor` causality bound instead of the
+       correct metric contraction `g^ab F_a F_b = (Fx²+Fy²+Fz²)/psi4` for
+       this diagonal, zero-shift metric — this under-detected causality
+       violations by a factor of `psi4≈1.2` and threw the whole comparison
+       off by 4+ orders of magnitude until caught by hand-deriving one row
+       and finding the C++ output matched only after including the missing
+       causality-rescaling branch (`apply_floor` clamps `F` hard here: at
+       the outer edge, the raw pre-floor flux exceeds the causal limit by
+       ~4 orders of magnitude because `T_photosphere=0.01` makes `E_lte`
+       tiny while the `lum_edd/(4πr²)` flux-normalization scale is not).
+    2. Physical **sanity** checks on the dynamical evolution: no NaN/Inf,
+       `dens`/`press`/`E` stay positive, causality `|F|≤E` (via the correct
+       metric contraction), and the two bounded-growth checks above. All
+       pass on Sakura.
+  - **Plots**: `bhstar_profiles_snapshots.png` (density/velocity/pressure
+    radial profiles for the hydro-only run, `E`/flux/`|F|/E` for the
+    radiation-on run, `t=0` vs final snapshot) and `bhstar_evolution.mp4`
+    (density and `E` evolving over the run) under
+    `/sakura/ptmp/tlam/athenak_run/dyngr_bhstar_plots/` (not committed —
+    scratch/visualization only, same convention as prior stages).
+  - **Deferred, not attempted here**: a proper `FixedBondiInflow`-style
+    boundary condition (would allow a much longer, genuinely steady
+    validation run) and a self-consistent (rather than ad hoc thick/thin
+    blend) radiative-Bondi initial profile — both are real follow-on
+    development work, not validation of what already exists.
 
 ## Stage 4 (later) — hardening
 

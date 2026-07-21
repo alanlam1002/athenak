@@ -3,8 +3,9 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file dyngr_tov.cpp
-//  \brief Problem generator for TOV star. Only works when ADM is enabled.
+//! \file dyngr_bhstar.cpp
+//  \brief Problem generator for a BH-star quasi-star Bondi accretion problem
+//  with grey M1 LTE radiation. Only works when ADM is enabled.
 
 #include <math.h>     // abs(), cos(), exp(), log(), NAN, pow(), sin(), sqrt()
 
@@ -30,8 +31,6 @@
 #include "radiation_m1/radiation_m1_tensors.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 
-#include <Kokkos_Random.hpp>
-
 // Prototypes for vector potential
 KOKKOS_INLINE_FUNCTION
 static Real A1(Real eosk, Real gamma, Real bondi_rs, Real pcut, Real rhoc,
@@ -41,49 +40,23 @@ static Real A2(Real eosk, Real gamma, Real bondi_rs, Real pcut, Real rhoc,
                Real magindex, Real x1, Real x2, Real x3);
 
 // Prototypes for user-defined BCs and history
-void TOVHistory(HistoryData *pdata, Mesh *pm);
+void BHStarHistory(HistoryData *pdata, Mesh *pm);
 
 void SetADMVariables(MeshBlockPack *pmbp);
-void FinalizeTOV(ParameterInput *pin, Mesh *pm);
+void FinalizeBHStar(ParameterInput *pin, Mesh *pm);
 
-void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
+void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_, bool enable_radiation) {
   Real eosk = pin->GetOrAddReal("problem", "eosk", 1.1126500560536184e-9);
   Real gamma = pin->GetOrAddReal("problem", "gamma", 5.0/3.0);
   Real bondi_rs = pin->GetOrAddReal("problem", "bondi_rs", 4.49e8);
-  Real jmom = pin->GetOrAddReal("problem", "jmom", 10.0);
-
-  bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
-  constexpr bool use_ye = false;
-  Real ye_atmo = pin->GetOrAddReal("mhd", "s0_atmosphere", 0.5);
+  // Density at the inner cutoff r=0.5 (where rsch=2), matching the density
+  // field below -- used to normalize the vector-potential/magnetization envelope.
+  Real rhoc = 0.0625 / pow( 2.0 * bondi_rs, 1.5 );
 
-  Real rhoc = 0.625 / pow( 2.0 * bondi_rs, 1.5 );
-
-  //auto& u0_ = pmbp->pmhd->u0;
   auto& w0_ = pmbp->pmhd->w0;
-  int& nvars_ = pmbp->pmhd->nmhd;
-  int& nscal_ = pmbp->pmhd->nscalars;
-
-  auto &uradm1_ = pmbp->pradm1->u0;
-  auto &nspecies_ = pmbp->pradm1->nspecies;
-  auto &m1_nvars_ = pmbp->pradm1->nvars;
-  auto &m1_params_ = pmbp->pradm1->params;
-
-  // M1 radiation initial condition parameters (all in code units)
-  Real arad    = pin->GetOrAddReal("problem", "arad",          0.0);
-  Real T_ph    = pin->GetOrAddReal("problem", "T_photosphere", 0.0);
-  Real mdot    = pin->GetOrAddReal("problem", "mdot",          0.0);
-
-  // Read kappa_s from <photons> block (same source as the M1 opacity module)
-  // so the optical depth profile is consistent with the opacity that will run.
-  Real kappa_s = pin->GetOrAddReal("photons", "kappa_s", 0.0);
-
-  // Default luminosity = Eddington luminosity: L_Edd = 4pi G M / kappa_es
-  // In code units (G=c=M_BH=1): L_Edd = 4pi / kappa_s
-  Real lum_edd = (kappa_s > 0.0) ? 4.0 * M_PI / kappa_s : 0.0;
-  Real lum     = pin->GetOrAddReal("problem", "luminosity", lum_edd);
 
   // Capture variables for kernel
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -101,8 +74,7 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
 
   auto &size = pmbp->pmb->mb_size;
   auto &adm = pmbp->padm->adm;
-  Kokkos::Random_XorShift64_Pool<> rand_pool64(pmbp->gids);
-  par_for("pgen_tov1", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
+  par_for("pgen_bhstar_hydro", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
     Real &x1max = size.d_view(m).x1max;
@@ -119,7 +91,6 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
     // Calculate the rest-mass density, pressure, and mass for a specific isotropic
     // radial coordinate.
     Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-    Real s = sqrt(SQR(x1v) + SQR(x2v));
 
     // Set ADM variables
     Real psi2 = pow(1.0 + 0.5 / r, 2);
@@ -132,16 +103,13 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
     adm.vK_dd(m,0,0,k,j,i) = adm.vK_dd(m,0,1,k,j,i) = adm.vK_dd(m,0,2,k,j,i) = 0.0;
     adm.vK_dd(m,1,1,k,j,i) = adm.vK_dd(m,1,2,k,j,i) = adm.vK_dd(m,2,2,k,j,i) = 0.0;
 
-    Real rho, p, mass, alp, r_schw;
+    Real rho, p;
     Real vr = 0.;
-    Real up = 0.;
-    auto &use_ye_ = use_ye;
     if ( r > 0.5 ) {
       Real rsch = r * pow( 1.0 + 0.5 / r, 2 );
       vr = - 0.5 * sqrt( 2.0 / rsch ) * ( 1.0 + 0.5 / sqrt( fmax( 1.e-8, rsch - 1.0 ) ) );
       rho = 0.0625 / pow( rsch * bondi_rs, 1.5 );
       p = eosk * pow(rho, gamma);
-      up = 0.0;
     } else {
       rho = 0;
       p = 0;
@@ -151,91 +119,106 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
                    vr * x2v / r,
                    vr * x3v / r };
 
-    Real vsq = psi4 * vr * vr + 1.0;
-    Real lfac = sqrt(vsq);
-
     // Set hydrodynamic quantities
-    //w0_(m,IDN,k,j,i) = fmax(rho, tov_.dfloor);
     w0_(m,IDN,k,j,i) = rho;
     w0_(m,IPR,k,j,i) = p;
     w0_(m,IVX,k,j,i) = vu[0];
     w0_(m,IVY,k,j,i) = vu[1];
     w0_(m,IVZ,k,j,i) = vu[2];
-    auto &nvars = nvars_;
-    auto &nscal = nscal_;
-    if (use_ye && nscal >= 1) {
-      w0_(m,nvars,k,j,i) = 0.5;
-    }
-    // Inverse 4-metric (diagonal: beta=0, spatial metric = psi4 * delta_ij)
-    AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
-    Real alp_m1 = adm.alpha(m,k,j,i);
-    g_uu(0,0) = -1.0 / (alp_m1 * alp_m1);
-    g_uu(1,1) = g_uu(2,2) = g_uu(3,3) = 1.0 / psi4;
-
-    // LTE energy density from photospheric temperature
-    Real E_lte = arad * pow(T_ph, 4.0);
-
-    Real E_rad = m1_params_.rad_E_floor;
-    AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> F_d{};
-    pack_F_d(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, F_d);
-
-    if (r > 0.5) {
-      Real rsch_loc = r * pow(1.0 + 0.5/r, 2.0);
-
-      // Optical depth via free-fall Bondi approximation
-      Real tau = kappa_s * 0.125 / M_PI / bondi_rs / sqrt( bondi_rs * rsch_loc );
-
-      // Thick-to-thin flux interpolation factor
-      Real f_tau = (1.0 - exp(-tau)) / (1.0 + tau);
-
-      // Comoving radial flux + lab-frame advection correction (lfac: Lorentz boost)
-      Real Fr_hat = f_tau * lum / (4.0 * M_PI * rsch_loc * rsch_loc);
-      Real Fr_lab = Fr_hat + vr * E_lte / lfac;
-
-      E_rad = E_lte;
-      // pack_F_d: F_d(0)=beta^i F_i=0, F_d(1..3)=spatial components
-      // Guard against r=0 by using safe direction cosines
-      Real inv_r = (r > 0.0) ? 1.0 / r : 0.0;
-      pack_F_d(0.0, 0.0, 0.0,
-               Fr_lab * x1v * inv_r,
-               Fr_lab * x2v * inv_r,
-               Fr_lab * x3v * inv_r, F_d);
-    } else {
-      Real rsch_loc = 2.0;
-
-      // Optical depth via free-fall Bondi approximation
-      Real tau = kappa_s * 0.125 / M_PI / bondi_rs / sqrt( bondi_rs * rsch_loc );
-
-      // Thick-to-thin flux interpolation factor
-      Real f_tau = (1.0 - exp(-tau)) / (1.0 + tau);
-
-      // Comoving radial flux + lab-frame advection correction (lfac: Lorentz boost)
-      Real Fr_hat = f_tau * lum / (4.0 * M_PI * rsch_loc * rsch_loc);
-      Real Fr_lab = Fr_hat + vr * E_lte / lfac;
-
-      E_rad = E_lte;
-      // pack_F_d: F_d(0)=beta^i F_i=0, F_d(1..3)=spatial components
-      // Guard against r=0 by using safe direction cosines
-      Real inv_r = (r > 0.0) ? 1.0 / r : 0.0;
-      pack_F_d(0.0, 0.0, 0.0,
-               Fr_lab * x1v * inv_r,
-               Fr_lab * x2v * inv_r,
-               Fr_lab * x3v * inv_r, F_d);
-    }
-
-    radiationm1::apply_floor(g_uu, E_rad, F_d, m1_params_);
-
-    for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
-      uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_E_IDX,  m1_nvars_), k, j, i) = E_rad;
-      uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FX_IDX, m1_nvars_), k, j, i) = F_d(1);
-      uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FY_IDX, m1_nvars_), k, j, i) = F_d(2);
-      uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FZ_IDX, m1_nvars_), k, j, i) = F_d(3);
-      if (nspecies_ > 1) {
-        uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_N_IDX, m1_nvars_), k, j, i) = m1_params_.rad_N_floor;
-      }
-    }
-
   });
+
+  if (enable_radiation) {
+    auto &uradm1_ = pmbp->pradm1->u0;
+    auto &nspecies_ = pmbp->pradm1->nspecies;
+    auto &m1_nvars_ = pmbp->pradm1->nvars;
+    auto &m1_params_ = pmbp->pradm1->params;
+
+    // M1 radiation initial condition parameters (all in code units)
+    Real arad    = pin->GetOrAddReal("problem", "arad",          0.0);
+    Real T_ph    = pin->GetOrAddReal("problem", "T_photosphere", 0.0);
+
+    // Read kappa_s from <photons> block (same source as the M1 opacity module)
+    // so the optical depth profile is consistent with the opacity that will run.
+    Real kappa_s = pin->GetOrAddReal("photons", "kappa_s", 0.0);
+
+    // Default luminosity = Eddington luminosity: L_Edd = 4pi G M / kappa_es
+    // In code units (G=c=M_BH=1): L_Edd = 4pi / kappa_s
+    Real lum_edd = (kappa_s > 0.0) ? 4.0 * M_PI / kappa_s : 0.0;
+    Real lum     = pin->GetOrAddReal("problem", "luminosity", lum_edd);
+
+    par_for("pgen_bhstar_rad", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real &x1min = size.d_view(m).x1min;
+      Real &x1max = size.d_view(m).x1max;
+      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+
+      Real &x2min = size.d_view(m).x2min;
+      Real &x2max = size.d_view(m).x2max;
+      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+
+      Real &x3min = size.d_view(m).x3min;
+      Real &x3max = size.d_view(m).x3max;
+      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+
+      Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real psi2 = pow(1.0 + 0.5 / r, 2);
+      Real psi4 = psi2 * psi2;
+
+      Real vr = 0.;
+      if (r > 0.5) {
+        Real rsch = r * pow(1.0 + 0.5 / r, 2);
+        vr = - 0.5 * sqrt( 2.0 / rsch ) * ( 1.0 + 0.5 / sqrt( fmax( 1.e-8, rsch - 1.0 ) ) );
+      }
+      Real vsq = psi4 * vr * vr + 1.0;
+      Real lfac = sqrt(vsq);
+
+      // Inverse 4-metric (diagonal: beta=0, spatial metric = psi4 * delta_ij)
+      AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
+      Real alp_m1 = 1.0 / psi2;
+      g_uu(0,0) = -1.0 / (alp_m1 * alp_m1);
+      g_uu(1,1) = g_uu(2,2) = g_uu(3,3) = 1.0 / psi4;
+
+      // LTE energy density from photospheric temperature
+      Real E_lte = arad * pow(T_ph, 4.0);
+
+      // rsch at the field point (clamped to the inner-cutoff value inside r<=0.5,
+      // matching the hydro kernel's excised-region convention).
+      Real rsch_loc = (r > 0.5) ? r * pow(1.0 + 0.5/r, 2.0) : 2.0;
+
+      // Optical depth via free-fall Bondi approximation
+      Real tau = kappa_s * 0.125 / M_PI / bondi_rs / sqrt( bondi_rs * rsch_loc );
+
+      // Thick-to-thin flux interpolation factor
+      Real f_tau = (1.0 - exp(-tau)) / (1.0 + tau);
+
+      // Comoving radial flux + lab-frame advection correction (lfac: Lorentz boost)
+      Real Fr_hat = f_tau * lum / (4.0 * M_PI * rsch_loc * rsch_loc);
+      Real Fr_lab = Fr_hat + vr * E_lte / lfac;
+
+      Real E_rad = E_lte;
+      // pack_F_d: F_d(0)=beta^i F_i=0, F_d(1..3)=spatial components
+      // Guard against r=0 by using safe direction cosines
+      AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> F_d{};
+      Real inv_r = (r > 0.0) ? 1.0 / r : 0.0;
+      pack_F_d(0.0, 0.0, 0.0,
+               Fr_lab * x1v * inv_r,
+               Fr_lab * x2v * inv_r,
+               Fr_lab * x3v * inv_r, F_d);
+
+      radiationm1::apply_floor(g_uu, E_rad, F_d, m1_params_);
+
+      for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
+        uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_E_IDX,  m1_nvars_), k, j, i) = E_rad;
+        uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FX_IDX, m1_nvars_), k, j, i) = F_d(1);
+        uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FY_IDX, m1_nvars_), k, j, i) = F_d(2);
+        uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FZ_IDX, m1_nvars_), k, j, i) = F_d(3);
+        if (nspecies_ > 1) {
+          uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_N_IDX, m1_nvars_), k, j, i) =
+              m1_params_.rad_N_floor;
+        }
+      }
+    });
+  }
 
   // parse some parameters
   Real b_norm = pin->GetOrAddReal("problem", "b_norm", 1.e-10);
@@ -406,8 +389,9 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
-//  \brief Sets initial conditions for TOV star in DynGRMHD
-//  Compile with '-D PROBLEM=dyngr_tov' to enroll as user-specific problem generator
+//  \brief Sets initial conditions for a BH-star Bondi accretion problem in DynGRMHD,
+//  with optional grey M1 LTE radiation.
+//  Compile with '-D PROBLEM=dyngr_bhstar' to enroll as user-specific problem generator
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
@@ -417,17 +401,28 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
               << std::endl;
     exit(EXIT_FAILURE);
   }
-  if (pmbp->pradm1 == nullptr) {
+  if (pmbp->pmhd == nullptr || pmbp->pdyngr == nullptr) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl
-              << "BH star problem can only be run with "
-                 "radiation-m1, but no "
-              << "<radiation_m1> block in input file" << std::endl;
+              << "BH star problem can only be run with <mhd> and dynamical GRMHD "
+                 "(<mhd>/dyn_eos) enabled" << std::endl;
     exit(EXIT_FAILURE);
   }
 
-  user_hist_func = &TOVHistory;
-  pgen_final_func = &FinalizeTOV;
+  // enable_radiation=true (default) requires <radiation_m1>; enable_radiation=false
+  // runs the Bondi hydro/metric IC alone, skipping the M1 radiation IC entirely.
+  bool enable_radiation = pin->GetOrAddBoolean("problem", "enable_radiation", true);
+  if (enable_radiation && pmbp->pradm1 == nullptr) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "BH star problem has enable_radiation=true (the default) but no "
+              << "<radiation_m1> block in input file -- either add one or set "
+                 "problem/enable_radiation=false for a hydro-only run" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  user_hist_func = &BHStarHistory;
+  pgen_final_func = &FinalizeBHStar;
   pmbp->padm->SetADMVariables = &SetADMVariables;
 
   // initialize primitive variables for restart
@@ -435,8 +430,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     return;
   }
 
-  // Select the right TOV template based on the EOS we need.
-  SetupProblem(pin, pmy_mesh_);
+  SetupProblem(pin, pmy_mesh_, enable_radiation);
 
   // Mesh block info for loop limits
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -473,7 +467,7 @@ static Real A1(Real eosk, Real gamma, Real bondi_rs, Real pcut, Real rhoc,
   Real rho = 0.0;
   Real p = 0.0;
   if ( r > 0.5 ) {
-    rho = 0.625 / pow( rsch * bondi_rs, 1.5 );
+    rho = 0.0625 / pow( rsch * bondi_rs, 1.5 );
     p = eosk * pow(rho, gamma);
   }
   return -x2*fmax(p - pcut, 0.0)*pow(1.0 - rho/rhoc,magindex);
@@ -487,7 +481,7 @@ static Real A2(Real eosk, Real gamma, Real bondi_rs, Real pcut, Real rhoc,
   Real rho = 0.0;
   Real p = 0.0;
   if ( r > 0.5 ) {
-    rho = 0.625 / pow( rsch * bondi_rs, 1.5 );
+    rho = 0.0625 / pow( rsch * bondi_rs, 1.5 );
     p = eosk * pow(rho, gamma);
   }
   return x1*fmax(p - pcut, 0.0)*pow(1.0 - rho/rhoc,magindex);
@@ -540,12 +534,12 @@ void SetADMVariables(MeshBlockPack *pmbp) {
 }
 
 // Cleanup at the end of the run
-void FinalizeTOV(ParameterInput *pin, Mesh *pm) {
+void FinalizeBHStar(ParameterInput *pin, Mesh *pm) {
   return;
 }
 
 // History function
-void TOVHistory(HistoryData *pdata, Mesh *pm) {
+void BHStarHistory(HistoryData *pdata, Mesh *pm) {
   // Select the number of outputs and create labels for them.
   pdata->nhist = 2;
   pdata->label[0] = "rho-max";
@@ -565,7 +559,7 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   const int nji = nx2*nx1;
   Real rho_max = std::numeric_limits<Real>::max();
   Real alpha_min = -rho_max;
-  Kokkos::parallel_reduce("TOVHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  Kokkos::parallel_reduce("BHStarHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min) {
     // coompute n,k,j,i indices of thread
     int m = (idx)/nkji;

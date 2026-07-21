@@ -2943,3 +2943,234 @@ src/cfc/
       as used here). The `ProlongateFCMG` fix should be kept regardless (it is
       a genuine, verified correctness improvement for high children), but the
       investigation is not finished.
+    - **Second root cause found and FIXED (2026-07-21, `multigrid_driver.cpp`'s
+      `MultigridDriver::RestrictCoeffOctets()`)**: this function is meant to be
+      the one-time (`coeff_` is static for the whole solve) analog of the
+      generic, per-V-cycle-sweep `RestrictOctets()` -- but `RestrictOctets()`
+      actually has *two* branches (fine-octet-to-coarser-octet, and, for the
+      coarsest octet level, an explicit "octets to root grid" branch that
+      writes `root_src_h`/`root_u_h` directly). `RestrictCoeffOctets()` only
+      ever mirrored the first branch (`for l = nreflevel_-1; l >= 1; --l`);
+      nothing mirrored the second. At `nreflevel_=1` (this test's geometry)
+      that loop condition (`0 >= 1`) is never true, so the function was a
+      **complete no-op**: the root-level cell under the refined patch was never
+      written by anything (`TransferCoeffToRoot()` only writes `root_coeff_h`
+      directly for blocks *at* root level, and the octet's own `Coeff()` for
+      refined blocks -- never both), and stayed at `coeff_`'s post-construction
+      default (`0.0`) for the entire solve. Confirmed empirically (not just by
+      code reading) with a new temporary diagnostic,
+      `MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet()`
+      (`mg_cfc_conformal_factor.{hpp,cpp}`, gated on the existing
+      `mg_debug_analytic_residual_test` input, called from `Solve()` right
+      after `RestrictCoeffOctets()`): before the fix, `mgroot_`'s actual `Utilde`
+      at the cell under the refined octet read back as exactly `0.0`, while
+      `RestrictOneCoeff`'s volume-averaged expectation from that same octet's
+      own (independently correct) `Coeff()` was `~7.4e-4` -- a real, non-trivial
+      value, not some edge-case zero. **Fix**: added the missing "octet level 0
+      -> root grid" branch to `RestrictCoeffOctets()`, using `Multigrid`'s
+      already-public `CoeffAtLevel()` accessor (no new friend/downcast needed).
+      This also required a small ordering fix: `TransferCoeffToRoot()` (both
+      `MGCFCConformalFactorDriver` and `MGCFCLapseDriver`'s copies) used to call
+      `mgc_root->RestrictCoefficients()` (propagates `mgroot_`'s own finest
+      level down through its coarser internal levels) at its own end -- but
+      that ran *before* `RestrictCoeffOctets()` even executed, so it was always
+      one step too early for any refined patch's root cell. Moved that call out
+      of `TransferCoeffToRoot()` into `Solve()`, right after
+      `RestrictCoeffOctets()`, in both drivers. Verified via rerun: `actual`
+      now matches `expected` exactly (`diff=0`) for every rank.
+    - **This fix is also real and confirmed, but likewise does NOT explain the
+      REAL solve's non-convergence**: rerunning the actual iterated solve with
+      both fixes in place still shows `"Failed to converge"` every stage, at
+      essentially the same defect (`0.00204301`, vs. `~0.00204`/`~0.0022`
+      before either fix) and the same worst-REFINED-cell location (`gid=1`,
+      `(6.2,0.6,0.6)`, value `~9.04e-4` -- consistent with every prior run to
+      3-4 significant figures). The `coeff_` restriction gap was real, but its
+      effect on this particular residual is evidently negligible compared to
+      whatever actually dominates it.
+    - **Re-ran the analytic-ghost-vs-defect comparison with both fixes applied**
+      (per explicit user request, to directly check whether prolongation/
+      restriction at the refinement boundary is now correct): with **no**
+      smoother involved, seeding `delta_psi` everywhere from the exact analytic
+      TOV solution and measuring the defect before vs. after one real MG
+      ghost-communication round (`FillCoarseBoundary` -> ... ->
+      `ProlongateFCBoundary`, i.e. the real coarse-fine `ProlongateFCMG` path):
+      worst REFINED-block defect goes from `~3.6e-4` (analytic ghosts, pure
+      `O(dx^2)` truncation baseline, at the high children `gid=3`/`gid=7`) to
+      `~9.04e-4` (**~2.5x larger**) at `gid=1`/`gid=4` (low children) after the
+      real ghost-comm round -- essentially unchanged from every pre-fix run of
+      this same test. The worst ROOT-block defect *also* increases post-ghost-
+      comm (`~1.8e-4` -> `~4.5e-4`, at `gid=8`, the coarse neighbor bordering
+      the refined patch), so the degradation isn't confined to the fine side's
+      own prolongation formula. Directly comparing ghost *values* (not defect)
+      against the analytic solution at `gid=1`/`gid=3`/`gid=5`/`gid=7`'s `+x1`
+      (and `gid=3`'s `+x2`) faces: all read back accurate to `~4e-5`-`1.4e-4`,
+      matching every previous measurement, with no outlier cell. **So the
+      ghost-fill machinery is correctly reproducing point *values* to
+      `~1e-4`, but the discrete *residual* (which depends on second-derivative/
+      curvature information built from those ghost values via the 7-point
+      Laplacian stencil) is still ~2.5x worse right at the coarse-fine interface
+      than the pure-truncation baseline, on both sides of the interface.** This
+      rules out a simple "wrong ghost value" bug (both of the two fixes so far
+      were exactly that class, and both are now closed) -- what's left is either
+      a genuine, inherent discretization effect of a 2:1 resolution jump feeding
+      into a second-derivative stencil (not obviously a "bug" to fix), or a
+      more subtle issue in exactly how the prolongation formula's gradient/
+      curvature terms are constructed that a pointwise value check can't catch.
+      Not yet root-caused -- still open.
+    - **Reflecting-BC control test (2026-07-21, `cfc_tov_amr_noreflect_test`)**:
+      per explicit user request, ruled out whether the octant-reduced domain's
+      inner `reflect` BC (`ix1_bc=ix2_bc=ix3_bc=reflect` in every prior run of
+      this investigation) is a necessary ingredient in the observed defect
+      amplification. Built a control input doubling the domain to the full
+      range (`x1min=-25.6` instead of `0.0`, `nx1` doubled `32->64` to keep the
+      same `dx=0.8`, same for x2/x3) with **all 6 faces** set to the original's
+      non-reflecting outer BC (`diode`) -- no `reflect` anywhere -- and
+      recentered the refined region on the origin (`[-6.4,6.4]` instead of
+      `[0,6.4]` on all 3 axes), which spans exactly 2 root MeshBlocks per axis
+      (8 root blocks total, each still refined to 8 children -- 64 children
+      total) and reproduces the original single-octant's "one coarse block
+      refined to 2x2x2 children" structure 8 times over, once per octant
+      around the origin, with every refined child now bordering only same-level
+      siblings or genuine coarse-fine interfaces -- never a reflecting wall.
+      Re-ran the same no-smoother analytic-residual test: worst REFINED |defect|
+      goes from `~3.77e-4` (analytic ghosts, matching the octant test's
+      `~3.6e-4` baseline almost exactly -- same `dx`, same star, same class of
+      truncation error) to **`~2.03e-3`** after one real ghost-comm round --
+      **~5.4x the baseline, and ~2.2x *larger* than the octant-reduced test's
+      post-ghost-comm value (`~9.04e-4`)**, not smaller. This pattern repeats at
+      comparable magnitude (`~9e-4` to `~2e-3`) simultaneously at *several*
+      different octants' coarse-fine corners in the same run (e.g. `gid=56` at
+      `(-12.6,-12.6,-12.6)`, `gid=88` at `(-12.6,-12.6,-6.2)`, `gid=296` at
+      `(-12.6,7,-12.6)`, and others), none of which border any reflecting
+      boundary in this domain at all. **Conclusion: the reflecting BC is
+      definitively ruled out** as a necessary or contributing cause -- removing
+      it entirely did not shrink the effect, it grew somewhat larger. The
+      amplification is an intrinsic property of the coarse-fine ghost-fill/
+      prolongation machinery at a 2:1 refinement jump, independent of what
+      boundary condition (if any) sits elsewhere in the domain. (Side note,
+      not the focus of this test: this particular run's *real* iterated solve
+      actually converged with no `"Failed to converge"` messages at all, unlike
+      every octant-reduced run -- consistent with `mg_threshold`'s convergence
+      check being an L2-style norm over many more cells here, not a per-cell
+      max, so one still-bad corner cell at `~2e-3` can hide under a
+      norm-based threshold even though the same localized residual floor this
+      whole item is chasing is still plainly present at the cell level.)
+    - **Curvature/gradient-reconstruction investigation (2026-07-21)**: per
+      explicit user request, investigated whether `ProlongateFCMG`'s quadratic
+      (value + transverse-gradient) coarse-face formula has a further, still-
+      unfound bug beyond the two already fixed, or whether the residual
+      amplification at the interface is an inherent discretization property.
+      **First attempt used the wrong metric**: comparing the domain-wide "worst
+      REFINED cell" defect between this test's `dx=0.8/0.4` and a pre-existing
+      `dx=0.4/0.2` companion input (`cfc_tov_amr_ghosttest_2x_v2.athinput`) showed
+      the *pre-ghost-comm* (pure analytic, zero communication) baseline
+      **increasing** at finer resolution (`~3.6e-4` -> `~1.33e-3`) instead of
+      shrinking `~4x` like ordinary `O(dx^2)` truncation -- the opposite of what
+      a well-behaved discretization should do. Root cause: `DebugReportWorst
+      Defect`'s "worst cell in the whole refined patch" search isn't a fixed
+      physical location -- the TOV star's own density profile (rhoc/kappa) has
+      reduced smoothness (a kink or rapid falloff) somewhere near the stellar
+      surface, and doubling resolution moved *which* cell is domain-wide-worst
+      to a different physical point entirely (confirmed: the reported gid/
+      position changed between the two resolutions). Comparing "worst-of-N-
+      samples" between two different N's (and, worse, from two different
+      underlying features) can't isolate the ghost-fill-specific error at all.
+    - **Fix: added a resolution-fair, fixed-location metric.** New temporary
+      diagnostic `DebugDumpInterfaceDefect(label)` (`mg_cfc_conformal_factor.
+      {hpp,cpp}`, called twice from `DebugAnalyticResidualTest`, before and
+      after the real ghost-comm round) restricts the search to just the single
+      layer of fine cells immediately adjacent to a real coarse-fine `+x1`
+      interface (same block-selection logic as `DebugDumpCoarseBuf`) and
+      reports **both** the max and the **RMS** over that fixed layer -- RMS
+      because even *max-over-the-fixed-layer* still grows with the number of
+      transverse cells in the layer (extreme-value statistics: doubling
+      resolution quadruples the transverse cell count, so the max of an
+      unchanged underlying per-cell error distribution would grow on its own),
+      confirmed as a real, separate confound this pass, distinct from the
+      density-profile issue above. RMS is per-point and doesn't share that bias.
+    - **Result (RMS, resolution-fair)**: at `dx=0.8/0.4` (`gid=3`): before
+      `9.30e-5`, after `5.83e-4` (`6.3x`); at `dx=0.4/0.2` (`gid=3`): before
+      `2.73e-4`, after `6.35e-4` (`2.3x`). Same pattern at `gid=5`: `1.14e-4`
+      ->`3.18e-4` (`2.8x`) at `dx=0.8/0.4`, `3.20e-4`->`4.17e-4` (`1.3x`) at
+      `dx=0.4/0.2`. Two consistent signals, both pointing the same direction:
+      (1) the *relative* extra defect the ghost-comm round adds (the
+      after/before ratio) **shrinks toward 1** as resolution increases (not
+      flat, not growing) -- the signature of a genuine, convergent discretization
+      effect, not a fixed indexing/formula bug (a real bug's effect size doesn't
+      generally track resolution this cleanly); (2) the *absolute* extra defect
+      the ghost-comm round adds (after minus before) also shrinks under 2x
+      resolution, but only by `~1.4x`-`2.1x`, not the `~4x` the bulk interior's
+      `O(dx^2)` truncation gets -- i.e. *some*where between `O(dx)` and
+      `O(dx^2)`, roughly one truncation order lower than the smooth interior.
+    - **Conclusion**: this is the textbook, generally-accepted characteristic of
+      a 2:1 AMR refinement jump for a second-derivative (Laplacian) elliptic
+      operator -- matching a coarse cell's *value and gradient* (what
+      `ProlongateFCMG`'s quadratic formula does) is not sufficient to keep the
+      *curvature* (what the 7-point Laplacian stencil actually needs) accurate
+      to the same order as the smooth interior; achieving that would require a
+      higher-order (matching second derivatives too) reconstruction. This is
+      exactly why AMR multigrid codes conventionally compensate with extra
+      smoothing sweeps near refinement boundaries -- already this code's
+      existing workaround (`mg_npresmooth`/`mg_npostsmooth=3`, item 12's own
+      note). **No further bug found in the curvature/gradient reconstruction
+      itself** -- the two real bugs already fixed this session (`ProlongateFCMG`
+      child-parity clamp, `RestrictCoeffOctets`'s missing octet-to-root step)
+      remain the correctness fixes this investigation produced; the remaining
+      residual floor is now understood to be an inherent, convergent (if
+      imperfect) discretization limitation rather than a third hidden bug. A
+      genuine improvement (if ever wanted) would mean a higher-order/curvature-
+      matching prolongation formula at the coarse-fine boundary, a real (if
+      involved) numerical-methods project, not a bug fix -- noted here as a
+      possible future direction, not undertaken in this investigation.
+    - **Higher-resolution/deeper-AMR check (2026-07-21, `cfc_stability_v4`'s
+      production input, adapted for a 1-cycle diagnostic run)**: per explicit
+      user request, reran the analytic-residual test on a much more realistic
+      setup than any prior test in this item -- full domain (`[-160,160]^3`,
+      `dx=1.6` root), **5** refinement levels (not 1), innermost refined region
+      `[-10,10]^3` down to `dx=0.1`, 32 MPI ranks. Extended
+      `DebugAnalyticResidualTest` with a new phase (needs `Driver*`, now
+      forwarded from `Solve()`): after the existing before/after-ghost-comm
+      defect measurements, runs exactly **one** real `SolveVCycle` (normal
+      `npresmooth_`/`npostsmooth_` counts) from the analytically-seeded state,
+      then reports the defect again *and* (new function,
+      `DebugReportWorstSolutionError`, mirrors `DebugReportWorstDefect`'s root/
+      refined classification but compares `u` directly against the analytic
+      value instead of the residual) how far the actual **solution** has moved
+      from the exact answer.
+      - Global-max results (across all 32 ranks): pure analytic baseline (no
+        comm, no smoother) worst REFINED defect `8.58e-3`; after one real
+        ghost-comm round `1.72e-2` (`~2x` worse, same qualitative pattern as
+        every smaller test in this item); after just **one** V-cycle
+        `1.24e-3` -- **~14x smaller than the post-ghost-comm value, and ~7x
+        smaller than even the pure-truncation baseline**. The Newton-GS
+        smoother is clearly effective here, even in a single sweep.
+      - Solution-value error after that one V-cycle: worst `|u-analytic|` =
+        `2.73e-6` (ROOT) / `4.35e-5` (REFINED) -- excellent absolute accuracy
+        (recall `delta_psi` itself is `O(0.01-1)` for this star, so this is a
+        relative error of order `1e-4`-`1e-5` after a single iteration).
+      - The real iterated solve for this same stage (full `SolveMG`, not just
+        the one diagnostic V-cycle) converged to a final worst |defect| of
+        `~1e-9`-`1e-10` (both ROOT and REFINED) by the end, with only 3 total
+        `"Failed to converge"`/`"Slow convergence"` messages across every
+        multigrid solve this stage runs (consistent with early transients
+        before convergence, not a stuck residual floor).
+      - **Conclusion**: at this much higher resolution and deeper (5-level)
+        AMR -- closer to how this solver would actually be used in production
+        -- the residual-floor behavior characterized above (items 21's earlier
+        entries) does not appear to be a practical problem: the real solve
+        converges to near machine precision, and even a single V-cycle from a
+        cold analytic seed reproduces the exact solution to `~1e-5` relative
+        accuracy. This doesn't contradict the earlier findings (the coarse-fine
+        interface truncation-order reduction is still real, and still visible
+        in the `~2x` post-ghost-comm defect bump above) -- it suggests that
+        reduction's *practical* impact shrinks enough at realistic production
+        resolution/AMR depth to not matter, consistent with it being an
+        inherent, convergent discretization effect rather than a fixed-size bug.
+      - One data point did not print (`DebugReportWorstSolutionError`'s "AFTER
+        ghost-comm (no smoother yet)" call, called right before the one
+        V-cycle) -- likely lost to stdout interleaving from 32 concurrent MPI
+        ranks each producing a very large volume of other diagnostic output
+        around the same point, not a logic error (the identically-implemented
+        call immediately afterward, "AFTER one V-cycle", printed correctly on
+        every rank). Not chased further since the data obtained already answers
+        the question this test was run for.

@@ -1607,6 +1607,26 @@ void MultigridDriver::PreRestrictOctetU() {
 //! from the per-block coeff_ arrays, before SetupMultigrid()/SolveMG() begins. A
 //! no-op (single early return) for every current driver except cfc::
 //! MGCFCConformalFactorDriver/MGCFCLapseDriver, the only ones with ncoeff_ > 0.
+//!
+//! 2026-07-21 fix: the fine-octet-to-coarser-octet loop below only ever mirrored
+//! the generic (per-V-cycle-sweep) RestrictOctets()'s "lev>=1" branch. RestrictOctets()
+//! itself has a second branch, for lev<1 ("octets to root grid"), that explicitly
+//! writes the coarsest octet level's data into the *root grid's* corresponding cell
+//! -- this function had no equivalent, so octet level 0's Coeff() (correctly
+//! populated by TransferCoeffToRoot's else-branch) was never pushed into mgroot_'s
+//! own finest-level Coeff() array. At nreflevel_==1 the loop below never executes at
+//! all (0 >= 1 is false), making this a *complete* no-op: the root-level cell(s)
+//! under any refined patch stayed at coeff_'s post-construction default (0.0) for
+//! the entire solve, corrupting the Newton relaxation at every coarser level mgroot_
+//! itself smooths. Empirically confirmed via a temporary diagnostic (DebugDump
+//! RootCoeffUnderOctet, mg_cfc_conformal_factor.cpp) before this fix: root coeff_
+//! read back as exactly 0.0 while the volume-averaged expectation from the octet's
+//! own (correct) Coeff() was ~7.4e-4 -- see DEVELOPMENT.md for the full trace.
+//! Callers must now run mgroot_->RestrictCoefficients() *after* this function (moved
+//! out of TransferCoeffToRoot(), which used to call it too early -- before this
+//! function had a chance to populate the finest-level root cell(s) it propagates
+//! from) so the newly-populated finest-level root cell(s) actually reach mgroot_'s
+//! own coarser internal levels too.
 
 void MultigridDriver::RestrictCoeffOctets() {
   if (ncoeff_ <= 0) return;
@@ -1628,6 +1648,25 @@ void MultigridDriver::RestrictCoeffOctets() {
       for (int c = 0; c < ncoeff_; ++c)
         coct.Coeff(c, ok, oj, oi) = RestrictOneCoeff(foct, c, ngh, ngh, ngh);
     }
+  }
+  if (nreflevel_ <= 0) return;
+
+  // Octet level 0 -> root grid (mirrors RestrictOctets()'s "else" branch).
+  auto &coeff_root = mgroot_->CoeffAtLevel(mgroot_->GetNumberOfLevels()-1);
+  auto root_coeff_h = coeff_root.h_view;
+  for (int o = 0; o < noctets_[0]; ++o) {
+    MGOctet &oct = octets_[0][o];
+    const LogicalLocation &oloc = oct.loc;
+    int ri = static_cast<int>(oloc.lx1);
+    int rj = static_cast<int>(oloc.lx2);
+    int rk = static_cast<int>(oloc.lx3);
+    for (int c = 0; c < ncoeff_; ++c) {
+      root_coeff_h(0, c, rk+ngh, rj+ngh, ri+ngh) =
+          RestrictOneCoeff(oct, c, ngh, ngh, ngh);
+    }
+  }
+  if (!mgroot_->OnHost()) {
+    Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
 }
 

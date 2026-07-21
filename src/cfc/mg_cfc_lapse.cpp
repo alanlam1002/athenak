@@ -314,6 +314,10 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // and before SetupMultigrid()/the V-cycle loop below begins reading Coeff() at
   // every level.
   RestrictCoeffOctets();
+  // 2026-07-21 fix: see MGCFCConformalFactorDriver::Solve's identical comment --
+  // must run after RestrictCoeffOctets(), not inside TransferCoeffToRoot() (moved
+  // out, see that function's updated doc comment below).
+  mgroot_->RestrictCoefficients();
 
   SetupMultigrid(dt, false);
 
@@ -511,7 +515,13 @@ void MGCFCLapseDriver::TransferCoeffToRoot() {
   // finest one was ever populated above; every coarser root level's coeff_
   // needs the same restriction mglevels_->RestrictCoefficients() already gives
   // the per-block hierarchy.
-  mgc_root->RestrictCoefficients();
+  //
+  // 2026-07-21 fix: mgc_root->RestrictCoefficients() used to be called right here
+  // -- moved to Solve(), after RestrictCoeffOctets(), since this function alone
+  // never populates a refined patch's finest-level root cell (that comes from
+  // RestrictCoeffOctets()'s octet-level-0-to-root step, which runs afterward).
+  // See MGCFCConformalFactorDriver::TransferCoeffToRoot's identical fix for the
+  // full rationale.
   return;
 }
 

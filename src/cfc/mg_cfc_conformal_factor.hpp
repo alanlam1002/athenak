@@ -157,6 +157,13 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     void DebugReportWorstDefect(const std::string &label, int &ref_m, int &ref_k,
                                 int &ref_j, int &ref_i, int &ref_gid);
 
+    // Temporary diagnostic (2026-07-21): companion to DebugReportWorstDefect --
+    // reports the worst |u - analytic| (actual solution-value error, not the
+    // equation's residual), split root/refined, same classification pattern.
+    // Used by DebugAnalyticResidualTest to show how far a single V-cycle moves
+    // the solution from the exact analytic answer.
+    void DebugReportWorstSolutionError(const std::string &label);
+
     // Temporary diagnostic (2026-07-21): seeds delta_psi at every cell -- including
     // every ghost cell, at the refinement boundary too -- from the exact analytic
     // isotropic TOV solution (same tov::TOVStar/PolytropeEOS machinery dyngr_tov.cpp
@@ -166,17 +173,41 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // finest level uses) and measures again. Distinguishes "the ghost-fill machinery
     // itself introduces a large error at the coarse-fine interface" from "the Newton
     // relaxation is the problem" -- see DEVELOPMENT.md's entry for this addendum.
+    // 2026-07-21 (user request): also runs exactly one real V-cycle afterward
+    // (needs pdriver, forwarded from Solve()) and reports both the defect and the
+    // actual solution-value error against analytic truth once more, to show how
+    // much a single relaxation sweep moves the solution.
     // Gated on mg_debug_analytic_residual_test_ (default false); PolytropeEOS-only;
     // to be deleted alongside the rest of this investigation's diagnostics.
     bool mg_debug_analytic_residual_test_;
     ParameterInput *pin_;
-    void DebugAnalyticResidualTest();
+    void DebugAnalyticResidualTest(Driver *pdriver);
 
     // Temporary diagnostic (2026-07-21): confirmation instrumentation for the
     // "stale coarse_buf_ slot at the high-child transverse edge" hypothesis --
     // see the .cpp doc comment for the full index trace. Called from
     // DebugAnalyticResidualTest, not separately gated.
     void DebugDumpCoarseBuf();
+
+    // Temporary diagnostic (2026-07-21): reports the worst |defect| restricted to
+    // just the layer of fine cells immediately adjacent to a coarse-fine +x1
+    // interface (same block-selection logic as DebugDumpCoarseBuf), at a FIXED
+    // physical location independent of wherever the domain-wide worst cell
+    // happens to be. Unlike DebugReportWorstDefect, this isn't contaminated by
+    // the star's own density-profile features moving the global worst cell to a
+    // different location at different resolutions -- see the .cpp doc comment.
+    // Called twice from DebugAnalyticResidualTest (before and after the real
+    // ghost-comm round), not separately gated.
+    void DebugDumpInterfaceDefect(const std::string &label);
+
+    // Temporary diagnostic (2026-07-21): confirmation instrumentation for the
+    // hypothesis that MultigridDriver::RestrictCoeffOctets() never restricts an
+    // octet-level-0's Coeff() down into mgroot_'s own corresponding root-level cell
+    // (unlike the generic, per-V-cycle RestrictOctets(), which has an explicit
+    // "octets to root grid" branch for u_/src_). Called from Solve(), gated on
+    // mg_debug_analytic_residual_test_ (same flag as the rest of this investigation's
+    // diagnostics -- see the .cpp doc comment for the full trace).
+    void DebugDumpRootCoeffUnderOctet();
 };
 
 #endif  // CFC_MG_CFC_CONFORMAL_FACTOR_HPP_

@@ -347,6 +347,19 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // and before SetupMultigrid()/the V-cycle loop below begins reading Coeff() at
   // every level.
   RestrictCoeffOctets();
+  // 2026-07-21 fix: must run after RestrictCoeffOctets(), not inside
+  // TransferCoeffToRoot() (see that function's updated doc comment) -- otherwise
+  // mgroot_'s coarser internal levels get restricted from a finest level that's
+  // still missing the octet-0-to-root contribution RestrictCoeffOctets() just
+  // added, under any refined patch.
+  mgroot_->RestrictCoefficients();
+
+  // Temporary diagnostic (2026-07-21) -- see DebugDumpRootCoeffUnderOctet's doc
+  // comment. Runs right after coeff_ is finalized (before any smoothing), so it
+  // reports the actual state RestrictCoeffOctets() left behind.
+  if (mg_debug_analytic_residual_test_) {
+    DebugDumpRootCoeffUnderOctet();
+  }
 
   SetupMultigrid(dt, false);
 
@@ -357,12 +370,17 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // producing an inf/NaN internally every call. Skipped entirely rather than left in
   // as unused-but-still-computed.
 
-  // Temporary diagnostic (2026-07-21) -- runs BEFORE SolveMG so no smoother
-  // iterations occur in either of its two measurements. See DebugAnalyticResidualTest's
-  // doc comment (mg_cfc_conformal_factor.hpp). The real solve below still proceeds
-  // afterward so the run continues normally.
+  // Temporary diagnostic (2026-07-21) -- runs BEFORE SolveMG. Its first several
+  // measurements involve no smoother at all; its final phase (2026-07-21, user
+  // request) runs exactly one real V-cycle from the analytically-seeded state to
+  // see how a single relaxation sweep moves the solution, then returns -- the
+  // "real" SolveMG below re-seeds nothing and proceeds normally from whatever
+  // state that one V-cycle left behind (a slightly warmer-than-cold start for
+  // this stage's real solve, harmless since SolveMG iterates to convergence
+  // regardless of its starting point). See DebugAnalyticResidualTest's doc
+  // comment (mg_cfc_conformal_factor.hpp) for the full sequence.
   if (mg_debug_analytic_residual_test_) {
-    DebugAnalyticResidualTest();
+    DebugAnalyticResidualTest(pdriver);
   }
 
   SolveMG(pdriver);
@@ -594,7 +612,18 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   // convergence. mglevels_->RestrictCoefficients() (called by Solve() just before
   // this function) only restricts the *per-block* hierarchy; mgroot_ needs the
   // identical treatment applied to itself.
-  mgc_root->RestrictCoefficients();
+  //
+  // 2026-07-21 fix: mgc_root->RestrictCoefficients() used to be called right here
+  // -- but for a refined mesh, this function only ever populates the finest-level
+  // root cell(s) that are *at* root level directly; cells under a refined patch
+  // are left untouched here (they're written into the octet hierarchy instead, in
+  // the else-branch above) and only get their finest-level root value from
+  // RestrictCoeffOctets()'s "octet level 0 -> root" step, which runs *after* this
+  // function returns (see Solve()). Restricting here was therefore always one
+  // step too early for any refined patch's root cell -- moved to Solve(), right
+  // after RestrictCoeffOctets(), so the finest root level is fully populated
+  // (both root-level-direct AND refined-patch-via-octet cells) before it gets
+  // propagated down through mgroot_'s own coarser internal levels.
   return;
 }
 
@@ -734,7 +763,7 @@ void MGCFCConformalFactorDriver::DebugReportWorstDefect(const std::string &label
 //! residual with CalculateDefectPack (no smoother involved at all), then overwrites
 //! just the ghost cells with one real ghost-communication round and measures again.
 
-void MGCFCConformalFactorDriver::DebugAnalyticResidualTest() {
+void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
   tov::PolytropeEOS eos(pin_);
   tov::TOVStar tov_star = tov::TOVStar::ConstructTOV(pin_, eos, false);
 
@@ -780,6 +809,7 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest() {
   int m0, k0, j0, i0, g0;
   DebugReportWorstDefect("analytic test, ANALYTIC ghosts (no comm, no smoother): ",
                          m0, k0, j0, i0, g0);
+  DebugDumpInterfaceDefect("BEFORE ghost-comm: ");
 
   // One real ghost-communication round, bypassing the smoother entirely -- mirrors
   // SetMGTaskListToFiner's flag==2 "final boundary exchange" block (multigrid_tasks.
@@ -805,6 +835,106 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest() {
 
   DebugReportWorstDefect("analytic test, AFTER one MG ghost-comm round: ",
                          m0, k0, j0, i0, g0);
+  DebugDumpInterfaceDefect("AFTER ghost-comm: ");
+  DebugReportWorstSolutionError("analytic test, AFTER ghost-comm (no smoother yet): ");
+
+  // 2026-07-21 (user request): run exactly ONE V-cycle (normal npresmooth_/
+  // npostsmooth_ smoothing counts, same as the real SolveMG loop would use per
+  // iteration) starting from the analytically-seeded state above, then compare
+  // both the defect and the actual solution VALUE against the analytic truth --
+  // shows how much a single relaxation sweep moves the solution away from (or
+  // toward) the exact answer, distinct from the defect-only measurements above.
+  SolveVCycle(pdriver, npresmooth_, npostsmooth_);
+  Kokkos::fence();
+  DebugReportWorstDefect("analytic test, AFTER one V-cycle (smoother applied): ",
+                         m0, k0, j0, i0, g0);
+  DebugReportWorstSolutionError("analytic test, AFTER one V-cycle: ");
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugReportWorstSolutionError(...)
+//! \brief Temporary diagnostic (2026-07-21): companion to DebugReportWorstDefect --
+//! instead of the discrete residual, reports the worst |delta_psi - analytic| (the
+//! actual SOLUTION value error, not the equation's residual), split by root vs.
+//! refined MeshBlock, same classification/physical-position pattern as
+//! DebugReportWorstDefect. Used to see directly how far a single V-cycle iteration
+//! moves the solution away from the exact analytic answer, which the defect alone
+//! doesn't show (a large defect doesn't necessarily mean a large solution error, and
+//! vice versa, for a single relaxation step). Reconstructs its own tov::TOVStar/
+//! PolytropeEOS each call (cheap, one-shot diagnostic -- matches DebugDumpCoarseBuf's
+//! own precedent of not caching it across calls).
+
+void MGCFCConformalFactorDriver::DebugReportWorstSolutionError(
+    const std::string &label) {
+  tov::PolytropeEOS eos(pin_);
+  tov::TOVStar tov_star = tov::TOVStar::ConstructTOV(pin_, eos, false);
+
+  auto u_d = mglevels_->GetCurrentData();
+  auto u_h = Kokkos::create_mirror_view(u_d);
+  Kokkos::deep_copy(u_h, u_d);
+
+  int ngh = mglevels_->GetGhostCells();
+  int ncx = u_h.extent_int(4), ncy = u_h.extent_int(3), ncz = u_h.extent_int(2);
+  int is = ngh, ie = ncx - ngh - 1;
+  int js = ngh, je = ncy - ngh - 1;
+  int ks = ngh, ke = ncz - ngh - 1;
+  int nx1 = ie - is + 1, nx2 = je - js + 1, nx3 = ke - ks + 1;
+  int nmb = pmy_pack_->nmb_thispack;
+
+  auto &size = pmy_pack_->pmb->mb_size;
+  auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+  const auto loc = pmy_mesh_->lloc_eachmb;
+
+  Real root_max = 0.0, ref_max = 0.0;
+  int root_gid = -1, ref_gid = -1;
+  Real root_x1 = 0.0, root_x2 = 0.0, root_x3 = 0.0;
+  Real ref_x1 = 0.0, ref_x2 = 0.0, ref_x3 = 0.0;
+
+  for (int m = 0; m < nmb; ++m) {
+    int gid = gid_h(m);
+    bool refined = (loc[gid].level > locrootlevel_);
+    for (int k = ks; k <= ke; ++k) {
+      Real x3v = CellCenterX(k-ks, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+      for (int j = js; j <= je; ++j) {
+        Real x2v = CellCenterX(j-js, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+        for (int i = is; i <= ie; ++i) {
+          Real x1v = CellCenterX(i-is, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+          Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+          Real rho, p, mass, alp;
+          tov_star.GetPrimitivesAtIsoPoint(eos, r, rho, p, mass, alp);
+          Real psi = 1.0;
+          if (r > 0.0) {
+            Real r_schw = tov_star.FindSchwarzschildR(r, mass);
+            psi = std::sqrt(r_schw / r);
+          }
+          Real val = Kokkos::fabs(u_h(m, 0, k, j, i) - (psi - 1.0));
+          Real &cur_max = refined ? ref_max : root_max;
+          if (val > cur_max) {
+            cur_max = val;
+            if (refined) {
+              ref_gid = gid; ref_x1 = x1v; ref_x2 = x2v; ref_x3 = x3v;
+            } else {
+              root_gid = gid; root_x1 = x1v; root_x2 = x2v; root_x3 = x3v;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (root_gid >= 0) {
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: " << label
+              << "worst |u-analytic| on ROOT blocks    = " << root_max << " at gid="
+              << root_gid << " (x1,x2,x3)=(" << root_x1 << "," << root_x2 << ","
+              << root_x3 << ")" << std::endl;
+  }
+  if (ref_gid >= 0) {
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: " << label
+              << "worst |u-analytic| on REFINED blocks = " << ref_max << " at gid="
+              << ref_gid << " (x1,x2,x3)=(" << ref_x1 << "," << ref_x2 << ","
+              << ref_x3 << ")" << std::endl;
+  }
   return;
 }
 
@@ -973,6 +1103,133 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
       std::cout << std::endl;
     }
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string&)
+//! \brief Temporary diagnostic (2026-07-21): DebugReportWorstDefect's "worst cell in
+//! the whole refined patch" is contaminated by the star's own density-profile
+//! features (kinks/steep falloff near the stellar surface) -- confirmed by a 2x-
+//! resolution rerun where the reported worst-REFINED-cell location moved to a
+//! different physical point and its *pre-ghost-comm* (pure analytic, no communication
+//! at all) value went *up* instead of shrinking ~4x, the opposite of ordinary O(dx^2)
+//! truncation scaling. That means comparing "worst cell" defects across resolutions
+//! can't isolate the ghost-comm/prolongation-specific error at all -- it's tracking a
+//! moving target. This function instead reports the worst |defect| restricted to just
+//! the single layer of fine cells immediately adjacent to a coarse-fine +x1 interface
+//! (same block-selection logic as DebugDumpCoarseBuf: a refined block with a real,
+//! actually-coarser +x1 neighbor), at the same fixed relative location every time,
+//! independent of wherever the star's density profile happens to peak. Called twice
+//! from DebugAnalyticResidualTest with different labels (before/after the real
+//! ghost-comm round) so the same physical cells' defect can be compared directly.
+
+void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string &label) {
+  mglevels_->CalculateDefectPack();
+  auto def_d = mglevels_->GetCurrentDefect();
+  auto def_h = Kokkos::create_mirror_view(def_d);
+  Kokkos::deep_copy(def_h, def_d);
+
+  int ngh_l = mglevels_->GetGhostCells();
+  int shift = mglevels_->GetLevelShift();
+  int ncells_l = mglevels_->GetSize() >> shift;
+
+  int nmb = pmy_pack_->nmb_thispack;
+  auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+  const auto loc = pmy_mesh_->lloc_eachmb;
+  auto &nghbr_h = pmy_pack_->pmb->nghbr;
+  auto &mblev_h = pmy_pack_->pmb->mb_lev;
+  int nnghbr = pmy_pack_->pmb->nnghbr;
+
+  Real ifmax = 0.0;
+  int if_gid = -1, if_fj = -1, if_fk = -1;
+  Real sumsq = 0.0;
+  int count = 0;
+  int fi = ngh_l + ncells_l - 1;  // last real interior cell, adjacent to the +x1 ghost
+  for (int m = 0; m < nmb; ++m) {
+    int gid = gid_h(m);
+    if (loc[gid].level <= locrootlevel_) continue;
+    int child_y = static_cast<int>(loc[gid].lx2) & 1;
+    int child_z = static_cast<int>(loc[gid].lx3) & 1;
+    int n = NeighborIndex(1, 0, 0, child_y, child_z);
+    if (n < 0 || n >= nnghbr) continue;
+    if (nghbr_h.h_view(m, n).gid < 0) continue;
+    if (nghbr_h.h_view(m, n).lev >= mblev_h.h_view(m)) continue;
+
+    for (int fk = ngh_l; fk <= ngh_l + ncells_l - 1; ++fk) {
+      for (int fj = ngh_l; fj <= ngh_l + ncells_l - 1; ++fj) {
+        Real val = Kokkos::fabs(def_h(m, 0, fk, fj, fi));
+        // RMS over the interface layer (below) is a resolution-fair metric a plain
+        // max isn't: max-of-N-samples grows with N purely from extreme-value
+        // statistics even if every sample were drawn from the same distribution,
+        // and doubling resolution quadruples the number of transverse cells (N) in
+        // this layer -- confirmed as a real confound this pass (see doc comment).
+        sumsq += val*val;
+        ++count;
+        if (val > ifmax) {
+          ifmax = val; if_gid = gid; if_fj = fj; if_fk = fk;
+        }
+      }
+    }
+  }
+  if (if_gid >= 0) {
+    Real rms = std::sqrt(sumsq / count);
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: " << label
+              << "worst |defect| on the +x1-interface cell layer = " << ifmax
+              << " at gid=" << if_gid << " (fj=" << if_fj << ",fk=" << if_fk << ")"
+              << " RMS over layer (n=" << count << ") = " << rms
+              << std::endl;
+  }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet()
+//! \brief Temporary diagnostic (2026-07-21): confirmation instrumentation for the
+//! hypothesis that MultigridDriver::RestrictCoeffOctets() (multigrid_driver.cpp) never
+//! pushes an octet-level-0's Coeff() down into mgroot_'s own corresponding root-level
+//! cell. The generic, per-V-cycle-sweep MultigridDriver::RestrictOctets() has two
+//! branches -- "fine octet to coarser octet" (lev>=1) and an else branch, "octets to
+//! root grid" (lev<1), which explicitly writes root_src_h/root_u_h from
+//! CalculateDefectOctet/RestrictOne. RestrictCoeffOctets() only mirrors the first
+//! branch (its loop is "for l = nreflevel_-1; l >= 1; --l"); it has no equivalent of
+//! the else branch. At nreflevel_==1 (this investigation's test geometry) that loop
+//! condition (0 >= 1) is never true, so RestrictCoeffOctets() is a complete no-op, and
+//! the root-level cell(s) under any refined patch are left at coeff_'s post-
+//! construction default (0.0) for the entire solve -- TransferCoeffToRoot() only
+//! writes into root_coeff_h for blocks *at* root level, and into the octet's own
+//! Coeff() for refined blocks, never both. This dumps, for every level-0 octet,
+//! mgroot_'s actual Coeff() at the corresponding root cell alongside
+//! RestrictOneCoeff's volume-averaged expectation computed from that same octet's own
+//! (independently confirmed-correct, via TransferCoeffToRoot) Coeff() values, so the
+//! "root cell stuck at zero" claim can be checked by eye rather than asserted. To be
+//! deleted alongside the rest of this investigation's diagnostics.
+
+void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet() {
+  if (nreflevel_ <= 0) return;
+
+  auto *mgc_root = static_cast<MGCFCConformalFactor*>(mgroot_);
+  int ngh = mgc_root->GetGhostCells();
+  auto &coeff_root = mgc_root->CoeffAtLevel(mgc_root->GetNumberOfLevels()-1);
+  auto coeff_root_h = Kokkos::create_mirror_view(coeff_root.d_view);
+  Kokkos::deep_copy(coeff_root_h, coeff_root.d_view);
+
+  for (int o = 0; o < noctets_[0]; ++o) {
+    MGOctet &oct = octets_[0][o];
+    const LogicalLocation &oloc = oct.loc;
+    int ri = static_cast<int>(oloc.lx1);
+    int rj = static_cast<int>(oloc.lx2);
+    int rk = static_cast<int>(oloc.lx3);
+    std::cout << "CFC debug [rank " << global_variable::my_rank << "]: root coeff_ "
+              << "under octet (lx1,lx2,lx3)=(" << ri << "," << rj << "," << rk << "):";
+    for (int c = 0; c < ncoeff_; ++c) {
+      Real actual = coeff_root_h(0, c, rk+ngh, rj+ngh, ri+ngh);
+      Real expected = RestrictOneCoeff(oct, c, ngh, ngh, ngh);
+      std::cout << " c" << c << ": actual=" << actual << " expected(from octet avg)="
+                << expected << " diff=" << (actual - expected);
+    }
+    std::cout << std::endl;
+  }
+  return;
 }
 
 // Item 12: octet-scale Newton-Gauss-Seidel smoothing, exactly the same math as

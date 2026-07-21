@@ -1,5 +1,5 @@
-#ifndef EOS_PRIMITIVE_SOLVER_RESET_FLOOR_HPP_
-#define EOS_PRIMITIVE_SOLVER_RESET_FLOOR_HPP_
+#ifndef EOS_PRIMITIVE_SOLVER_RESET_FLOOR_ZLA_BAG_HPP_
+#define EOS_PRIMITIVE_SOLVER_RESET_FLOOR_ZLA_BAG_HPP_
 //========================================================================================
 // PrimitiveSolver equation-of-state framework
 // Copyright(C) 2023 Jacob M. Fields <jmf6719@psu.edu>
@@ -22,10 +22,10 @@
 
 namespace Primitive {
 
-class ResetFloor : public ErrorPolicyInterface {
+class ResetFloorZlaBag : public ErrorPolicyInterface {
  protected:
   /// Constructor
-  ResetFloor() {
+  ResetFloorZlaBag() {
     fail_conserved_floor = false;
     fail_primitive_floor = false;
     adjust_conserved = true;
@@ -101,14 +101,46 @@ class ResetFloor : public ErrorPolicyInterface {
   KOKKOS_INLINE_FUNCTION bool SpeciesLimits(Real* Y, const Real* Y_min, const Real* Y_max,
                                             int n_species) const {
     bool adjusted = false;
-    for (int i = 0; i < n_species; i++) {
-      if (Y[i] < Y_min[i]) {
-        adjusted = true;
-        Y[i] = Y_min[i];
-      } else if (Y[i] > Y_max[i]) {
-        adjusted = true;
-        Y[i] = Y_max[i];
-      }
+    /// Volume fraction (f)
+    if (Y[0] < Y_min[0]) {
+      adjusted = true;
+      Y[0] = Y_min[0];
+    } else if (Y[0] > Y_max[0]) {
+      adjusted = true;
+      Y[0] = Y_max[0];
+    }
+    /// Nucleons Fraction (f nB,N / nB)
+    Real Y_min_ = Y_min[1] * Y[0];
+    Real Y_max_ = Y_max[1] * Y[0];
+    if (Y[0] == Y_max[0] && Y[1] != Y_max_) {
+      adjusted = true;
+      Y[1] = Y_max_;
+    } else if (Y[1] < Y_min_) {
+      adjusted = true;
+      Y[1] = Y_min_;
+    } else if (Y[1] > Y_max_) {
+      adjusted = true;
+      Y[1] = Y_max_;
+    }
+    /// Nucleons Leptons Fraction (f nB,N y_lN / nB)
+    Y_min_ = Y_min[2] * Y[1];
+    Y_max_ = Y_max[2] * Y[1];
+    if (Y[2] < Y_min_) {
+      adjusted = true;
+      Y[2] = Y_min_;
+    } else if (Y[2] > Y_max_) {
+      adjusted = true;
+      Y[2] = Y_max_;
+    }
+    /// Quarks Leptons Fraction ((1-f) nB,Q y_lQ / nB)
+    Y_min_ = Y_min[3] * (1.0 - Y[1]);
+    Y_max_ = Y_max[3] * (1.0 - Y[1]);
+    if (Y[3] < Y_min_) {
+      adjusted = true;
+      Y[3] = Y_min_;
+    } else if (Y[3] > Y_max_) {
+      adjusted = true;
+      Y[3] = Y_max_;
     }
     return adjusted;
   }
@@ -160,4 +192,4 @@ class ResetFloor : public ErrorPolicyInterface {
 
 } // namespace Primitive
 
-#endif  // EOS_PRIMITIVE_SOLVER_RESET_FLOOR_HPP_
+#endif  // EOS_PRIMITIVE_SOLVER_RESET_FLOOR_ZLA_BAG_HPP_

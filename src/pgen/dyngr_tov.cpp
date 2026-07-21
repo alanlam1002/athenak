@@ -30,6 +30,7 @@
 #include "utils/tov/tov_tabulated.hpp"
 #include "utils/tov/tov_piecewise_poly.hpp"
 #include "utils/tov/tov_zla_bag.hpp"
+#include "z4c/z4c_amr.hpp"
 
 #include <Kokkos_Random.hpp>
 
@@ -64,6 +65,7 @@ TOVParams *ptov_params;
 
 void SetADMVariablesToTOV(MeshBlockPack *pmbp);
 void FinalizeTOV(ParameterInput *pin, Mesh *pm);
+void TOVRefinementCondition(MeshBlockPack *pmbp);
 
 template<class TOVEOS>
 void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
@@ -449,6 +451,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   user_hist_func = &TOVHistory;
+  user_ref_func = &TOVRefinementCondition;
   pgen_final_func = &FinalizeTOV;
   pmbp->padm->SetADMVariables = &SetADMVariablesToTOV;
 
@@ -638,13 +641,16 @@ void FinalizeTOV(ParameterInput *pin, Mesh *pm) {
 // History function
 void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // Select the number of outputs and create labels for them.
-  pdata->nhist = 2;
+  pdata->nhist = 4;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
+  pdata->label[2] = "press-max";
+  pdata->label[3] = "Yl,N-max";
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
   auto &adm = pm->pmb_pack->padm->adm;
+  int& nvars_ = pm->pmb_pack->pmhd->nmhd;
 
   // loop over all MeshBlocks in this pack
   auto &indcs = pm->pmb_pack->pmesh->mb_indcs;
@@ -656,8 +662,10 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   const int nji = nx2*nx1;
   Real rho_max = std::numeric_limits<Real>::max();
   Real alpha_min = -rho_max;
+  Real prs_max = std::numeric_limits<Real>::max();
+  Real yln_max = std::numeric_limits<Real>::max();
   Kokkos::parallel_reduce("TOVHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min) {
+  KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min, Real &mb_prs_max, Real &mb_yln_max) {
     // compute n,k,j,i indices of thread
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
@@ -668,7 +676,9 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
 
     mb_max = fmax(mb_max, w0_(m,IDN,k,j,i));
     mb_alp_min = fmin(mb_alp_min, adm.alpha(m, k, j, i));
-  }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min));
+    mb_prs_max = fmax(mb_prs_max, w0_(m, IPR,k,j,i));
+    mb_yln_max = fmax(mb_yln_max, w0_(m, nvars_+2,k,j,i));
+  }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(prs_max), Kokkos::Max<Real>(yln_max));
 
   // Currently AthenaK only supports MPI_SUM operations between ranks, but we need MPI_MAX
   // and MPI_MIN operations instead. This is a cheap hack to make it work as intended.
@@ -676,15 +686,27 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   if (global_variable::my_rank == 0) {
     MPI_Reduce(MPI_IN_PLACE, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &prs_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
   } else {
     MPI_Reduce(&rho_max, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&alpha_min, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&prs_max, &prs_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&yln_max, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     rho_max = 0.;
     alpha_min = 0.;
+    prs_max = 0.;
+    yln_max = 0.;
   }
 #endif
 
   // store data in hdata array
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
+  pdata->hdata[2] = prs_max;
+  pdata->hdata[3] = yln_max;
+}
+
+void TOVRefinementCondition(MeshBlockPack *pmbp) {
+  pmbp->pz4c->pamr->Refine(pmbp);
 }

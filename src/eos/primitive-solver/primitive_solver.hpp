@@ -164,6 +164,330 @@ class PrimitiveSolver {
       return mu - muhat;
     }
   };
+
+  // RootFunctor {{{
+  class RootFunctor2 {
+   public:
+    KOKKOS_INLINE_FUNCTION
+    Real operator()(Real mu, Real D, Real q, Real bsq, Real rsq, Real rbsq, Real *Y,
+        const EOS<EOSPolicy, ErrorPolicy> * peos, Real* n, Real* T, Real* P) const {
+      // We need to get some utility quantities first.
+      const Real x = 1.0/(1.0 + mu*bsq);
+      const Real xsq = x*x;
+      const Real musq = mu*mu;
+      //const Real den = 1.0 + mu*bsq;
+      //const Real mux = mu*x;
+      //const Real muxsq = mux/den;
+      //const Real rbarsq = rsq*xsq + mu*x*(1.0 + x)*rbsq;
+      //const Real rbarsq = xsq*(rsq + mu*(2.0 + mu*bsq)*rbsq);
+      // An alternative calculation of rbarsq that may be more accurate.
+      //const Real rbarsq = rsq*xsq + (mux + muxsq)*rbsq;
+      const Real rbarsq = x*(rsq*x + mu*(x + 1.0)*rbsq);
+      //const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*(bsq*rsq - rbsq);
+      const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*fma(bsq, rsq, -rbsq);
+      const Real mb = peos->GetBaryonMass();
+
+      // Now we can estimate the velocity.
+      //const Real v_max = peos->GetMaxVelocity();
+      const Real h_min = peos->GetMinimumEnthalpy();
+      const Real vsq_max = fmin(rsq/(h_min*h_min + rsq),
+                                    peos->GetMaxVelocity()*peos->GetMaxVelocity());
+      const Real vhatsq = fmin(musq*rbarsq, vsq_max);
+
+      // Using the velocity estimate, predict the Lorentz factor.
+      // NOTE: for extreme velocities, this alternative form of W may be more accurate:
+      // Wsq = 1/(eps*(2 - eps)) = 1/(eps*(1 + v)), where eps = 1 - v.
+      //const Real What = 1.0/std::sqrt(1.0 - vhatsq);
+      const Real iWhat = sqrt(1.0 - vhatsq);
+
+      // Now estimate the number density.
+      Real rhohat = D*iWhat;
+      Real nhat = rhohat/mb;
+      peos->ApplyDensityLimits(nhat);
+
+      // Estimate the energy density.
+      Real eoverD = qbar - mu*rbarsq + 1.0;
+      Real ehat = D*eoverD;
+      peos->ApplyEnergyLimits(ehat, nhat, Y);
+      //eoverD = ehat/D;
+
+      // Now we can get an estimate of the temperature, and from that, the pressure and
+      // enthalpy.
+      Real That = peos->GetTemperatureFromE(nhat, ehat, Y);
+      //peos->ApplyTemperatureLimits(That);
+      //ehat = peos->GetEnergy(nhat, That, Y);
+      Real Phat = peos->GetPressure(nhat, That, Y);
+      Real Pcold = peos->GetPressure(nhat, 0.0, Y);
+      Real ecold = peos->GetEnergy(nhat, 0.0, Y);
+      Real eintcold = peos->GetInternalEnergy(nhat, 0.0, Y);
+      //Real hhat = peos->GetEnthalpy(nhat, That, Y);
+      Real hhat = (ehat + Phat)/(mb*nhat);
+
+      // Now we can get two different estimates for nu = h/W.
+      Real nu_a = hhat*iWhat;
+      //Real ahat = Phat / ehat;
+      Real nu_b = eoverD + Phat/D;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      Real nuhat = fmax(nu_a, nu_b);
+
+      // Finally, we can get an estimate for muhat.
+      Real muhat = 1.0/(nuhat + mu*rbarsq);
+
+      *n = nhat;
+      *T = That;
+      *P = Phat;
+
+      // FIXME: Debug only!
+      Kokkos::printf(
+        " Root2 D   = %.17g "
+        " q   = %.17g "
+        " rsq = %.17g "
+        " n   = %.17g "
+        " T   = %.17g "
+        " E   = %.17g %.17g %.17g "
+        " P   = %.17g %.17g "
+        " Y   = %.17g %.17g %.17g %.17g "
+        " vsq = %.17g %.17g %.17g "
+        " iWat = %.17g "
+        " hmin = %.17g %.17g "
+        " mu = %.17g %.17g "
+        " e/n = %.17g %.17g"
+        "\n",
+        D, q, rsq, nhat, That, 
+        ehat, ecold, eintcold,
+        Phat, Pcold,
+        Y[0], Y[1], Y[2], Y[3],
+        vhatsq,
+        vsq_max, 
+        peos->GetMaxVelocity()*peos->GetMaxVelocity(), 
+        iWhat,
+        hhat, h_min, 
+        muhat, mu,
+        ehat / (mb*nhat), mb
+        );
+
+      return mu - muhat;
+    }
+  };
+
+
+  // RootFunctor {{{
+  class RootFunctor3 {
+   public:
+    KOKKOS_INLINE_FUNCTION
+    Real operator()(Real mu, Real D, Real q, Real bsq, Real rsq, Real rbsq, Real *Y,
+        const EOS<EOSPolicy, ErrorPolicy> * peos, Real* n, Real* T, Real* P) const {
+      // We need to get some utility quantities first.
+      const Real x = 1.0/(1.0 + mu*bsq);
+      const Real xsq = x*x;
+      const Real musq = mu*mu;
+      //const Real den = 1.0 + mu*bsq;
+      //const Real mux = mu*x;
+      //const Real muxsq = mux/den;
+      //const Real rbarsq = rsq*xsq + mu*x*(1.0 + x)*rbsq;
+      //const Real rbarsq = xsq*(rsq + mu*(2.0 + mu*bsq)*rbsq);
+      // An alternative calculation of rbarsq that may be more accurate.
+      //const Real rbarsq = rsq*xsq + (mux + muxsq)*rbsq;
+      const Real rbarsq = x*(rsq*x + mu*(x + 1.0)*rbsq);
+      //const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*(bsq*rsq - rbsq);
+      const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*fma(bsq, rsq, -rbsq);
+      const Real mb = peos->GetBaryonMass();
+
+      // Now we can estimate the velocity.
+      //const Real v_max = peos->GetMaxVelocity();
+      const Real h_min = peos->GetMinimumEnthalpy();
+      const Real vsq_max = fmin(rsq/(h_min*h_min + rsq),
+                                    peos->GetMaxVelocity()*peos->GetMaxVelocity());
+      const Real vhatsq = fmin(musq*rbarsq, vsq_max);
+
+      // Using the velocity estimate, predict the Lorentz factor.
+      // NOTE: for extreme velocities, this alternative form of W may be more accurate:
+      // Wsq = 1/(eps*(2 - eps)) = 1/(eps*(1 + v)), where eps = 1 - v.
+      //const Real What = 1.0/std::sqrt(1.0 - vhatsq);
+      const Real iWhat = sqrt(1.0 - vhatsq);
+      const Real What = 1.0/sqrt(1.0 - vhatsq);
+
+      // Now estimate the number density.
+      Real rhohat = D*iWhat;
+      Real nhat = rhohat/mb;
+      peos->ApplyDensityLimits(nhat);
+
+      // Estimate the energy density.
+      Real eoverD = qbar - mu*rbarsq + 1.0;
+      //Real ehat = D*eoverD;
+      Real ehat = D * (qbar - mu*rbarsq + vhatsq * What / (1.0+What));
+      peos->ApplyInternalEnergyLimits(ehat, nhat, Y);
+      //eoverD = ehat/D;
+
+      // Now we can get an estimate of the temperature, and from that, the pressure and
+      // enthalpy.
+      Real That = peos->GetTemperatureFromInternalE(nhat, ehat, Y);
+      //peos->ApplyTemperatureLimits(That);
+      //ehat = peos->GetEnergy(nhat, That, Y);
+      Real Phat = peos->GetPressure(nhat, That, Y);
+      Real Pcold = peos->GetPressure(nhat, 0.0, Y);
+      Real ecold = peos->GetEnergy(nhat, 0.0, Y);
+      //Real hhat = peos->GetEnthalpy(nhat, That, Y);
+      Real hhat = 1.0 + (ehat + Phat)/(mb*nhat);
+
+      // Now we can get two different estimates for nu = h/W.
+      Real nu_a = hhat*iWhat;
+      //Real ahat = Phat / ehat;
+      Real nu_b = eoverD + Phat/D;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      Real nuhat = fmax(nu_a, nu_b);
+
+      // Finally, we can get an estimate for muhat.
+      Real muhat = 1.0/(nuhat + mu*rbarsq);
+
+      *n = nhat;
+      *T = That;
+      *P = Phat;
+
+      // FIXME: Debug only!
+      //Kokkos::printf(
+      //  " D   = %.17g "
+      //  " q   = %.17g "
+      //  " rsq = %.17g "
+      //  " n   = %.17g "
+      //  " T   = %.17g "
+      //  " E   = %.17g %.17g "
+      //  " P   = %.17g %.17g "
+      //  " Y   = %.17g %.17g %.17g %.17g "
+      //  " vsq = %.17g %.17g %.17g "
+      //  " iWat = %.17g "
+      //  " hmin = %.17g %.17g "
+      //  " mu = %.17g %.17g "
+      //  " e/n = %.17g %.17g"
+      //  "\n",
+      //  D, q, rsq, nhat, That, 
+      //  ehat, ecold,
+      //  Phat, Pcold,
+      //  Y[0], Y[1], Y[2], Y[3],
+      //  vhatsq,
+      //  vsq_max, 
+      //  peos->GetMaxVelocity()*peos->GetMaxVelocity(), 
+      //  iWhat,
+      //  hhat, h_min, 
+      //  muhat, mu,
+      //  ehat / (mb*nhat), mb
+      //  );
+
+      return mu - muhat;
+    }
+  };
+
+
+  // RootFunctor {{{
+  class RootFunctor4 {
+   public:
+    KOKKOS_INLINE_FUNCTION
+    Real operator()(Real mu, Real D, Real q, Real bsq, Real rsq, Real rbsq, Real *Y,
+        const EOS<EOSPolicy, ErrorPolicy> * peos, Real* n, Real* T, Real* P) const {
+      // We need to get some utility quantities first.
+      const Real x = 1.0/(1.0 + mu*bsq);
+      const Real xsq = x*x;
+      const Real musq = mu*mu;
+      //const Real den = 1.0 + mu*bsq;
+      //const Real mux = mu*x;
+      //const Real muxsq = mux/den;
+      //const Real rbarsq = rsq*xsq + mu*x*(1.0 + x)*rbsq;
+      //const Real rbarsq = xsq*(rsq + mu*(2.0 + mu*bsq)*rbsq);
+      // An alternative calculation of rbarsq that may be more accurate.
+      //const Real rbarsq = rsq*xsq + (mux + muxsq)*rbsq;
+      const Real rbarsq = x*(rsq*x + mu*(x + 1.0)*rbsq);
+      //const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*(bsq*rsq - rbsq);
+      const Real qbar = q - 0.5*bsq - 0.5*musq*xsq*fma(bsq, rsq, -rbsq);
+      const Real mb = peos->GetBaryonMass();
+
+      // Now we can estimate the velocity.
+      //const Real v_max = peos->GetMaxVelocity();
+      const Real h_min = peos->GetMinimumEnthalpy();
+      const Real vsq_max = fmin(rsq/(h_min*h_min + rsq),
+                                    peos->GetMaxVelocity()*peos->GetMaxVelocity());
+      const Real vhatsq = fmin(musq*rbarsq, vsq_max);
+
+      // Using the velocity estimate, predict the Lorentz factor.
+      // NOTE: for extreme velocities, this alternative form of W may be more accurate:
+      // Wsq = 1/(eps*(2 - eps)) = 1/(eps*(1 + v)), where eps = 1 - v.
+      //const Real What = 1.0/std::sqrt(1.0 - vhatsq);
+      const Real iWhat = sqrt(1.0 - vhatsq);
+      const Real What = 1.0/sqrt(1.0 - vhatsq);
+
+      // Now estimate the number density.
+      Real rhohat = D*iWhat;
+      Real nhat = rhohat/mb;
+      peos->ApplyDensityLimits(nhat);
+
+      // Estimate the energy density.
+      Real eoverD = qbar - mu*rbarsq + 1.0;
+      //Real ehat = D*eoverD;
+      Real ehat = D * (qbar - mu*rbarsq + vhatsq * What / (1.0+What));
+      peos->ApplyInternalEnergyLimits(ehat, nhat, Y);
+      //eoverD = ehat/D;
+
+      // Now we can get an estimate of the temperature, and from that, the pressure and
+      // enthalpy.
+      Real That = peos->GetTemperatureFromInternalE(nhat, ehat, Y);
+      //peos->ApplyTemperatureLimits(That);
+      //ehat = peos->GetEnergy(nhat, That, Y);
+      Real Phat = peos->GetPressure(nhat, That, Y);
+      Real Pcold = peos->GetPressure(nhat, 0.0, Y);
+      Real ecold = peos->GetEnergy(nhat, 0.0, Y);
+      Real eintcold = peos->GetTestInternalEnergy(nhat, 0.0, Y);
+      //Real hhat = peos->GetEnthalpy(nhat, That, Y);
+      Real hhat = 1.0 + (ehat + Phat)/(mb*nhat);
+
+      // Now we can get two different estimates for nu = h/W.
+      Real nu_a = hhat*iWhat;
+      //Real ahat = Phat / ehat;
+      Real nu_b = eoverD + Phat/D;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      //Real nu_b = (1.0 + ahat)*eoverD;
+      Real nuhat = fmax(nu_a, nu_b);
+
+      // Finally, we can get an estimate for muhat.
+      Real muhat = 1.0/(nuhat + mu*rbarsq);
+
+      *n = nhat;
+      *T = That;
+      *P = Phat;
+
+      // FIXME: Debug only!
+      Kokkos::printf(
+        " Root4 D   = %.17g "
+        " q   = %.17g "
+        " rsq = %.17g "
+        " n   = %.17g "
+        " T   = %.17g "
+        " E   = %.17g %.17g %.17g"
+        " P   = %.17g %.17g "
+        " Y   = %.17g %.17g %.17g %.17g "
+        " vsq = %.17g %.17g %.17g "
+        " iWat = %.17g "
+        " hmin = %.17g %.17g "
+        " mu = %.17g %.17g "
+        " e/n = %.17g %.17g"
+        "\n",
+        D, q, rsq, nhat, That, 
+        ehat, ecold, eintcold, 
+        Phat, Pcold,
+        Y[0], Y[1], Y[2], Y[3],
+        vhatsq,
+        vsq_max, 
+        peos->GetMaxVelocity()*peos->GetMaxVelocity(), 
+        iWhat,
+        hhat, h_min, 
+        muhat, mu,
+        ehat / (mb*nhat), mb
+        );
+
+      return mu - muhat;
+    }
+  };
+
   // }}}
  private:
   /// A constant pointer to the EOS.
@@ -179,6 +503,9 @@ class PrimitiveSolver {
   UpperRootFunctor UpperRoot;
   MuFromWFunctor MuFromW;
   RootFunctor RootFunction;
+  RootFunctor2 RootFunction2;
+  RootFunctor3 RootFunction3;
+  RootFunctor4 RootFunction4;
 
   //! \brief Check and handle the corner case for rho being too small or large.
   //
@@ -494,12 +821,14 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
 
   // Do the root solve.
   Real n, P, T, mu;
-  bool result = root.FalsePosition(RootFunction, mul, muh, mu, tol,
+  bool result = root.FalsePosition(RootFunction3, mul, muh, mu, tol,
                                    D, q, bsqr, rsqr, rbsqr, Y, &eos, &n, &T, &P);
   // WARNING: the reported number of iterations is not thread-safe and should only be
   // trusted on single-thread benchmarks.
   solver_result.iterations = root.iterations;
   if (!result) {
+    bool result_tmp = root.FalsePosition_test(RootFunction4, mul, muh, mu, tol,
+                                     D, q, bsqr, rsqr, rbsqr, Y, &eos, &n, &T, &P);
     HandleFailure(prim, cons, b, g3d);
     solver_result.error = Error::NO_SOLUTION;
     return solver_result;

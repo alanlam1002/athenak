@@ -99,6 +99,18 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     return temperature_from_var(ECLOGE, log_e, n, Y[0]);
   }
 
+  /// Temperature from energy density
+  KOKKOS_INLINE_FUNCTION Real TemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    assert (m_initialized);
+    if (n < min_n) {
+      return min_T;
+    } else if (e <= MinimumInternalEnergy(n, Y)) {
+      return min_T;
+    }
+    Real log_e = log2_(e+n*mb);
+    return temperature_from_var(ECLOGE, log_e, n, Y[0]);
+  }
+
   /// Calculate the temperature using.
   KOKKOS_INLINE_FUNCTION Real TemperatureFromP(Real n, Real p, Real *Y) const {
     assert (m_initialized);
@@ -116,6 +128,20 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
     assert (m_initialized);
     Real log_e = eval_at_nty(ECLOGE, n, T, Y[0]);
     return exp2_(log_e);
+  }
+
+  /// Calculate the energy density using.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergy(Real n, Real T, const Real *Y) const {
+    assert (m_initialized);
+    Real log_e = eval_at_nty(ECLOGE, n, T, Y[0]);
+    return exp2_(log_e)-n*mb;
+  }
+
+  /// Calculate the energy density using.
+  KOKKOS_INLINE_FUNCTION Real TestInternalEnergy(Real n, Real T, const Real *Y) const {
+    assert (m_initialized);
+    Real log_e = eval_at_nty(ECLOGE, n, T, Y[0]);
+    return exp2_(log_e)-n*mb;
   }
 
   /// Calculate the pressure using.
@@ -274,6 +300,16 @@ class EOSCompOSE : public EOSPolicyInterface, public LogPolicy, public SupportsE
   /// Get the maximum energy at a given density and composition
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
     return Energy(n, max_T, Y);
+  }
+
+  /// Get the minimum internal energy at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MinimumInternalEnergy(Real n, Real *Y) const {
+    return InternalEnergy(n, min_T, Y);
+  }
+
+  /// Get the maximum internal energy at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
+    return InternalEnergy(n, max_T, Y);
   }
 
  public:

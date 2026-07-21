@@ -69,6 +69,13 @@ class PiecewisePolytrope : public EOSPolicyInterface {
   }
 
   /// Calculate the temperature using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real TemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    int p = FindPiece(n);
+    Real e_cold = GetColdInternalEnergy(n, p);
+    return (e - e_cold)*(gamma_thermal - 1.0)/n;
+  }
+
+  /// Calculate the temperature using the ideal gas law.
   KOKKOS_INLINE_FUNCTION Real TemperatureFromP(Real n, Real p, Real *Y) const {
     int i = FindPiece(n);
     Real p_cold = GetColdPressure(n, i);
@@ -80,6 +87,20 @@ class PiecewisePolytrope : public EOSPolicyInterface {
     int p = FindPiece(n);
 
     return GetColdEnergy(n, p) + n*T/(gamma_thermal - 1.0);
+  }
+
+  /// Calculate the energy density using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergy(Real n, Real T, const Real *Y) const {
+    int p = FindPiece(n);
+
+    return GetColdInternalEnergy(n, p) + n*T/(gamma_thermal - 1.0);
+  }
+
+  /// Calculate the energy density using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real TestInternalEnergy(Real n, Real T, const Real *Y) const {
+    int p = FindPiece(n);
+
+    return GetColdInternalEnergy(n, p) + n*T/(gamma_thermal - 1.0);
   }
 
   /// Calculate the pressure using the ideal gas law.
@@ -145,6 +166,18 @@ class PiecewisePolytrope : public EOSPolicyInterface {
 
   /// Calculate the maximum energy at a given density and composition
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
+    // Note that max_T is already set to numeric_limits<Real>::max()!
+    return max_T;
+  }
+  /// Calculate the minimum energy at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MinimumInternalEnergy(Real n, Real *Y) const {
+    int p = FindPiece(n);
+
+    return GetColdInternalEnergy(n, p);
+  }
+
+  /// Calculate the maximum energy at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
     // Note that max_T is already set to numeric_limits<Real>::max()!
     return max_T;
   }
@@ -268,6 +301,11 @@ class PiecewisePolytrope : public EOSPolicyInterface {
   /// Polytropic Energy Density
   KOKKOS_INLINE_FUNCTION Real GetColdEnergy(Real n, int p) const {
     return mb*n*(1.0 + eps_pieces[p]) + GetColdPressure(n, p)/(gamma_pieces[p] - 1.0);
+  }
+
+  /// Polytropic Internal Energy Density
+  KOKKOS_INLINE_FUNCTION Real GetColdInternalEnergy(Real n, int p) const {
+    return mb*n*eps_pieces[p] + GetColdPressure(n, p)/(gamma_pieces[p] - 1.0);
   }
 
   /// Polytropic Pressure

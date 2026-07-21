@@ -54,6 +54,11 @@ class IdealGas : public EOSPolicyInterface {
   }
 
   /// Calculate the temperature using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real TemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    return gammam1*e/n;
+  }
+
+  /// Calculate the temperature using the ideal gas law.
   KOKKOS_INLINE_FUNCTION Real TemperatureFromP(Real n, Real p, Real *Y) const {
     return p/n;
   }
@@ -61,6 +66,16 @@ class IdealGas : public EOSPolicyInterface {
   /// Calculate the energy density using the ideal gas law.
   KOKKOS_INLINE_FUNCTION Real Energy(Real n, Real T, const Real *Y) const {
     return n*(mb + T/gammam1);
+  }
+
+  /// Calculate the energy density using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergy(Real n, Real T, const Real *Y) const {
+    return n*T/gammam1;
+  }
+
+  /// Calculate the energy density using the ideal gas law.
+  KOKKOS_INLINE_FUNCTION Real TestInternalEnergy(Real n, Real T, const Real *Y) const {
+    return n*T/gammam1;
   }
 
   /// Calculate the pressure using the ideal gas law.
@@ -106,6 +121,17 @@ class IdealGas : public EOSPolicyInterface {
 
   /// Calculate the maximum energy density at a given density and composition
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
+    // Note that max_T is already set to numeric_limits<Real>::max!
+    return max_T;
+  }
+
+  /// Calculate the minimum energy density at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MinimumInternalEnergy(Real n, Real *Y) const {
+    return 0.0;
+  }
+
+  /// Calculate the maximum energy density at a given density and composition
+  KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
     // Note that max_T is already set to numeric_limits<Real>::max!
     return max_T;
   }

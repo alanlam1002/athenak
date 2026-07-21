@@ -104,6 +104,22 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return Kokkos::fmax(T,min_T);
   }
 
+  /// Temperature from internal energy density.
+  KOKKOS_INLINE_FUNCTION Real TemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    assert (m_initialized);
+    if (n < min_n) {
+      // If density is OOB then return minimum temperature
+      return min_T;
+    } else if (e <= MinimumInternalEnergy(n, Y)) {
+      // If energy is OOB then return minimum temperature
+      return min_T;
+    }
+
+    Real e_cold = ColdInternalEnergy(n, Y);
+    Real T = gamma_th_m1*(e-e_cold)/n;
+    return Kokkos::fmax(T,min_T);
+  }
+
   /// Calculate the temperature using.
   KOKKOS_INLINE_FUNCTION Real TemperatureFromP(Real n, Real p, Real *Y) const {
     assert (m_initialized);
@@ -127,6 +143,13 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return e_cold + e_th;
   }
 
+  /// Calculate the energy density using.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergy(Real n, Real T, const Real *Y) const {
+    Real e_cold = ColdInternalEnergy(n, Y);
+    Real e_th   = n*T/gamma_th_m1;
+    return e_cold + e_th;
+  }
+
   /// Calculate the pressure using.
   KOKKOS_INLINE_FUNCTION Real Pressure(Real n, Real T, Real *Y) const {
     Real p_cold = ColdPressure(n, Y);
@@ -146,7 +169,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real H_cold = ColdEnthalpy(n, Y);
     Real H_th   = (gamma_th*T)/(gamma_th_m1);
 
-    Real Hcs2_cold = pow(ColdSoundSpeed(n, Y),2.0)*H_cold;
+    Real Hcs2_cold = ColdSoundSpeed2(n, Y)*H_cold;
     Real Hcs2_th   = gamma_th*T;
 
     return sqrt((Hcs2_cold + Hcs2_th)/(H_cold + H_th));
@@ -169,6 +192,46 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     if (nY[4] < 1.0) E_Q = ColdEnergyQuarks(nY[1], nY[3]);
     if (ZL_eta < 1.0) E_G = ColdEnergyLeptons(n, nY[5]);
     return E_N * nY[4] + E_Q * (1.0-nY[4]) + (1.0-ZL_eta) * E_G;
+  }
+
+  /// Calculate Internal Energy for the cold part.
+  KOKKOS_INLINE_FUNCTION Real ColdInternalEnergy(Real n, const Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real E_N = 0.0;
+    Real E_Q = 0.0;
+    Real E_G = 0.0;
+    if (nY[4] > 0.0) E_N = ColdInternalEnergyNucleons(nY[0], nY[2]);
+    if (nY[4] < 1.0) E_Q = ColdInternalEnergyQuarks(nY[1], nY[3]);
+    if (ZL_eta < 1.0) E_G = ColdEnergyLeptons(n, nY[5]);
+    return E_N * nY[4] + E_Q * (1.0-nY[4]) + (1.0-ZL_eta) * E_G
+          + nY[0] * nY[4] * mb - n * mb;
+          //+ ( nY[0] * nY[4] - n ) * mb;
+  }
+
+  /// Calculate Internal Energy for the cold part.
+  KOKKOS_INLINE_FUNCTION Real TestInternalEnergy(Real n, Real T, const Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real E_N = 0.0;
+    Real E_Q = 0.0;
+    Real E_G = 0.0;
+    if (nY[4] > 0.0) E_N = ColdInternalEnergyNucleons(nY[0], nY[2]);
+    if (nY[4] < 1.0) E_Q = ColdInternalEnergyQuarks(nY[1], nY[3]);
+    if (ZL_eta < 1.0) E_G = TestColdEnergyLeptons(n, nY[5]);
+    Kokkos::printf(" Test Internal Energy: "
+        " Y = %.17g %.17g %.17g %.17g %.17g %.17g"
+        " E_N = %.17g"
+        " E_Q = %.17g"
+        " E_G = %.17g"
+        "\n",
+        nY[0], nY[1], nY[2], nY[3], nY[4], nY[5],
+        E_N, E_Q, E_G);
+    return E_N * nY[4] + E_Q * (1.0-nY[4]) + (1.0-ZL_eta) * E_G
+          + nY[0] * nY[4] * mb - n * mb;
+          //+ ( nY[0] * nY[4] - n ) * mb;
   }
 
   /// Calculate pressure for the cold part.
@@ -200,7 +263,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   }
 
   /// Calculate sound speed for the cold part.
-  KOKKOS_INLINE_FUNCTION Real ColdSoundSpeed(Real n, Real *Y) const {
+  KOKKOS_INLINE_FUNCTION Real ColdSoundSpeed2(Real n, Real *Y) const {
     assert (m_initialized);
     Real nY[6] = {0.0};
     ConvertPrimitive(n, Y, nY);
@@ -223,17 +286,158 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
       dPdn_Q = dPdn_Quarks(nY[1], Y_Q);
     }
     if (ZL_eta < 1.0) {
-      Real yf = GetHeavyLeptonFraction(n * nY[5], m_electron, m_muon);
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
       Real y_e  = nY[5] * (1.0 - yf);
       Real y_mu = nY[5] * yf;
       dEdn_G = dEdn_Leptons(n, y_e, y_mu);
       dPdn_G = dPdn_Leptons(n, y_e, y_mu);
     }
     return ( dPdn_N * nY[4] + dPdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dPdn_G )
-          /( dEdn_N * nY[4] + dEdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dEdn_G );
+        /( dEdn_N * nY[4] + dEdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dEdn_G );
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dPdn_N(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dPdn_N = 0.0;
+    if (nY[4] > 0.0) {
+      Real Y_N[3] = {0.0};
+      NucleonsFractionFromYq(nY[0], nY[2], Y_N);
+      dPdn_N = dPdn_Nucleons(nY[0], Y_N);
+    }
+    return dPdn_N;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dPdn_Q(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dPdn_Q = 0.0;
+    if (nY[4] < 1.0) {
+      Real Y_Q[5] = {0.0};
+      QuarksFractionFromYq(nY[1], nY[3], Y_Q);
+      dPdn_Q = dPdn_Quarks(nY[1], Y_Q);
+    }
+    return dPdn_Q;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dPdn_G(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dPdn_G = 0.0;
+    if (ZL_eta < 1.0) {
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
+      Real y_e  = nY[5] * (1.0 - yf);
+      Real y_mu = nY[5] * yf;
+      dPdn_G = dPdn_Leptons(n, y_e, y_mu);
+    }
+    return dPdn_G;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dPdn(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dPdn_N = 0.0;
+    Real dPdn_Q = 0.0;
+    Real dPdn_G = 0.0;
+    if (nY[4] > 0.0) {
+      Real Y_N[3] = {0.0};
+      NucleonsFractionFromYq(nY[0], nY[2], Y_N);
+      dPdn_N = dPdn_Nucleons(nY[0], Y_N);
+    }
+    if (nY[4] < 1.0) {
+      Real Y_Q[5] = {0.0};
+      QuarksFractionFromYq(nY[1], nY[3], Y_Q);
+      dPdn_Q = dPdn_Quarks(nY[1], Y_Q);
+    }
+    if (ZL_eta < 1.0) {
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
+      Real y_e  = nY[5] * (1.0 - yf);
+      Real y_mu = nY[5] * yf;
+      dPdn_G = dPdn_Leptons(n, y_e, y_mu);
+    }
+    return ( dPdn_N * nY[4] + dPdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dPdn_G );
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dEdn_N(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dEdn_N = 0.0;
+    if (nY[4] > 0.0) {
+      Real Y_N[3] = {0.0};
+      NucleonsFractionFromYq(nY[0], nY[2], Y_N);
+      dEdn_N = dEdn_Nucleons(nY[0], Y_N);
+    }
+    return dEdn_N;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dEdn_Q(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dEdn_Q = 0.0;
+    if (nY[4] < 1.0) {
+      Real Y_Q[5] = {0.0};
+      QuarksFractionFromYq(nY[1], nY[3], Y_Q);
+      dEdn_Q = dEdn_Quarks(nY[1], Y_Q);
+    }
+    return dEdn_Q;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dEdn_G(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dEdn_G = 0.0;
+    if (ZL_eta < 1.0) {
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
+      Real y_e  = nY[5] * (1.0 - yf);
+      Real y_mu = nY[5] * yf;
+      dEdn_G = dEdn_Leptons(n, y_e, y_mu);
+    }
+    return dEdn_G;
+  }
+
+  /// Calculate sound speed for the cold part.
+  KOKKOS_INLINE_FUNCTION Real test_dEdn(Real n, Real *Y) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real dEdn_N = 0.0;
+    Real dEdn_Q = 0.0;
+    Real dEdn_G = 0.0;
+    if (nY[4] > 0.0) {
+      Real Y_N[3] = {0.0};
+      NucleonsFractionFromYq(nY[0], nY[2], Y_N);
+      dEdn_N = dEdn_Nucleons(nY[0], Y_N);
+    }
+    if (nY[4] < 1.0) {
+      Real Y_Q[5] = {0.0};
+      QuarksFractionFromYq(nY[1], nY[3], Y_Q);
+      dEdn_Q = dEdn_Quarks(nY[1], Y_Q);
+    }
+    if (ZL_eta < 1.0) {
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
+      Real y_e  = nY[5] * (1.0 - yf);
+      Real y_mu = nY[5] * yf;
+      dEdn_G = dEdn_Leptons(n, y_e, y_mu);
+    }
+    return ( dEdn_N * nY[4] + dEdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dEdn_G );
   }
 
   /// Convert Primitive Variables to the mass fraction
+  /// Y: (f n, f n_N, f Y_qN n_N, (1-f) Y_qQ n_Q)
   /// (n_N, n_Q, Y_qN, Y_qQ, f, Y_qG)
   KOKKOS_INLINE_FUNCTION void ConvertPrimitive(Real n, const Real *Y, Real nY[6]) const{
     nY[4] = Y[0];                                 // Volume fraction
@@ -262,7 +466,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   KOKKOS_INLINE_FUNCTION Real ColdEnergyLeptons(Real n, Real yq) const{
     // Muon and Electron Fraction Assuming Equilibrium
     Real abs_yq = Kokkos::fabs(yq);
-    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_electron, m_muon);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Real y_e  = abs_yq * (1.0 - yf);
     Real y_mu = abs_yq * yf;
     return EnergyFermion(n * y_e , m_electron)
@@ -270,21 +474,51 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   }
 
   /// Leptons Cold Energy (electron and muon)
+  KOKKOS_INLINE_FUNCTION Real TestColdEnergyLeptons(Real n, Real yq) const{
+    // Muon and Electron Fraction Assuming Equilibrium
+    Real abs_yq = Kokkos::fabs(yq);
+    Real yf = TestGetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
+    Real y_e  = abs_yq * (1.0 - yf);
+    Real y_mu = abs_yq * yf;
+    Kokkos::printf(" Test Leptons Energy: "
+        " n = %.17g "
+        " Y = %.17g %.17g %.17g %.17g"
+        " E = %.17g %.17g"
+        "\n",
+        n, yq, yf, y_e, y_mu, 
+        EnergyFermion(n * y_e , m_electron), 
+        EnergyFermion(n * y_mu, m_muon));
+    return EnergyFermion(n * y_e , m_electron)
+         + EnergyFermion(n * y_mu, m_muon);
+  }
+
+  /// Leptons Cold Internal Energy (electron and muon)
+  KOKKOS_INLINE_FUNCTION Real ColdInternalEnergyLeptons(Real n, Real yq) const{
+    // Muon and Electron Fraction Assuming Equilibrium
+    Real abs_yq = Kokkos::fabs(yq);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
+    Real y_e  = abs_yq * (1.0 - yf);
+    Real y_mu = abs_yq * yf;
+    return InternalEnergyFermion(n * y_e , m_electron)
+         + InternalEnergyFermion(n * y_mu, m_muon);
+  }
+
+  /// Leptons Cold Pressure (electron and muon)
   KOKKOS_INLINE_FUNCTION Real ColdPressureLeptons(Real n, Real yq) const{
     // Muon and Electron Fraction Assuming Equilibrium
     Real abs_yq = Kokkos::fabs(yq);
-    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_electron, m_muon);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Real y_e  = abs_yq * (1.0 - yf);
     Real y_mu = abs_yq * yf;
     return PressureFermion(n * y_e , m_electron) 
          + PressureFermion(n * y_mu, m_muon);
   }
 
-  /// Leptons Cold Energy (electron and muon)
+  /// Leptons Cold Enthalpy (electron and muon)
   KOKKOS_INLINE_FUNCTION Real ColdEnthalpyLeptons(Real n, Real yq) const{
     // Muon and Electron Fraction Assuming Equilibrium
     Real abs_yq = Kokkos::fabs(yq);
-    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_electron, m_muon);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Real y_e  = abs_yq * (1.0 - yf);
     Real y_mu = abs_yq * yf;
     return EnthalpyFermion(n * y_e , m_electron) 
@@ -295,7 +529,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   KOKKOS_INLINE_FUNCTION void LeptonsFractionFromYq(Real n, Real yq, Real Y[2]) const{
     // Muon and Electron Fraction Assuming Equilibrium
     Real abs_yq = Kokkos::fabs(yq);
-    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_electron, m_muon);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Y[0]  = yq * (1.0 - yf);
     Y[1]  = yq * yf;
   }
@@ -320,6 +554,15 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
          + ZL_eta * ColdEnergyLeptons(n, yq);
   }
 
+  /// Nucleons Cold Internal Energy
+  KOKKOS_INLINE_FUNCTION Real ColdInternalEnergyNucleons(Real n, Real yq) const{
+    return InternalEnergyFermion(n *      yq , m_proton)
+         + InternalEnergyFermion(n * (1.0-yq), m_neutron)
+         //+ m_proton * n * yq + m_neutron * n * (1.0-yq)
+         + ZLattimer_Energy(n, yq)
+         + ZL_eta * ColdEnergyLeptons(n, yq);
+  }
+
   /// Nucleons Cold Pressure
   KOKKOS_INLINE_FUNCTION Real ColdPressureNucleons(Real n, Real yq) const{
     return PressureFermion(n *      yq , m_proton)
@@ -330,8 +573,12 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Nucleons Cold Enthalpy
   KOKKOS_INLINE_FUNCTION Real ColdEnthalpyNucleons(Real n, Real yq) const{
-    return n * ( ChemPoNucleon(n,     yq, m_proton ) * yq
-               + ChemPoNucleon(n, 1.0-yq, m_neutron) * (1.0-yq) )
+    //return n * ( ChemPoNucleon(n,     yq, m_proton ) * yq
+    //           + ChemPoNucleon(n, 1.0-yq, m_neutron) * (1.0-yq) )
+    //     + ZL_eta * ColdEnthalpyLeptons(n, yq);
+    return EnthalpyFermion(n * yq, m_proton )
+         + EnthalpyFermion(n *(1.0-yq), m_neutron)
+         + ZLattimer_Enthalpy(n, yq)
          + ZL_eta * ColdEnthalpyLeptons(n, yq);
   }
 
@@ -340,7 +587,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real abs_yq = Kokkos::fabs(yq);
     Y[0] = yq;
     // Muon and Electron Fraction Assuming Equilibrium
-    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_electron, m_muon);
+    Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Y[1] = yq * (1.0 - yf);
     Y[2] = yq * yf;
   }
@@ -368,13 +615,34 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real y_ds = 2.0 - yq;     // Down + Strange Quarks
     Real n_ds = y_ds * nQ;
     // Down and Strange Quarks Fraction assuming equilibrium
-    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_d_quark, m_s_quark);
+    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
     Real y_d = y_ds * (1.0 - yf);
     Real y_s = y_ds * yf;
     return Bag_a4 * 3.0 *
         ( EnergyFermion(nQ * y_u * ONE_3RD, m_u_quark)
         + EnergyFermion(nQ * y_d * ONE_3RD, m_d_quark)
         + EnergyFermion(nQ * y_s * ONE_3RD, m_s_quark) )
+        + Bag_B + 0.5 * Bag_av * SQR(3.0 * nQ)
+        + ZL_eta * ColdEnergyLeptons(n, yq);
+  }
+
+  /// Quarks Cold InternalEnergy
+  KOKKOS_INLINE_FUNCTION Real ColdInternalEnergyQuarks(Real n, Real yq) const{
+    Real nQ = n / Bag_a4;
+    Real y_u = 1.0 + yq;      // Up Quark
+    Real y_ds = 2.0 - yq;     // Down + Strange Quarks
+    Real n_ds = y_ds * nQ;
+    // Down and Strange Quarks Fraction assuming equilibrium
+    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
+    Real y_d = y_ds * (1.0 - yf);
+    Real y_s = y_ds * yf;
+    return Bag_a4 * 3.0 *
+        ( InternalEnergyFermion(nQ * y_u * ONE_3RD, m_u_quark)
+        + InternalEnergyFermion(nQ * y_d * ONE_3RD, m_d_quark)
+        + InternalEnergyFermion(nQ * y_s * ONE_3RD, m_s_quark) )
+        + n * m_u_quark * y_u 
+        + n * m_d_quark * y_d 
+        + n * m_s_quark * y_s
         + Bag_B + 0.5 * Bag_av * SQR(3.0 * nQ)
         + ZL_eta * ColdEnergyLeptons(n, yq);
   }
@@ -386,7 +654,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real y_ds = 2.0 - yq;     // Down + Strange Quarks
     Real n_ds = y_ds * nQ;
     // Down and Strange Quarks Fraction assuming equilibrium
-    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_d_quark, m_s_quark);
+    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
     Real y_d = y_ds * (1.0 - yf);
     Real y_s = y_ds * yf;
     return Bag_a4 * 3.0 * 
@@ -404,7 +672,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real y_ds = 2.0 - yq;     // Down + Strange Quarks
     Real n_ds = y_ds * nQ;
     // Down and Strange Quarks Fraction assuming equilibrium
-    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_d_quark, m_s_quark);
+    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
     Real y_d = y_ds * (1.0 - yf);
     Real y_s = y_ds * yf;
     return Bag_a4 * 3.0 *
@@ -421,10 +689,10 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real y_ds = 2.0 - yq;     // Down + Strange Quarks
     Real n_ds = y_ds * nQ;
     // Down and Strange Quarks Fraction assuming equilibrium
-    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_d_quark, m_s_quark);
+    Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
     Y[1] = y_ds * (1.0 - yf);
     Y[2] = y_ds * yf;
-    yf = GetHeavyLeptonFraction(n * yq, m_electron, m_muon);
+    yf = GetHeavyLeptonFraction(n * Kokkos::fabs(yq), m_idiff_mu_e);
     Y[3] = yq * (1.0 - yf);
     Y[4] = yq * yf;
   }
@@ -481,6 +749,15 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
       * (1.0 - 2.0 * y) * (3.0 - 2.0 * y - ZL_gam1 * (1.0 - 2.0 * y));
   }
 
+  /// Zhao-Lattimer Enthalpy for proton + neutron
+  KOKKOS_INLINE_FUNCTION Real ZLattimer_Enthalpy(Real n, Real y) const{
+    Real u = n / n_sat;
+    return n * ( SQR(1.0-2.0*y) *
+      (2.0 * u * ZL_a1 + ZL_b1 * (ZL_gam1 + 1.0) * Kokkos::pow(u, ZL_gam1))
+      + 4.0 * y * (1.0-y) *
+      (2.0 * u * ZL_a0 + ZL_b0 * (ZL_gam0 + 1.0) * Kokkos::pow(u, ZL_gam0)) );
+  }
+
   /// Zhao-Lattimer Pressure
   KOKKOS_INLINE_FUNCTION Real ZLattimer_Pressure(Real n, Real y) const{
     Real u = n / n_sat;
@@ -520,6 +797,12 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return ZL_POW4(m) * EnergyFermion_FromX(x);
   }
 
+  /// Fermion Internal Energy
+  KOKKOS_INLINE_FUNCTION Real InternalEnergyFermion(Real n, Real m) const{
+    Real x = FermiMomentum(n) / m;
+    return ZL_POW4(m) * InternalEnergyFermion_FromX(x);
+  }
+
   /// Fermion Pressure
   KOKKOS_INLINE_FUNCTION Real PressureFermion(Real n, Real m) const{
     Real x = FermiMomentum(n) / m;
@@ -533,12 +816,12 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Fermion dE / dn
   KOKKOS_INLINE_FUNCTION Real dEdn_Fermion(Real n, Real y, Real m) const{
-    return y * ChemPoFermion(n*y, m);
+    return y * ChemPoFermion(Kokkos::fabs(n*y), m);
   }
 
   /// Fermion dP / dn
   KOKKOS_INLINE_FUNCTION Real dPdn_Fermion(Real n, Real y, Real m) const{
-    Real x = FermiMomentum(n*y) / m;
+    Real x = FermiMomentum(Kokkos::fabs(n*y)) / m;
     return ONE_3RD * m * y * SQR(x) / ChemPoFermion_FromX(x);
   }
 
@@ -558,6 +841,21 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
       Real x2 = x*x;
       return 0.125 / pi2hbar3 * x3
           * ( ONE_3RD * 8.0 + 0.8 * x2 - SQR(x2) / 7.0 );
+    }
+  }
+
+  /// Fermion Internal Energy / m^4
+  KOKKOS_INLINE_FUNCTION Real InternalEnergyFermion_FromX(Real x) const{
+    if ( x > 1.e-2 ) {
+      return 0.125 / pi2hbar3 
+          * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) + 1.0)
+          - ONE_3RD * 8.0 * x*x*x
+          - Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
+    } else {
+      Real x5 = x*x*x*x*x;
+      Real x2 = x*x;
+      return 0.125 / pi2hbar3 * x5
+          * ( 0.8 - x2 / 7.0 + SQR(x2) / 18.0 );
     }
   }
 
@@ -582,35 +880,166 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Fermi Momentum
   KOKKOS_INLINE_FUNCTION Real FermiMomentum(Real n) const{
-    return Kokkos::pow(3.0 * pi2hbar3 * n, ONE_3RD);
+    return Kokkos::cbrt(3.0 * pi2hbar3 * n);
   }
 
   /// Calcalate the lepton fractions assuming equilibrium (chem1 = chem2)
-  KOKKOS_INLINE_FUNCTION Real GetHeavyLeptonFraction(Real n, Real m1, Real m2) const {
-    Real a = Kokkos::sqrt(SQR(m2) - SQR(m1));
-    Real a3 = ZL_CUBE(a);
-    Real b = 3.0 * pi2hbar3 * n;
-    if (b > a3) {
-      Real a2 = SQR(a);
-      Real a6 = ZL_POW6(a);
-      Real b2 = SQR(b);
-      Real c_cubic =- 11.0 * SQR(a6)
-                    + 14.0 * a6 * b2
-                    -  2.0 * SQR(b2)
-                    +  2.0 * Kokkos::sqrt((b-a3) * (b+a3)
-                    * ZL_CUBE(a6 + b2)); // b^4
+  KOKKOS_INLINE_FUNCTION Real GetHeavyLeptonFraction(Real n, Real m_idiff) const {
+    Real x = n * m_idiff;
+    if (x > 1.0) {
+      Real x2 = SQR(x);
+      Real c_cubic =- 11.0 + 14.0 * x2 - 2.0 * SQR(x2)
+                    + 2.0 * Kokkos::sqrt((x-1.0) * (x+1.0)
+                    * ZL_CUBE(x2+1.0)); // b^4
       Real c = SIGN(c_cubic) * Kokkos::cbrt(Kokkos::fabs(c_cubic)); // b^(4/3)
-      Real d = (5.0*ZL_POW8(a) - 4.0*a2*b2 + SQR(c))/(3.0*a2*c); // b^(2/3)
-      Real f = (-6.0*a6 + b2)/(9.0*SQR(a2)); //b^(2/3)
-      Real g = (2.0*b*(9.0 - b2/a6))/27.0; // b
-      Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f) 
-              + 3.0*Kokkos::sqrt(-d + 2.0*f - SIGN(b-3.0*a3)*g
-              / Kokkos::sqrt(d+f)) ) / 6.0; // b^(1/3)
-      return ZL_CUBE(kF) / b;
+      Real d = (5.0 - 4.0*x2 + SQR(c))/(3.0*c); // b^(2/3)
+      Real f = (-6.0 + x2)/(9.0); //b^(2/3)
+      if ( Kokkos::fabs(x-3.0) < 1.e-2 ){
+        Real xm = x - 3.0;
+        Real xm2 = SQR(xm);
+        Real xm3 = ZL_CUBE(xm);
+        Real xm4 = ZL_POW4(xm);
+        Real kF = ( -x - 3.0 * xm * (
+                + 0.204124145231931508
+                + 0.0127577590769957193 * xm
+                - 0.00194910208120767933 * xm2
+                + 0.000337770531118376248 * xm3
+                - 0.0000606787224618394489 * xm4 )
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                -d + 2.0*f
+                + 6.53197264742180826
+                + 2.85773803324704111 * xm
+                + 0.246650008821917239 * xm2
+                + 0.00106314658974964327 * xm3
+                - 0.000498349963945145284 * xm4
+                ) ) ) / 6.0; // b^(1/3)
+        return ZL_CUBE(kF) / x;
+      } else {
+        Real g = (2.0*x*Kokkos::fabs(9.0 - x2))/27.0; // b
+        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f) 
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                -d + 2.0*f + g / Kokkos::sqrt(d+f)
+                ) ) ) / 6.0; // b^(1/3)
+        return ZL_CUBE(kF) / x;
+      }
     } else {
       return 0.0;
     }
   }
+  //KOKKOS_INLINE_FUNCTION Real GetHeavyLeptonFraction(Real n, Real m1, Real m2) const {
+  //  Real a = Kokkos::sqrt(SQR(m2) - SQR(m1));
+  //  Real a3 = ZL_CUBE(a);
+  //  Real b = 3.0 * pi2hbar3 * n;
+  //  if (b > a3) {
+  //    Real a2 = SQR(a);
+  //    Real a6 = ZL_POW6(a);
+  //    Real b2 = SQR(b);
+  //    Real c_cubic =- 11.0 * SQR(a6)
+  //                  + 14.0 * a6 * b2
+  //                  -  2.0 * SQR(b2)
+  //                  +  2.0 * Kokkos::sqrt((b-a3) * (b+a3)
+  //                  * ZL_CUBE(a6 + b2)); // b^4
+  //    Real c = SIGN(c_cubic) * Kokkos::cbrt(Kokkos::fabs(c_cubic)); // b^(4/3)
+  //    Real d = (5.0*ZL_POW8(a) - 4.0*a2*b2 + SQR(c))/(3.0*a2*c); // b^(2/3)
+  //    Real f = (-6.0*a6 + b2)/(9.0*SQR(a2)); //b^(2/3)
+  //    Real g = (2.0*b*(9.0 - b2/a6))/27.0; // b
+  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f) 
+  //            + 3.0*Kokkos::sqrt(-d + 2.0*f - SIGN(b-3.0*a3)*g
+  //            / Kokkos::sqrt(d+f)) ) / 6.0; // b^(1/3)
+  //    return ZL_CUBE(kF) / b;
+  //  } else {
+  //    return 0.0;
+  //  }
+  //}
+
+  /// Calcalate the lepton fractions assuming equilibrium (chem1 = chem2)
+  KOKKOS_INLINE_FUNCTION Real TestGetHeavyLeptonFraction(Real n, Real m_idiff) const {
+    Real x = n * m_idiff;
+    if (x > 1.0) {
+      Real x2 = SQR(x);
+      Real c_cubic =- 11.0 + 14.0 * x2 - 2.0 * SQR(x2)
+                    + 2.0 * Kokkos::sqrt((x-1.0) * (x+1.0)
+                    * ZL_CUBE(x2+1.0)); // b^4
+      Real c = SIGN(c_cubic) * Kokkos::cbrt(Kokkos::fabs(c_cubic)); // b^(4/3)
+      Real d = (5.0 - 4.0*x2 + SQR(c))/(3.0*c); // b^(2/3)
+      Real f = (-6.0 + x2)/(9.0); //b^(2/3)
+      if ( Kokkos::fabs(x-3.0) < 1.e-2 ){
+        Real xm = x - 3.0;
+        Real xm2 = SQR(xm);
+        Real xm3 = ZL_CUBE(xm);
+        Real xm4 = ZL_POW4(xm);
+        Real kF = ( -x - 3.0 * xm * (
+                + 0.204124145231931508
+                + 0.0127577590769957193 * xm
+                - 0.00194910208120767933 * xm2
+                + 0.000337770531118376248 * xm3
+                - 0.0000606787224618394489 * xm4 )
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                -d + 2.0*f
+                + 6.53197264742180826
+                + 2.85773803324704111 * xm
+                + 0.246650008821917239 * xm2
+                + 0.00106314658974964327 * xm3
+                - 0.000498349963945145284 * xm4
+                ) ) ) / 6.0; // b^(1/3)
+        Kokkos::printf(" GetHeavyLeptonFractionA: "
+          " var %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g"
+          "\n",
+          x, c_cubic, c, d, f, d+f,-d + 2.0*f 
+                + 6.53197264742180826
+                + 2.85773803324704111 * xm3
+                + 0.246650008821917239 * SQR(xm3)
+                + 0.00106314658974964327 * ZL_CUBE(xm3)
+                - 0.000498349963945145284 * ZL_POW4(xm3)
+                , kF);
+        return ZL_CUBE(kF) / x;
+      } else {
+        Real g = (2.0*x*Kokkos::fabs(9.0 - x2))/27.0; // b
+        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f) 
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                -d + 2.0*f + g / Kokkos::sqrt(d+f)
+                ) ) ) / 6.0; // b^(1/3)
+        Kokkos::printf(" GetHeavyLeptonFractionB: "
+          " var %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g"
+          "\n",
+          x, c_cubic, c, d, f, g, d+f,-d + 2.0*f +g
+                / Kokkos::sqrt(d+f), kF);
+        return ZL_CUBE(kF) / x;
+      }
+    } else {
+      return 0.0;
+    }
+  }
+  //KOKKOS_INLINE_FUNCTION Real TestGetHeavyLeptonFraction(Real n, Real m1, Real m2) const {
+  //  Real a = Kokkos::sqrt(SQR(m2) - SQR(m1));
+  //  Real a3 = ZL_CUBE(a);
+  //  Real b = 3.0 * pi2hbar3 * n;
+  //  if (b > a3) {
+  //    Real a2 = SQR(a);
+  //    Real a6 = ZL_POW6(a);
+  //    Real b2 = SQR(b);
+  //    Real c_cubic =- 11.0 * SQR(a6)
+  //                  + 14.0 * a6 * b2
+  //                  -  2.0 * SQR(b2)
+  //                  +  2.0 * Kokkos::sqrt((b-a3) * (b+a3)
+  //                  * ZL_CUBE(a6 + b2)); // b^4
+  //    Real c = SIGN(c_cubic) * Kokkos::cbrt(Kokkos::fabs(c_cubic)); // b^(4/3)
+  //    Real d = (5.0*ZL_POW8(a) - 4.0*a2*b2 + SQR(c))/(3.0*a2*c); // b^(2/3)
+  //    Real f = (-6.0*a6 + b2)/(9.0*SQR(a2)); //b^(2/3)
+  //    Real g = (2.0*b*(9.0 - b2/a6))/27.0; // b
+  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f) 
+  //            + 3.0*Kokkos::sqrt(-d + 2.0*f - SIGN(b-3.0*a3)*g
+  //            / Kokkos::sqrt(d+f)) ) / 6.0; // b^(1/3)
+  //    Kokkos::printf(" GetHeavyLeptonFraction: "
+  //      " var %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g"
+  //      "\n",
+  //      a, b, c_cubic, c, d, f, g, d+f,-d + 2.0*f - SIGN(b-3.0*a3)*g
+  //            / Kokkos::sqrt(d+f), kF);
+  //    return ZL_CUBE(kF) / b;
+  //  } else {
+  //    return 0.0;
+  //  }
+  //}
 
   /// Get the minimum enthalpy per baryon.
   KOKKOS_INLINE_FUNCTION Real MinimumEnthalpy() const {
@@ -636,6 +1065,17 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Get the maximum energy at a given density and composition.
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
+    // Note that max_T is already set to numeric_limits<Real>::max!
+    return max_T;
+  }
+
+  /// Get the minimum energy at a given density and composition.
+  KOKKOS_INLINE_FUNCTION Real MinimumInternalEnergy(Real n, Real *Y) const {
+    return InternalEnergy(n, min_T, Y);
+  }
+
+  /// Get the maximum energy at a given density and composition.
+  KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
     // Note that max_T is already set to numeric_limits<Real>::max!
     return max_T;
   }
@@ -769,6 +1209,9 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   // Pi^2 hbar^3
   Real pi2hbar3;
+  // 3 * Pi^2 hbar^3 / (m2^2-m1^2)^(3/2)
+  Real m_idiff_mu_e;
+  Real m_idiff_s_d;
 };
 
 }; // namespace Primitive

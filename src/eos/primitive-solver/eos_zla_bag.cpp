@@ -22,6 +22,7 @@
 #include "eos_zla_bag.hpp"
 #include "utils/tr_table.hpp"
 #include "logs.hpp"
+#include "globals.hpp"
 
 namespace Primitive {
 
@@ -46,6 +47,11 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
   m_d_quark  = pin->GetOrAddReal(block, "m_d_quark" , 7.0);
   m_s_quark  = pin->GetOrAddReal(block, "m_s_quark" , 150.0);
     
+  Real dm = Kokkos::sqrt(SQR(m_muon) - SQR(m_electron));
+  m_idiff_mu_e = 3.0 * pi2hbar3 / (dm*dm*dm);
+  dm = Kokkos::sqrt(SQR(m_s_quark) - SQR(m_d_quark));
+  m_idiff_s_d = 3.0 * pi2hbar3 / (dm*dm*dm);
+
   ZL_a0   = pin->GetOrAddReal(block, "ZL_a0"  , -96.64);
   ZL_b0   = pin->GetOrAddReal(block, "ZL_b0"  , 58.85);
   ZL_gam0 = pin->GetOrAddReal(block, "ZL_gam0", 1.40);
@@ -185,66 +191,101 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
       }
     }
 
-    //{
-    //  for (size_t in=0; in<m_nn; ++in) {
-    //    Real n = exp2_(host_log_nb[in]);
-    //    Real f = host_table(ECFVOL, in);
-    //    Real yn = host_table(ECYN, in);
-    //    Real yln = host_table(ECYLN, in);
-    //    Real ylq = host_table(ECYLQ, in);
-    //    Real y[4] = {0.0};
-    //    y[0] = f;
-    //    y[1] = yn;
-    //    y[2] = yn * yln;
-    //    y[3] = (1.0-yn) * ylq;
-    //    Real nY[6] = {0.0};
-    //    ConvertPrimitive(n, y, nY);
-    //    Real p_tab = exp2_(host_table(ECLOGP, in));
-    //    Real p_cold = ColdPressure(n, y);
-    //    Real p_n = ColdPressureNucleons(nY[0], nY[2]);
-    //    Real p_q = ColdPressureQuarks(nY[1], nY[3]);
-    //    Real e_tab = exp2_(host_table(ECLOGE, in));
-    //    Real e_cold = ColdEnergy(n, y);
-    //    Real e_n = ColdEnergyNucleons(nY[0], nY[2]);
-    //    Real e_ln = ColdEnergyLeptons(nY[0], nY[2]);
-    //    Real e_q = ColdEnergyQuarks(nY[1], nY[3]);
-    //    Real e_lq = ColdEnergyLeptons(nY[1], nY[3]);
-    //    Real e_mu = GetHeavyLeptonFraction(nY[0] * fabs(nY[2]), m_electron, m_muon);
-    //    Real chp_e = ChemPoFermion(nY[0] * fabs(nY[2]) * (1.0-e_mu), m_electron);
-    //    Real chp_mu = ChemPoFermion(nY[0] * fabs(nY[2]) * (e_mu), m_muon);
-    //    Real q_mu = GetHeavyLeptonFraction(nY[1] * fabs(nY[3]), m_electron, m_muon);
-    //    std::cout << "Test table " << in << std::endl
-    //              << in << " Prim0 = [ " 
-    //              << n << ", " 
-    //              << f << ", " 
-    //              << yn << ", " 
-    //              << yln << ", " 
-    //              << ylq << " ], [ " 
-    //              << nY[0] << ", " 
-    //              << nY[1] << ", " 
-    //              << nY[2] << ", " 
-    //              << nY[3] << ", " 
-    //              << nY[4] << ", " 
-    //              << nY[5] << " ]" 
-    //              << std::endl
-    //              << in << ", P = [ " 
-    //              << p_tab << ", " 
-    //              << p_cold << ", " 
-    //              << p_n << ", " 
-    //              << p_q
-    //              << " ], E = [ " 
-    //              << e_tab << ", " 
-    //              << e_cold << ", " 
-    //              << e_n << ", " 
-    //              << e_q << ", " 
-    //              << e_ln << ", " 
-    //              << e_lq << ", " 
-    //              << e_mu << ", " 
-    //              << chp_e << ", " 
-    //              << chp_mu
-    //              << " ]" << std::endl;
-    //  }
-    //}
+    if (global_variable::my_rank == 0) {
+    {
+      for (size_t in=0; in<m_nn; ++in) {
+        Real n = exp2_(host_log_nb[in]);
+        Real f = host_table(ECFVOL, in);
+        Real yn = host_table(ECYN, in);
+        Real yln = host_table(ECYLN, in);
+        Real ylq = host_table(ECYLQ, in);
+        Real y[4] = {0.0};
+        y[0] = f;
+        y[1] = yn;
+        y[2] = yn * yln;
+        y[3] = (1.0-yn) * ylq;
+        Real nY[6] = {0.0};
+        Real nY_Q[5] = {0.0};
+        ConvertPrimitive(n, y, nY);
+        if (nY[4] < 1.0) {
+          QuarksFractionFromYq(nY[1], nY[3], nY_Q);
+        }
+        Real p_tab = exp2_(host_table(ECLOGP, in));
+        Real p_cold = ColdPressure(n, y);
+        Real p_n = ColdPressureNucleons(nY[0], nY[2]);
+        Real p_q = ColdPressureQuarks(nY[1], nY[3]);
+        Real e_tab = exp2_(host_table(ECLOGE, in));
+        Real e_cold = ColdEnergy(n, y);
+        Real e_n = ColdEnergyNucleons(nY[0], nY[2]);
+        Real e_ln = ColdEnergyLeptons(nY[0], nY[2]);
+        Real e_q = ColdEnergyQuarks(nY[1], nY[3]);
+        Real e_lq = ColdEnergyLeptons(nY[1], nY[3]);
+        Real e_mu = GetHeavyLeptonFraction(nY[0] * fabs(nY[2]), m_idiff_mu_e);
+        Real chp_e = ChemPoFermion(nY[0] * fabs(nY[2]) * (1.0-e_mu), m_electron);
+        Real chp_mu = ChemPoFermion(nY[0] * fabs(nY[2]) * (e_mu), m_muon);
+        Real q_mu = GetHeavyLeptonFraction(nY[1] * fabs(nY[3]), m_idiff_mu_e);
+        Real cs_tab = host_table(ECCS, in);
+        Real cs_cold = Kokkos::sqrt(ColdSoundSpeed2(n, y));
+        Real cs_dPdn = test_dPdn(n, y);
+        Real cs_dEdn = test_dEdn(n, y);
+        Real cs_dPdn_N = test_dPdn_N(n, y);
+        Real cs_dEdn_N = test_dEdn_N(n, y);
+        Real cs_dPdn_Q = test_dPdn_Q(n, y);
+        Real cs_dEdn_Q = test_dEdn_Q(n, y);
+        Real cs_dPdn_G = test_dPdn_G(n, y);
+        Real cs_dEdn_G = test_dEdn_G(n, y);
+        std::cout << "Test table " << in << std::endl
+                  << in << " Prim0 = [ " 
+                  << n << ", " 
+                  << f << ", " 
+                  << yn << ", " 
+                  << yln << ", " 
+                  << ylq << " ], [ " 
+                  << nY[0] << ", " 
+                  << nY[1] << ", " 
+                  << nY[2] << ", " 
+                  << nY[3] << ", " 
+                  << nY[4] << ", " 
+                  << nY[5] << " ]" 
+                  << std::endl
+                  << in << ", cs = [ " 
+                  << cs_tab << ", " 
+                  << cs_cold << ", " 
+                  << cs_dPdn << ", " 
+                  << cs_dEdn << ", " 
+                  << cs_dPdn_N << ", " 
+                  << cs_dEdn_N << ", " 
+                  << cs_dPdn_Q << ", " 
+                  << cs_dEdn_Q << ", " 
+                  << cs_dPdn_G << ", " 
+                  << cs_dEdn_G << ", " 
+                  << nY_Q[0] << ", " 
+                  << nY_Q[1] << ", " 
+                  << nY_Q[2] << ", " 
+                  << nY_Q[3] << ", " 
+                  << nY_Q[4]
+                  << " ]" << std::endl
+                  << in << ", P = [ " 
+                  << p_tab << ", " 
+                  << p_cold << ", " 
+                  << p_n << ", " 
+                  << p_q << ", " 
+                  << code_units.PressureConversion(eos_units) << ", "
+                  << eos_units.TemperatureConversion(code_units)
+                  << " ], E = [ " 
+                  << e_tab << ", " 
+                  << e_cold << ", " 
+                  << e_n << ", " 
+                  << e_q << ", " 
+                  << e_ln << ", " 
+                  << e_lq << ", " 
+                  << e_mu << ", " 
+                  << chp_e << ", " 
+                  << chp_mu
+                  << " ]" << std::endl;
+      }
+    }
+    }
 
     // Copy from host to device
     Kokkos::deep_copy(m_log_nb, host_log_nb);

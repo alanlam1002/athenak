@@ -35,6 +35,7 @@
 #include "eos/primitive-solver/piecewise_polytrope.hpp"
 #include "eos/primitive-solver/eos_zla_bag.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
+#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 
 namespace dyngr {
 
@@ -108,7 +109,20 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
     std::exit(EXIT_FAILURE);
   }
   if (error_string.compare("reset_floor") == 0) {
-    error_policy = DynGRMHD_Error::reset_floor;
+    if (eos_string.compare("zla_bag") == 0) {
+      error_policy = DynGRMHD_Error::reset_floor_zla_bag;
+    } else {
+      error_policy = DynGRMHD_Error::reset_floor;
+    }
+  } else if (error_string.compare("reset_floor_zla_bag") == 0) {
+    if (eos_string.compare("zla_bag") != 0) {
+      std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
+                << std::endl << "<mhd> dyn_error = '" << error_string
+                << "' ERROR_POLICY reset_floor_zla_bag must be used with zla_bag EOS" << std::endl;
+      std::exit(EXIT_FAILURE);
+    } else {
+      error_policy = DynGRMHD_Error::reset_floor_zla_bag;
+    }
   } else {
     std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
               << std::endl << "<mhd> dyn_error = '" << error_string
@@ -121,6 +135,9 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
   switch (error_policy) {
     case DynGRMHD_Error::reset_floor:
       dyn_gr = SelectDynGRMHDEOS<Primitive::ResetFloor>(ppack, pin, eos_policy);
+      break;
+    case DynGRMHD_Error::reset_floor_zla_bag:
+      dyn_gr = SelectDynGRMHDEOS<Primitive::ResetFloorZlaBag>(ppack, pin, eos_policy);
       break;
   }
 
@@ -676,9 +693,9 @@ template class DynGRMHDPS<Primitive::EOSHybrid<Primitive::NormalLogs>,
 template class DynGRMHDPS<Primitive::EOSHybrid<Primitive::NQTLogs>,
                           Primitive::ResetFloor>;
 template class DynGRMHDPS<Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                          Primitive::ResetFloor>;
+                          Primitive::ResetFloorZlaBag>;
 template class DynGRMHDPS<Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                          Primitive::ResetFloor>;
+                          Primitive::ResetFloorZlaBag>;
 
 // Macro for defining CoordTerms templates
 #define INSTANTIATE_COORD_TERMS(EOSPolicy, ErrorPolicy) \
@@ -705,7 +722,20 @@ INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NormalLogs>,
 INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloor);
 INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                         Primitive::ResetFloor);
-INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>, Primitive::ResetFloor);
+INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+                        Primitive::ResetFloor);
+INSTANTIATE_COORD_TERMS(Primitive::IdealGas, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                        Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NormalLogs>,
+                        Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
+                        Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+                        Primitive::ResetFloorZlaBag);
 
 #undef INSTANTIATE_COORD_TERMS
 

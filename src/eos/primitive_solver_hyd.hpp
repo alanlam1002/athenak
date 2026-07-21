@@ -29,6 +29,7 @@
 #include "eos/primitive-solver/eos_hybrid.hpp"
 #include "eos/primitive-solver/eos_zla_bag.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
+#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 #include "eos/primitive-solver/logs.hpp"
 
 // AthenaK headers
@@ -129,6 +130,21 @@ class PrimitiveSolverHydro {
       ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal",
                                          5.0/3.0));
       ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 4));
+      std::string units = pin->GetOrAddString(block, "units", "geometric_solar");
+      if (!units.compare("geometric_solar")) {
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricSolar());
+      } else if (!units.compare("geometric_kilometer")) {
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricKilometer());
+      } else if (!units.compare("nuclear")) {
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeNuclear());
+      } else if (!units.compare("cgs")) {
+        ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeCGS());
+      } else {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Unknown unit system " << units << " requested."
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
       bool result = ps.GetEOSMutable().ReadParametersFromInput(block, pin);
       if (!result) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -495,7 +511,10 @@ class PrimitiveSolverHydro {
                  "    Sy  = %.17g\n"
                  "    Sz  = %.17g\n"
                  "    tau = %.17g\n"
-                 "    Dye = %.17g\n"
+                 "    Dy0 = %.17g\n"
+                 "    Dy1 = %.17g\n"
+                 "    Dy2 = %.17g\n"
+                 "    Dy3 = %.17g\n"
                  "    Bx  = %.17g\n"
                  "    By  = %.17g\n"
                  "    Bz  = %.17g\n"
@@ -510,7 +529,12 @@ class PrimitiveSolverHydro {
                  m, k, j, i,
                  x1v, x2v, x3v,
                  cons_pt_old[CDN], cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ],
-                 cons_pt_old[CTA], cons_pt_old[CYD], b3u[IBX], b3u[IBY], b3u[IBZ], detg,
+                 cons_pt_old[CTA], 
+                 cons_pt_old[CYD], 
+                 cons_pt_old[CYD+1],
+                 cons_pt_old[CYD+2],
+                 cons_pt_old[CYD+3],
+                 b3u[IBX], b3u[IBY], b3u[IBZ], detg,
                  g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
                  adm.alpha(m, k, j, i),
                  adm.beta_u(m, 0, k, j, i),

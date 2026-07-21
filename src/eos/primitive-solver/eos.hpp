@@ -68,8 +68,11 @@ class EOS : public EOSPolicy, public ErrorPolicy {
  private:
   // EOSPolicy member functions
   using EOSPolicy::TemperatureFromE;
+  using EOSPolicy::TemperatureFromInternalE;
   using EOSPolicy::TemperatureFromP;
   using EOSPolicy::Energy;
+  using EOSPolicy::InternalEnergy;
+  using EOSPolicy::TestInternalEnergy;
   using EOSPolicy::Pressure;
   using EOSPolicy::Enthalpy;
   using EOSPolicy::SoundSpeed;
@@ -79,6 +82,8 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   using EOSPolicy::MaximumPressure;
   using EOSPolicy::MinimumEnergy;
   using EOSPolicy::MaximumEnergy;
+  using EOSPolicy::MinimumInternalEnergy;
+  using EOSPolicy::MaximumInternalEnergy;
 
   // EOSPolicy member variables
   // The number of particle species used by the EOS.
@@ -111,6 +116,7 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   using ErrorPolicy::SpeciesLimits;
   using ErrorPolicy::PressureLimits;
   using ErrorPolicy::EnergyLimits;
+  using ErrorPolicy::InternalEnergyLimits;
   using ErrorPolicy::FailureResponse;
 
   // ErrorPolicy member variables
@@ -159,6 +165,19 @@ class EOS : public EOSPolicy, public ErrorPolicy {
            eos_units.TemperatureConversion(code_units);
   }
 
+  //! \fn Real GetTemperatureFromInternalE(Real n, Real e, Real *Y)
+  //  \brief Calculate the temperature from number density, energy density, and
+  //         particle fractions.
+  //
+  //  \param[in] n  The number density
+  //  \param[in] e  The energy density
+  //  \param[in] Y  An array of particle fractions, expected to be of size n_species.
+  //  \return The temperature according to the EOS.
+  KOKKOS_INLINE_FUNCTION Real GetTemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    return TemperatureFromInternalE(n, e*code_units.PressureConversion(eos_units), Y) *
+           eos_units.TemperatureConversion(code_units);
+  }
+
   //! \fn Real GetTemperatureFromP(Real n, Real p, Real *Y)
   //  \brief Calculate the temperature from number density, pressure, and
   //         particle fractions.
@@ -182,6 +201,31 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   KOKKOS_INLINE_FUNCTION Real GetEnergy(Real n, Real T, const Real *Y) const {
     return Energy(n, T*code_units.TemperatureConversion(eos_units), Y) *
            eos_units.PressureConversion(code_units);
+  }
+
+  //! \fn Real GetInternalEnergy(Real n, Real T, Real *Y)
+  //  \brief Get the energy density from the number density, temperature, and
+  //         particle fractions.
+  //
+  //  \param[in] n  The number density
+  //  \param[in] T  The temperature
+  //  \param[in] Y  An array of size n_species of the particle fractions.
+  //  \return The energy density according to the EOS.
+  KOKKOS_INLINE_FUNCTION Real GetInternalEnergy(Real n, Real T, const Real *Y) const {
+    return InternalEnergy(n, T*code_units.TemperatureConversion(eos_units), Y) *
+           eos_units.PressureConversion(code_units);
+  }
+
+  //! \fn Real GetTestInternalEnergy(Real n, Real T, Real *Y)
+  //  \brief Get the energy density from the number density, temperature, and
+  //         particle fractions.
+  //
+  //  \param[in] n  The number density
+  //  \param[in] T  The temperature
+  //  \param[in] Y  An array of size n_species of the particle fractions.
+  //  \return The energy density according to the EOS.
+  KOKKOS_INLINE_FUNCTION Real GetTestInternalEnergy(Real n, Real T, const Real *Y) const {
+    return TestInternalEnergy(n, T, Y) * eos_units.PressureConversion(code_units);
   }
 
   //! \fn Real GetPressure(Real n, Real T, Real *Y)
@@ -616,6 +660,14 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   KOKKOS_INLINE_FUNCTION void ApplyEnergyLimits(Real& e, Real n, Real* Y) const {
     Real e_eos = e*code_units.PressureConversion(eos_units);
     EnergyLimits(e_eos, MinimumEnergy(n, Y), MaximumEnergy(n, Y));
+    e = e_eos*eos_units.PressureConversion(code_units);
+  }
+
+  //! \brief Limit the energy density to a specified range at a given density and
+  //  composition
+  KOKKOS_INLINE_FUNCTION void ApplyInternalEnergyLimits(Real& e, Real n, Real* Y) const {
+    Real e_eos = e*code_units.PressureConversion(eos_units);
+    InternalEnergyLimits(e_eos, MinimumInternalEnergy(n, Y), MaximumInternalEnergy(n, Y));
     e = e_eos*eos_units.PressureConversion(code_units);
   }
 

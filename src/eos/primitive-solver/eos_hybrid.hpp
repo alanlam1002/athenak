@@ -92,6 +92,22 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
     return Kokkos::fmax(T,min_T);
   }
 
+  /// Temperature from internal energy density.
+  KOKKOS_INLINE_FUNCTION Real TemperatureFromInternalE(Real n, Real e, Real *Y) const {
+    assert (m_initialized);
+    if (n < min_n) {
+      // If density is OOB then return minimum temperature
+      return min_T;
+    } else if (e <= MinimumInternalEnergy(n, Y)) {
+      // If energy is OOB then return minimum temperature
+      return min_T;
+    }
+
+    Real e_cold = ColdInternalEnergy(n);
+    Real T = gamma_th_m1*(e-e_cold)/n;
+    return Kokkos::fmax(T,min_T);
+  }
+
   /// Calculate the temperature using.
   KOKKOS_INLINE_FUNCTION Real TemperatureFromP(Real n, Real p, Real *Y) const {
     assert (m_initialized);
@@ -111,6 +127,20 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
   /// Calculate the energy density using.
   KOKKOS_INLINE_FUNCTION Real Energy(Real n, Real T, const Real *Y) const {
     Real e_cold = ColdEnergy(n);
+    Real e_th   = n*T/gamma_th_m1;
+    return e_cold + e_th;
+  }
+
+  /// Calculate the energy density using.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergy(Real n, Real T, const Real *Y) const {
+    Real e_cold = ColdInternalEnergy(n);
+    Real e_th   = n*T/gamma_th_m1;
+    return e_cold + e_th;
+  }
+
+  /// Calculate the energy density using.
+  KOKKOS_INLINE_FUNCTION Real TestInternalEnergy(Real n, Real T, const Real *Y) const {
+    Real e_cold = ColdInternalEnergy(n);
     Real e_th   = n*T/gamma_th_m1;
     return e_cold + e_th;
   }
@@ -149,6 +179,12 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
   KOKKOS_INLINE_FUNCTION Real ColdEnergy(Real n) const {
     assert (m_initialized);
     return exp2_(eval_at_n(ECLOGE, n));
+  }
+
+  /// Calculate energy for the cold part.
+  KOKKOS_INLINE_FUNCTION Real ColdInternalEnergy(Real n) const {
+    assert (m_initialized);
+    return exp2_(eval_at_n(ECLOGE, n))-n*mb;
   }
 
   /// Calculate pressure for the cold part.
@@ -195,6 +231,17 @@ class EOSHybrid : public EOSPolicyInterface, public LogPolicy {
 
   /// Get the maximum energy at a given density and composition.
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
+    // Note that max_T is already set to numeric_limits<Real>::max!
+    return max_T;
+  }
+
+  /// Get the minimum internal energy at a given density and composition.
+  KOKKOS_INLINE_FUNCTION Real MinimumInternalEnergy(Real n, Real *Y) const {
+    return InternalEnergy(n, min_T, Y);
+  }
+
+  /// Get the maximum energy at a given density and composition.
+  KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
     // Note that max_T is already set to numeric_limits<Real>::max!
     return max_T;
   }

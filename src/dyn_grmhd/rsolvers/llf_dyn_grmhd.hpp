@@ -13,7 +13,7 @@
 #include "coordinates/cell_locations.hpp"
 #include "coordinates/adm.hpp"
 #include "eos/primitive_solver_hyd.hpp"
-#include "eos/primitive-solver/reset_floor.hpp"
+#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 #include "eos/primitive-solver/geom_math.hpp"
 #include "flux_dyn_grmhd.hpp"
 

@@ -68,6 +68,13 @@ real density-normalization bug, now fixed, with a genuine hydro-only mode
 added, first-ever athinputs, and a two-tier (exact IC regression + physical
 sanity) validation script — both passing on Sakura.
 
+Stage 4 (hardening, see below) is also done: fixed a real opacity-dispatch
+bug (silently ran the toy Lattice model whenever `opacity_type` was left at
+its `none` default), a real crash risk (hydro-only + `theta_limiter`), and
+guarded 4 more silently-wrong-physics/unguarded-typo gaps, all found via
+Explore-agent code survey and verified with no regression to the existing
+test suite.
+
 **Not yet done** (see "Stage 2 plan" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -617,7 +624,113 @@ existing athinput anywhere in the repo. Fixed all of the above:
     blend) radiative-Bondi initial profile — both are real follow-on
     development work, not validation of what already exists.
 
-## Stage 4 (later) — hardening
+## Stage 4 — hardening — DONE
 
-Input validation for unimplemented combinations, and keeping this note current as
-the module evolves.
+Goal: input validation for unimplemented combinations, and keeping this note
+current. Two Explore-agent surveys of `src/radiation_m1/` and its pgens found
+six concrete, currently-reachable gaps: a real crash risk, several
+silently-wrong-physics cases, and unguarded string typos. None were hit by any
+of the 7 photon-M1 tests or `dyngr_bhstar` (every one of those athinputs uses
+`<mhd>`, `opacity_type=photons`, and no exotic metric/initial_data strings),
+so fixing them carried zero regression risk to already-validated physics.
+Guiding principle, consistent with prior stages: **add cheap guards/dispatch
+fixes; don't implement genuinely new physics** (e.g. full hydro-only Doppler
+support across the closure/fluxes/tmunu/nurates-opacity paths is real new
+development, deferred and documented below, not "hardening").
+
+1. **Real bug, not just a gap — opacity dispatch silently ran the
+   Toy/Lattice model for `opacity_type=none` (the default!).**
+   `radiation_m1_tasks.cpp`'s task-assembly `else` branch called
+   `CalcOpacityToy` for *any* `params.opacity_type` other than `BnsNurates`/
+   `Photons`, including `None` (the actual default when `opacity_type` is
+   omitted). Since `matter_sources` also defaults to `true`, an athinput that
+   simply omits `opacity_type` and leaves `matter_sources` at its default
+   silently got the hardcoded 6×6 lattice-test opacity pattern
+   (`ToyOpacityModel::Lattice`, enum value 0, since `toy_opacity_fn{}`
+   value-initializes to it) instead of the zero opacities almost certainly
+   intended. **Fixed**: the dispatch now only calls `CalcOpacityToy` when
+   `opacity_type == Toy`; `None` is a true no-op (`M1_mattersrc = M1_closure`,
+   matching the existing `!matter_sources` no-op pattern). Not independently
+   live-tested with a fresh negative-path run: every existing pgen that
+   exercises this code path already hard-requires a specific `opacity_type`
+   of its own (confirmed the hard way — a negative-path test built for this
+   fix instead tripped `rad_m1_photon_singlezone.cpp`'s own pre-existing
+   `opacity_type = photons` requirement first). The fix itself is a
+   single-line dispatch reclassification, verified safe by the full 7+2 CPU/
+   MPI regression pass (zero change, since every current test sets an
+   explicit non-`None` `opacity_type`).
+2. **Real crash risk + 4 silently-wrong-physics variants — `ismhd`-only
+   fallback, no `ishydro` fallback, in 5 files.** `radiation_m1_update.cpp`
+   set `w0_`/`umhd0_` only `if (ismhd)` (unlike the already-correct
+   `radiation_m1_calc_opacities_photons.cpp`, which handles both `ismhd` and
+   `ishydro`), then unconditionally dereferenced them whenever
+   `(ismhd_ || ishydro_)` — so hydro-only (no `<mhd>`) + `theta_limiter=true`
+   would dereference an unallocated array (real crash). The same
+   `ismhd`-only pattern (silently assuming `v=0` for hydro-only, not
+   crashing) also appears in `radiation_m1_fluxes.cpp`,
+   `radiation_m1_calc_closure.cpp`, `radiation_m1_calc_opacities_nurates.cpp`,
+   and `radiation_m1_tmunu.cpp`. Implementing genuine hydro-only support
+   across all 5 files would be real new development (mirrors a proven
+   pattern but touches delicate physics code never exercised or tested) —
+   not proportionate for a hardening pass. **Fixed (guard, not implement)**:
+   added a single constructor-time check in `radiation_m1.cpp` (right after
+   `ishydro`/`ismhd` are set): fatal-error if `ishydro && !ismhd`, with a
+   message explaining hydro-only mode isn't supported by the
+   closure/fluxes/tmunu/nurates-opacity paths yet. **Verified live**: a
+   negative-path athinput (`<hydro>` + `<adm>` + `<radiation_m1>`, no
+   `<mhd>`) hits this fatal error immediately, as intended.
+3. **Silent wrong physics — `power_opacity=true` + EOSCompOSE without
+   `<units>`.** The EOSCompOSE opacity path
+   (`radiation_m1_calc_opacities_photons.cpp`) defaulted
+   `rosseland_coef_`/`planck_minus_rosseland_coef_`/etc. to `1.0`/`1.0`/`0.0`
+   if `!isunits`, then used `power_opacity_` with no abort — unlike the
+   `IdealGas` path, which already hard-aborts on `power_opacity=true`
+   unconditionally. **Fixed**: added the same fatal-error-style abort when
+   `power_opacity_ && !isunits` in the EOSCompOSE path. Not live-tested (no
+   EOSCompOSE build exists in this development track); verified by direct
+   comparison against the already-working `IdealGas` abort it mirrors.
+4. **Unguarded metric-string typos — `rad_m1_beams.cpp`.** Two separate
+   if/else-if chains on the `metric` string (default `"minkowski"`, no
+   validation) both ended in a bare `else` that silently assumed Kerr-Schild
+   for any unrecognized string (e.g. a typo'd `"Isotropic"`). **Fixed**: a
+   single upfront check right after the `metric` string is read now
+   fatal-errors on anything other than `minkowski`/`isotropic`/`kerr-schild`,
+   so both downstream `else` branches are safe by construction. **Verified
+   live**: `metric = Minkowski` (wrong case) hits the new fatal error.
+5. **Unguarded string typo — `rad_m1_diffusiontest.cpp`.** `initial_data`
+   was checked only against `"gaussian"` via a boolean comparison; any typo
+   silently fell back to the step-function IC. **Fixed**: replaced with an
+   explicit string read validated against `gaussian`/`step`, fatal-erroring
+   otherwise. **Verified live**: `initial_data = Gaussian` (wrong case) hits
+   the new fatal error.
+6. **`dyngr_bhstar.cpp` — no `opacity_type` consistency check, duplicate
+   `arad` key.** The radiation IC block was gated only on `enable_radiation`
+   (never checked `opacity_type == Photons`), so `opacity_type=none`/`toy`
+   with `enable_radiation=true` would have silently built an IC inconsistent
+   with the opacities actually evolved. Separately, `arad` was read from an
+   independent `<problem>/arad` key rather than the one
+   `CalcOpacityPhotons_IdealGas_`/`CalcOpacityPhotons_` actually use
+   (`photon_op_params.arad`, from `<photons>/arad` or units) — consistent by
+   coincidence in the existing Stage 3 athinputs (`arad=1.0` in both blocks)
+   but nothing prevented future divergence. **Fixed**: `UserProblem()` now
+   fatal-errors if `enable_radiation` and `opacity_type != Photons`; the
+   pgen now reads `pmbp->pradm1->photon_op_params.arad` directly instead of
+   an independent `<problem>/arad` key (removed that key from
+   `dyngr_bhstar_radiation.athinput`), eliminating the divergence risk
+   rather than just guarding it. **Verified**: re-ran both Stage 3 validated
+   athinputs (`dyngr_bhstar_hydro`, `dyngr_bhstar_radiation`) against the
+   rebuilt `dyngr_bhstar.cpp` — `check_dyngr_bhstar_radiation.py` still
+   passes with bit-identical results (max rel err unchanged: `2.6e-6`
+   dens/press, `2.4e-6` Fx; bulk/near-horizon growth bounds unchanged), and
+   both runs still complete to `tlim=3.0` with no crash.
+
+**Regression verification**: rebuilt (`built_in_pgens`) and re-ran the full
+photon-M1 suite on Sakura via `run_test_suite.py` — all 7 `_cpu` tests and
+both `_mpicpu` tests (diffusion, beam) still pass, zero change, confirming
+none of the 6 fixes above affect any already-validated configuration.
+
+**Deferred, not fixed (documented as future work, not hardening)**:
+- Full hydro-only (no `<mhd>`) support across closure/fluxes/tmunu/nurates
+  opacities (item 2's underlying gap) — real new development.
+- Kramers/`power_opacity` and EOSCompOSE testing generally — already listed
+  as "not yet done" at the top of this file, unchanged by this stage.

@@ -119,10 +119,10 @@ kappa_p = 0.0         # precedent (avoids the LTE-emission confound found
                       # the ad hoc E_lte already set by the IC)
 power_opacity = false # constant (non-Kramers) opacities
 compton = false       # no <units> block, so Compton is unavailable
-arad = 1.0            # radiation constant [code units] -- must match
-                      # <problem>/arad below (the pgen's own E_lte IC uses
-                      # <problem>/arad directly, while this value is what the
-                      # M1 module itself uses for its own runtime physics)
+arad = 1.0            # radiation constant [code units] -- the pgen's E_lte
+                      # IC reads this same value directly from the M1 module
+                      # (photon_op_params.arad), so there is only one arad
+                      # to set, not a separate <problem>/arad copy
 
 <problem>
 eosk             = 1.0               # polytropic constant K, p=eosk*rho^gamma
@@ -131,8 +131,6 @@ bondi_rs         = 8.0               # Bondi scale radius [M]
 b_norm           = 0.0               # disable the magnetic field (see hydro
                                       # athinput's comment)
 enable_radiation = true              # default -- included here for clarity
-arad             = 1.0               # radiation constant [code units], must
-                                      # match <photons>/arad above
 T_photosphere    = 0.01              # fixed photospheric temperature [code
                                       # units] -- E_lte = arad*T_photosphere^4
 

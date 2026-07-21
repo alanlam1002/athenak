@@ -133,8 +133,12 @@ void SetupProblem(ParameterInput *pin, Mesh* pmy_mesh_, bool enable_radiation) {
     auto &m1_nvars_ = pmbp->pradm1->nvars;
     auto &m1_params_ = pmbp->pradm1->params;
 
-    // M1 radiation initial condition parameters (all in code units)
-    Real arad    = pin->GetOrAddReal("problem", "arad",          0.0);
+    // M1 radiation initial condition parameters (all in code units). arad
+    // comes from the same photon_op_params the opacity module actually uses
+    // (<photons>/arad or units-derived), not an independent <problem> key
+    // (UserProblem already enforces opacity_type == photons above), so the
+    // IC and the evolved opacities can never silently diverge.
+    Real arad    = pmbp->pradm1->photon_op_params.arad;
     Real T_ph    = pin->GetOrAddReal("problem", "T_photosphere", 0.0);
 
     // Read kappa_s from <photons> block (same source as the M1 opacity module)
@@ -418,6 +422,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
               << "BH star problem has enable_radiation=true (the default) but no "
               << "<radiation_m1> block in input file -- either add one or set "
                  "problem/enable_radiation=false for a hydro-only run" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if (enable_radiation &&
+      pmbp->pradm1->params.opacity_type != radiationm1::Photons) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "BH star problem's radiation initial data assumes "
+                 "radiation_m1/opacity_type = photons (it builds the IC from "
+                 "<photons>/kappa_s); got a different opacity_type instead"
+              << std::endl;
     exit(EXIT_FAILURE);
   }
 

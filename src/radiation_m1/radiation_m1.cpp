@@ -47,7 +47,16 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
     // @TODO phydro are only partially implemented
     exit(EXIT_FAILURE);
   }
-  
+
+  if (ishydro && !ismhd) {
+    std::cerr << "Error: radiation_m1 with a <hydro> block and no <mhd> "
+      "block is not supported yet. Only CalcOpacityPhotons has a genuine "
+      "hydro-only path; the closure, flux, Tmunu-backreaction, and "
+      "bns-nurates-opacity code all assume <mhd> is present. Add an <mhd> "
+      "block, or track hydro-only support as future work." << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
   nspecies = M1_TOTAL_NUM_SPECIES;
 
   params.gr_sources = pin->GetOrAddBoolean("radiation_m1", "gr_sources", true);

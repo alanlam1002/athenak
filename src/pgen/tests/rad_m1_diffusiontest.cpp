@@ -107,7 +107,15 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
   adm::ADM::ADM_vars &adm = pmbp->padm->adm;
   auto &params_ = pmbp->pradm1->params;
 
-  bool erf = pin->GetOrAddString("problem", "initial_data", "gaussian") == "gaussian";
+  auto initial_data = pin->GetOrAddString("problem", "initial_data", "gaussian");
+  if (initial_data != "gaussian" && initial_data != "step") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "Unknown problem/initial_data: " << initial_data
+              << " (expected gaussian or step)" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  bool erf = (initial_data == "gaussian");
   auto vx = pin->GetOrAddReal("problem", "fluid_velocity", 0.0);
   auto lorentz_w = 1. / Kokkos::sqrt(1. - vx * vx);
   Real rho = pin->GetOrAddReal("problem", "rho", 1.0);

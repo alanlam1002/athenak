@@ -72,6 +72,14 @@ void ProblemGenerator::RadiationM1BeamTest(ParameterInput *pin,
 
   Real adm_mass = pin->GetOrAddReal("adm", "bh_mass", 1.);
   auto metric = pin->GetOrAddString("adm", "metric", "minkowski");
+  if (metric != "minkowski" && metric != "isotropic" && metric != "kerr-schild") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "Unknown adm/metric: " << metric
+              << " (expected minkowski, isotropic, or kerr-schild)"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
   // opacity_type=photons needs real density/pressure to compute opacities
   // from (CalcOpacityPhotons_IdealGas_ reads w0_(IDN)/w0_(IEN)), so it uses

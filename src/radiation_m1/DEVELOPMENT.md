@@ -359,6 +359,31 @@ Recommended order (cheapest / fewest new mechanisms first):
      over `tlim=6` (tolerance `2%`) — no spurious damping, growth, or
      isotropization. All single-zone tests and the `kappa_s=5` diffusion test
      re-ran clean after this change (no regression).
+   - **Cross-checked against the DO module's own beam test**
+     (`src/pgen/tests/rad_beam.cpp` + `src/srcterms/srcterms.cpp::BeamSource`,
+     dispatched via the same `built_in_pgens` table, no separate build
+     needed). Found by hand that the repo's existing template
+     (`inputs/radiation/beam.athinput`) is itself broken: it sets
+     `beam_source=true` and `pos_1`/`dir_1`/... under `<radiation>`/
+     `<problem>`, but `SourceTerms` actually reads the flag `rad_beam` (not
+     `beam_source`) and all beam parameters from a `<rad_srcterms>` block
+     (`radiation.cpp:101-102`, `srcterms.cpp:42,67-77`) — as distributed the
+     template silently injects nothing (confirmed: `r00=0` everywhere with
+     the template's block placement). Built a corrected, domain/`tlim`-
+     matched 1D-propagation input from scratch. This module has no
+     boundary-injected plane-parallel beam mechanism (unlike M1's
+     ghost-zone refresh) — `BeamSource` is a volumetric point source with a
+     finite angular cone, so its radiation spreads geometrically (falls off
+     with distance from the source) rather than staying at a flat plateau,
+     and the two codes' absolute normalizations aren't calibrated to match.
+     The one directly comparable, meaningful diagnostic is *front position*:
+     both codes track `x=c*t` cleanly (M1 within `0.08`, DO within `0.16`,
+     both consistent with each code's own front-detection convention and
+     numerical smearing), and the DO module's front is causally sharp
+     (exactly zero beyond it, no leakage). Plots (profile snapshots, front
+     position vs `t`) and an mp4 animation under
+     `/sakura/ptmp/tlam/athenak_run/beam_1d_comparison/` (not committed —
+     scratch/visualization only, same as the diffusion-test comparison).
 
 4. **Radiation-pressure backreaction test (`backreact=true`,
    `backreact_tmunu=true`).** Start with the cheapest meaningful case rather than

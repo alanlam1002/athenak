@@ -36,17 +36,18 @@ is the target application).
   in the source solver against an independently-derived closed-form
   equilibrium (`rad_m1_photon_vx_singlezone`).
 
-**In progress, crash fixed, one accuracy question still open**: the
-optically-thick diffusion test (item 2 below) works well at `kappa_s=5`
-(sub-1% error, cross-validated against the reference discrete-ordinate module)
-after fixing a "zero-flux spin-up transient" IC issue. That same corrected IC
-used to make `E` collapse to the floor everywhere at `kappa_s=200` (the
-stiff/implicit source-solver regime); this has been root-caused and fixed (a
-latent Newton-solver/floor interaction — see `apply_floor()` in
-`radiation_m1_helpers.hpp` and item 2's writeup). What remains open: `E` at
-`kappa_s=200` still spreads ~27-34% faster than the analytic diffusion law
-predicts, the same discrepancy that originally motivated the cross-check
-against the discrete-ordinate module — not yet explained.
+**Done**: the optically-thick diffusion test (item 2 below) works well at
+`kappa_s=5` (sub-1% error, cross-validated against the reference
+discrete-ordinate module) after fixing a "zero-flux spin-up transient" IC
+issue. That same corrected IC used to make `E` collapse to the floor
+everywhere at `kappa_s=200` (the stiff/implicit source-solver regime); this
+has been root-caused and fixed (a latent Newton-solver/floor interaction —
+see `apply_floor()` in `radiation_m1_helpers.hpp` and item 2's writeup). The
+remaining ~27-34% "spreads faster than analytic" discrepancy at `kappa_s=200`
+has been cross-checked directly against the discrete-ordinate module (same
+opacity, same domain/`tlim`): both codes show matching behavior, so this is
+concluded to be shared physics/numerics (a finite-relaxation-time correction
+to the pure diffusion limit), not an M1 bug — see item 2's writeup.
 
 **Not yet done** (see "Stage 2 plan" below): free-streaming and
 radiation-pressure-backreaction transport tests, and CI wiring. Kramers/
@@ -216,7 +217,7 @@ Recommended order (cheapest / fewest new mechanisms first):
      `basetype_output.cpp:736-753`).
 
 2. **Optically-thick diffusion test (real opacities, first genuine transport
-   test) — IN PROGRESS, crash fixed, one accuracy question open.** Real-physics analogue of the
+   test) — DONE.** Real-physics analogue of the
    existing toy-opacity `rad_m1_diffusiontest.cpp` (which prescribes `D`
    directly via `ToyOpacityModel::Diffusion{Explicit,Implicit}`); extended
    that same pgen (rather than writing a new one) to also support
@@ -291,16 +292,34 @@ Recommended order (cheapest / fewest new mechanisms first):
      NaNs and exact energy conservation (`integral/integral(0)=1.0` at every
      output); all four single-zone tests and the `kappa_s=5` diffusion test
      re-ran clean with unchanged results (no regression).
-   - **Still open, NOT the crash — a genuine accuracy question**: with the
-     crash fixed, `kappa_s=200` now runs to completion but its `sigma²(t)`
-     still spreads ~27-34% faster than `sigma0²+2Dt` predicts, matching the
-     *original* discrepancy that motivated cross-checking against the
-     discrete-ordinate module in the first place (the diffusive-flux IC fix
-     resolved `kappa_s=5` but evidently not this regime). Not yet
-     investigated — possibly a genuine breakdown of strict diffusion-limit
-     validity at this optical depth per cell (`kappa_s*dx≈18.75`, with the
-     pulse width `sigma0` only ~2.5 cells wide), or a separate scheme issue
-     specific to the stiff/implicit branch.
+   - **Remaining `sigma²(t)` discrepancy at `kappa_s=200` — cross-checked,
+     concluded NOT an M1 bug.** With the crash fixed, `kappa_s=200` runs to
+     completion but its `sigma²(t)` still spreads ~27-34% faster than
+     `sigma0²+2Dt` predicts (the diffusive-flux IC fix resolved `kappa_s=5`
+     but evidently not this regime). Re-ran the reference discrete-ordinate
+     (DO) module at the same `kappa_s=200` (`inputs/radiation/
+     rad_diffusion_m1crosscheck.athinput`, `kappa_s=200`, matched domain/
+     `tlim`) and compared directly: the DO module shows the **same**
+     faster-than-analytic spreading, in the same direction, at comparable
+     magnitude (37% at t=20 vs M1's 30%, narrowing to 20% vs M1's 27% by
+     t=200 — both codes converge back toward the analytic line at late
+     times). Energy is conserved to machine precision in both. Since two
+     independent numerical schemes (M1's moment closure vs the DO module's
+     angular discretization) show matching behavior, this is not an M1
+     implementation bug. Working hypothesis (not analytically confirmed):
+     the two-moment/M1 equations are a damped hyperbolic (telegraph-type)
+     system that reduces to the pure parabolic diffusion equation only
+     asymptotically; at `kappa_s=200` both codes' asymptotic-preserving flux
+     blends deliberately suppress numerical dissipation in favor of the
+     opacity's physical damping (`radiation_m1_fluxes.cpp`'s
+     `A_jp12=min(1,1/(kappa_ave*dx))` shrinks to ~0.05 here vs. ≈1 at
+     `kappa_s=5`), making the leading finite-relaxation-time correction to
+     pure diffusion relatively more visible. Comparison plots/animation
+     (profile snapshots, `sigma²(t)` curves, and an mp4 showing both codes'
+     `E(x)` evolving side by side) generated under
+     `/sakura/ptmp/tlam/athenak_run/diffusion_kappa200_comparison/` (not
+     committed — scratch/visualization only). **Item 2 considered resolved**
+     for the purposes of this development plan.
 
 3. **Free-streaming/beam test with photon opacities.** Reuse
    `rad_m1_beams.cpp`/`radiation_m1_beams.cpp` with `opacity_type=photons` and

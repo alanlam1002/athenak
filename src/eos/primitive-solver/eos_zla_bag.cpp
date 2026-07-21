@@ -291,6 +291,53 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
     Kokkos::deep_copy(m_log_nb, host_log_nb);
     Kokkos::deep_copy(m_table,  host_table);
 
+    // Check consistency at OFF-GRID points, not just at table nodes (the loop above
+    // only checks n exactly on the table, where ColdPressure/ColdEnergy(n, Y_table(n))
+    // matches the table by construction). During evolution, only the analytic EOS is
+    // ever evaluated, fed by a composition Y that is itself interpolated (via eval_at_n,
+    // linear in log2 n) from the table -- independently of how P/E are interpolated.
+    // This checks whether ColdPressure/ColdEnergy(n, Y_interp(n)) still agrees with the
+    // table's own (log-log-linear) interpolation of P/E at the same off-grid n, using
+    // eval_at_n itself so this exercises the exact same interpolation code used
+    // elsewhere (e.g. by the GetXFromRho accessors used to set up TOV/BNS initial data).
+    // Note: eval_at_n reads m_table/m_log_nb directly, so this assumes a host-accessible
+    // execution space (true for this project's current CPU-only OpenMP/Serial Kokkos
+    // build; would need a parallel_for wrapper on a GPU build).
+    if (global_variable::my_rank == 0) {
+    {
+      for (size_t in=0; in+1<m_nn; ++in) {
+        for (Real t : {0.25, 0.5, 0.75}) {
+          Real log_nb_test = (1.0-t)*host_log_nb(in) + t*host_log_nb(in+1);
+          Real n_test = exp2_(log_nb_test);
+
+          Real f   = eval_at_n(ECFVOL, n_test);
+          Real yn  = eval_at_n(ECYN,   n_test);
+          Real yln = eval_at_n(ECYLN,  n_test);
+          Real ylq = eval_at_n(ECYLQ,  n_test);
+          Real y[4] = {f, yn, yn*yln, (1.0-yn)*ylq};
+
+          Real p_tab = exp2_(eval_at_n(ECLOGP, n_test));
+          Real e_tab = exp2_(eval_at_n(ECLOGE, n_test));
+
+          Real p_cold = ColdPressure(n_test, y);
+          Real e_cold = ColdEnergy(n_test, y);
+
+          Real p_reldiff = p_cold/p_tab - 1.0;
+          Real e_reldiff = e_cold/e_tab - 1.0;
+
+          std::cout << "Test offgrid " << in << " t=" << t
+                    << " n = " << n_test
+                    << " Y = [ " << f << ", " << yn << ", " << yln << ", " << ylq << " ]"
+                    << " P = [ tab=" << p_tab << ", cold=" << p_cold
+                    << ", reldiff=" << p_reldiff << " ]"
+                    << " E = [ tab=" << e_tab << ", cold=" << e_cold
+                    << ", reldiff=" << e_reldiff << " ]"
+                    << std::endl;
+        }
+      }
+    }
+    }
+
     m_initialized = true;
 
     min_Y[0] = 0.0;

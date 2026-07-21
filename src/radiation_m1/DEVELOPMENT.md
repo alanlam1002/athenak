@@ -53,10 +53,13 @@ The free-streaming/beam test (item 3 below) is also done: a beam free-streams
 at `c` with no measurable spurious damping, growth, or isotropization at
 small nonzero scattering opacity.
 
-**Not yet done** (see "Stage 2 plan" below): the radiation-pressure-
-backreaction transport test, and CI wiring. Kramers/`power_opacity` and the
-EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
-EOSCompOSE Compton — see below).
+The single-zone radiation-pressure backreaction test (item 4 below) is also
+done: `E` and `T_gas` jointly relax to the correct energy-conservation-based
+equilibrium with `backreact=true`.
+
+**Not yet done** (see "Stage 2 plan" below): CI wiring (item 5). Kramers/
+`power_opacity` and the EOSCompOSE branch have no dedicated test yet either
+(deprioritized alongside EOSCompOSE Compton — see below).
 
 **Scope decision — IdealGas only, for now:** Compton and the newer single-zone
 tests all target `Primitive::IdealGas`, not `Primitive::EOSCompOSE`. This was an
@@ -385,20 +388,49 @@ Recommended order (cheapest / fewest new mechanisms first):
      `/sakura/ptmp/tlam/athenak_run/beam_1d_comparison/` (not committed —
      scratch/visualization only, same as the diffusion-test comparison).
 
-4. **Radiation-pressure backreaction test (`backreact=true`,
-   `backreact_tmunu=true`).** Start with the cheapest meaningful case rather than
-   a full hydrostatic atmosphere: repeat the single-zone LTE setup but let
-   `T_gas` respond too, so `E` and `T_gas` jointly relax to an equilibrium set by
-   **total energy conservation** (`rho*cv*T + E` constant), not just `E` chasing a
-   fixed external `T`. Check gets two things essentially for free: (a) energy
-   conservation to near machine precision (a strong, cheap invariant-based check
-   independent of knowing the transient in closed form), and (b) the correct
-   final joint equilibrium `T_final`/`E_final` from the conservation constraint —
-   optionally cross-check the transient itself against a `scipy`-integrated
-   reference solution of the coupled 2-ODE system. A full spatial hydrostatic
-   (Eddington) atmosphere test is a natural follow-on once this passes, but is
-   more ambitious (needs a steady-state spatial profile, not just a 0-D
-   equilibrium) — deliberately deferred past this first step.
+4. **Radiation-pressure backreaction test (`backreact=true`) — DONE.**
+   Cheapest meaningful case rather than a full hydrostatic atmosphere:
+   reused `rad_m1_photon_singlezone.cpp` **unmodified** — `backreact` is a
+   pure input-file toggle for this pgen (`radiation_m1.cpp:55`, default
+   `true`; the existing `rad_m1_photon_singlezone.athinput` explicitly
+   overrides it to `false` to keep `T_gas` fixed for that earlier test). New
+   input `rad_m1_photon_backreaction_singlezone.athinput` is identical
+   except `backreact=true`, so `T_gas` responds too and `E`/`T_gas` jointly
+   relax to the equilibrium set by **total energy conservation**, not `E`
+   chasing a fixed external `T`. The backreaction mechanism itself
+   (`radiation_m1_update.cpp:672-680`) subtracts the same `DrEFN`
+   matter-exchange increment already used to update the M1 fields from the
+   MHD conserved energy-momentum — exact by construction; the test checks
+   this holds numerically and drives the correct equilibrium, not that the
+   mechanism exists.
+   - Derived the exact (not approximate) internal-energy relation from
+     `Primitive::IdealGas` itself (`src/eos/primitive-solver/idealgas.hpp`,
+     code units, `mb=1`): `T=P/rho` (`Pressure(n,T)=n*T`), gas internal
+     energy density `e_int=rho*T/(gamma-1)`.
+   - **Check 1 (energy conservation)**: `E_tot(t)=E(t)+e_int(t)` stays
+     constant to `3e-6` relative error throughout the run (tolerance `1e-5`).
+   - **Check 2 (correct joint equilibrium)**: independently solved
+     `rho*T_final/(gamma-1)+arad*T_final^4=E_tot(0)` via `scipy.brentq` →
+     `T_final=0.724492`, `E_final=0.275508`; simulation's late-time values
+     (`T=0.724491`, `E=0.275506`) match to `1.3e-6`/`7.4e-6` relative error
+     (tolerance `1e-3`). All four single-zone tests re-ran clean (no
+     regression).
+   - **No DO-module comparison for this item**: that module has no existing
+     homogeneous/uniform-single-zone pgen (only `rad_linear_wave` and
+     `rad_beam`, both spatial-transport setups, `pgen.cpp:962-996`); writing
+     one just for this comparison would mean adding code to the independent
+     reference module itself, undercutting the point of using it as a
+     check — skipped as disproportionate scope for one comparison point
+     (unlike items 2/3, which reused already-existing, already-verified
+     DO-module pgens).
+   - **No animation**: genuinely 0-D (homogeneous single-zone) — nothing
+     spatial to animate. Time-series plots (`E(t)`, `T_gas(t)`,
+     conservation residual) under
+     `/sakura/ptmp/tlam/athenak_run/backreaction_singlezone_plots/` (not
+     committed — scratch/visualization only).
+   - A full spatial hydrostatic (Eddington) atmosphere test is a natural
+     follow-on, but is more ambitious (needs a steady-state spatial profile,
+     not just a 0-D equilibrium) — deliberately deferred past this step.
 
 5. **Wire into `tst/test_suite/` CI (pytest, AMR+MPI).** Follow the
    `test_rad_beam_gpu.py`/`test_rad_lwave*.py` pattern once 2-4 are stable. Open

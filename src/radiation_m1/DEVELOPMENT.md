@@ -49,10 +49,14 @@ opacity, same domain/`tlim`): both codes show matching behavior, so this is
 concluded to be shared physics/numerics (a finite-relaxation-time correction
 to the pure diffusion limit), not an M1 bug — see item 2's writeup.
 
-**Not yet done** (see "Stage 2 plan" below): free-streaming and
-radiation-pressure-backreaction transport tests, and CI wiring. Kramers/
-`power_opacity` and the EOSCompOSE branch have no dedicated test yet either
-(deprioritized alongside EOSCompOSE Compton — see below).
+The free-streaming/beam test (item 3 below) is also done: a beam free-streams
+at `c` with no measurable spurious damping, growth, or isotropization at
+small nonzero scattering opacity.
+
+**Not yet done** (see "Stage 2 plan" below): the radiation-pressure-
+backreaction transport test, and CI wiring. Kramers/`power_opacity` and the
+EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
+EOSCompOSE Compton — see below).
 
 **Scope decision — IdealGas only, for now:** Compton and the newer single-zone
 tests all target `Primitive::IdealGas`, not `Primitive::EOSCompOSE`. This was an
@@ -321,14 +325,40 @@ Recommended order (cheapest / fewest new mechanisms first):
      committed — scratch/visualization only). **Item 2 considered resolved**
      for the purposes of this development plan.
 
-3. **Free-streaming/beam test with photon opacities.** Reuse
-   `rad_m1_beams.cpp`/`radiation_m1_beams.cpp` with `opacity_type=photons` and
-   `kappa`s near zero, confirming a beam propagates at exactly `c` without
-   spurious spreading or damping — the opposite limit from the diffusion test,
-   and a classic M1 failure mode (implicit solvers can over-damp free-streaming
-   radiation even at `kappa~0`). **Open question, not yet resolved**: whether
-   `rad_m1_beams.cpp` currently assumes a specific `opacity_type` (needs
-   inspection before implementation).
+3. **Free-streaming/beam test with photon opacities — DONE.** Extended
+   `rad_m1_beams.cpp` (1D Minkowski branch only) with the same
+   `use_mhd`/`dynamic_cast`/`PrimToConInit` pattern as the diffusion test, so
+   `opacity_type=photons` has a real `<mhd>`+`dyn_grmhd` fluid to compute
+   opacities from (previously the pgen never touched matter fields at all —
+   opacity-model-agnostic by construction, since the beam is injected via a
+   boundary-condition hook, `ApplyBeamSources1D`,
+   `radiation_m1_beams.cpp:18-46`, independent of `opacity_type`). Guarded
+   with a fatal error if `opacity_type=photons` is selected together with the
+   2D isotropic/Kerr-Schild BH branches (curved-spacetime beam bending is a
+   different, more complex test, out of scope here).
+   See `rad_m1_photon_beam_1d.athinput`, `check_rad_m1_photon_beam_1d.py`.
+   - **Closure choice matters**: must use `closure_fun=minerbo` (the code
+     default), not `eddington` — `eddington` pins `chi=1/3` (isotropic
+     assumption) and cannot represent a directed beam (`chi→1` in the
+     free-streaming limit).
+   - **Opacity configuration matters too — found by hand**: an initial trial
+     with `kappa_a=kappa_p=kappa_s=1e-3` (all nonzero) revealed a confound —
+     the static `T=1` background gas emits locally (LTE) everywhere in the
+     domain from `t=0` regardless of the beam (`E≈kappa_p*a_rad*T^4*t`,
+     confirmed to match this formula to high precision ahead of the beam
+     front), and since `kappa_a=kappa_p` here, `J_eq=a_rad*T^4=1` exactly
+     equals the beam's own value, entangling the two effects in the
+     illuminated region. Switched to `kappa_a=kappa_p=0`, `kappa_s=1e-3`
+     (scattering-only, matching the already-validated Stage 1 scattering-only
+     single-zone null test) to cleanly isolate the physics this test exists
+     to check.
+   - **Result**: beam front tracks `x=c*t` to within `0.08` (well inside the
+     donor-cell scheme's inherent numerical smearing width, tolerance `0.5`);
+     illuminated-region `E` stays within `0.24%` of the injected value `1.0`
+     (tolerance `2%`); `F_x/E` (causality/"beam-ness") drifts by only `0.16%`
+     over `tlim=6` (tolerance `2%`) — no spurious damping, growth, or
+     isotropization. All single-zone tests and the `kappa_s=5` diffusion test
+     re-ran clean after this change (no regression).
 
 4. **Radiation-pressure backreaction test (`backreact=true`,
    `backreact_tmunu=true`).** Start with the cheapest meaningful case rather than

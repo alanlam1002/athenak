@@ -80,7 +80,7 @@ def front_position(x1v, E, threshold):
     return x0 + (threshold - e0) * (x1 - x0) / (e1 - e0)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
     parser.add_argument("--front-tol", type=float, default=0.5,
@@ -89,12 +89,13 @@ def main():
                         help="relative tolerance on plateau E vs the injected value")
     parser.add_argument("--fe-ratio-tol", type=float, default=0.02,
                         help="absolute tolerance on F_x/E drift from its injected value")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     e_rows = load_series(args.tab_dir, "rad_m1_E", "E:0")
     f_rows = load_series(args.tab_dir, "rad_m1_F", "Fx:0")
 
-    print("\n   t     x_front    c*t     front_err   plateau_E   rel_err    Fx/E    fe_err")
+    print("\n   t     x_front    c*t     front_err   plateau_E   rel_err    Fx/E    "
+          "fe_err")
     max_front_err = 0.0
     max_plateau_rel_err = 0.0
     max_fe_err = 0.0
@@ -122,10 +123,12 @@ def main():
         fe_err = abs(fe_ratio - injected_fe_ratio)
         max_fe_err = max(max_fe_err, fe_err)
 
-        print("{:6.2f}  {:8.4f}  {:6.2f}  {:10.3e}  {:10.6f}  {:9.3e}  {:7.4f}  {:8.3e}".format(
-            t, xfront, t, front_err, plateau_E, plateau_rel_err, fe_ratio, fe_err))
+        print("{:6.2f}  {:8.4f}  {:6.2f}  {:10.3e}  {:10.6f}  {:9.3e}  {:7.4f}  "
+              "{:8.3e}".format(
+                  t, xfront, t, front_err, plateau_E, plateau_rel_err, fe_ratio, fe_err))
 
-    print("\nreference (earliest-measured) plateau F_x/E = {:.6f}".format(injected_fe_ratio))
+    print("\nreference (earliest-measured) plateau F_x/E = {:.6f}".format(
+        injected_fe_ratio))
     print("max |x_front - c*t|                = {:.3e} (tol {:.1e})".format(
         max_front_err, args.front_tol))
     print("max relative error of plateau E     = {:.3e} (tol {:.1e})".format(
@@ -141,8 +144,9 @@ def main():
               "isotropization")
     else:
         print("\nFAIL: beam does not free-stream cleanly within tolerance")
-        sys.exit(1)
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

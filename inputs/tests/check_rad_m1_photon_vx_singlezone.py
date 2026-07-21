@@ -57,12 +57,12 @@ E_EQ = J_EQ * (4.0 * W**2 - 1.0) / 3.0
 FX_EQ = J_EQ * (4.0 / 3.0) * W**2 * VX
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
     parser.add_argument("--tol", type=float, default=1e-3,
                         help="relative tolerance on late-time E, Fx vs equilibrium")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     t, E = load_series(args.tab_dir, BASENAME, "rad_m1_E", "E:0")
     _, Fx = load_series(args.tab_dir, BASENAME, "rad_m1_F", "Fx:0")
@@ -89,8 +89,9 @@ def main():
     else:
         print("FAIL: late-time (E, Fx) did NOT converge to the boosted-LTE "
               "equilibrium within tolerance {:.1e}".format(args.tol))
-        sys.exit(1)
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

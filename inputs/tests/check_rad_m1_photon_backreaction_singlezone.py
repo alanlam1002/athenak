@@ -35,7 +35,6 @@ import argparse
 import os
 import sys
 
-import numpy as np
 from scipy.optimize import brentq
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -53,7 +52,7 @@ def e_int(rho, T):
     return rho * T / (GAMMA - 1.0)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
     parser.add_argument("--conservation-tol", type=float, default=1e-5,
@@ -61,7 +60,7 @@ def main():
     parser.add_argument("--equilibrium-tol", type=float, default=1e-3,
                         help="relative tolerance on late-time E, T vs the "
                              "independently-solved equilibrium")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     t, E = load_series(args.tab_dir, BASENAME, "rad_m1_E", "E:0")
     _, dens = load_series(args.tab_dir, BASENAME, "mhd_w", "dens")
@@ -113,8 +112,9 @@ def main():
     else:
         print("\nFAIL: either energy was not conserved or (E, T_gas) did not "
               "converge to the correct joint equilibrium")
-        sys.exit(1)
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

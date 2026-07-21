@@ -57,9 +57,14 @@ The single-zone radiation-pressure backreaction test (item 4 below) is also
 done: `E` and `T_gas` jointly relax to the correct energy-conservation-based
 equilibrium with `backreact=true`.
 
-**Not yet done** (see "Stage 2 plan" below): CI wiring (item 5). Kramers/
-`power_opacity` and the EOSCompOSE branch have no dedicated test yet either
-(deprioritized alongside EOSCompOSE Compton — see below).
+All 7 photon-M1 tests are now wired into the `tst/test_suite/` pytest CI
+harness (item 5 below): 5 single-zone `_cpu` tests plus `_cpu`/`_mpicpu`
+variants of the diffusion and beam tests (9 test files total), verified
+end-to-end through the harness's own `run_test_suite.py` entrypoint.
+
+**Not yet done** (see "Stage 2 plan" below): Kramers/`power_opacity` and the
+EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
+EOSCompOSE Compton — see below).
 
 **Scope decision — IdealGas only, for now:** Compton and the newer single-zone
 tests all target `Primitive::IdealGas`, not `Primitive::EOSCompOSE`. This was an
@@ -432,16 +437,71 @@ Recommended order (cheapest / fewest new mechanisms first):
      follow-on, but is more ambitious (needs a steady-state spatial profile,
      not just a 0-D equilibrium) — deliberately deferred past this step.
 
-5. **Wire into `tst/test_suite/` CI (pytest, AMR+MPI).** Follow the
-   `test_rad_beam_gpu.py`/`test_rad_lwave*.py` pattern once 2-4 are stable. Open
-   decision to make at that point: the CI harness's tab-reading path goes through
-   `athena_read.tab()`/`vis/python`, which has the degenerate-dimension bug noted
-   above. Options: (a) fix the general AthenaK tab writer/reader (broadest fix,
-   most blast radius, benefits everything not just M1), (b) design the CI-facing
-   test variants with genuinely non-degenerate geometry so the existing reader
-   works unmodified, or (c) relocate/adapt `m1_tab_utils.py` into the `tst/`
-   Python path for CI's use. Not resolved yet — revisit once we're actually
-   wiring this in.
+5. **Wire into `tst/test_suite/` CI (pytest, MPI) — DONE.** All 7 photon-M1
+   tests now have pytest wrappers in the new `tst/test_suite/radiation_m1/`
+   package, following the `test_nr_sod_cpu.py`/`test_gr_bondi_mpicpu.py`
+   pattern (`testutils.run()`/`mpi_run()` in a `try/finally: cleanup()`).
+   - **Tab-reader decision (option c from the list below)**: reused
+     `inputs/tests/m1_tab_utils.py` and the existing
+     `inputs/tests/check_rad_m1_photon_*.py` analytic checks as-is, rather
+     than patching the shared `vis/python/athena_read.py` (option a — that
+     reader's degenerate-dimension bug affects every test category, not just
+     M1; fixing it is out of scope here) or redesigning the tests around
+     non-degenerate geometry (option b — would change the validated physics
+     regime just to dodge a reader bug). `tst/test_suite/radiation_m1/__init__.py`
+     bootstraps `sys.path` to `inputs/tests/` (repo-root-relative via
+     `__file__`, not cwd, since pytest imports it after the harness has
+     already chdir'd into `tst/build/src`), so the pytest test files import
+     the check modules directly (`import check_rad_m1_photon_singlezone as
+     check`) instead of duplicating any analytic-check logic.
+   - **Check-script refactor**: each `check_rad_m1_photon_*.py`'s `main()`
+     signature changed to `main(argv=None) -> bool` (parses `argv` instead of
+     always `sys.argv`, `return False`/`True` instead of `sys.exit(1)`/falling
+     off the end) so pytest can call `check.main([])` and assert on the
+     result. Zero change to any analytic/tolerance logic or manual CLI
+     behavior (`if __name__ == "__main__": sys.exit(0 if main() else 1)`
+     still works identically by hand).
+   - **9 test files**: the 5 single-zone tests as `_cpu` only (physically
+     0-D/homogeneous, gain nothing from MPI decomposition); the diffusion and
+     beam tests each get both a `_cpu` variant (reusing the existing
+     hand-validated athinput) and an `_mpicpu` variant (a copy with
+     `meshblock/nx1` shrunk to give 4 blocks/`mpirun -np 4`, e.g.
+     `rad_m1_photon_diffusion_mpi.athinput`) — confirms the physics is
+     unaffected by domain decomposition. **AMR is explicitly out of scope**:
+     none of the 7 validated M1 pgens implement a refinement criterion (all
+     uniform meshes), so there's no AMR behavior to exercise yet; adding one
+     would be new pgen work, not CI wiring.
+   - **Diffusion test's default `--tol` was miscalibrated — found and fixed
+     while wiring this in.** `check_rad_m1_photon_diffusion.py`'s default
+     `--tol=0.05` predates the `kappa_s=200` finding above (that
+     `sigma^2(t)` genuinely, and correctly, spreads ~27-34% faster than the
+     pure-diffusion prediction — a real, DO-module-cross-validated
+     finite-relaxation-time effect, not a bug) and was never updated to match
+     it; running the test through pytest surfaced a spurious FAIL (measured
+     `34.07%` against a `5%` default) with the exact same physics that was
+     already accepted as correct by hand. Loosened the default to `0.4` (same
+     kind of tolerance-calibration fix as item 4's `--conservation-tol`).
+   - **Verified** on Sakura: all 7 `_cpu` tests and both `_mpicpu` tests pass
+     directly via pytest against a manually-built `tst/build`; additionally
+     confirmed through the actual `run_test_suite.py --test
+     test_suite/radiation_m1/test_rad_m1_photon_singlezone_cpu.py --cpu`
+     entrypoint (the harness's own designed single-file verification path).
+     A full `--cpu`/`--mpicpu` whole-suite pass was deliberately not run —
+     none of this work touches shared harness code or any other test
+     category's files, so it wouldn't add confidence proportional to its
+     compute cost on a shared cluster.
+   - **Sakura-specific build note (unrelated to M1, pre-existing environment
+     gap)**: this cluster's default `cc`/`c++` resolve to system GCC 7.5,
+     which fails Kokkos's C++17 minimum-version check; a working build needs
+     `CXX`/`CC` pointed at the Intel oneAPI compilers (`icpx`/`icx`, or
+     `mpiicpx` for `-DAthena_ENABLE_MPI=ON`), same as the untracked
+     `build_m1_sakura.sh`. Also found that `run_test_suite.py`'s own
+     `--cpu`/`--mpicpu`/`--test` argparse (`nargs="*"`) cannot accept `-D...`
+     cmake flags on the command line at all (a token starting with `-`
+     immediately stops `nargs="*"` from consuming it, a stock argparse
+     behavior, reproducible with a 3-line script) — worked around by setting
+     `CXX`/`CC` environment variables instead of passing `-D` flags, no
+     harness code changed.
 
 ## Stage 3 (later) — capstone application
 

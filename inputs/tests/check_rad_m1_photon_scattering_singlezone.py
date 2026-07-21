@@ -33,12 +33,12 @@ from m1_tab_utils import load_series  # noqa: E402
 BASENAME = "photon_scattering_singlezone"
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
     parser.add_argument("--tol", type=float, default=1e-6,
                         help="relative tolerance on E(t) staying at E(0)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     t, E = load_series(args.tab_dir, BASENAME, "rad_m1_E", "E:0")
 
@@ -61,8 +61,9 @@ def main():
         print("FAIL: E drifted away from its floor value by more than tolerance "
               "{:.1e} -- kscat may be leaking into the emission/absorption "
               "term".format(args.tol))
-        sys.exit(1)
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

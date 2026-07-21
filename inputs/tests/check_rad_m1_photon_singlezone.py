@@ -40,12 +40,12 @@ J_EQ = ARAD * TEMP**4
 ABS_1_EXPECTED = KAPPA_P * RHO
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tab-dir", default="tab", help="directory with .tab output")
     parser.add_argument("--tol", type=float, default=1e-3,
                         help="relative tolerance on late-time E vs J_eq")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     t, E = load_series(args.tab_dir, BASENAME, "rad_m1_E", "E:0")
     _, abs_1 = load_series(args.tab_dir, BASENAME, "rad_m1_abs_1", "abs_1:0")
@@ -72,8 +72,9 @@ def main():
     else:
         print("FAIL: late-time E did NOT converge to a_rad*T^4 within tolerance "
               "{:.1e}".format(args.tol))
-        sys.exit(1)
+        return False
+    return True
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(0 if main() else 1)

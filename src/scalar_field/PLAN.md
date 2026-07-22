@@ -202,15 +202,21 @@ existing z4c pgens).
 | 0 -- scaffolding | `ScalarField` class/arrays/tasks wired in, RHS is a no-op, `has_scalar` guards all false-by-default | Existing `tst/` Z4c + dyn_grmhd regression suite byte-identical with `<scalarfield>` absent; compiles/runs as no-op when present | **Done** -- verified via `z4c_linear_wave` smoke test, outputs byte-identical with/without `<scalarfield>` |
 | 1 -- decoupling-limit sanity | Massless (`mass2=0`), scalar's own RHS only, **no** back-reaction on geometry (`z4c_calcrhs.cpp` edits not yet enabled) | New pgen modeled on `src/pgen/tests/z4c_linear_wave.cpp`; check `phi` propagates at light speed, `Pi = -dt(phi)/alpha` to machine precision, convergence order matches scheme order | **Done** -- `scalar_field_linear_wave` pgen; measured convergence order 4.52 (n=16->32), 3.54 (n=32->64), matching the nominal 4th-order scheme. Also fixed a real bug: `ScalarField` was missing from `Driver::InitBoundaryValuesAndPrimitives` (per-module opt-in initial ghost-zone fill), see DEVELOPMENT_NOTES.md |
 | 2 -- full DEF coupling, vacuum | Enable `z4c_calcrhs.cpp` extra terms + modified lapse gauge, no fluid | `sphi==0` exact recovery (see note below on why this replaces the plan's original `beta0->0` idea); stable, sensible-magnitude evolution with nonzero coupling; full `Z4c::ADMConstraints` convergence deferred | **Done** (back-reaction terms + task-race fix); constraint-convergence diagnostic extension deferred, see DEVELOPMENT_NOTES.md |
-| 3 -- coupling to `dyn_grmhd` fluid | `RescaleTmunu` task + matter-trace terms (`T`) in both scalar and Z4c RHS | Scalarized TOV star: extend the existing `src/pgen/dyn_grmhd/dyngr_tov.cpp` (currently pure-GR) with the coupled scalarized-TOV ODE shooting solve; compare central `phi` and radial profile against SACRA's single-star output; check static equilibrium (no drift); constraint convergence with matter | Not started |
+| 3 -- coupling to `dyn_grmhd` fluid | `RescaleTmunu` task + matter-trace terms (`T`) in both scalar and Z4c RHS | Regression: real (nonzero) fluid stress-energy + `sphi==0` exact recovery, at production resolution with real MPI decomposition. Scalarized-TOV shooting solve + quantitative SACRA comparison deferred (see note below) | **Done** (code); regression verified, self-consistent scalarized-star ID **not built** -- see DEVELOPMENT_NOTES.md |
 | 4 -- massive field + implicit solver | `ImpRKUpdate` Newton solve, Yukawa BC, require `imex2/imex2+/imex3` | Static massive scalar star: verify `exp(-m*r)/r` far-field falloff over several e-foldings; Newton solve converges in a few iterations; compare against SACRA `pmass2>0` single-star run | Not started |
 | 5 -- full BNS merger validation | Integration/perf tuning only, no new files expected | Reproduce arXiv:2406.05211 diagnostics (scalar-charge growth, GW dephasing, post-merger remnant scalarization) against SACRA_MPI outputs for matched binary parameters | Not started |
 
-**Open decision to revisit before Phase 3**: scalarized-star initial data. SACRA currently
+**Open decision, still not resolved**: scalarized-star initial data. SACRA currently
 reads an externally pre-computed scalar profile (`input.f90:1186`). AthenaK already has a
 pure-GR TOV pgen (`dyngr_tov.cpp`) that is the natural extension point for an in-repo
 scalarized-TOV solver, but reusing an external ID pipeline instead (as SACRA does) is also
-an option -- worth deciding once Phase 2 is working, not before.
+an option. Phase 3's code (RescaleTmunu + matter-trace terms) is done and regression-
+tested, but this decision was **not** made or acted on -- `dyngr_tov.cpp` still has zero
+scalar-field awareness, so there is currently no way to produce a genuinely
+constraint-satisfying nonzero-`sphi` star. Whichever path is chosen, it's a substantial,
+independent numerical-methods task (radial ODE integration + a shooting method for the
+scalar-charge boundary condition) deserving its own dedicated session -- see
+DEVELOPMENT_NOTES.md for what was validated instead in its absence.
 
 **Note on the `beta0->0` recovery check (superseded)**: the plan originally proposed
 comparing a `beta0->0` run against unmodified GR as a Phase 2 sanity check. This doesn't
@@ -240,7 +246,7 @@ DEVELOPMENT_NOTES.md).
 ## Critical files
 
 - New: `src/scalar_field/{scalar_field.hpp,.cpp, scalar_field_calcrhs.cpp,
-  scalar_field_update.cpp, scalar_field_tasks.cpp}` -- done (Phase 0-1);
+  scalar_field_update.cpp, scalar_field_tasks.cpp}` -- done (Phase 0-3);
   `scalar_field_geom.hpp` -- **deliberately not created**: Phase 2's covariant-Hessian
   construction duplicates ~10 lines already present in `scalar_field_calcrhs.cpp`
   (Phase 1) rather than factoring it into a shared header, matching the codebase's own
@@ -249,19 +255,25 @@ DEVELOPMENT_NOTES.md).
   `scalar_field_imex.cpp, scalar_field_Sbc.cpp` -- not yet created (Phase 4)
 - New: `src/pgen/tests/scalar_field_linear_wave.cpp` -- done (Phase 1 validation pgen)
 - Edit: `src/z4c/z4c_calcrhs.cpp` (guarded scalar-source insertions, 5 spots: lapse,
-  Theta, K/Khat, Aij, Gamma-tilde) -- **done (Phase 2)**. Every coefficient was
-  cross-checked directly against `bssn_st.f90` line-by-line, not just the condensed plan
-  equations above -- the plan's `Gamma-tilde^i` RHS coefficient (`-8*pi*gamma^ij*momsca_j`)
-  turned out to be wrong; the correct term (verified against the source) is
-  `-2*alpha*g_tilde^ij*momsca_j` using the *conformal* inverse metric, matching how the
-  pre-existing matter term in the same RHS is structured. See DEVELOPMENT_NOTES.md.
+  Theta, K/Khat, Aij, Gamma-tilde, plus Phase 3's matter-trace `T` term in K/Khat) --
+  **done (Phase 2-3)**. Every coefficient was cross-checked directly against
+  `bssn_st.f90` line-by-line, not just the condensed plan equations above -- the plan's
+  `Gamma-tilde^i` RHS coefficient (`-8*pi*gamma^ij*momsca_j`) turned out to be wrong; the
+  correct term (verified against the source) is `-2*alpha*g_tilde^ij*momsca_j` using the
+  *conformal* inverse metric, matching how the pre-existing matter term in the same RHS
+  is structured. See DEVELOPMENT_NOTES.md.
+- Edit: `src/scalar_field/scalar_field_tasks.cpp` (`ScalarField::RescaleTmunu`, new
+  `SF_RescaleT` task) -- **done (Phase 3)**: rescales the fluid's Jordan-frame `Tmunu`
+  (`E`, `S_d`, `S_dd`) by `1/A(sphi)` in place, matching SACRA's `tabfac` factor, before
+  anything reads it as a geometry-equation source.
 - Edit: `src/tasklist/numerical_relativity.{hpp,cpp}` (task enum + dispatch + queueing) --
-  done for Phase 0's task set
+  done for Phase 0's task set; `SF_RescaleT` added to the enum in Phase 3
 - Edit: `src/z4c/z4c_tasks.cpp` / `src/scalar_field/scalar_field_tasks.cpp` (cross-module
   task-race fix: `Z4c_ExplRK` now optionally depends on `SF_CalcRHS`, and `SF_ExplRK` now
   optionally depends on `Z4c_CalcRHS`) -- **done (Phase 2)**, required once both sectors
   read each other's raw evolved state; see DEVELOPMENT_NOTES.md for why this is a real
-  correctness issue and not just belt-and-suspenders.
+  correctness issue and not just belt-and-suspenders. Phase 3 additionally makes
+  `Z4c_CalcRHS` optionally depend on `SF_RescaleT` (must read the *rescaled* Tmunu).
 - Edit: `src/mesh/meshblock_pack.{hpp,cpp}` (pointer, destructor, `AddPhysics` gating) --
   done
 - Edit: `src/CMakeLists.txt` (add new source groups) -- done

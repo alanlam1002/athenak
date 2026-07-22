@@ -1,6 +1,7 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phase 2 (full DEF coupling, vacuum) complete.** This directory implements a massive
+Status: **Phase 3 (fluid coupling code) complete; scalarized-star initial data NOT built.**
+This directory implements a massive
 scalar-tensor (Damour-Esposito-Farese-type) gravity sector for AthenaK, ported from
 `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and cross-checked against arXiv:2406.05211 ("Binary
 neutron star mergers in massive scalar-tensor theory", Lam, Kuan, Shibata, Van Aelst,
@@ -242,16 +243,91 @@ This should be added before relying on `Z4c::ADMConstraints` for rigorous
 constraint-convergence testing in Phase 2/3; deliberately deferred here to keep this
 pass's scope bounded to the RHS physics itself. See `PLAN.md` for the same note.
 
-## Next step: Phase 3
+## What Phase 3 actually did
 
-Couple to the `dyn_grmhd` fluid: add the `RescaleTmunu` task (rescale the fluid's
-Jordan-frame `Tmunu` by `1/A(phi)` before it enters any geometry equation) and the
-matter-trace `T` terms in both the scalar's own RHS and `z4c_calcrhs.cpp`'s K/Khat and
-Gamma-tilde^i RHS (currently zero since Phase 2 is vacuum-only). See `PLAN.md`'s
-"Fluid stress-energy rescaling" and "Phased rollout" sections for the full plan,
-including the open scalarized-TOV initial-data decision. The `Z4c::ADMConstraints` gap
-above should ideally be closed alongside this, since Phase 3's own verification plan
-(constraint convergence with matter) depends on it being scalar-aware too.
+Coupled the scalar sector to the `dyn_grmhd` fluid, still massless (`mass2=0`, Phase 4).
+Two pieces:
+
+**`ScalarField::RescaleTmunu`** (new task `SF_RescaleT`, in `scalar_field_tasks.cpp`):
+multiplies the fluid's `Tmunu` (`E`, `S_d`, `S_dd`, all set fresh each stage by
+`DynGRMHD::SetTmunu` from the MHD primitives, in the Jordan frame) by `1/A(sphi) =
+exp(-0.5*sphi^2)` in place, matching SACRA's `tabfac = 1/A(sphi)` factor -- confirmed by
+reading how SACRA computes `tnn`/`txx` (`bssn_st.f90:1083-1085`: `tnn = hd_tmp(...)*wa_p3
+*tabfac`, i.e. the *same* rescale factor SACRA applies to every fluid stress-energy
+component before it's used anywhere). No-op when no fluid module exists (task returns
+immediately), and mathematically a no-op when `sphi==0` everywhere (`A(0)=1`). Runs after
+`MHD_SetTmunu` and before anything that reads `Tmunu` as a geometry-equation source --
+both `Z4c_CalcRHS` (which already had a pre-existing, is-vacuum-gated matter term for
+ordinary GR) and the scalar's own `CalcRHS`, both extended via the optional-dependency
+mechanism as usual.
+
+**Matter-trace `T` terms**, added in exactly two places (verified by reading
+`bssn_st.f90` for every appearance of `ttrace`; it does *not* appear in the Theta/Ricci or
+Gamma-tilde^i RHS lines, contrary to what might be guessed from "matter couples
+everywhere"):
+- the scalar's own Pi-RHS (`scalar_field_calcrhs.cpp`): `+ 2*pi*alpha*omega_c*T*sphi`
+- the K/Khat RHS (`z4c_calcrhs.cpp`, `dk_sf`): `- 3*pi*omega_c*sphi^2*T`
+
+where `T = -E + gamma^ij*S_ij` (`bssn_st.f90`'s `ttrace = -tnn + wa_p2*g^ij*t_ij`) is the
+fluid's full 4D stress-energy trace, computed from the *already-rescaled* (Einstein-frame)
+`Tmunu`. In `z4c_calcrhs.cpp` this reuses the `S` variable already computed by the
+pre-existing (pre-Phase-2) matter-term code (`S = oopsi4*g_uu(a,b)*tmunu.S_dd(a,b)`), so
+no new tensor contraction was needed there, only `T = -tmunu.E + S`. In
+`scalar_field_calcrhs.cpp` the same trace has to be computed fresh (that file didn't
+previously read `Tmunu` at all), using the `g_uu`/`oopsi4` already in scope from the
+scalar's own derivative computations.
+
+### Validation
+
+Since `dyngr_tov.cpp` (the only in-repo star-initial-data pgen) has no scalar-field
+awareness, `sphi` stays at exactly `0.0` (Kokkos default-zero-init) for any TOV-star run
+regardless of `<scalarfield>` block content — this makes the TOV star an excellent
+regression test (real, nonzero fluid stress-energy exercising `RescaleTmunu` and both new
+`T`-terms for the first time, unlike Phase 2's vacuum-only tests) but *not* a test of a
+genuinely nonzero-coupling scenario (see the open gap below).
+
+Built a dynamical-Z4c TOV star input (`<z4c>` instead of the existing
+`inputs/dyn_grmhd/whisky_tov.athinput`'s static `<adm>` background; `dyngr_tov.cpp`
+already supports this via its `pmbp->pz4c != nullptr` -> `ADMToZ4c` conversion path) and
+ran it two ways, with and without a (content-identical, safely-appended-at-file-end this
+time -- see Phase 2's `sed`-pitfall note) `<scalarfield>` block:
+- Serial, single-MeshBlock, `nx=32`, 20 cycles: byte-identical.
+- MPI, production resolution (`nx=64`, `meshblock=32` -> 2x2x2=8 MeshBlocks, 8 ranks
+  across 4 nodes), 30 cycles: byte-identical across all 32 `.tab` dumps and all 3 `.hst`
+  history files (submitted via `/sakura/ptmp/tlam/athenak_run/test_stt`, following this
+  account's existing MPCDF module conventions: `intel/2025.3 + impi/2021.17 + gcc/13 +
+  gsl/2.4`, matching `~/athenak_cfc`'s established build). Confirms the new task
+  (`SF_RescaleT`) and its dependency wiring behave correctly under real MPI domain
+  decomposition and ghost-zone exchange too, not just the single-block case Phase 0-2
+  were checked under.
+
+### Open gap: no self-consistent scalarized initial data (not resolved this pass)
+
+`dyngr_tov.cpp` was **not** extended with a coupled scalarized-TOV solve. This means
+there is currently no way to actually exercise the new `T`-matter-coupling terms with
+`sphi` genuinely nonzero and constraint-satisfying -- only the "no-op when zero" side has
+been validated. Building this requires a shooting-method radial ODE integration for the
+coupled TOV+scalar stellar-structure equations (extending `src/utils/tov/tov.cpp`'s
+existing pure-GR solve) and a decision on the initial-data pipeline (in-repo solver vs.
+external, see `PLAN.md`'s "Open decision" note) -- a substantial, independent
+numerical-methods task, deliberately not attempted in this pass to avoid rushing it.
+**Do not claim Phase 3 is physics-validated against SACRA's scalarized-star results until
+this is built** -- what's validated so far is "the new code doesn't break existing GRMHD
+physics," not "the new code correctly reproduces scalarized stars."
+
+## Next step: Phase 3 initial data, then Phase 4
+
+Two options going forward, either of which unblocks genuine physics validation:
+1. Build the scalarized-TOV shooting solve in-repo (extend `src/utils/tov/tov.cpp` +
+   `dyngr_tov.cpp`), compare central `sphi` and radial profile against SACRA's
+   single-star output, check static equilibrium (no secular drift) and constraint
+   convergence with matter. This is the PLAN.md Phase 3 verification step, still open.
+2. Or proceed to Phase 4 (`ImpRKUpdate` Newton solve for the mass term, Yukawa BC,
+   `imex2/imex2+/imex3`) using the existing decoupling-limit and vacuum-back-reaction
+   tests, and return to scalarized initial data once both scalar-sector pieces
+   (matter coupling, mass term) are complete, testing them together.
+Either way, the `Z4c::ADMConstraints` scalar-awareness gap above should be closed
+before relying on constraint convergence as a verification method.
 
 ## Sample input block
 

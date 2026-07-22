@@ -6,18 +6,20 @@
 //! \file scalar_field_calcrhs.cpp
 //! \brief RHS for the scalar-field sector.
 //!
-//! Phase 1 (current): the scalar's own massless, minimally-Klein-Gordon-like RHS,
-//! reading the Z4c/ADM geometry but NOT writing back to it -- there is still no
-//! back-reaction on the Z4c equations (that is Phase 2). The continuum equations being
-//! discretized (see src/scalar_field/PLAN.md) are:
+//! The scalar's own massless Klein-Gordon-like RHS, reading the Z4c/ADM geometry and
+//! (Phase 3) the fluid's matter trace, but not writing back to the Z4c equations itself
+//! (that back-reaction lives in z4c/z4c_calcrhs.cpp, Phase 2/3). The continuum equations
+//! being discretized (see src/scalar_field/PLAN.md) are:
 //!
 //!   dt(sphi) = -alpha*Pi                                         (+ shift advection)
 //!   dt(Pi)   = alpha*(K+2*Theta)*Pi - alpha*D2(sphi)
 //!              - g^ij di(alpha) dj(sphi) - alpha*sphi*(|D(sphi)|^2 - Pi^2)
+//!              + 2*pi*alpha*omega_c*T*sphi
 //!
-//! where D2/|D.|^2 are built from the *physical* 3-metric. The matter-trace term
-//! (2*pi*alpha*omega_c*T*sphi) and mass term (m^2*alpha*sphi*A(sphi)) are added in
-//! Phases 3/4 respectively; until then this is the massless, vacuum-matter-free limit.
+//! where D2/|D.|^2 are built from the *physical* 3-metric, and T is the fluid's matter
+//! trace (Einstein frame -- Tmunu has already been rescaled by 1/A(sphi) by
+//! ScalarField::RescaleTmunu by the time this runs, see scalar_field_tasks.cpp), zero in
+//! vacuum. The mass term (m^2*alpha*sphi*A(sphi)) is added in Phase 4.
 //!
 //! Derivative convention: mirrors z4c/z4c_calcrhs.cpp exactly -- all derivatives use the
 //! *conformal* metric (pz4c->z4c.g_dd) and its Christoffel symbols, with physical
@@ -36,12 +38,13 @@
 #include "driver/driver.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
+#include "z4c/tmunu.hpp"
 #include "scalar_field/scalar_field.hpp"
 
 namespace scalarfield {
 //----------------------------------------------------------------------------------------
 //! \fn  TaskStatus ScalarField::CalcRHS
-//! \brief compute rhs of the scalar-field equations (Phase 1: no geometry back-reaction)
+//! \brief compute rhs of the scalar-field equations
 template <int NGHOST>
 TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -56,6 +59,11 @@ TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
   auto &zopt = pmy_pack->pz4c->opt;
   auto &sf = pmy_pack->pscalarfield->sf;
   auto &rhs = pmy_pack->pscalarfield->rhs;
+  Real omega_c = pmy_pack->pscalarfield->opt.omega_c;
+
+  bool is_vacuum = (pmy_pack->ptmunu == nullptr) ? true : false;
+  Tmunu::Tmunu_vars tmunu;
+  if (!is_vacuum) tmunu = pmy_pack->ptmunu->tmunu;
 
   par_for("sf rhs loop", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -174,6 +182,19 @@ TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
     }
 
     // -----------------------------------------------------------------------------------
+    // Matter trace T = -E + gamma^ij*S_ij (bssn_st.f90's ttrace); zero in vacuum. Tmunu
+    // has already been rescaled to the Einstein frame by ScalarField::RescaleTmunu.
+    Real T_matter = 0.0;
+    if (!is_vacuum) {
+      Real S_trace = 0.0;
+      for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b) {
+        S_trace += oopsi4 * g_uu(a,b) * tmunu.S_dd(m,a,b,k,j,i);
+      }
+      T_matter = -tmunu.E(m,k,j,i) + S_trace;
+    }
+
+    // -----------------------------------------------------------------------------------
     // Assemble RHS
     Real K = z4c.vKhat(m,k,j,i) + 2.*z4c.vTheta(m,k,j,i);
     Real alpha = z4c.alpha(m,k,j,i);
@@ -182,7 +203,8 @@ TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
 
     rhs.sphi(m,k,j,i) = -alpha*pi_ + Lsphi;
     rhs.vpi(m,k,j,i) = alpha*K*pi_ - alpha*Ddsphi - dalpha_dsphi
-                     - alpha*sphi_*(gradsphi2 - SQR(pi_)) + Lpi;
+                     - alpha*sphi_*(gradsphi2 - SQR(pi_))
+                     + 2.0*M_PI*alpha*omega_c*T_matter*sphi_ + Lpi;
   });
 
   // ===================================================================================

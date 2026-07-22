@@ -83,6 +83,7 @@ class ScalarField {
   TaskStatus Prolongate(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver *d, int stage);
   TaskStatus ExpRKUpdate(Driver *d, int stage);
+  TaskStatus RescaleTmunu(Driver *d, int stage);
 
   template <int NGHOST>
   TaskStatus CalcRHS(Driver *d, int stage);

@@ -45,12 +45,13 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   Tmunu::Tmunu_vars tmunu;
   if (!is_vacuum) tmunu = pmy_pack->ptmunu->tmunu;
 
-  // Massive scalar-tensor (Damour-Esposito-Farese) back-reaction (Phase 2, vacuum/
-  // massless: matter-trace and mass-term pieces are added in Phases 3/4). See
-  // src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md -- every coefficient below was
-  // cross-checked directly against ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (not just the
-  // condensed plan equations, which turned out to have a wrong coefficient for the
-  // Gamma-tilde^i term; see DEVELOPMENT_NOTES.md).
+  // Massive scalar-tensor (Damour-Esposito-Farese) back-reaction: Phase 2 (vacuum) +
+  // Phase 3 (fluid matter-trace T term in the K/Khat RHS below; still massless -- the
+  // mass-term piece is Phase 4). See src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md
+  // -- every coefficient below was cross-checked directly against
+  // ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (not just the condensed plan equations, which
+  // turned out to have a wrong coefficient for the Gamma-tilde^i term; see
+  // DEVELOPMENT_NOTES.md).
   bool has_scalar = (pmy_pack->pscalarfield != nullptr);
   scalarfield::ScalarField::ScalarField_vars sf;
   Real sf_omega_c = 0.0;
@@ -557,12 +558,21 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
       dtheta_sf = -omega_sphi2*(SQR(pi_) + gradsphi2)
                   - 2.*(-K*sphipi + sphi_*Ddsphi + gradsphi2*(1. + sphi2));
 
-      // Extra term feeding the K/Khat RHS (bssn_st.f90's fek scalar bracket, massless
-      // vacuum limit -- the -3*pi*omega_c*sphi^2*T matter term and mass-term pieces
-      // are added in Phases 3/4).
+      // Matter trace T = -E + gamma^ij*S_ij (bssn_st.f90's ttrace = -tnn + g^ij*t_ij;
+      // S here is the *same* physical trace already computed above for the pre-existing
+      // matter term, and tmunu has already been rescaled to the Einstein frame by
+      // ScalarField::RescaleTmunu by the time this runs). Zero in vacuum.
+      Real T_matter = 0.0;
+      if (!is_vacuum) {
+        T_matter = -tmunu.E(m,k,j,i) + S;
+      }
+
+      // Extra term feeding the K/Khat RHS (bssn_st.f90's fek scalar bracket; the mass-
+      // term piece is added in Phase 4).
       dk_sf = omega_sphi2*SQR(pi_)
               + sphi_*Ddsphi - K*sphipi + gradsphi2*(1. + sphi2)
-              + 1.5*(SQR(pi_) - gradsphi2);
+              + 1.5*(SQR(pi_) - gradsphi2)
+              - 3.0*M_PI*sf_omega_c*sphi2*T_matter;
 
       // Extra (already physical-trace-free once strtr_sf is added back via g_dd) term
       // feeding the Aij RHS.

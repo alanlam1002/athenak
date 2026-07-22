@@ -6,18 +6,21 @@
 //! \file scalar_field_tasks.cpp
 //! \brief functions that control scalar-field tasks in the NumericalRelativity task list
 //!
-//! Phase 0 task graph (start -> run -> end), no matter/Z4c back-reaction dependencies
-//! yet: InitRecv -> CopyU -> CalcRHS -> ExpRKUpdate -> RestrictU -> SendU -> RecvU ->
-//! ApplyPhysicalBCs -> Prolongate -> ClearSend -> ClearRecv. See DEVELOPMENT_NOTES.md for
-//! the additional tasks (RescaleTmunu, ImpRKUpdate, ...) planned for later phases.
+//! Task graph (start -> run -> end): InitRecv -> CopyU -> RescaleTmunu -> CalcRHS ->
+//! ExpRKUpdate -> RestrictU -> SendU -> RecvU -> ApplyPhysicalBCs -> Prolongate ->
+//! ClearSend -> ClearRecv. RescaleTmunu (Phase 3) rescales the fluid's Tmunu by
+//! 1/A(sphi); ImpRKUpdate is still planned for Phase 4, see DEVELOPMENT_NOTES.md.
 
 #include <string>
+
+#include <math.h>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
 #include "bvals/bvals.hpp"
+#include "z4c/tmunu.hpp"
 #include "scalar_field/scalar_field.hpp"
 #include "tasklist/numerical_relativity.hpp"
 
@@ -36,18 +39,24 @@ void ScalarField::QueueScalarFieldTasks() {
 
   // Run task list
   pnr->QueueTask(&ScalarField::CopyU, this, SF_CopyU, "SF_CopyU", Task_Run);
+  // Rescales the fluid's Jordan-frame Tmunu by 1/A(sphi) (a no-op, internally, when no
+  // fluid/Tmunu module exists -- see RescaleTmunu below). Must run before anything that
+  // reads Tmunu for a geometry-equation source: both CalcRHS's below, and (via the
+  // optional-dependency mechanism) Z4c_CalcRHS.
+  pnr->QueueTask(&ScalarField::RescaleTmunu, this, SF_RescaleT, "SF_RescaleT",
+                 Task_Run, {}, {MHD_SetTmunu});
   switch (indcs.ng) {
     case 2:
       pnr->QueueTask(&ScalarField::CalcRHS<2>, this, SF_CalcRHS, "SF_CalcRHS",
-                     Task_Run, {SF_CopyU});
+                     Task_Run, {SF_CopyU, SF_RescaleT});
       break;
     case 3:
       pnr->QueueTask(&ScalarField::CalcRHS<3>, this, SF_CalcRHS, "SF_CalcRHS",
-                     Task_Run, {SF_CopyU});
+                     Task_Run, {SF_CopyU, SF_RescaleT});
       break;
     case 4:
       pnr->QueueTask(&ScalarField::CalcRHS<4>, this, SF_CalcRHS, "SF_CalcRHS",
-                     Task_Run, {SF_CopyU});
+                     Task_Run, {SF_CopyU, SF_RescaleT});
       break;
   }
   // SF_ExplRK must not overwrite the scalar field's u0 before Z4c_CalcRHS has read it
@@ -128,6 +137,43 @@ TaskStatus ScalarField::CopyU(Driver *pdrive, int stage) {
       Kokkos::deep_copy(DevExeSpace(), u1, u0);
     }
   }
+  return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn  TaskStatus ScalarField::RescaleTmunu
+//! \brief rescale the fluid's Jordan-frame stress-energy (E, S_d, S_dd) by 1/A(sphi) so
+//! that Z4c_CalcRHS and ScalarField::CalcRHS read the Einstein-frame Tmunu, matching the
+//! convention in ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (its `tabfac = 1/A(sphi)` factor,
+//! applied uniformly to tnn/txx/... before they're used in any geometry- or scalar-RHS
+//! formula). No-op (and no-op safe -- `pmy_pack->ptmunu` stays untouched) when no
+//! fluid/Tmunu module exists. A(sphi) = exp(0.5*beta0*sphi^2); beta0 is hardcoded to 1
+//! here to match SACRA, same as the rest of the Phase 2/3 back-reaction terms.
+
+TaskStatus ScalarField::RescaleTmunu(Driver *pdrive, int stage) {
+  if (pmy_pack->ptmunu == nullptr) {
+    return TaskStatus::complete;
+  }
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+
+  auto &tmunu = pmy_pack->ptmunu->tmunu;
+  auto &sf = pmy_pack->pscalarfield->sf;
+
+  par_for("SF RescaleTmunu", DevExeSpace(), 0,nmb-1,ks,ke,js,je,is,ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real oo_asphi = exp(-0.5*SQR(sf.sphi(m,k,j,i)));
+    tmunu.E(m,k,j,i) *= oo_asphi;
+    for (int a = 0; a < 3; ++a) {
+      tmunu.S_d(m,a,k,j,i) *= oo_asphi;
+      for (int b = a; b < 3; ++b) {
+        tmunu.S_dd(m,a,b,k,j,i) *= oo_asphi;
+      }
+    }
+  });
   return TaskStatus::complete;
 }
 

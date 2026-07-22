@@ -91,11 +91,13 @@ enum TaskName {
   Z4c_DumpHorizon,
   Z4c_NTASKS,
 
-  // ScalarField (massive scalar-tensor gravity sector). Phase 0: no back-reaction tasks
-  // yet (RescaleTmunu, ImpRKUpdate, ... to be added in later phases, see
-  // src/scalar_field/DEVELOPMENT_NOTES.md).
+  // ScalarField (massive scalar-tensor gravity sector). Phase 3 adds SF_RescaleT
+  // (rescales the fluid's Jordan-frame Tmunu by 1/A(sphi) before it enters any
+  // geometry equation); ImpRKUpdate still to be added in Phase 4, see
+  // src/scalar_field/DEVELOPMENT_NOTES.md.
   SF_Recv,
   SF_CopyU,
+  SF_RescaleT,
   SF_CalcRHS,
   SF_ExplRK,
   SF_RestU,

@@ -435,7 +435,8 @@ Recommended order (cheapest / fewest new mechanisms first):
    except `backreact=true`, so `T_gas` responds too and `E`/`T_gas` jointly
    relax to the equilibrium set by **total energy conservation**, not `E`
    chasing a fixed external `T`. The backreaction mechanism itself
-   (`radiation_m1_update.cpp:672-680`) subtracts the same `DrEFN`
+   (`radiation_m1_update.cpp:755-759`, line numbers as of Stage 6) subtracts
+   the same `DrEFN`
    matter-exchange increment already used to update the M1 fields from the
    MHD conserved energy-momentum — exact by construction; the test checks
    this holds numerically and drives the correct equilibrium, not that the
@@ -808,8 +809,9 @@ an Explore-agent code read of `radiation_m1_sources.hpp`/
   `radiation_m1_update.cpp` (that estimate is only ever used as a Newton-solve
   seed, irrelevant to this branch).
 - The backreaction increment `DrEFN = Enew - Estar`
-  (`radiation_m1_update.cpp:570`) is applied to the fluid's conserved energy
-  **unconditionally** (`radiation_m1_update.cpp:714-718`), gated only by
+  (`radiation_m1_update.cpp:611`, line numbers as of Stage 6) is applied to
+  the fluid's conserved energy **unconditionally**
+  (`radiation_m1_update.cpp:755-759`), gated only by
   `theta`, which is pinned to `1.0` whenever `<radiation_m1>/theta_limiter`
   is `false` — the default, and what this test (and the pre-existing Planck
   backreaction test) both set. **No check anywhere reconciles the implied
@@ -825,7 +827,8 @@ an Explore-agent code read of `radiation_m1_sources.hpp`/
   `compton_implicit`.**
 - **Fix applied at the test level (not the solver)**: `theta_limiter=true`
   activates an *existing*, already-implemented limiter
-  (`radiation_m1_update.cpp:619-678`) that scales the entire per-step
+  (`radiation_m1_update.cpp:661-719`, line numbers as of Stage 6) that
+  scales the entire per-step
   increment (both the radiation-field update and the matching backreaction
   subtraction) by `theta`, capped so it can't remove more than
   `source_limiter` of the gas's available energy in one step. This was the
@@ -842,12 +845,15 @@ an Explore-agent code read of `radiation_m1_sources.hpp`/
   dominant term) revealed the real, expected physics: see below. All 3
   Compton+backreaction athinputs now use `theta_limiter=true`,
   `source_limiter=0.9999`.
-- **Not fixed at the solver level** (deferred, real new development, same
-  "guard don't implement" principle as Stage 4): making the `SrcThin` branch
-  itself energy-aware (e.g. clamp its own local update, or force the
-  stiffer Newton branch whenever the LTE target vastly exceeds the local
-  gas reservoir) would be a genuine change to the source-update dispatch
-  logic, not test configuration.
+- **Not fixed at the solver level in this stage** (deferred here, real new
+  development, same "guard don't implement" principle as Stage 4): making
+  the `SrcThin` branch itself energy-aware (e.g. clamp its own local
+  update, or force the stiffer Newton branch whenever the LTE target
+  vastly exceeds the local gas reservoir) would be a genuine change to the
+  source-update dispatch logic, not test configuration. **Addressed in
+  Stage 6** — not by changing `SrcThin`'s own dispatch logic as
+  speculated here, but by correcting `Enew` *after* whichever branch runs,
+  using the quartic's own energy-conserving `J_new`.
 
 **Verification results (3 single-zone Compton+backreaction athinputs, all
 `kappa_s=1, kappa_a=kappa_p=0, compton=true`, same `rho=1, T0=1.5e-3,
@@ -902,16 +908,18 @@ against regression — run by hand per their check scripts' module
 docstrings. Could be wired in later if desired; deferred as disproportionate
 scope for this stage.
 
-**Deferred, not fixed here**:
+**Deferred, not fixed here** (as of Stage 5 — see Stage 6, which follows):
 - The `SrcThin`-branch energy-accounting gap itself (see above) — a
   generic issue in the explicit source-update path under backreaction,
-  independent of Compton/`compton_implicit`. Currently mitigated at the
-  test-configuration level (`theta_limiter=true`,
-  `source_limiter=0.9999`) for the 3 tests in this stage; any *other*
-  future backreaction test/pgen with a similarly large LTE-target/reservoir
-  mismatch would need the same mitigation until the solver itself is fixed.
+  independent of Compton/`compton_implicit`. Mitigated, at the time of
+  this stage, at the test-configuration level (`theta_limiter=true`,
+  `source_limiter=0.9999`) for the 3 tests here. **Fixed at the solver
+  level in Stage 6** (below) — the `theta_limiter` mitigation is no
+  longer load-bearing for this specific failure mode, though it remains
+  in place as a general-purpose safeguard for cases Stage 6 doesn't cover
+  (momentum backreaction, neutrino transport).
 - EOSCompOSE Compton, Kramers/`power_opacity` testing — unchanged from
-  Stage 1's scope decision, still deferred.
+  Stage 1's scope decision, still deferred (unaffected by Stage 6).
 
 ## Stage 6 — fix the backreaction energy-accounting gap at the solver level, and generalize to Planck (`matter_implicit`) — DONE
 
@@ -929,7 +937,7 @@ generalizes the fix beyond Compton — renaming the feature
    Jacobian, or `SrcParams` struct anywhere; `eta`/`kabs`/`kscat` are
    frozen constants for the whole Newton iteration. The gas's conserved
    energy (`umhd0_(IEN)`, τ) is only ever read *after* this solve, inside
-   the `theta_limiter` block (`radiation_m1_update.cpp:619-678`) —
+   the `theta_limiter` block (`radiation_m1_update.cpp:661-719`) —
    nothing checks it during the solve itself.
 2. Stage 5's own quartic pre-solve (`SolveComptonQuartic`) already computes
    a self-consistent, energy-conserving `(T_new, J_new)` pair — but

@@ -1,6 +1,6 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phase 0 (scaffolding) complete.** This directory implements a massive
+Status: **Phase 1 (decoupling-limit sanity test) complete.** This directory implements a massive
 scalar-tensor (Damour-Esposito-Farese-type) gravity sector for AthenaK, ported from
 `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and cross-checked against arXiv:2406.05211 ("Binary
 neutron star mergers in massive scalar-tensor theory", Lam, Kuan, Shibata, Van Aelst,
@@ -83,28 +83,67 @@ absent from the input file):
   wiring" section) -- don't forget this when Phase 2 starts, or the back-reaction terms
   will silently read stale/uninitialized scalar-field data.
 
-## Next step: Phase 1
+## What Phase 1 actually did
 
-Massless (`mass2=0`), scalar's own RHS only, **no** back-reaction on geometry yet (i.e.
-`z4c_calcrhs.cpp` still untouched). Implement the actual Klein-Gordon-like RHS in
-`scalar_field_calcrhs.cpp`:
+Implemented the scalar's own massless Klein-Gordon-like RHS in `scalar_field_calcrhs.cpp`
+(still **no** back-reaction on geometry -- `z4c_calcrhs.cpp` remains untouched):
 ```
-dt(sphi) = alpha * Pi                                     (+ shift advection)
+dt(sphi) = -alpha * Pi                                    (+ shift advection)
 dt(Pi)   = alpha*(K+2*Theta)*Pi - alpha*D2(sphi) - g^ij di(alpha) dj(sphi)
            - alpha*sphi*(|D(sphi)|^2 - Pi^2)
 ```
-(the matter-trace and mass-term pieces come in Phase 3/4). Use the conformal-variable
-convention already established in `z4c_calcrhs.cpp` (differentiate `pz4c->z4c.g_dd`/`chi`
-plus `oopsi4`, not `padm->adm.g_dd` directly) for consistency with the rest of the Z4c
-sector's finite-difference machinery. Validate with a pgen modeled on
-`src/pgen/tests/z4c_linear_wave.cpp`: check `sphi` propagates at light speed, `Pi =
--dt(sphi)/alpha` to machine precision, and convergence order matches the finite-difference
-scheme order.
+(the matter-trace and mass-term pieces come in Phase 3/4). Derivatives use the
+conformal-variable convention established in `z4c_calcrhs.cpp` (differentiate
+`pz4c->z4c.g_dd`/`chi` plus `oopsi4`, not `padm->adm.g_dd` directly) -- the scalar's
+physical-metric covariant Hessian `D_iD_j(sphi)` is built exactly the way
+`z4c_calcrhs.cpp` builds the lapse's `Ddalpha_dd` (conformal-covariant Hessian plus the
+two chi-derivative correction terms). Added K-O dissipation for the scalar sector's own
+channels, mirroring `z4c_calcrhs.cpp`'s dissipation loop.
 
-Full physics reference (all modified BSSN/Z4c RHS terms for Phases 2-3, Newton-solve
-structure for Phase 4, boundary-condition formula, and the phased test/verification plan)
-is in `PLAN.md` in this directory -- read that before starting Phase 1. The equations are
-also fully derived and line-cited in `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and
+Added a new test pgen, `src/pgen/tests/scalar_field_linear_wave.cpp` (`pgen_name =
+scalar_field_linear_wave`), modeled on `z4c_linear_wave.cpp`: a massless scalar plane wave
+on a fixed flat (Minkowski) Z4c background (an exact static vacuum-Z4c solution, so it's a
+clean decoupling-limit test of the scalar sector alone). Sample input at
+`inputs/scalar_field/scalar_field_linear_wave.athinput`.
+
+**Validated by convergence, not just by running**: RMS-L1 error at `nx=16/32/64`
+(diagonal wave, `kx1=kx2=kx3=1`) is `1.241e-10 / 5.414e-12 / 4.665e-13`, giving measured
+convergence orders **4.52** (16->32) and **3.54** (32->64) -- consistent with the nominal
+4th-order (`nghost=3`) finite-difference + RK4 scheme. Confirms `sphi` propagates at the
+correct (light) speed and `Pi = -dt(sphi)/alpha` self-consistently.
+
+### A real bug found and fixed along the way
+
+The first version of this test showed an error that did **not** converge with resolution
+(flat/slowly growing ~2-3e-9 regardless of grid spacing) despite the RHS math being
+correct. Root cause, found by process of elimination (ruled out: a `dt(sphi)=+alpha*Pi`
+sign error, found and fixed first; K-O dissipation; the `is_z4c` boundary-buffer flag;
+`rk4`-specific `CopyU` bookkeeping via an `rk2` comparison; Dxy/off-diagonal terms via a
+pure-1D-wave test; a genuine growing instability via a 5-period run) --
+
+**`ScalarField` was never registered in `Driver::InitBoundaryValuesAndPrimitives`**
+(`src/driver/driver.cpp`). This function is a hand-written, per-module opt-in list (one
+hardcoded `if (pmodule != nullptr) {...}` block per physics module -- Z4c, Hydro, MHD,
+Radiation) that runs **once**, after the problem generator sets initial data but before
+the main evolution loop starts, to populate every evolved field's ghost zones (periodic
+wrap, prolongation, etc.) for the very first `CalcRHS` call. There is no generic
+"fill ghost zones for whatever fields exist" mechanism -- it is not automatic, and Z4c's
+own registration doesn't cover modules added later. Missing this meant the very first
+`CalcRHS` of the very first stage read stale/uninitialized ghost-zone data near the
+domain edges; that contamination then persisted (bounded, non-growing, resolution-
+independent) for the rest of the run, exactly matching the observed symptom. Fixed by
+adding a `pscalarfield` block in `driver.cpp` mirroring the existing Z4c block (see the
+diff in this commit). **Any future new evolved-field module must add its own block
+here, or it will silently carry the same bug.**
+
+## Next step: Phase 2
+
+Enable the `z4c_calcrhs.cpp` back-reaction terms + modified lapse gauge (full DEF
+coupling in vacuum, still no fluid). See `PLAN.md` in this directory for the complete
+modified-RHS formulas, the task-list wiring changes needed (`Z4c_CalcRHS`'s optional
+dependencies), and the phased test/verification plan (constraint convergence via
+`Z4c::ADMConstraints`, exact-GR-recovery check via `beta0->0`/`sphi==0`). The equations
+are also fully derived and line-cited in `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and
 arXiv:2406.05211 Eqs. 2-13.
 
 ## Sample input block

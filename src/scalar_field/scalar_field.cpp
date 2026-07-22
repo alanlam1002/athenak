@@ -71,14 +71,12 @@ ScalarField::ScalarField(MeshBlockPack *ppack, ParameterInput *pin) :
     Kokkos::realloc(coarse_u0, nmb, (nscalarfield), nccells3, nccells2, nccells1);
   }
 
-  // Allocate boundary buffers for cell-centered variables. The scalar field is
-  // differentiated twice (D^2 sphi) and feeds directly into the Z4c RHS once the
-  // back-reaction is enabled (Phase 2), so -- like Z4c's own fields -- it needs
-  // 4th-order-safe prolongation/restriction across refinement boundaries; hence
-  // the "is_z4c=true" buffer treatment here, even though this class is a separate
-  // module from z4c::Z4c.
+  // Allocate boundary buffers for cell-centered variables. Uses the same generic
+  // (is_z4c=false) buffer/prolongation treatment as Hydro/MHD -- a 2-variable field has
+  // no special same-level-buffer requirement; is_z4c=true is only needed for the higher-
+  // order refinement-boundary smoothness Z4c's own 25-variable metric state relies on.
   Kokkos::Profiling::pushRegion("ScalarField buffers");
-  pbval_u = new MeshBoundaryValuesCC(ppack, pin, true);
+  pbval_u = new MeshBoundaryValuesCC(ppack, pin, false);
   pbval_u->InitializeBuffers(nscalarfield);
   Kokkos::Profiling::popRegion();
 }

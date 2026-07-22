@@ -20,6 +20,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
+#include "scalar_field/scalar_field.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
@@ -581,6 +582,19 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     (void) pz4c->Z4cBoundaryRHS(this, 0);
     (void) pz4c->Prolongate(this, 0); // coarse grid BCs and prolongation
     (void) pz4c->ApplyPhysicalBCs(this, 0); // fine grid BCs
+  }
+
+  // Initialize ScalarField: ghost zones (everywhere)
+  scalarfield::ScalarField *pscalarfield = pm->pmb_pack->pscalarfield;
+  if (pscalarfield != nullptr) {
+    (void) pscalarfield->RestrictU(this, 0);
+    (void) pscalarfield->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv
+    (void) pscalarfield->SendU(this, 0);
+    (void) pscalarfield->ClearSend(this, -1);
+    (void) pscalarfield->ClearRecv(this, -1);
+    (void) pscalarfield->RecvU(this, 0);
+    (void) pscalarfield->ApplyPhysicalBCs(this, 0);
+    (void) pscalarfield->Prolongate(this, 0);
   }
 
   // Initialize HYDRO: ghost zones and primitive variables (everywhere)

@@ -30,7 +30,7 @@ matches the paper's `B`. Scalar mass^2 `m^2` (SACRA `pmass2`, default 0, massles
 recovers plain GR).
 
 ```
-dt(phi) = alpha*Pi                                                    (+ shift advection)
+dt(phi) = -alpha*Pi                                                   (+ shift advection)
 dt(Pi)  = alpha*(K+2*Theta)*Pi - alpha*D2(phi) - g^ij di(alpha) dj(phi)
           - alpha*phi*(|D(phi)|^2 - Pi^2)
           + 2*pi*alpha*omega_c*T*phi + m^2*alpha*phi*A(phi)
@@ -200,7 +200,7 @@ existing z4c pgens).
 | Phase | Scope | Verification | Status |
 |---|---|---|---|
 | 0 -- scaffolding | `ScalarField` class/arrays/tasks wired in, RHS is a no-op, `has_scalar` guards all false-by-default | Existing `tst/` Z4c + dyn_grmhd regression suite byte-identical with `<scalarfield>` absent; compiles/runs as no-op when present | **Done** -- verified via `z4c_linear_wave` smoke test, outputs byte-identical with/without `<scalarfield>` |
-| 1 -- decoupling-limit sanity | Massless (`mass2=0`), scalar's own RHS only, **no** back-reaction on geometry (`z4c_calcrhs.cpp` edits not yet enabled) | New pgen modeled on `src/pgen/tests/z4c_linear_wave.cpp`; check `phi` propagates at light speed, `Pi = -dt(phi)/alpha` to machine precision, convergence order matches scheme order | Not started |
+| 1 -- decoupling-limit sanity | Massless (`mass2=0`), scalar's own RHS only, **no** back-reaction on geometry (`z4c_calcrhs.cpp` edits not yet enabled) | New pgen modeled on `src/pgen/tests/z4c_linear_wave.cpp`; check `phi` propagates at light speed, `Pi = -dt(phi)/alpha` to machine precision, convergence order matches scheme order | **Done** -- `scalar_field_linear_wave` pgen; measured convergence order 4.52 (n=16->32), 3.54 (n=32->64), matching the nominal 4th-order scheme. Also fixed a real bug: `ScalarField` was missing from `Driver::InitBoundaryValuesAndPrimitives` (per-module opt-in initial ghost-zone fill), see DEVELOPMENT_NOTES.md |
 | 2 -- full DEF coupling, vacuum | Enable `z4c_calcrhs.cpp` extra terms + modified lapse gauge, no fluid | Constraint convergence via existing `Z4c::ADMConstraints`; compare `beta0->0`/`sphi==0` run against unmodified GR for exact recovery | Not started |
 | 3 -- coupling to `dyn_grmhd` fluid | `RescaleTmunu` task + matter-trace terms (`T`) in both scalar and Z4c RHS | Scalarized TOV star: extend the existing `src/pgen/dyn_grmhd/dyngr_tov.cpp` (currently pure-GR) with the coupled scalarized-TOV ODE shooting solve; compare central `phi` and radial profile against SACRA's single-star output; check static equilibrium (no drift); constraint convergence with matter | Not started |
 | 4 -- massive field + implicit solver | `ImpRKUpdate` Newton solve, Yukawa BC, require `imex2/imex2+/imex3` | Static massive scalar star: verify `exp(-m*r)/r` far-field falloff over several e-foldings; Newton solve converges in a few iterations; compare against SACRA `pmass2>0` single-star run | Not started |
@@ -215,22 +215,31 @@ an option -- worth deciding once Phase 2 is working, not before.
 ## Critical files
 
 - New: `src/scalar_field/{scalar_field.hpp,.cpp, scalar_field_calcrhs.cpp,
-  scalar_field_update.cpp, scalar_field_tasks.cpp, scalar_field_geom.hpp,
-  scalar_field_imex.cpp, scalar_field_Sbc.cpp}` (last four not yet created)
+  scalar_field_update.cpp, scalar_field_tasks.cpp}` -- done (Phase 0-1);
+  `scalar_field_geom.hpp, scalar_field_imex.cpp, scalar_field_Sbc.cpp` -- not yet created
+  (Phase 2+/4)
+- New: `src/pgen/tests/scalar_field_linear_wave.cpp` -- done (Phase 1 validation pgen)
 - Edit: `src/z4c/z4c_calcrhs.cpp` (guarded scalar-source insertions, ~6 spots) -- not yet
-  touched
+  touched (Phase 2)
 - Edit: `src/tasklist/numerical_relativity.{hpp,cpp}` (task enum + dispatch + queueing) --
   done for Phase 0's task set
 - Edit: `src/z4c/z4c_tasks.cpp` (extend `Z4c_CalcRHS` optional-dependency list) -- not yet
-  touched
+  touched (Phase 2/3)
 - Edit: `src/mesh/meshblock_pack.{hpp,cpp}` (pointer, destructor, `AddPhysics` gating) --
   done
-- Edit: `src/CMakeLists.txt` (add new source group) -- done
+- Edit: `src/CMakeLists.txt` (add new source groups) -- done
 - Edit: `src/parameter_input.cpp` (add `"scalarfield"` to the block-name allow-list) --
   done (found during Phase 0 smoke testing, not anticipated during planning)
+- Edit: `src/driver/driver.cpp` (`Driver::InitBoundaryValuesAndPrimitives` --
+  per-module-opt-in initial ghost-zone fill) -- done (Phase 1; this was a real bug found
+  via a non-converging validation test, not anticipated during planning -- see
+  DEVELOPMENT_NOTES.md for the full debugging account). **Any future new evolved-field
+  module must add its own block here.**
+- Edit: `src/pgen/pgen.hpp`/`pgen.cpp` (new `ScalarFieldLinearWave` declaration +
+  `pgen_name` dispatch entry) -- done (Phase 1)
 - Reference only (do not edit): `src/z4c/z4c_adm.cpp`, `src/utils/finite_diff.hpp`,
   `src/dyn_grmhd/dyn_grmhd.cpp`, `src/ion-neutral/ion-neutral_tasks.cpp`,
-  `src/driver/driver.{hpp,cpp}`, `src/pgen/tests/z4c_linear_wave.cpp`,
+  `src/driver/driver.hpp`, `src/pgen/tests/z4c_linear_wave.cpp`,
   `src/pgen/dyn_grmhd/dyngr_tov.cpp`
 - Physics ground truth: `~/SACRA_2D/SACRA_MPI/bssn_st.f90`, `scalar.f90`, `boundary.f90`,
   `dissipation.f90`; paper arXiv:2406.05211 Eqs. 2-13.

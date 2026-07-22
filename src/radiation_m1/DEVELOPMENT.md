@@ -75,7 +75,7 @@ guarded 4 more silently-wrong-physics/unguarded-typo gaps, all found via
 Explore-agent code survey and verified with no regression to the existing
 test suite.
 
-**Not yet done** (see "Stage 2 plan" below): Kramers/`power_opacity` and the
+**Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
 
@@ -131,7 +131,7 @@ the existing Planck channel:
 sigma_compton = kappa_s * rho * 4 * T_gas * inv_t_electron   [inv_t_electron = k_B/(m_e c^2), in code units]
 eta_1  += sigma_compton * a_rad * T_gas^4
 abs_1  += sigma_compton
-scat_1  = kappa_s + kappa_a   (unchanged — kappa_s still contributes its ordinary elastic/flux-damping role too)
+scat_1  = rho * (kappa_s + kappa_a)   (unchanged — kappa_s still contributes its ordinary elastic/flux-damping role too)
 ```
 This required **zero changes** to the Newton solver, its hand-derived analytic
 Jacobian, the closure, or `T_dd` backreaction — they all just see a larger
@@ -204,7 +204,7 @@ exercising the parts this test cannot reach.
 - [x] Add + validate `rad_m1_photon_compton_singlezone` (5×10⁻⁵ final relative
   error against the closed-form Compton relaxation).
 
-## Stage 2 plan — exercise transport + real photon opacities together
+## Stage 2 — exercise transport + real photon opacities together — DONE
 
 Everything in Stage 1 is 0-D (homogeneous, source-term-only). Stage 2 is the
 validation ladder that turns on fluxes, the closure, motion, and backreaction one
@@ -409,7 +409,7 @@ Recommended order (cheapest / fewest new mechanisms first):
 4. **Radiation-pressure backreaction test (`backreact=true`) — DONE.**
    Cheapest meaningful case rather than a full hydrostatic atmosphere:
    reused `rad_m1_photon_singlezone.cpp` **unmodified** — `backreact` is a
-   pure input-file toggle for this pgen (`radiation_m1.cpp:55`, default
+   pure input-file toggle for this pgen (`radiation_m1.cpp:64`, default
    `true`; the existing `rad_m1_photon_singlezone.athinput` explicitly
    overrides it to `false` to keep `T_gas` fixed for that earlier test). New
    input `rad_m1_photon_backreaction_singlezone.athinput` is identical
@@ -662,8 +662,11 @@ development, deferred and documented below, not "hardening").
 2. **Real crash risk + 4 silently-wrong-physics variants — `ismhd`-only
    fallback, no `ishydro` fallback, in 5 files.** `radiation_m1_update.cpp`
    set `w0_`/`umhd0_` only `if (ismhd)` (unlike the already-correct
-   `radiation_m1_calc_opacities_photons.cpp`, which handles both `ismhd` and
-   `ishydro`), then unconditionally dereferenced them whenever
+   `CalcOpacityPhotons_IdealGas_` in `radiation_m1_calc_opacities_photons.cpp`,
+   which handles both `ismhd` and `ishydro` — though its EOSCompOSE sibling,
+   `CalcOpacityPhotons_`, is `ismhd`-only too; harmless only because the new
+   guard below makes hydro-only mode unreachable regardless), then
+   unconditionally dereferenced them whenever
    `(ismhd_ || ishydro_)` — so hydro-only (no `<mhd>`) + `theta_limiter=true`
    would dereference an unallocated array (real crash). The same
    `ismhd`-only pattern (silently assuming `v=0` for hydro-only, not

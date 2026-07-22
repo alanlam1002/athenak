@@ -187,6 +187,12 @@ class CFC {
   int cfc_init_iter_max_;
   Real cfc_init_tol_;
   bool cfc_init_verbose_;
+  // Under-relaxation factor for InitializeMetric()'s psi update (1.0 = no
+  // relaxation, byte-identical to the original unrelaxed Picard iteration). Added
+  // after the iteration was found to diverge for a more compact/relativistic star
+  // than any previously tested here (2M/R~0.34) -- see InitializeMetric's doc
+  // comment for the mechanism. Default 1.0 keeps every existing test unaffected.
+  Real cfc_init_omega_;
 
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per
   // field that cfc_reconstruct.cpp later finite-differences (mirrors

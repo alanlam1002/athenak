@@ -250,6 +250,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   cfc_init_iter_max_ = pin->GetOrAddInteger("cfc", "init_iter_max", 50);
   cfc_init_tol_ = pin->GetOrAddReal("cfc", "init_tol", 1.0e-10);
   cfc_init_verbose_ = pin->GetOrAddBoolean("cfc", "init_verbose", false);
+  cfc_init_omega_ = pin->GetOrAddReal("cfc", "init_omega", 1.0);
 }
 
 //----------------------------------------------------------------------------------------
@@ -466,6 +467,30 @@ void CFC::InitializeMetric(Driver *pdriver) {
     // iteration's PrimToConInit.
     ComputeADual();
     SolveConformalFactor(pdriver, 0);
+
+    // Under-relax the just-solved psi against the previous iteration's value
+    // (cfc_init_omega_ < 1) when the plain Picard step is unstable (found for a
+    // more compact/relativistic star than any previously tested here -- see
+    // cfc_init_omega_'s doc comment in cfc.hpp). SolveConformalFactor() already
+    // wrote the unrelaxed solve into delta_psi and used it to update
+    // padm->adm.g_dd/psi4 via AssembleConformalMetric -- blend delta_psi back down
+    // here and re-run AssembleConformalMetric so g_dd/psi4 reflect the relaxed
+    // value the next iteration's PrimToConInit actually sees. Both are interior-
+    // only (is..ie), matching AssembleConformalMetric's own pointwise, no-ghost-
+    // dependency implementation (cfc_reconstruct.cpp), so no ghost exchange is
+    // needed either way. omega=1.0 (the default) skips this entirely -- byte-
+    // identical to the original unrelaxed iteration.
+    if (cfc_init_omega_ != 1.0) {
+      Real omega = cfc_init_omega_;
+      auto &psi_relax = delta_psi;
+      auto &psi_old_relax = psi_old;
+      par_for("cfc_init_relax_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        psi_relax(m,0,k,j,i) = (1.0 - omega)*psi_old_relax(m,0,k,j,i) +
+                                omega*psi_relax(m,0,k,j,i);
+      });
+      cfc::AssembleConformalMetric(pmy_pack, delta_psi);
+    }
 
     // A difference of two same-convention values (both delta_psi, one from before
     // this iteration's solve, one after), so it's unaffected by whether delta_psi

@@ -241,16 +241,22 @@ Steps 1 and 6 each decompose (Shibata sec. 3) into a vector potential `P_i`
 
 ## File layout
 
+**Corrected 2026-07-22** — this section described the module's pre-item-18 layout
+(separate `P_i`/`eta` solvers) long after item 18 merged them; see that item for the
+merge itself and its rationale.
+
 ```
 src/cfc/
-  cfc.hpp / cfc.cpp                     # orchestrator; owns all 6 multigrid drivers
+  cfc.hpp / cfc.cpp                     # orchestrator; owns all 4 multigrid drivers
                                          # and the 6-step control flow, queued into
                                          # the NumericalRelativity task graph via
                                          # QueueCFCTasks() (not a direct Solve() call)
-  mg_cfc_vector_poisson.hpp/.cpp        # P_i solver (linear, nvar=3), shared by
-                                         # both X^i and beta^i (2 instances)
-  mg_cfc_scalar_poisson.hpp/.cpp        # eta solver (linear, nvar=1), shared by
-                                         # both X^i and beta^i (2 instances)
+  mg_cfc_vector_poisson.hpp/.cpp        # P_i+eta solver (linear, nvar=4 -- P_i at
+                                         # channels 0-2, its paired eta at channel 3,
+                                         # item 18), shared by both X^i and beta^i
+                                         # (2 instances). mg_cfc_scalar_poisson.{hpp,
+                                         # cpp} (the old separate eta-only solver)
+                                         # was deleted by item 18, not just emptied.
   mg_cfc_conformal_factor.hpp/.cpp      # psi solver (nonlinear scalar, nvar=1)
   mg_cfc_lapse.hpp/.cpp                 # alpha*psi solver (nonlinear scalar, nvar=1)
   cfc_reconstruct.hpp/.cpp              # free-function Kokkos kernels: Adual^ij from
@@ -258,8 +264,9 @@ src/cfc/
                                          # final ADM assembly into padm->u_adm
 ```
 
-6 multigrid driver instances total: `pmgd_px`, `pmgd_etax` (for `X^i`), `pmgd_pbeta`,
-`pmgd_etabeta` (for `beta^i`), `pmgd_psi`, `pmgd_alpha`.
+4 multigrid driver instances total (was 6 before item 18's merge): `pmgd_pietax`
+(`X^i`'s `P_i`+`eta`, packed), `pmgd_pietabeta` (`beta^i`'s `P_i`+`eta`, packed),
+`pmgd_psi`, `pmgd_alpha`.
 
 ## Key design decisions (and why)
 
@@ -278,25 +285,44 @@ src/cfc/
   `AthenaTensor` view (`InitWithShallowSlice`) provides tensor-index access on top of
   it. Applies to `x_u`, `beta_u` (rank-1, `TensorSymm::NONE`), `a_dd` (rank-2,
   `TensorSymm::SYM2`), `s_tilde_d` (rank-1), and the decomposed vector potentials
-  `p_x`/`p_beta` (rank-1). Genuine scalars (`psi`, `alpha_psi`, `a_sq`, `u_tilde`,
-  `s_tilde`, `eta_x`, `eta_beta`) stay plain `DvceArray5D<Real>`, same as
+  `p_x`/`p_beta` (rank-1, now channels 0-2 of the merged `u_p_x`/`u_p_beta` storage,
+  item 18 — `eta`'s own value lives at channel 3 of that same array, no separate
+  `eta_x`/`eta_beta` member exists anymore). Genuine scalars (`psi`, `alpha_psi`,
+  `a_sq`, `u_tilde`, `s_tilde`) stay plain `DvceArray5D<Real>`, same as
   `gravity::Gravity::phi`.
 
-- **`P_i` and `eta` are solved as two separate sequential multigrid solves, not one
-  combined 4-channel solve.** `Delta P_i = S_i` (3 components) and
-  `Delta eta = -S_i x^i` are mathematically independent of each other, but the
-  workflow solves `P_i` to completion first (`MGCFCVectorPoissonDriver`, `nvar_=3`),
-  then builds and solves `eta`'s equation second (`MGCFCScalarPoissonDriver`,
-  `nvar_=1`) using the same known source `S_i`. This is a deliberate implementation
-  choice (explicit user direction), not a correctness requirement — it keeps the
-  vector quantity `P_i` cleanly represented as an `AthenaTensor` throughout, rather
-  than packed into an opaque 4-component array alongside the unrelated scalar `eta`.
+- **Corrected 2026-07-22 (was stale since item 18): `P_i` and `eta` are now solved
+  as one combined `nvar_=4` multigrid solve, not two separate sequential ones.**
+  This bullet originally documented the opposite as a deliberate, permanent
+  choice — item 18 (2026-07-14) reversed it per later user direction: `Delta P_i
+  = S_i` (channels 0-2) and `Delta eta = -S_i x^i` (channel 3) are loaded into one
+  merged source array and solved together by `MGCFCVectorPoissonDriver` (`nvar_=4`
+  since the merge, was 3), retiring the separate `MGCFCScalarPoissonDriver`
+  entirely. See item 18 for why a genuine storage merge (not just "call Solve()
+  once") was required — `Multigrid::LoadSource`/`RetrieveResult` always populate
+  the driver's *entire* channel range in one call, so two separate 3-/1-channel
+  calls could never target one merged driver's internal storage.
 
-- **Boundary conditions reuse existing multigrid BCs, no new BC code.**
-  `X^i`/`beta^i` (and their decomposed `P_i`/`eta`) use `BoundaryFlag::mg_zerofixed`
-  (simple Dirichlet-zero, Gmunu eqs. 79-80). `psi`/`alpha*psi` are solved as
-  deviations from 1 (`delta_psi = psi - 1`, etc.) using `BoundaryFlag::mg_multipole`
-  (already-implemented isolated/asymptotically-flat 1/r falloff, Gmunu eqs. 77-78).
+- **Boundary conditions reuse existing multigrid BCs (mostly) — corrected
+  2026-07-22, was stale since items 16/17.** This bullet originally said
+  `X^i`/`beta^i` use `mg_zerofixed` and `psi`/`alpha*psi` use `mg_multipole`, and
+  claimed no new BC code was needed — both the specifics and that claim are now
+  wrong. Current defaults (each overridable via its own `<cfc>` input, see items
+  16/17 for the full derivation): `psi`/`alpha*psi` (solved as deviations
+  `delta_psi = psi - 1` etc.) default to `BoundaryFlag::mg_robin` (`<cfc>
+  mg_outer_bc`, item 16) — a local `ghost = interior*(r_anchor/r_ghost)^order`
+  extrapolation that sidesteps the `mg_multipole` bug class entirely (no moments,
+  no MPI reduction) rather than fixing it; `mg_multipole` was tried first for
+  these two fields and found to divide by zero, since their matter source lives
+  in `coeff_`, not `src_`, which `CalculateCenterOfMass`/
+  `CalculateMultipoleCoefficients` only ever integrate (item 9, rounds 1-5).
+  `X^i`/`beta^i` (`P_i`/`eta`, merged per item 18 above) default instead to
+  `BoundaryFlag::mg_multipole` (`<cfc> mg_poisson_outer_bc`, item 17) — safe for
+  these because their source genuinely lives in `src_`, so the existing
+  gravity-proven multipole machinery applies without the bug class above; `Delta
+  eta = -S_i x^i` predates `x^i`'s own `1/r` falloff and needed `multigrid.hpp`
+  generalized to per-channel multipole moments to support this 4-channel driver
+  (item 17's Option A) — genuinely new BC-adjacent code, not a same-BC reuse.
 
 - **`CFC` queues its steps into the shared `NumericalRelativity` task graph
   (`QueueCFCTasks()`), it does NOT call `Driver::Execute()` directly the way
@@ -313,8 +339,8 @@ src/cfc/
   resulting per-stage order, all inside `"stagen"`:
   ```
   MHD_CopyU -> MHD_Flux -> ... -> MHD_ExplRK -> MHD_AddSrc
-    -> CFC_BuildSrcX (step 1: S_i from pmhd->u0; solve P_i/eta)
-    -> CFC_Rest/Send/Recv/ProlongPX, ...EtaX (ghost-exchange p_x, eta_x, parallel)
+    -> CFC_BuildSrcX (step 1: S_i from pmhd->u0; solve merged P_i+eta, item 18)
+    -> CFC_Rest/Send/Recv/ProlongPiEtaX (ghost-exchange the merged u_p_x)
     -> CFC_ReconstructX (Shibata recon -> x_u)
     -> CFC_Rest/Send/Recv/ProlongX (ghost-exchange x_u)
     -> CFC_ComputeADual (step 2: Adual^ij/Ahat^2)
@@ -325,20 +351,26 @@ src/cfc/
     -> CFC_RescaleSrc (step 4, no con2prim call -- just reads the w0 MHD_C2P wrote)
     -> CFC_SolveLapse (step 5)
     -> CFC_Rest/Send/Recv/ProlongPsi, ...AlphaPsi (ghost-exchange psi/alpha_psi)
-    -> CFC_BuildSrcBeta (step 6: eq. 75 source; solve P_i/eta for beta^i)
-    -> CFC_Rest/Send/Recv/ProlongPBeta, ...EtaBeta (ghost-exchange, parallel)
+    -> CFC_BuildSrcBeta (step 6: eq. 75 source; solve merged P_i+eta for beta^i)
+    -> CFC_Rest/Send/Recv/ProlongPiEtaBeta (ghost-exchange the merged u_p_beta)
     -> CFC_ReconstructBeta (Shibata recon -> beta_u)
     -> CFC_AssembleFinal
+    -> [CFC_Rest/Send/Recv/ProlongADM: item 14's own u_adm ghost-exchange round]
     -> MHD_Newdt (optional dep on CFC_AssembleFinal)
   ```
-  32 `CFC_*` `TaskName` entries total (see the enum in `numerical_relativity.hpp` for
-  the exact list) -- expanded from an original 6-node sketch once it became clear
-  each multigrid solve's *output* needs its own post-retrieve ghost-exchange round
-  before `cfc_reconstruct.cpp` can safely finite-difference it (see item 4's "NGHOST-
-  deep ghost exchange" design, folded into item 4's implementation). Each `Rest*`/
+  **Node count corrected 2026-07-22**: this bullet originally said "32 `CFC_*`
+  `TaskName` entries total" — stale on two counts since: item 18's P_i/eta merge
+  *removed* 8 entries (`...EtaX`/`...EtaBeta` quartets folded into
+  `...PiEtaX`/`...PiEtaBeta`), and item 14 *added* `CFC_InitRecv`, 4
+  `CFC_Rest/Send/Recv/ProlongADM` entries, and `CFC_ClearSend`/`CFC_ClearRecv` for
+  `padm->u_adm`'s own ghost exchange (not shown in the diagram at all as of this
+  bullet's original writing). Rather than hardcode a count here that will drift
+  again, treat `numerical_relativity.hpp`'s `CFC_*` enum (ending at `CFC_NTASKS`)
+  as the single source of truth for the current exact list/count. Each `Rest*`/
   `Send*`/`Recv*`/`Prolong*` quartet is a thin one-liner on `cfc::CFC` mirroring
   `z4c::Z4c::RestrictU`/`SendU`/`RecvU`/`Prolongate`'s exact shape, using one
-  `MeshBoundaryValuesCC` + `coarse_*` pair per field (`pbval_px`/`coarse_u_px`, etc.,
+  `MeshBoundaryValuesCC` + `coarse_*` pair per field (`pbval_pietax`/
+  `coarse_u_pietax`, etc. -- `pbval_px`/`pbval_etax` before item 18's merge,
   `cfc.hpp`) -- `is_z4c=false` throughout since CFC is not z4c.
   `MHD_C2P`/`MHD_Newdt`'s CFC dependencies are *optional*
   (`NumericalRelativity::AddExtraDependencies`), so a run without a `<cfc>` block
@@ -395,11 +427,13 @@ src/cfc/
   `pnr = new numrel::NumericalRelativity(...)` / `AssembleNumericalRelativityTasks`
   runs (moved from its original spot after `gravity`'s construction), since that
   call is what invokes `pcfc->QueueCFCTasks()`.
-- `src/tasklist/numerical_relativity.hpp`/`.cpp`: 32 `CFC_*` `TaskName` values
-  (appended after `Z4c_NTASKS`, see the task-graph design-decision bullet above for
-  the full list/order) and a `Phys_CFC` `PhysicsDependency`; both `NeedsPhysics`/
+- `src/tasklist/numerical_relativity.hpp`/`.cpp`: `CFC_*` `TaskName` values
+  (appended after `Z4c_NTASKS`, count has drifted since this was first written --
+  see the task-graph design-decision bullet above, corrected 2026-07-22) and a
+  `Phys_CFC` `PhysicsDependency`; both `NeedsPhysics`/
   `DependencyAvailable` are purely ordinal against `Z4c_NTASKS`/`CFC_NTASKS`, so no
-  `.cpp` changes were needed there when the list grew from 6 to 32 entries.
+  `.cpp` changes were needed there as the list grew (originally 6 entries, then
+  32, then adjusted again by items 14/18 -- see above).
   `AssembleNumericalRelativityTasks(tl_map)` calls `pmy_pack->pcfc->QueueCFCTasks()`
   alongside `pdyngr`/`pz4c`'s equivalents.
 - `src/dyn_grmhd/dyn_grmhd.cpp`: `MHD_C2P`'s and `MHD_Newdt`'s `QueueTask` calls
@@ -1918,16 +1952,28 @@ src/cfc/
       initial-data convergence behavior reported by other XCFC codes, not a
       sign of a bug.
 
-12. **AMR support for CFC (supersedes open item 3b).** In progress. Investigation
+12. **AMR support for CFC (supersedes open item 3b).** **Status corrected
+    2026-07-22: effectively Done, not "In progress"** — this item's own last
+    verification note below (2-level AMR, 3 cycles) predates items 20/21 and
+    this file's own item 22, which have since exercised `nreflevel_ > 0`
+    configurations far more deeply (up to 5 refinement levels, real multi-cycle
+    dynamical evolution, the full migration-test setup) without ever hitting the
+    `nreflevel_ > 0` guards this item describes removing — confirming they were
+    in fact removed and the octet-coefficient machinery below works as
+    implemented. What item 21 found is a separate, secondary discretization
+    property (a resolution-order truncation floor at the coarse-fine interface),
+    not a gap in AMR support itself. Original investigation follows unchanged:
     (re-reading the full octet/AMR machinery in `src/multigrid/` end to end, and
     every CFC multigrid driver, not just re-stating item 3b's original note) found
     the gap is narrower than 3b assumed, plus two additional bugs in *shared*
     (non-CFC) code that item 3b's investigation hadn't surfaced.
     - **Already AMR-capable, confirmed by reading the actual code, not assumed**:
       `MGCFCVectorPoisson`/`MGCFCScalarPoisson` (the linear solvers backing `P_i`/
-      `eta` for both `X^i` and `beta^i`) already have real `SmoothOctet`/
-      `CalculateDefectOctet`/`CalculateFASRHSOctet` bodies (`mg_cfc_vector_
-      poisson.cpp`/`mg_cfc_scalar_poisson.cpp`) -- a direct port of gravity's
+      `eta` for both `X^i` and `beta^i`, since merged into one `nvar_=4` driver by
+      item 18 -- `mg_cfc_scalar_poisson.{hpp,cpp}`, named here, no longer exists)
+      already have real `SmoothOctet`/`CalculateDefectOctet`/`CalculateFASRHSOctet`
+      bodies (`mg_cfc_vector_poisson.cpp`, and the now-deleted `mg_cfc_scalar_
+      poisson.cpp` at the time this was written) -- a direct port of gravity's
       `OctLaplacian` pattern, generalized to 3 channels for the vector case, no
       `nreflevel_` guard on `Solve()`. These equations (`Delta P^i = S^i`) have no
       point-varying coefficient, so they never needed `coeff_` and were never
@@ -3174,3 +3220,97 @@ src/cfc/
         call immediately afterward, "AFTER one V-cycle", printed correctly on
         every rank). Not chased further since the data obtained already answers
         the question this test was run for.
+22. **TODO, open — "Migration of an unstable neutron star" test (Gmunu sec.
+    3.3.5) not yet running cleanly.** New input file
+    `inputs/dyn_grmhd/cfc_tov_migration.athinput` (untracked in git as of this
+    writing) attempts to reproduce this test: polytropic `K=100`, `Gamma=2`
+    star on the *unstable* branch, `rhoc=8.00e-3` (the paper's "SU" model,
+    Cordero-Carrion et al. 2009) -- `dyngr_tov.cpp` already supports an
+    arbitrary `rhoc` with no code changes needed for the physics itself. The
+    paper's own setup is 2D axisymmetric cylindrical (`R,z`); this CFC port has
+    no cylindrical/axisymmetric support at all (confirmed: `dyngr_tov.cpp`'s
+    whole pgen and every `cfc_reconstruct.cpp` kernel assume flat 3D Cartesian
+    `x1v/x2v/x3v`), so the input reproduces it in full 3D Cartesian with octant
+    symmetry instead, matching the paper's root/finest resolution to the digit
+    where the coordinate change allows.
+    - **Root cause of every failure mode below: this star is meaningfully more
+      compact/relativistic (`2M/R~0.34`, `Mass=1.44729`, `R_schw=5.83677`) than
+      any star previously exercised anywhere in this module** (prior stars sit
+      around `2M/R~0.29`). Two separate numerical consequences, found in this
+      order:
+    - **(1) FIXED, in code but NOT YET COMMITTED (`src/cfc/cfc.hpp`/`cfc.cpp`,
+      modified, uncommitted as of this writing)**: `CFC::InitializeMetric()`'s
+      one-time `t=0` Picard iteration (item 11) diverged outright for this star
+      under its default unrelaxed update (`max|delta psi|` growing from `0.011`
+      at iteration 1 to `2.1e52` by iteration 18, then NaN). Added a new
+      `<cfc>` `init_omega` under-relaxation parameter (new private member
+      `cfc_init_omega_`, default `1.0` -- byte-identical behavior for every
+      existing test/input, since `(1-1)*old + 1*new = new`): after
+      `SolveConformalFactor()`'s unrelaxed solve, blend
+      `delta_psi = (1-omega)*psi_old + omega*delta_psi_new` (interior-only, matching
+      `AssembleConformalMetric`'s own no-ghost-dependency implementation) and
+      re-run `AssembleConformalMetric()` so `padm->adm.g_dd`/`psi4` reflect the
+      relaxed value before the next iteration's `PrimToConInit`. At
+      `init_omega=0.5` this star converges cleanly (geometric decay, typically
+      ratio `~0.5`-`0.86`/iteration depending on the AMR configuration below, to
+      well under the default `init_tol=1e-10`).
+    - **(2) STILL OPEN**: even with (1) fixed, the routine *per-cycle* metric
+      solves (`psi`/lapse, every RK stage of every cycle -- not just the one-time
+      initialization) land at or above the default `mg_threshold=1e-10`,
+      tripping `MultigridDriver::SolveIterative`'s existing safety valve (any
+      *single* non-converged solve anywhere sets `pdriver->nlim =
+      pmy_mesh_->ncycle`, force-truncating the whole run -- this is
+      `multigrid_driver.cpp:821-828`, shared/unmodified code, not new). Diagnosed
+      with `mg_debug_defect_by_level` (item 12's existing diagnostic, reused
+      unmodified): the plateau is pinned exactly at the edges/corners of
+      `refined_region1`, where the reported defect (`~0.01`-`0.04`) tracks
+      `delta_psi`'s own local value there (consistent with `~M/(2r)`, Gmunu
+      eq. 77) rather than shrinking toward zero -- i.e. the same 2:1-jump
+      truncation-order effect item 21 already characterized as an inherent,
+      convergent (not buggy) discretization property, just landing somewhere
+      the field's curvature is still significant for this specific box
+      placement, unlike item 21's own higher-resolution check where it turned
+      out not to matter in practice.
+      - `R=20` (root MeshBlocks are 30-wide, so this snaps to `R=22.5`,
+        confined to 1 of 8 root blocks, 309 total MeshBlocks): stable, zero
+        NaN, but plateau (`~5e-4`-`2e-3`) trips the clamp after 1 cycle even
+        with `mg_threshold=5e-4`/`mg_npresmooth=mg_npostsmooth=3` (item 12's
+        own established workaround).
+      - `R=40` (spills into all 8 root blocks since `40 > 30`, 2024 total
+        MeshBlocks -- a genuinely different, much larger AMR footprint, not
+        just a bigger box): **fixes `InitializeMetric` completely** (clean
+        `~0.5`/iteration decay to `7e-11`, no cap hit at all) but introduces a
+        **new, more severe, uninvestigated failure**: early in cycle 1, the
+        psi defect explodes `6.5e-4 -> 2.5e13 -> 1.7e22 -> 4.7e27 -> 2.5e30` in
+        a handful of solves, traced to a matter-source coefficient
+        (`Coeff0(Utilde)`) already at `~8.7e9` (should be `O(1e-2)` or
+        smaller) by that point -- i.e. the *hydro* state went bad first,
+        likely at one of the many new coarse-fine interfaces this much larger
+        AMR footprint introduces, and that then detonates psi's nonlinear
+        solve. **Not root-caused** -- flagged here as a real, separate
+        robustness question worth its own investigation if AMR footprints this
+        large (spanning multiple root MeshBlocks) are needed again, CFC or not.
+      - `R=30` (exactly matches the root-MeshBlock boundary, stays confined to
+        1 of 8 root blocks like `R=20`, 701 total MeshBlocks -- the safe
+        middle ground): stable, zero NaN, modestly better plateau
+        (`~5e-4`-`1.5e-3`, worst seen `~2.6e-3`) than `R=20`, but still trips
+        the clamp.
+      - **Current best configuration**: `R=30` + `mg_threshold=3e-3` (loosened
+        from the `5e-4` tried first) + `mg_npresmooth=mg_npostsmooth=3` +
+        `init_omega=0.5` runs **5 clean cycles** (up from dying after cycle 1),
+        zero NaN throughout, `InitializeMetric` converging fully (no cap hit).
+        Trips the same clamp again at cycle 4->5 (`defect=7.1e-3`), notably
+        *higher* than the `t=0` baseline (`~2.6e-3`) -- expected in isolation,
+        since this is an *unstable* star that's actively beginning to migrate/
+        oscillate by this point, so per-cycle solve difficulty appears to rise
+        somewhat as the dynamics develop, not just sit at a fixed floor.
+    - **Not yet decided**: whether to keep loosening `mg_threshold` (next
+      candidate discussed: `1e-2`) to give headroom for that rising per-cycle
+      difficulty and push further into the run, or to investigate the
+      per-cycle plateau/the `R=40` mesh-explosion divergence more fundamentally
+      first. Paused here per explicit user request (testing a different
+      problem next) -- pick this back up by rerunning
+      `cfc_tov_migration.athinput` from `/sakura/ptmp/tlam/athenak_run/
+      cfc_tov_migration_test/` (parfile/sub.sh already staged there) with
+      `mg_threshold` adjusted, or by digging into either open sub-question
+      above.

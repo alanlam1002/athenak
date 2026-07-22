@@ -193,12 +193,30 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
                 << "Compton requires enabling units" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    photon_op_params.is_compton_implicit =
+        pin->GetOrAddBoolean("photons", "compton_implicit", false);
+    if (photon_op_params.is_compton_implicit && !(photon_op_params.is_compton)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "compton_implicit requires compton=true" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (photon_op_params.is_compton_implicit && params.src_update != Implicit) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "compton_implicit requires src_update = implicit" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     if (isunits) {
       photon_op_params.arad = (pmy_pack->punit->rad_constant_cgs *
                                SQR(SQR(pmy_pack->punit->temperature_cgs())) /
                                pmy_pack->punit->pressure_cgs());
+      photon_op_params.inv_t_electron =
+          pmy_pack->punit->temperature_cgs() /
+          pmy_pack->punit->electron_rest_mass_energy_cgs;
     } else {
       photon_op_params.arad = pin->GetReal("photons", "arad");
+      photon_op_params.inv_t_electron = 0.0;
     }
   } else if (opacity_type == "none") {
     params.opacity_type = None;

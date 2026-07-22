@@ -1,0 +1,132 @@
+<comment>
+problem = grey photon M1 single zone Compton+backreaction test at a
+  deliberately STIFF cfl_number (large implicit stride, dtau*sigma_c = O(10)),
+  with compton_implicit=false (the existing frozen-opacity path): the target
+  a_rad*T^4 the implicit E/F solve relaxes toward is evaluated at T_gas from
+  the *start* of the step, not the true end-of-step T_gas, so at this stride
+  the frozen path is expected to lag or even overshoot into an unphysical
+  T_gas. Compare against rad_m1_photon_compton_backreaction_stiff_implicit.athinput
+  (identical except compton_implicit=true), which should stay close to the
+  independently-solved true equilibrium at this same stride. See
+  rad_m1_photon_compton_backreaction_singlezone.athinput for the mild-cfl
+  baseline where the two approaches are expected to agree.
+
+<job>
+basename = photon_compton_backreaction_stiff_frozen  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 1.0      # STIFF -- dtau*sigma_c = O(10), see comment above
+nlim       = 10       # cycle limit -- few large steps, the stiff regime
+tlim       = 5.0      # time limit
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 5         # Number of zones in X1-direction
+x1min  = -2.5      # minimum value of X1
+x1max  = 2.5       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 5          # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here
+
+<units>
+bhmass_msun = 1.0   # sets the GM/c^2 length unit; only overall normalization matters here
+density_cgs = 1.0   # density unit (cgs)
+mu          = 1.0   # mean molecular weight
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 2.0       # ratio of specific heats Gamma
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = eddington
+src_update = implicit
+opacity_type = photons
+
+gr_sources = false     # default: true
+matter_sources = true  # default: true
+backreact = true       # let gas temperature respond -- the only change from
+                       # rad_m1_photon_compton_singlezone.athinput
+
+theta_limiter = true   # required -- see rad_m1_photon_compton_backreaction_singlezone.athinput:
+                       # without it, the non-stiff explicit source branch
+                       # (radiation_m1_sources.hpp:154) can transfer more
+                       # energy than the gas reservoir holds in one step;
+                       # the limiter throttles theta so both stiff_frozen
+                       # and stiff_implicit are on equal, physical footing
+                       # for the frozen-vs-implicit comparison this pair
+                       # of tests exists to make
+source_limiter = 0.9999  # NOT the default (0.5) -- verified by hand that at
+                       # 0.5, theta locks near 0.5 every step regardless of
+                       # the true rate, making the limiter itself (a fixed
+                       # per-step decay) the dominant effect and masking any
+                       # difference between compton_implicit=false/true. At
+                       # 0.9999 the limiter is a true safety net and the
+                       # frozen-vs-implicit comparison reflects the actual
+                       # opacity physics.
+
+<photons>
+kappa_s = 1.0          # scattering opacity [code units]
+kappa_a = 0.0          # Rosseland absorption opacity [code units]
+kappa_p = 0.0          # Planck absorption/emission opacity [code units] -- off,
+                       # to isolate Compton as the only exchange channel (so
+                       # the joint equilibrium has a single, unambiguous
+                       # closed-form target -- see the check script)
+power_opacity = false  # constant (non-Kramers) opacities
+compton = true         # enable Compton energy exchange (requires <units>, above)
+compton_implicit = false  # STIFF regime, frozen-opacity path (see comment above)
+# arad is not set here: with <units> present, RadiationM1 derives it from
+# rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
+
+<problem>
+pgen_name = rad_m1_photon_singlezonetest
+rho = 1.0     # initial density [code]
+temp = 1.5e-3 # initial temperature [code]; same calibration as the existing
+              # Compton-only test (kappa_s*4*T*inv_t_electron ~ O(10))
+vx = 0.0    # x velocity
+vy = 0.0    # y velocity
+vz = 0.0    # z velocity
+
+<output1>
+file_type   = tab         # Binary data dump
+variable    = mhd_w       # Primitive variables
+dcycle      = 1
+
+<output2>
+file_type   = tab        # output format
+variable    = rad_m1_E    # choice of variables to output
+dcycle      = 1

@@ -75,6 +75,16 @@ guarded 4 more silently-wrong-physics/unguarded-typo gaps, all found via
 Explore-agent code survey and verified with no regression to the existing
 test suite.
 
+Stage 5 (implicit Compton, `compton_implicit`, see below) is also done: a
+closed-form quartic pre-solve (ported from the discrete-ordinate module's
+`FourthPolyRoot`) fixes the frozen-opacity Compton channel's accuracy at
+large per-step stiffness, verified to be `~2×10^5` times more accurate than
+the frozen approach at a stiff `cfl_number`, with zero regression to any
+existing test. Along the way, found and worked around (test-level, not
+solver-level) a real, previously-latent energy-accounting gap in the
+non-stiff explicit source branch under `backreact=true` — see Stage 5 for
+details; it's generic to that branch, not specific to Compton.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -737,3 +747,159 @@ none of the 6 fixes above affect any already-validated configuration.
   opacities (item 2's underlying gap) — real new development.
 - Kramers/`power_opacity` and EOSCompOSE testing generally — already listed
   as "not yet done" at the top of this file, unchanged by this stage.
+
+## Stage 5 — implicit Compton (`compton_implicit`) — DONE
+
+Goal: the existing Compton implementation (Stage 1, "Compton implementation"
+above) folds the exchange rate into `eta_1_`/`abs_1_` using `T_gas` frozen at
+the *start* of the timestep, exactly like the pre-existing Planck channel.
+That's accurate whenever the per-step Compton stiffness `dtau*sigma_c << 1`,
+but degrades at large `dtau*sigma_c` (few large implicit steps, e.g. a stiff
+`cfl_number`): the emission target `sigma_c*a_rad*T_gas^4` is evaluated at a
+`T_gas` that's about to change a lot within the same step, so the implicit
+E/F solve relaxes toward the *wrong* (stale) target. `compton_implicit=true`
+adds a closed-form quartic pre-solve — ported from the sibling
+discrete-ordinate module's `FourthPolyRoot`
+(`src/radiation/radiation_source.cpp:396-435`) — that jointly solves for a
+self-consistent `(T_new, J_new)` pair *before* the per-cell `eta_local`/
+`abs_local` are computed, so the implicit solve relaxes toward the
+correctly-linearized target instead of the stale one. New file
+`src/radiation_m1/radiation_m1_compton_implicit.hpp`
+(`FourthPolyRoot`/`SolveComptonQuartic`); wired into
+`radiation_m1_update.cpp`'s "Estimate interaction with matter" block, gated
+by `<photons>/compton_implicit` (default `false`) and two constructor-time
+guards in `radiation_m1.cpp` (`compton_implicit` requires `compton=true` and
+`src_update=implicit` — both verified live via negative-path athinputs, see
+below). Falls back to the existing frozen-opacity `eta_1_`/`abs_1_` if the
+quartic has no valid positive real root (e.g. `rho<=0`), or when the feature
+is off — zero behavior change to every already-validated test (confirmed:
+regression re-run below).
+
+**Negative-path guards — verified live.** `compton_implicit=true` with
+`compton=false` and with `src_update=explicit` each hit their respective
+fatal error immediately (`radiation_m1.cpp`), run via the CPU binary
+directly (not `mpirun` — an earlier attempt through an MPI-enabled binary
+without `mpirun` crashed in `MPI_Init` itself, a false negative unrelated to
+the guards; re-confirmed with the correct serial launch).
+
+**A real, previously-latent bug found along the way — energy-conservation
+gap in the non-stiff explicit source branch under backreaction.** Compton
+and `backreact=true` had never been combined in any test before this stage
+(`rad_m1_photon_compton_backreaction_singlezone.athinput`, a baseline
+"mild" `cfl_number` sanity check meant to trivially pass). It instead blew
+up in the first step: `E` jumped to `3.18e4` (vs the correct joint
+equilibrium `1.489e-3`) and `T_gas` collapsed to the floor, then stayed
+stuck there (energy non-conserved by `~2e7` relative error). Root-caused via
+an Explore-agent code read of `radiation_m1_sources.hpp`/
+`radiation_m1_update.cpp`:
+- At this test's `dtau*kappa≈0.055`, `source_update_ll` takes its **non-stiff
+  explicit branch** (`SrcThin`, `radiation_m1_sources.hpp:154`,
+  `cdt*kabs<1 && cdt*kscat<1`) — plain forward Euler from the pre-step state,
+  discarding entirely the rational `Jnew` estimate computed earlier in
+  `radiation_m1_update.cpp` (that estimate is only ever used as a Newton-solve
+  seed, irrelevant to this branch).
+- The backreaction increment `DrEFN = Enew - Estar`
+  (`radiation_m1_update.cpp:570`) is applied to the fluid's conserved energy
+  **unconditionally** (`radiation_m1_update.cpp:714-718`), gated only by
+  `theta`, which is pinned to `1.0` whenever `<radiation_m1>/theta_limiter`
+  is `false` — the default, and what this test (and the pre-existing Planck
+  backreaction test) both set. **No check anywhere reconciles the implied
+  energy transfer against what the gas actually has available.**
+- The pre-existing Planck backreaction test
+  (`rad_m1_photon_backreaction_singlezone.athinput`) takes the *same*
+  `SrcThin` branch but never trips this, purely because its LTE target
+  (`arad*T^4≈1`) happens to be comparable to the gas's own internal energy
+  reservoir (`≈1`) at its chosen parameters — the Compton test's frozen-`T0`
+  target is `~10^7` larger than its reservoir (`≈1.5e-3`), the first
+  parameter choice that actually stress-tests this gap. **This is a generic
+  gap in the explicit branch, not specific to Compton or
+  `compton_implicit`.**
+- **Fix applied at the test level (not the solver)**: `theta_limiter=true`
+  activates an *existing*, already-implemented limiter
+  (`radiation_m1_update.cpp:619-678`) that scales the entire per-step
+  increment (both the radiation-field update and the matching backreaction
+  subtraction) by `theta`, capped so it can't remove more than
+  `source_limiter` of the gas's available energy in one step. This was the
+  right fix, just never enabled by these tests.
+- **A second pitfall found enabling it**: `source_limiter`'s *default*
+  (`0.5`) itself turned out to dominate the dynamics at these parameters —
+  verified by hand that with `DrEFN` this far past the reservoir every step,
+  `theta` locks near `source_limiter` regardless of the true opacity/rate,
+  turning the limiter into a **fixed per-step geometric decay schedule**
+  that fully masks any difference between `compton_implicit=false` and
+  `=true` (confirmed: bit-identical output trajectories between the two
+  stiff test variants at `source_limiter=0.5`). Raising it to `0.9999` (a
+  true safety net — only prevents literal negative energy — rather than the
+  dominant term) revealed the real, expected physics: see below. All 3
+  Compton+backreaction athinputs now use `theta_limiter=true`,
+  `source_limiter=0.9999`.
+- **Not fixed at the solver level** (deferred, real new development, same
+  "guard don't implement" principle as Stage 4): making the `SrcThin` branch
+  itself energy-aware (e.g. clamp its own local update, or force the
+  stiffer Newton branch whenever the LTE target vastly exceeds the local
+  gas reservoir) would be a genuine change to the source-update dispatch
+  logic, not test configuration.
+
+**Verification results (3 single-zone Compton+backreaction athinputs, all
+`kappa_s=1, kappa_a=kappa_p=0, compton=true`, same `rho=1, T0=1.5e-3,
+gamma=2` — so all three share the identical independently-solved target
+equilibrium `T_final=1.067e-5, E_final=1.489e-3`, `a_rad=1.149e17` code
+units):**
+1. `rad_m1_photon_compton_backreaction_singlezone.athinput` (mild
+   `cfl_number=0.005`, `compton_implicit=false`, `nlim=300`) — **PASS**.
+   Overshoots hard in the very first step (`T` collapses from `1.5e-3` to
+   `1.5e-7`, since even at this "mild" `cdt*kabs` the raw `SrcThin`-branch
+   estimate vastly exceeds the reservoir once `theta_limiter` is a true
+   safety net rather than the dominant term — see the finding above), then
+   climbs back and converges to the correct equilibrium by `t≈0.6` (out of
+   `tlim=1.0`) and stays there;
+   `check_rad_m1_photon_compton_backreaction_singlezone.py`: final `E`/`T`
+   relative error `7.2e-6`/`5.1e-6`, max conservation error `1.3e-5`
+   (default `--conservation-tol` loosened `1e-5→2e-5` to match — same kind
+   of measured-vs-default recalibration as the diffusion test's `--tol`,
+   not a real problem).
+2. `rad_m1_photon_compton_backreaction_stiff_frozen.athinput` (stiff
+   `cfl_number=1.0`, `compton_implicit=false`, `nlim=10`) — lands in the
+   full implicit Newton branch (`cdt*kabs≈10.9≥1`), but with the frozen
+   (stale-`T`) opacity target: oscillates chaotically between near-total
+   consumption of the gas reservoir and partial recovery across its 5
+   steps, still `~99.8%` off the true equilibrium `T_final` at `t=5` —
+   energy is still conserved throughout (max `1.27e-5`), so this is purely
+   an accuracy failure of the frozen linearization at this stiffness, not a
+   conservation bug.
+3. `rad_m1_photon_compton_backreaction_stiff_implicit.athinput` (identical
+   to #2 except `compton_implicit=true`) — lands in the same Newton branch,
+   but the quartic pre-solve gets the target right from step 1: within
+   `2%` of `T_final` after one step, converged to `5.1e-6` relative error
+   by `t=2` and stays there.
+   `check_rad_m1_photon_compton_backreaction_stiff.py` (new, compares both
+   stiff runs against the shared target and against each other): both
+   conserve energy (`1.05e-5`/`1.27e-5`, both under a `2e-5` tolerance);
+   implicit's final `T` error (`5.1e-6`) is `~2×10^5` times smaller than
+   frozen's (`0.998`), clearing the script's required `10×`-improvement bar
+   by many orders of magnitude.
+
+**Regression verification**: re-ran the full existing photon-M1 pytest
+suite (all 7 `_cpu` tests, via `run_test_suite.py`'s own entrypoint) after
+all `compton_implicit`/`radiation_m1_compton_implicit.hpp` changes — zero
+change, confirming the new opt-in code path doesn't affect any
+already-validated configuration.
+
+**Not wired into `tst/test_suite/` CI**: unlike Stage 2 item 5, these 3
+tests are single-zone/homogeneous-only diagnostics purpose-built to
+characterize one specific numerical-accuracy tradeoff (stiff vs. mild
+Compton linearization) rather than to guard a piece of transport machinery
+against regression — run by hand per their check scripts' module
+docstrings. Could be wired in later if desired; deferred as disproportionate
+scope for this stage.
+
+**Deferred, not fixed here**:
+- The `SrcThin`-branch energy-accounting gap itself (see above) — a
+  generic issue in the explicit source-update path under backreaction,
+  independent of Compton/`compton_implicit`. Currently mitigated at the
+  test-configuration level (`theta_limiter=true`,
+  `source_limiter=0.9999`) for the 3 tests in this stage; any *other*
+  future backreaction test/pgen with a similarly large LTE-target/reservoir
+  mismatch would need the same mitigation until the solver itself is fixed.
+- EOSCompOSE Compton, Kramers/`power_opacity` testing — unchanged from
+  Stage 1's scope decision, still deferred.

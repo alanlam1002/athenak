@@ -11,9 +11,11 @@
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/eos.hpp"
 #include "globals.hpp"
 #include "radiation_m1.hpp"
 #include "radiation_m1_calc_closure.hpp"
+#include "radiation_m1_compton_implicit.hpp"
 #include "radiation_m1_helpers.hpp"
 #include "radiation_m1_nurates.hpp"
 #include "radiation_m1_sources.hpp"
@@ -151,6 +153,13 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   if (ismhd) {
     w0_ = pmy_pack->pmhd->w0;
     umhd0_ = pmy_pack->pmhd->u0;
+  }
+
+  auto &photon_op_params_ = pmy_pack->pradm1->photon_op_params;
+  Real gm1_{};
+  if (ismhd && params_.opacity_type == Photons &&
+      photon_op_params_.is_compton_implicit) {
+    gm1_ = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
   }
 
   auto &BrentFunc_ = pmy_pack->pradm1->BrentFunc;
@@ -464,13 +473,46 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
 
               // Estimate interaction with matter
               const Real dtau = beta_dt * (adm.alpha(m, k, j, i) / w_lorentz);
-              Real Jnew = (Jstar + dtau * eta_1_(m, nuidx, k, j, i) * volform) /
-                          (1. + dtau * abs_1_(m, nuidx, k, j, i));
+
+              // [Compton-implicit] Replace the frozen-opacity eta_1_/abs_1_
+              // for this cell with a closed-form Compton quartic pre-solve,
+              // self-consistent in T_gas/J at this cell's pre-coupling
+              // ("star") state -- see radiation_m1_compton_implicit.hpp and
+              // DEVELOPMENT.md's "Compton implementation" section. Assumes
+              // Primitive::IdealGas (safe: compton=true+EOSCompOSE already
+              // hard-errors at opacity-parse time, before this can run).
+              // Falls back to the existing frozen-opacity arrays on failure
+              // or when the feature is off -- zero behavior change for
+              // every currently-validated test.
+              Real eta_local = eta_1_(m, nuidx, k, j, i);
+              Real abs_local = abs_1_(m, nuidx, k, j, i);
+              if (params_.opacity_type == Photons &&
+                  photon_op_params_.is_compton_implicit) {
+                const Real rho_gas = w0_(m, IDN, k, j, i);
+                const Real T_star = w0_(m, IEN, k, j, i) / rho_gas;
+                Real T_new{}, J_new{};
+                if (SolveComptonQuartic(
+                        rho_gas, T_star, Jstar, gm1_,
+                        photon_op_params_.kappa_s, photon_op_params_.arad,
+                        photon_op_params_.inv_t_electron, dtau, volform,
+                        T_new, J_new)) {
+                  // Rate stays frozen at T_star (matching the quartic's own
+                  // linearization); only the emission target moves to T_new.
+                  const Real sigma_c_star = photon_op_params_.kappa_s *
+                                            rho_gas * 4.0 * T_star *
+                                            photon_op_params_.inv_t_electron;
+                  abs_local = sigma_c_star + rho_gas * photon_op_params_.kappa_p;
+                  eta_local = abs_local * photon_op_params_.arad *
+                              SQR(SQR(T_new));
+                }
+              }
+
+              Real Jnew = (Jstar + dtau * eta_local * volform) /
+                          (1. + dtau * abs_local);
 
               // Only three components of H^a are independent H^0 is found by
               // requiring H^a u_a = 0
-              const Real khat =
-                  (abs_1_(m, nuidx, k, j, i) + scat_1_(m, nuidx, k, j, i));
+              const Real khat = (abs_local + scat_1_(m, nuidx, k, j, i));
               AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> Hnew_d{};
               for (int a = 1; a < 4; ++a) {
                 Hnew_d(a) = Hstar_d(a) / (1. + dtau * khat);
@@ -509,8 +551,8 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                   BrentFunc_, HybridsjFunc_, beta_dt, adm.alpha(m, k, j, i),
                   g_dd, g_uu, n_d, n_u, gamma_ud, u_d, u_u, v_d, v_u, proj_ud,
                   w_lorentz, Estar, Fstar_d, Estar, Fstar_d,
-                  volform * eta_1_(m, nuidx, k, j, i),
-                  abs_1_(m, nuidx, k, j, i), scat_1_(m, nuidx, k, j, i),
+                  volform * eta_local,
+                  abs_local, scat_1_(m, nuidx, k, j, i),
                   chi_(m, nuidx, k, j, i), Enew, Fnew_d, params_,
                   params_.closure_type);
               apply_floor(g_uu, Enew, Fnew_d, params_);

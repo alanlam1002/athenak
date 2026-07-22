@@ -92,11 +92,7 @@ TaskStatus RadiationM1::CalcOpacityPhotons_IdealGas_(Driver *pdrive, int stage) 
   Real arad_ = photon_op_params.arad;
 
   bool is_compton_ = photon_op_params.is_compton;
-  Real inv_t_electron_ = 0.0;
-  if (is_compton_) {
-    inv_t_electron_ =
-        pmy_pack->punit->temperature_cgs() / pmy_pack->punit->electron_rest_mass_energy_cgs;
-  }
+  Real inv_t_electron_ = photon_op_params.inv_t_electron;
 
   par_for(
       "radiation_m1_calc_opacity_photons_idealgas", DevExeSpace(), 0, nmb1, ks,

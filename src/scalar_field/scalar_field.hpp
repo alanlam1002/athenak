@@ -9,11 +9,10 @@
 //! \brief definitions for ScalarField class: the massive scalar-tensor (Damour-Esposito-
 //! Farese-type) scalar-field sector, coupled to the Z4c/ADM spacetime sector.
 //!
-//! Phase 0 (current): the evolved state (sphi, Pi) and its tasks are wired into the
-//! MeshBlockPack / NumericalRelativity task graph, but CalcRHS is a no-op and no
-//! back-reaction terms have been added to the Z4c equations yet -- the field is inert.
-//! See src/scalar_field/DEVELOPMENT_NOTES.md for the full phased rollout plan and the
-//! physics this module will eventually implement.
+//! Through Phase 3: the scalar's own Klein-Gordon RHS, its back-reaction on the Z4c
+//! equations, and coupling to the dyn_grmhd fluid (via RescaleTmunu and matter-trace
+//! terms) are all implemented; the mass term and its implicit solver are still Phase 4.
+//! See src/scalar_field/DEVELOPMENT_NOTES.md for the full phased rollout plan and status.
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

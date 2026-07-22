@@ -61,14 +61,18 @@ absent from the input file):
 
 ## Design decisions made during Phase 0 (revisit if they turn out wrong)
 
-- **Boundary-buffer treatment**: `ScalarField`'s own `MeshBoundaryValuesCC` is constructed
-  with `is_z4c=true` (`scalar_field.cpp`'s constructor), i.e. it opts into the same
-  4th-order-safe prolongation/restriction path Z4c's own fields use, rather than the
-  plain 2nd-order path Hydro/MHD use. Reasoning: once Phase 1+ back-reaction is enabled,
-  `sphi` is differentiated twice and feeds directly into the Z4c RHS, so it needs the same
-  refinement-boundary smoothness Z4c's own metric fields need. This has no effect unless
-  `pmesh->multilevel` (SMR/AMR) is on. If this turns out to be unnecessary overhead or
-  wrong for some other reason, it's a one-line flip back to `false`.
+- **Boundary-buffer treatment (superseded during Phase 1, see below)**: originally
+  `ScalarField`'s own `MeshBoundaryValuesCC` was constructed with `is_z4c=true`, i.e. it
+  opted into the same 4th-order-safe prolongation/restriction path Z4c's own fields use.
+  During Phase 1 debugging this was changed to `is_z4c=false` (the plain path Hydro/MHD
+  use) while chasing the `InitBoundaryValuesAndPrimitives` bug below -- it turned out not
+  to be the cause, but `false` was kept anyway as the more standard/correct choice for a
+  generic 2-variable field (see an Explore agent's analysis at the time). **Current code
+  (`scalar_field.cpp`'s constructor, and the matching `RestrictCC`/`ProlongateCC` calls
+  in `scalar_field_tasks.cpp`) uses `is_z4c=false`.** This has no effect unless
+  `pmesh->multilevel` (SMR/AMR) is on, so it hasn't mattered for any test run so far
+  (none use AMR) -- revisit if `sphi` differentiability at refinement boundaries ever
+  becomes suspect once AMR is actually exercised.
 - **`ApplyPhysicalBCs` is a no-op** (beyond the generic user-BC hook every physics module
   calls). There is no `ScalarFieldBCs` formula yet -- ghost zones at the edge of the whole
   domain will hold whatever the problem generator set them to, or whatever a pgen's
@@ -78,11 +82,16 @@ absent from the input file):
   light, already reflected in Z4c's existing CFL-based timestep; no separate timestep
   constraint is needed until Phase 4's stiff mass term requires one (handled through the
   IMEX machinery instead, not a CFL limiter).
-- **No `z4c_tasks.cpp` dependency wiring yet**: `Z4c_CalcRHS`'s optional-dependency list
-  is untouched. Phase 2/3 will need to add `SF_CalcRHS`/`SF_RescaleT` there once the
-  Z4c-side back-reaction terms are actually implemented (see `PLAN.md`'s "Task-list
-  wiring" section) -- don't forget this when Phase 2 starts, or the back-reaction terms
-  will silently read stale/uninitialized scalar-field data.
+- **No `z4c_tasks.cpp` dependency wiring yet (partly superseded, see below)**:
+  `Z4c_CalcRHS`'s optional-dependency list was untouched at Phase 0. What actually
+  happened later was *not* exactly what this note predicted: `SF_RescaleT` was indeed
+  added to `Z4c_CalcRHS`'s optional deps (Phase 3, matches the prediction), but
+  `SF_CalcRHS` was **not** -- it was added to `Z4c_ExplRK`'s optional deps instead
+  (Phase 2), because the actual hazard that needed fixing was a cross-module RK race
+  (see "What Phase 2 actually did" below), not "`Z4c_CalcRHS` reading stale scalar-field
+  RHS data" as this note assumed. `Z4c_CalcRHS` reads `sf.sphi`/`sf.vpi` directly (the
+  scalar's *state*, not its RHS), so it never actually needed a dependency on
+  `SF_CalcRHS` at all.
 
 ## What Phase 1 actually did
 

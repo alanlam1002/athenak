@@ -46,18 +46,20 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   if (!is_vacuum) tmunu = pmy_pack->ptmunu->tmunu;
 
   // Massive scalar-tensor (Damour-Esposito-Farese) back-reaction: Phase 2 (vacuum) +
-  // Phase 3 (fluid matter-trace T term in the K/Khat RHS below; still massless -- the
-  // mass-term piece is Phase 4). See src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md
-  // -- every coefficient below was cross-checked directly against
-  // ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (not just the condensed plan equations, which
-  // turned out to have a wrong coefficient for the Gamma-tilde^i term; see
-  // DEVELOPMENT_NOTES.md).
+  // Phase 3 (fluid matter-trace T term) + Phase 4 (mass term, treated fully explicitly --
+  // see PLAN.md's "Mass-term treatment" section for why no implicit solve is needed).
+  // See src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md -- every coefficient below was
+  // cross-checked directly against ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (not just the
+  // condensed plan equations, which turned out to have a wrong coefficient for the
+  // Gamma-tilde^i term; see DEVELOPMENT_NOTES.md).
   bool has_scalar = (pmy_pack->pscalarfield != nullptr);
   scalarfield::ScalarField::ScalarField_vars sf;
   Real sf_omega_c = 0.0;
+  Real sf_mass2 = 0.0;
   if (has_scalar) {
     sf = pmy_pack->pscalarfield->sf;
     sf_omega_c = pmy_pack->pscalarfield->opt.omega_c;
+    sf_mass2 = pmy_pack->pscalarfield->opt.mass2;
   }
 
   // ===================================================================================
@@ -549,14 +551,18 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
       Real sphipi = sphi_*pi_;
       Real sphi2 = SQR(sphi_);
       Real omega_sphi2 = 2.0/sf_omega_c - 1.5*sphi2;
+      // A(sphi) = exp(0.5*beta0*sphi^2), beta0=1 hardcoded (matches RescaleTmunu and
+      // every other Phase 2/3 coefficient's implicit beta0=1, see PLAN.md).
+      Real A_sphi = exp(0.5*sphi2);
 
       // Lapse gauge: (1+log) K-driver uses (Khat + 1.5*sphi*Pi) instead of bare Khat.
       dalpha_sf = -3.0*z4c.alpha(m,k,j,i)*sphipi;
 
       // Extra term feeding the Theta/Hamiltonian-like combination (bssn_st.f90's
-      // hamil_tmp scalar bracket).
+      // hamil_tmp scalar bracket), including the Phase 4 mass-term piece.
       dtheta_sf = -omega_sphi2*(SQR(pi_) + gradsphi2)
-                  - 2.*(-K*sphipi + sphi_*Ddsphi + gradsphi2*(1. + sphi2));
+                  - 2.*(-K*sphipi + sphi_*Ddsphi + gradsphi2*(1. + sphi2))
+                  - 2.0*(sf_mass2/sf_omega_c)*sphi2*A_sphi;
 
       // Matter trace T = -E + gamma^ij*S_ij (bssn_st.f90's ttrace = -tnn + g^ij*t_ij;
       // S here is the *same* physical trace already computed above for the pre-existing
@@ -567,12 +573,14 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
         T_matter = -tmunu.E(m,k,j,i) + S;
       }
 
-      // Extra term feeding the K/Khat RHS (bssn_st.f90's fek scalar bracket; the mass-
-      // term piece is added in Phase 4).
+      // Extra term feeding the K/Khat RHS (bssn_st.f90's fek scalar bracket), including
+      // the Phase 4 mass-term piece. dk_sf is added to rhs.vKhat as alpha*dk_sf below, so
+      // the alpha factor on the mass terms in PLAN.md's dt(K) equation is divided out here.
       dk_sf = omega_sphi2*SQR(pi_)
               + sphi_*Ddsphi - K*sphipi + gradsphi2*(1. + sphi2)
               + 1.5*(SQR(pi_) - gradsphi2)
-              - 3.0*M_PI*sf_omega_c*sphi2*T_matter;
+              - 3.0*M_PI*sf_omega_c*sphi2*T_matter
+              - 1.5*sf_mass2*sphi2*A_sphi - (sf_mass2/sf_omega_c)*sphi2*A_sphi;
 
       // Extra (already physical-trace-free once strtr_sf is added back via g_dd) term
       // feeding the Aij RHS.

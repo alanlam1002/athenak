@@ -93,12 +93,14 @@ enum TaskName {
 
   // ScalarField (massive scalar-tensor gravity sector). Phase 3 adds SF_RescaleT
   // (rescales the fluid's Jordan-frame Tmunu by 1/A(sphi) before it enters any
-  // geometry equation); ImpRKUpdate still to be added in Phase 4, see
-  // src/scalar_field/DEVELOPMENT_NOTES.md.
+  // geometry equation); Phase 4 adds SF_SomBC (Yukawa Sommerfeld outer BC, mirroring
+  // Z4c_SomBC) and an explicit mass term in SF_CalcRHS -- no implicit solve, see
+  // src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md.
   SF_Recv,
   SF_CopyU,
   SF_RescaleT,
   SF_CalcRHS,
+  SF_SomBC,
   SF_ExplRK,
   SF_RestU,
   SF_SendU,

@@ -7,9 +7,11 @@
 //! \brief functions that control scalar-field tasks in the NumericalRelativity task list
 //!
 //! Task graph (start -> run -> end): InitRecv -> CopyU -> RescaleTmunu -> CalcRHS ->
-//! ExpRKUpdate -> RestrictU -> SendU -> RecvU -> ApplyPhysicalBCs -> Prolongate ->
-//! ClearSend -> ClearRecv. RescaleTmunu (Phase 3) rescales the fluid's Tmunu by
-//! 1/A(sphi); ImpRKUpdate is still planned for Phase 4, see DEVELOPMENT_NOTES.md.
+//! SomBC -> ExpRKUpdate -> RestrictU -> SendU -> RecvU -> ApplyPhysicalBCs -> Prolongate
+//! -> ClearSend -> ClearRecv. RescaleTmunu (Phase 3) rescales the fluid's Tmunu by
+//! 1/A(sphi); SomBC (Phase 4) applies the Yukawa Sommerfeld outer BC. The mass term
+//! itself is explicit (added directly in CalcRHS, see scalar_field_calcrhs.cpp) -- no
+//! implicit/IMEX update was needed, see PLAN.md's "Mass-term treatment" section.
 
 #include <string>
 
@@ -59,12 +61,16 @@ void ScalarField::QueueScalarFieldTasks() {
                      Task_Run, {SF_CopyU, SF_RescaleT});
       break;
   }
+  // Yukawa Sommerfeld outer BC (Phase 4): overwrites rhs.sphi/rhs.vpi at outflow-type
+  // faces, mirroring Z4c_SomBC's placement between CalcRHS and ExplRK exactly.
+  pnr->QueueTask(&ScalarField::ScalarFieldBoundaryRHS, this, SF_SomBC, "SF_SomBC",
+                 Task_Run, {SF_CalcRHS});
   // SF_ExplRK must not overwrite the scalar field's u0 before Z4c_CalcRHS has read it
   // (Phase 2 back-reaction reads sf.sphi/sf.vpi directly) -- both sectors are RK-evolved
   // and this is not the "recompute fresh each stage" case MHD_SetTmunu is, so ordinary
   // task-order luck is not enough; see DEVELOPMENT_NOTES.md for the full reasoning.
   pnr->QueueTask(&ScalarField::ExpRKUpdate, this, SF_ExplRK, "SF_ExplRK",
-                 Task_Run, {SF_CalcRHS}, {Z4c_CalcRHS});
+                 Task_Run, {SF_SomBC}, {Z4c_CalcRHS});
   pnr->QueueTask(&ScalarField::RestrictU, this, SF_RestU, "SF_RestU",
                  Task_Run, {SF_ExplRK});
   pnr->QueueTask(&ScalarField::SendU, this, SF_SendU, "SF_SendU",
@@ -219,11 +225,14 @@ TaskStatus ScalarField::Prolongate(Driver *pdrive, int stage) {
 //! \fn  TaskStatus ScalarField::ApplyPhysicalBCs
 //! \brief
 //!
-//! Phase 0: there is no dedicated ScalarField boundary-value formula yet (Phase 4 will
-//! add a Yukawa-falloff Sommerfeld condition for the massive field, see
-//! DEVELOPMENT_NOTES.md). Ghost zones are filled by inter-MeshBlock communication above;
-//! only the generic user-BC hook runs here, matching the convention used by every other
-//! physics module (Z4c, MHD, ...).
+//! No dedicated ScalarField boundary-value formula lives here -- the Phase 4
+//! Yukawa-falloff Sommerfeld condition for the massive field ended up as its own task,
+//! SF_SomBC (ScalarFieldBoundaryRHS, in scalar_field_Sbc.cpp), queued right after
+//! CalcRHS, mirroring where Z4c_SomBC sits relative to Z4c_CalcRHS -- not here, since
+//! this task runs after boundary communication/RK-update, too late to affect the RHS
+//! the way a Sommerfeld condition needs to. Ghost zones are filled by inter-MeshBlock
+//! communication above; only the generic user-BC hook runs here, matching the
+//! convention used by every other physics module (Z4c, MHD, ...).
 
 TaskStatus ScalarField::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   if (!(pmy_pack->pmesh->strictly_periodic)) {

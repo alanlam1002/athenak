@@ -9,10 +9,14 @@
 //! \brief definitions for ScalarField class: the massive scalar-tensor (Damour-Esposito-
 //! Farese-type) scalar-field sector, coupled to the Z4c/ADM spacetime sector.
 //!
-//! Through Phase 3: the scalar's own Klein-Gordon RHS, its back-reaction on the Z4c
-//! equations, and coupling to the dyn_grmhd fluid (via RescaleTmunu and matter-trace
-//! terms) are all implemented; the mass term and its implicit solver are still Phase 4.
-//! See src/scalar_field/DEVELOPMENT_NOTES.md for the full phased rollout plan and status.
+//! Through Phase 4: the scalar's own Klein-Gordon RHS, its back-reaction on the Z4c
+//! equations, coupling to the dyn_grmhd fluid (via RescaleTmunu and matter-trace terms),
+//! the mass term, and a Yukawa Sommerfeld outer BC are all implemented -- the mass term
+//! is fully explicit (no implicit/IMEX solve; AthenaK's global, non-subcycled timestep
+//! makes SACRA's implicit treatment unnecessary here, see PLAN.md). Still open:
+//! self-consistent scalarized-star initial data (needed to physics-validate Phase 3/4
+//! against SACRA) and scalar-awareness in Z4c::ADMConstraints. See
+//! src/scalar_field/DEVELOPMENT_NOTES.md for the full phased rollout plan and status.
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -61,8 +65,7 @@ class ScalarField {
     Real mass2;            // scalar mass squared (SACRA pmass2); 0 = massless
     Real sphi0;            // asymptotic value of the scalar field at infinity
     Real diss;             // Kreiss-Oliger dissipation amplitude
-    Real newton_tol;       // Phase 4: implicit mass-term Newton solve tolerance
-    int  newton_maxiter;   // Phase 4: implicit mass-term Newton solve max iterations
+    bool user_Sbc;          // apply the Yukawa Sommerfeld BC on "user"-flagged faces too
   };
   Options opt;
   Real diss;   // dissipation parameter, scaled as in z4c.cpp
@@ -83,6 +86,7 @@ class ScalarField {
   TaskStatus ApplyPhysicalBCs(Driver *d, int stage);
   TaskStatus ExpRKUpdate(Driver *d, int stage);
   TaskStatus RescaleTmunu(Driver *d, int stage);
+  TaskStatus ScalarFieldBoundaryRHS(Driver *d, int stage);
 
   template <int NGHOST>
   TaskStatus CalcRHS(Driver *d, int stage);

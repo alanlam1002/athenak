@@ -1,6 +1,8 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phase 3 (fluid coupling code) complete; scalarized-star initial data NOT built.**
+Status: **Phase 4 (explicit mass term + Yukawa Sommerfeld BC) complete; scalarized-star
+initial data still NOT built, so neither Phase 3's nor Phase 4's physics is validated
+against SACRA yet -- see "Next step" below.**
 This directory implements a massive
 scalar-tensor (Damour-Esposito-Farese-type) gravity sector for AthenaK, ported from
 `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and cross-checked against arXiv:2406.05211 ("Binary
@@ -23,8 +25,10 @@ absent, and provably non-back-reacting even when present.
 New files (`src/scalar_field/`):
 - `scalar_field.hpp/.cpp` -- class definition + constructor. 2-variable state
   `{I_SF_SPHI, I_SF_PI}`, own `u0/u1/u_rhs/coarse_u0` arrays, `Options` struct parsed from
-  a new `<scalarfield>` input block (`omega_c`, `beta0`, `mass2`, `sphi0`, `diss`,
-  `newton_tol`, `newton_maxiter` -- the last two unused until Phase 4).
+  a new `<scalarfield>` input block (`omega_c`, `beta0`, `mass2`, `sphi0`, `diss`). Phase 4
+  adds `user_Sbc`; the `newton_tol`/`newton_maxiter` fields that used to live here
+  (anticipating an implicit mass-term solve) were removed in Phase 4 once that plan
+  changed to a fully explicit treatment -- see "What Phase 4 actually did" below.
 - `scalar_field_calcrhs.cpp` -- `CalcRHS<NGHOST>`, currently a no-op (RHS = 0).
 - `scalar_field_update.cpp` -- `ExpRKUpdate`, a byte-for-byte copy of `z4c_update.cpp`'s
   generic weighted-average RK update with `nvar = nscalarfield`.
@@ -79,9 +83,10 @@ absent from the input file):
   `user_bcs_func` sets. This is fine for Phase 0/1 (periodic or reflecting test domains);
   Phase 4 is where the Yukawa-falloff Sommerfeld condition gets added (see the plan file).
 - **No `SF_Newdt` task**: the scalar field's own characteristic speed is the speed of
-  light, already reflected in Z4c's existing CFL-based timestep; no separate timestep
-  constraint is needed until Phase 4's stiff mass term requires one (handled through the
-  IMEX machinery instead, not a CFL limiter).
+  light, already reflected in Z4c's existing CFL-based timestep. (Originally this bullet
+  anticipated Phase 4's mass term needing a separate stiff-source timestep/IMEX
+  treatment; that plan changed -- see "What Phase 4 actually did" below -- the mass term
+  is explicit and needs no separate timestep constraint either.)
 - **No `z4c_tasks.cpp` dependency wiring yet (partly superseded, see below)**:
   `Z4c_CalcRHS`'s optional-dependency list was untouched at Phase 0. What actually
   happened later was *not* exactly what this note predicted: `SF_RescaleT` was indeed
@@ -305,7 +310,17 @@ time -- see Phase 2's `sed`-pitfall note) `<scalarfield>` block:
   across 4 nodes), 30 cycles: byte-identical across all 32 `.tab` dumps and all 3 `.hst`
   history files (submitted via `/sakura/ptmp/tlam/athenak_run/test_stt`, following this
   account's existing MPCDF module conventions: `intel/2025.3 + impi/2021.17 + gcc/13 +
-  gsl/2.4`, matching `~/athenak_cfc`'s established build). Confirms the new task
+  gsl/2.4`, matching `~/athenak_cfc`'s established build). **Correction found in Phase 4**:
+  the diff script used here (`diff -rq dirA dirB`) compared directories whose files are
+  named with different `basename`s (`tov_z4c_mpi_noscalar.*` vs `tov_z4c_mpi_withscalar.*`)
+  -- `diff -rq` never matches mismatched filenames, so it printed a full "Only in ..."
+  listing for *every* file regardless of content and never actually performed a byte
+  comparison. The "byte-identical" conclusion above happened to still be true (reverified
+  in Phase 4 with a corrected script that matches files by their common cycle-number
+  suffix, see below), but this specific run's log did not actually prove it at the time.
+  **Lesson: when comparing two runs with different `basename`s, diff matching pairs of
+  files explicitly (e.g. by stripping/renaming the differing prefix) -- never
+  `diff -rq` two directories whose filenames aren't identical.** Confirms the new task
   (`SF_RescaleT`) and its dependency wiring behave correctly under real MPI domain
   decomposition and ghost-zone exchange too, not just the single-block case Phase 0-2
   were checked under.
@@ -324,19 +339,106 @@ numerical-methods task, deliberately not attempted in this pass to avoid rushing
 this is built** -- what's validated so far is "the new code doesn't break existing GRMHD
 physics," not "the new code correctly reproduces scalarized stars."
 
-## Next step: Phase 3 initial data, then Phase 4
+## What Phase 4 actually did
 
-Two options going forward, either of which unblocks genuine physics validation:
+Added the mass term, fully **explicitly** -- no Newton solve, no IMEX, no new
+`impl_src`-style array, contrary to this module's original plan (see PLAN.md's
+"Mass-term treatment" section for the full reasoning): AthenaK uses one global timestep
+across all refinement levels, set by the finest level's CFL condition -- unlike SACRA's
+per-level-subcycled timestepping, which is what actually forces SACRA's implicit
+treatment. At AthenaK's timestep this makes the mass term no stiffer than every other
+explicit RHS term, so it's just added alongside them. Three pieces:
+
+- **Mass term in the scalar's own RHS** (`scalar_field_calcrhs.cpp`'s Pi-RHS):
+  `+ mass2*alpha*sphi*A(sphi)`, `A(sphi) = exp(0.5*sphi^2)` (beta0=1 hardcoded, matching
+  every other Phase 2/3 coefficient's implicit beta0=1).
+- **Mass term in the Z4c-side RHS** (`z4c_calcrhs.cpp`): an extra
+  `-2*(mass2/omega_c)*sphi^2*A(sphi)` piece in the Theta/Hamiltonian-like combination
+  (`dtheta_sf`), and an extra `-1.5*mass2*sphi^2*A(sphi) - (mass2/omega_c)*sphi^2*A(sphi)`
+  piece in the K/Khat RHS (`dk_sf`) -- both exactly as given in PLAN.md's physics
+  equations, both identically zero when `mass2=0` (regression-safe by construction: adding
+  `0.0` to an existing sum cannot change any bit of the result).
+- **Yukawa Sommerfeld outer BC** (new `scalar_field_Sbc.cpp`, new task `SF_SomBC`,
+  queued between `SF_CalcRHS` and `SF_ExplRK` exactly mirroring `Z4c_SomBC`'s placement
+  between `Z4c_CalcRHS` and `Z4c_ExplRK`): overwrites `rhs.sphi`/`rhs.vpi` at
+  outflow/diode/vacuum/user-flagged faces with
+  `rhs = -(f-f_inf)/r - m*(f-f_inf) - s^i*di(f-f_inf)`, `m = sqrt(mass2)`, `f_inf = sphi0`
+  for `sphi` and `f_inf = 0` for `Pi` (a static/quasi-static configuration has
+  `dt(sphi)->0` at infinity). Reduces exactly to `Z4c`'s own massless Sommerfeld form
+  when `mass2=0` (`f_inf` is a constant, so `di(f_inf)=0` always). Cross-checked against
+  `~/SACRA_2D/SACRA_MPI/boundary.f90`'s own outer-boundary treatment: it extrapolates
+  toward `asym` (`sphi00` for sphi, `0` for Pi) with exponential rate `exp_drop = pmass`
+  (i.e. `m`, not `m^2`) for *both* components -- the same `(f_inf, m)` pairing used here,
+  even though SACRA implements it via buffer-zone extrapolation rather than an
+  RHS-replacement ODE (AthenaK's own existing `Z4c_SomBC` convention, used here for
+  consistency with this codebase rather than copying SACRA's mechanism literally).
+  Added a new `Options::user_Sbc` flag (mirrors `z4c::Options::user_Sbc`) to let this BC
+  also apply on `user`-flagged faces, same convention as Z4c.
+- Removed the now-unused `Options::newton_tol`/`newton_maxiter` fields (added in Phase 0
+  in anticipation of a Newton solve that never got built) rather than leaving them as
+  dead/misleading options.
+
+### Validation
+
+- **Compiles clean**: both a custom-pgen MPI build (`-DPROBLEM=dyn_grmhd/dyngr_tov`) and
+  the default `built_in_pgens` serial build (which is what `scalar_field_linear_wave`
+  actually needs -- see the pitfall below) succeed with no warnings from the new code.
+- **`mass2=0` regression, quantitative**: reran Phase 1's `scalar_field_linear_wave` test
+  (`nx=64`, same input file, unchanged) against the Phase 4 code. RMS-L1 error:
+  `4.665155e-13` -- an *exact* match, digit-for-digit, to the RMS-L1 value recorded when
+  Phase 1 was first validated. Proves the new (structurally zero) mass-term code paths
+  and the new `SF_SomBC` task (a no-op here: this test uses periodic BCs, so it never
+  engages) perturb nothing.
+- **TOV MPI byte-identical regression, corrected methodology**: reran the Phase 3 TOV
+  `noscalar`/`withscalar` (`mass2=0`) comparison against the Phase 4 code, this time with
+  a per-file diff that matches files by their common cycle-number suffix instead of
+  `diff -rq` (see the Phase 3 "Correction found in Phase 4" note above for why the
+  original script couldn't have actually caught a regression). Genuinely byte-identical:
+  all 32 `.tab` dumps, all 3 `.hst` files. This TOV input uses `diode` outer BCs, so
+  `SF_SomBC` *does* engage here (unlike the linear-wave test) -- and still produces
+  exactly zero RHS contribution, because `sphi`/`Pi` are bit-exactly zero everywhere in
+  this run (no scalarized initial data yet, see the open gap above), so
+  `f - f_inf = 0 - 0 = 0` at every boundary point.
+- **Massive-field stability sanity check** (not a quantitative Yukawa-falloff
+  validation): `scalar_field_linear_wave`'s flat background with `mass2=100` (vs. the
+  decoupling-limit test's `mass2=0`) runs stably to the same `tlim`, no NaN/blowup. Its
+  built-in error diagnostic reports a larger RMS-L1 (`1.35e-7` vs `4.67e-13`) -- expected
+  and *not* a bug: that diagnostic compares against the *massless* plane-wave analytic
+  solution, which is the wrong dispersion relation once `mass2>0`. A real quantitative
+  check of the Yukawa `exp(-m*r)/r` falloff needs an actual asymptotically-flat,
+  spherically-symmetric massive-scalar-star setup -- not available until scalarized
+  initial data exists (see the open gap above), so this remains **not yet done**.
+- **Build pitfall found while testing**: `scalar_field_linear_wave` is a *built-in* pgen
+  (dispatched at runtime by its `pgen_name` string in `pgen.cpp`, and already
+  unconditionally compiled via `src/CMakeLists.txt`'s source list) -- it does **not**
+  define `ProblemGenerator::UserProblem`. Building it with a custom
+  `-DPROBLEM=tests/scalar_field_linear_wave` flag (as opposed to the default
+  `PROBLEM=built_in_pgens`) sets `USER_PROBLEM_ENABLED`, which makes `pgen.cpp` call a
+  `UserProblem()` this file never defines -- a link error
+  (`undefined reference to ProblemGenerator::UserProblem`), not a code bug. The custom
+  `-DPROBLEM=` flag is only for standalone pgens that *do* define `UserProblem` (like
+  `dyngr_tov.cpp`). Build `scalar_field_linear_wave` (and any other `pgen/tests/*.cpp`
+  pgen dispatched by `pgen_name`) with the default `PROBLEM=built_in_pgens` instead.
+
+## Next step: scalarized initial data, then quantitative Phase 4 validation
+
+Phase 4's code (explicit mass term, Yukawa Sommerfeld BC) is done and structurally
+verified (regression + stability), but -- same as Phase 3 -- not yet *physics*-validated
+against SACRA, because that requires a genuinely nonzero, constraint-satisfying `sphi`,
+which still doesn't exist in this repo. The remaining open items, in the order they
+naturally unblock each other:
 1. Build the scalarized-TOV shooting solve in-repo (extend `src/utils/tov/tov.cpp` +
    `dyngr_tov.cpp`), compare central `sphi` and radial profile against SACRA's
    single-star output, check static equilibrium (no secular drift) and constraint
-   convergence with matter. This is the PLAN.md Phase 3 verification step, still open.
-2. Or proceed to Phase 4 (`ImpRKUpdate` Newton solve for the mass term, Yukawa BC,
-   `imex2/imex2+/imex3`) using the existing decoupling-limit and vacuum-back-reaction
-   tests, and return to scalarized initial data once both scalar-sector pieces
-   (matter coupling, mass term) are complete, testing them together.
-Either way, the `Z4c::ADMConstraints` scalar-awareness gap above should be closed
-before relying on constraint convergence as a verification method.
+   convergence with matter. This is the PLAN.md Phase 3 verification step, still open,
+   and now also unblocks Phase 4's own missing check (below).
+2. Extend that same solver to a massive scalarized star (`mass2>0`), and verify the
+   `exp(-m*r)/r` far-field falloff over several e-foldings against SACRA's `pmass2>0`
+   single-star output -- this is Phase 4's still-missing quantitative verification step
+   (the mass-term *code* is done, but the physics it implements has only been sanity-
+   checked for stability, not validated).
+3. Close the `Z4c::ADMConstraints` scalar-awareness gap above before relying on
+   constraint convergence as a verification method for either of the above.
 
 ## Sample input block
 
@@ -347,5 +449,6 @@ beta0     = 1.0
 mass2     = 0.0
 sphi0     = 0.0
 diss      = 0.0
+user_Sbc  = false   # Phase 4: also apply the Yukawa Sommerfeld BC on "user"-flagged faces
 ```
 Requires a `<z4c>` block also be present.

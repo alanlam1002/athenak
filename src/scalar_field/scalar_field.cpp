@@ -56,8 +56,7 @@ ScalarField::ScalarField(MeshBlockPack *ppack, ParameterInput *pin) :
     opt.mass2   = pin->GetOrAddReal("scalarfield", "mass2", 0.0);
     opt.sphi0   = pin->GetOrAddReal("scalarfield", "sphi0", 0.0);
     opt.diss    = pin->GetOrAddReal("scalarfield", "diss", 0.0);
-    opt.newton_tol     = pin->GetOrAddReal("scalarfield", "newton_tol", 1.0e-10);
-    opt.newton_maxiter = pin->GetOrAddInteger("scalarfield", "newton_maxiter", 20);
+    opt.user_Sbc = pin->GetOrAddBoolean("scalarfield", "user_Sbc", false);
 
     diss = opt.diss*pow(2., -2.*indcs.ng)*(indcs.ng % 2 == 0 ? -1. : 1.);
     Kokkos::Profiling::popRegion();

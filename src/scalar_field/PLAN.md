@@ -82,8 +82,11 @@ for optional physics.
 data container like `Tmunu`):
 - `scalar_field.hpp/.cpp` -- 2-variable state `{I_SF_SPHI, I_SF_PI}`, own
   `DvceArray5D<Real> u0,u1,u_rhs,coarse_u0`, `Options{omega_c, beta0, mass2, sphi0, diss,
-  newton_tol, newton_maxiter}` parsed from a new `<scalarfield>` input block via
-  `pin->GetOrAddReal`, mirroring `z4c.cpp`'s constructor idiom.
+  user_Sbc}` parsed from a new `<scalarfield>` input block via `pin->GetOrAddReal`,
+  mirroring `z4c.cpp`'s constructor idiom. (No `newton_tol`/`newton_maxiter`: the mass
+  term is explicit, no Newton solve -- see "Mass-term treatment" below. These two fields
+  existed in Phases 0-3 in anticipation of one and were removed in Phase 4 once that
+  plan changed, rather than left as dead options.)
 - `scalar_field_calcrhs.cpp` -- the scalar's own `dt(phi)/dt(Pi)` RHS.
 - `scalar_field_update.cpp` -- generic RK update, literally `z4c_update.cpp` with
   `nvar = nscalarfield`.
@@ -93,8 +96,8 @@ data container like `Tmunu`):
   `strtr`, `momsca_i`, the covariant Hessian, etc., called from **both**
   `scalar_field_calcrhs.cpp` and the new edits inside `z4c_calcrhs.cpp`, to avoid
   duplicating the tensor algebra.
-- `scalar_field_imex.cpp` (Phase 4) -- Newton-solve implicit mass-term update.
-- `scalar_field_Sbc.cpp` (Phase 4) -- Yukawa outer boundary condition.
+- `scalar_field_Sbc.cpp` (Phase 4) -- Yukawa outer boundary condition. (No
+  `scalar_field_imex.cpp`: the mass term is explicit, see "Mass-term treatment" below.)
 
 Convention to follow for derivatives: mirror `z4c_calcrhs.cpp`'s established idiom of
 working in **conformal** variables (`z4c.g_dd`, `chi`) plus `oopsi4` rather than
@@ -139,21 +142,35 @@ This is non-invasive (zero edits to `dyn_grmhd.cpp`), trivially skipped when
 `<scalarfield>` is absent, and keeps the "only fluid T_munu gets rescaled, scalar's own
 stress never does" invariant automatically satisfied.
 
-## Implicit mass-term treatment (deferred to Phase 4)
+## Mass-term treatment: explicit, not implicit (revised -- see below)
 
-SACRA's mass term is **not** naively explicit: it does a per-gridpoint Newton iteration
-each RK substage (`bssn_st.f90:2096-2312`, tol `1e-10`) because `A(phi)=exp(beta0*phi^2/2)`
-is transcendental, so no closed-form implicit solve exists (unlike AthenaK's only existing
-stiff-source precedent, `src/ion-neutral/ion-neutral_tasks.cpp`, whose drag term is
-analytically invertible). Recommendation: **require `mass2=0` through Phases 1-3**, and
-only in Phase 4 add IMEX support (`imex2`/`imex2+`/`imex3`, already implemented
-generically in `src/driver/driver.cpp`) plus a `ScalarField::ImpRKUpdate` task doing a
-capped (~20 iteration), tolerance-based Newton solve for `(phi,Pi)`, mirroring
-`ion-neutral_tasks.cpp`'s control flow (cache explicit RHS, solve implicit piece, cache
-`R(U^n)` for later stages). Give `ScalarField` its **own** `impl_src_sf` array rather than
-reusing/resizing `Driver::impl_src` (currently hardcoded to 8 slots and gated only on
-ion-neutral, and ion-neutral/z4c are mutually exclusive today) -- avoids touching `Driver`
-at all.
+**Original plan (superseded before Phase 4 implementation, never built)**: SACRA does the
+mass term via a per-gridpoint Newton iteration each RK substage (`bssn_st.f90:2096-2312`,
+tol `1e-10`), because `A(phi)=exp(beta0*phi^2/2)` is transcendental. The original version
+of this plan proposed mirroring that with a `ScalarField::ImpRKUpdate` Newton solve plus
+IMEX integrator support (`imex2`/`imex2+`/`imex3`), analogous to
+`src/ion-neutral/ion-neutral_tasks.cpp`'s stiff drag-term handling.
+
+**Revised decision**: treat the mass term fully explicitly, the same way every other RHS
+term in this module (and in `z4c_calcrhs.cpp` generally) is handled -- no Newton solve, no
+IMEX, no new `impl_src` array, no `scalar_field_imex.cpp` file. Reasoning: SACRA's need for
+an implicit solve is a consequence of *SACRA's* time-stepping architecture (AMR with
+per-level subcycled timesteps, where coarse levels can take a `dt` large enough for `m^2`
+to be numerically stiff relative to it). AthenaK does not subcycle: every refinement level
+advances with the **same** global `dt`, set by the finest level's CFL condition. That `dt`
+is already far smaller than any coarse-level `dt` SACRA might use, and is set by the light-
+crossing time of the finest cell -- for any mass in the physically relevant range (Compton
+wavelength resolved by the grid, i.e. `m^2` not enormous compared to the grid's own
+curvature scales), this keeps `m*dt << 1` automatically, so the mass term is not actually
+stiff at AthenaK's resolution/timestep regime and explicit RK4 handles it exactly like
+every other term. This removes an entire implementation axis (Phase 4 no longer needs new
+integrators, a Newton solve, or a new source-splitting array) -- the mass term is just two
+or three more explicit additions to existing RHS kernels (`scalar_field_calcrhs.cpp`'s
+Pi-RHS, `z4c_calcrhs.cpp`'s Theta- and K-RHS), guarded by the same `has_scalar`/`mass2 !=
+0` pattern as everything else. If a future run ever needs `m` large enough that this
+assumption breaks (observed as instability/NaN scaling with `mass2` at fixed resolution
+rather than a genuine physical effect), revisit with a real stiffness analysis before
+reaching for an implicit scheme.
 
 ## Task-list wiring (required correctness fix, not optional)
 
@@ -203,7 +220,7 @@ existing z4c pgens).
 | 1 -- decoupling-limit sanity | Massless (`mass2=0`), scalar's own RHS only, **no** back-reaction on geometry (`z4c_calcrhs.cpp` edits not yet enabled) | New pgen modeled on `src/pgen/tests/z4c_linear_wave.cpp`; check `phi` propagates at light speed, `Pi = -dt(phi)/alpha` to machine precision, convergence order matches scheme order | **Done** -- `scalar_field_linear_wave` pgen; measured convergence order 4.52 (n=16->32), 3.54 (n=32->64), matching the nominal 4th-order scheme. Also fixed a real bug: `ScalarField` was missing from `Driver::InitBoundaryValuesAndPrimitives` (per-module opt-in initial ghost-zone fill), see DEVELOPMENT_NOTES.md |
 | 2 -- full DEF coupling, vacuum | Enable `z4c_calcrhs.cpp` extra terms + modified lapse gauge, no fluid | `sphi==0` exact recovery (see note below on why this replaces the plan's original `beta0->0` idea); stable, sensible-magnitude evolution with nonzero coupling; full `Z4c::ADMConstraints` convergence deferred | **Done** (back-reaction terms + task-race fix); constraint-convergence diagnostic extension deferred, see DEVELOPMENT_NOTES.md |
 | 3 -- coupling to `dyn_grmhd` fluid | `RescaleTmunu` task + matter-trace terms (`T`) in both scalar and Z4c RHS | Regression: real (nonzero) fluid stress-energy + `sphi==0` exact recovery, at production resolution with real MPI decomposition. Scalarized-TOV shooting solve + quantitative SACRA comparison deferred (see note below) | **Done** (code); regression verified, self-consistent scalarized-star ID **not built** -- see DEVELOPMENT_NOTES.md |
-| 4 -- massive field + implicit solver | `ImpRKUpdate` Newton solve, Yukawa BC, require `imex2/imex2+/imex3` | Static massive scalar star: verify `exp(-m*r)/r` far-field falloff over several e-foldings; Newton solve converges in a few iterations; compare against SACRA `pmass2>0` single-star run | Not started |
+| 4 -- massive field (explicit) | Explicit mass-term additions to `scalar_field_calcrhs.cpp` (Pi-RHS) and `z4c_calcrhs.cpp` (Theta-, K-RHS), no new integrator; Yukawa Sommerfeld outer BC | Static massive scalar star: verify `exp(-m*r)/r` far-field falloff over several e-foldings; `mass2=0` exactly recovers Phase 2/3 output (regression); compare against SACRA `pmass2>0` single-star run once scalarized ID exists | **Done** (code); `mass2=0` regression verified quantitatively (RMS-L1 error at nx=64 exactly matches Phase 1's recorded value, `4.665155e-13`) and the TOV MPI byte-identical check (regression, corrected diff methodology) both pass; `mass2=100` flat-background sanity run is stable (no NaN). Quantitative `exp(-m*r)/r` falloff validation **not done** -- needs the same scalarized-star initial data Phase 3 is waiting on, see DEVELOPMENT_NOTES.md |
 | 5 -- full BNS merger validation | Integration/perf tuning only, no new files expected | Reproduce arXiv:2406.05211 diagnostics (scalar-charge growth, GW dephasing, post-merger remnant scalarization) against SACRA_MPI outputs for matched binary parameters | Not started |
 
 **Open decision, still not resolved**: scalarized-star initial data. SACRA currently
@@ -246,28 +263,36 @@ DEVELOPMENT_NOTES.md).
 ## Critical files
 
 - New: `src/scalar_field/{scalar_field.hpp,.cpp, scalar_field_calcrhs.cpp,
-  scalar_field_update.cpp, scalar_field_tasks.cpp}` -- done (Phase 0-3);
-  `scalar_field_geom.hpp` -- **deliberately not created**: Phase 2's covariant-Hessian
-  construction duplicates ~10 lines already present in `scalar_field_calcrhs.cpp`
-  (Phase 1) rather than factoring it into a shared header, matching the codebase's own
-  existing style (Z4c's `Ddalpha_dd` construction isn't factored out either, despite
-  `Rphi_dd` needing an analogous chi-correction). Revisit if a third call site appears.
-  `scalar_field_imex.cpp, scalar_field_Sbc.cpp` -- not yet created (Phase 4)
+  scalar_field_update.cpp, scalar_field_tasks.cpp, scalar_field_Sbc.cpp}` -- done
+  (Phase 0-4). `scalar_field_geom.hpp` -- **deliberately not created**: Phase 2's
+  covariant-Hessian construction duplicates ~10 lines already present in
+  `scalar_field_calcrhs.cpp` (Phase 1) rather than factoring it into a shared header,
+  matching the codebase's own existing style (Z4c's `Ddalpha_dd` construction isn't
+  factored out either, despite `Rphi_dd` needing an analogous chi-correction). Revisit if
+  a third call site appears. No `scalar_field_imex.cpp`: mass term is explicit, see
+  "Mass-term treatment" section above.
 - New: `src/pgen/tests/scalar_field_linear_wave.cpp` -- done (Phase 1 validation pgen)
 - Edit: `src/z4c/z4c_calcrhs.cpp` (guarded scalar-source insertions, 5 spots: lapse,
-  Theta, K/Khat, Aij, Gamma-tilde, plus Phase 3's matter-trace `T` term in K/Khat) --
-  **done (Phase 2-3)**. Every coefficient was cross-checked directly against
-  `bssn_st.f90` line-by-line, not just the condensed plan equations above -- the plan's
-  `Gamma-tilde^i` RHS coefficient (`-8*pi*gamma^ij*momsca_j`) turned out to be wrong; the
-  correct term (verified against the source) is `-2*alpha*g_tilde^ij*momsca_j` using the
-  *conformal* inverse metric, matching how the pre-existing matter term in the same RHS
-  is structured. See DEVELOPMENT_NOTES.md.
+  Theta, K/Khat, Aij, Gamma-tilde, plus Phase 3's matter-trace `T` term and Phase 4's
+  mass term, both in Theta/K/Khat) -- **done (Phase 2-4)**. Every coefficient was
+  cross-checked directly against `bssn_st.f90` line-by-line, not just the condensed plan
+  equations above -- the plan's `Gamma-tilde^i` RHS coefficient
+  (`-8*pi*gamma^ij*momsca_j`) turned out to be wrong; the correct term (verified against
+  the source) is `-2*alpha*g_tilde^ij*momsca_j` using the *conformal* inverse metric,
+  matching how the pre-existing matter term in the same RHS is structured. See
+  DEVELOPMENT_NOTES.md.
 - Edit: `src/scalar_field/scalar_field_tasks.cpp` (`ScalarField::RescaleTmunu`, new
   `SF_RescaleT` task) -- **done (Phase 3)**: rescales the fluid's Jordan-frame `Tmunu`
   (`E`, `S_d`, `S_dd`) by `1/A(sphi)` in place, matching SACRA's `tabfac` factor, before
-  anything reads it as a geometry-equation source.
+  anything reads it as a geometry-equation source. Phase 4 additionally queues the new
+  `SF_SomBC` task (`ScalarField::ScalarFieldBoundaryRHS`, in the new
+  `scalar_field_Sbc.cpp`) between `SF_CalcRHS` and `SF_ExplRK`, and changes `SF_ExplRK`'s
+  required dependency from `SF_CalcRHS` to `SF_SomBC` -- mirroring `Z4c_SomBC`'s
+  placement between `Z4c_CalcRHS` and `Z4c_ExplRK` exactly.
 - Edit: `src/tasklist/numerical_relativity.{hpp,cpp}` (task enum + dispatch + queueing) --
-  done for Phase 0's task set; `SF_RescaleT` added to the enum in Phase 3
+  done for Phase 0's task set; `SF_RescaleT` added to the enum in Phase 3, `SF_SomBC` in
+  Phase 4 (position-based `NeedsPhysics` dispatch needs no further changes for either --
+  see the Phase 0 note above on why that classification is required, not automatic)
 - Edit: `src/z4c/z4c_tasks.cpp` / `src/scalar_field/scalar_field_tasks.cpp` (cross-module
   task-race fix: `Z4c_ExplRK` now optionally depends on `SF_CalcRHS`, and `SF_ExplRK` now
   optionally depends on `Z4c_CalcRHS`) -- **done (Phase 2)**, required once both sectors
@@ -276,7 +301,9 @@ DEVELOPMENT_NOTES.md).
   `Z4c_CalcRHS` optionally depend on `SF_RescaleT` (must read the *rescaled* Tmunu).
 - Edit: `src/mesh/meshblock_pack.{hpp,cpp}` (pointer, destructor, `AddPhysics` gating) --
   done
-- Edit: `src/CMakeLists.txt` (add new source groups) -- done
+- Edit: `src/CMakeLists.txt` (add new source groups) -- done (Phase 0);
+  `scalar_field_Sbc.cpp` added to the explicit `scalar_field/*.cpp` list in Phase 4 (this
+  list is NOT a glob, so every new file needs its own line -- easy to miss)
 - Edit: `src/parameter_input.cpp` (add `"scalarfield"` to the block-name allow-list) --
   done (found during Phase 0 smoke testing, not anticipated during planning)
 - Edit: `src/driver/driver.cpp` (`Driver::InitBoundaryValuesAndPrimitives` --

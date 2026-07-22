@@ -154,6 +154,7 @@ add_executable(
 
         scalar_field/scalar_field.cpp
         scalar_field/scalar_field_calcrhs.cpp
+        scalar_field/scalar_field_Sbc.cpp
         scalar_field/scalar_field_tasks.cpp
         scalar_field/scalar_field_update.cpp
 

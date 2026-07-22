@@ -6,20 +6,22 @@
 //! \file scalar_field_calcrhs.cpp
 //! \brief RHS for the scalar-field sector.
 //!
-//! The scalar's own massless Klein-Gordon-like RHS, reading the Z4c/ADM geometry and
-//! (Phase 3) the fluid's matter trace, but not writing back to the Z4c equations itself
-//! (that back-reaction lives in z4c/z4c_calcrhs.cpp, Phase 2/3). The continuum equations
-//! being discretized (see src/scalar_field/PLAN.md) are:
+//! The scalar's own (massive, Phase 4) Klein-Gordon-like RHS, reading the Z4c/ADM
+//! geometry and (Phase 3) the fluid's matter trace, but not writing back to the Z4c
+//! equations itself (that back-reaction lives in z4c/z4c_calcrhs.cpp, Phase 2-4). The
+//! continuum equations being discretized (see src/scalar_field/PLAN.md) are:
 //!
 //!   dt(sphi) = -alpha*Pi                                         (+ shift advection)
 //!   dt(Pi)   = alpha*(K+2*Theta)*Pi - alpha*D2(sphi)
 //!              - g^ij di(alpha) dj(sphi) - alpha*sphi*(|D(sphi)|^2 - Pi^2)
-//!              + 2*pi*alpha*omega_c*T*sphi
+//!              + 2*pi*alpha*omega_c*T*sphi + m^2*alpha*sphi*A(sphi)
 //!
 //! where D2/|D.|^2 are built from the *physical* 3-metric, and T is the fluid's matter
 //! trace (Einstein frame -- Tmunu has already been rescaled by 1/A(sphi) by
 //! ScalarField::RescaleTmunu by the time this runs, see scalar_field_tasks.cpp), zero in
-//! vacuum. The mass term (m^2*alpha*sphi*A(sphi)) is added in Phase 4.
+//! vacuum. The mass term (Phase 4) is fully explicit -- see PLAN.md's "Mass-term
+//! treatment" section for why AthenaK's global (non-subcycled) timestep makes this safe,
+//! unlike SACRA's implicit Newton-solve treatment of the same term.
 //!
 //! Derivative convention: mirrors z4c/z4c_calcrhs.cpp exactly -- all derivatives use the
 //! *conformal* metric (pz4c->z4c.g_dd) and its Christoffel symbols, with physical
@@ -60,6 +62,7 @@ TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
   auto &sf = pmy_pack->pscalarfield->sf;
   auto &rhs = pmy_pack->pscalarfield->rhs;
   Real omega_c = pmy_pack->pscalarfield->opt.omega_c;
+  Real mass2 = pmy_pack->pscalarfield->opt.mass2;
 
   bool is_vacuum = (pmy_pack->ptmunu == nullptr) ? true : false;
   Tmunu::Tmunu_vars tmunu;
@@ -200,11 +203,15 @@ TaskStatus ScalarField::CalcRHS(Driver *pdriver, int stage) {
     Real alpha = z4c.alpha(m,k,j,i);
     Real sphi_ = sf.sphi(m,k,j,i);
     Real pi_ = sf.vpi(m,k,j,i);
+    // A(sphi) = exp(0.5*beta0*sphi^2), beta0=1 hardcoded (matches RescaleTmunu and every
+    // other Phase 2/3 coefficient's implicit beta0=1, see PLAN.md).
+    Real A_sphi = exp(0.5*SQR(sphi_));
 
     rhs.sphi(m,k,j,i) = -alpha*pi_ + Lsphi;
     rhs.vpi(m,k,j,i) = alpha*K*pi_ - alpha*Ddsphi - dalpha_dsphi
                      - alpha*sphi_*(gradsphi2 - SQR(pi_))
-                     + 2.0*M_PI*alpha*omega_c*T_matter*sphi_ + Lpi;
+                     + 2.0*M_PI*alpha*omega_c*T_matter*sphi_
+                     + mass2*alpha*sphi_*A_sphi + Lpi;
   });
 
   // ===================================================================================

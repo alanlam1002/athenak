@@ -59,8 +59,11 @@ void Z4c::QueueZ4cTasks() {
   }
   pnr->QueueTask(&Z4c::Z4cBoundaryRHS, this, Z4c_SomBC, "Z4c_SomBC", Task_Run,
                  {Z4c_CalcRHS});
+  // Z4c_ExplRK must not overwrite Z4c's u0 before SF_CalcRHS has read it (Phase 2
+  // back-reaction reads z4c.g_dd/alpha/chi/vKhat/vTheta/beta_u directly) -- see the
+  // matching comment in scalar_field_tasks.cpp's SF_ExplRK queueing.
   pnr->QueueTask(&Z4c::ExpRKUpdate, this, Z4c_ExplRK, "Z4c_ExplRK", Task_Run,
-                 {Z4c_SomBC},{MHD_EField});
+                 {Z4c_SomBC},{MHD_EField, SF_CalcRHS});
   if (pmy_pack->pz4c->opt.floor_chi) {
     pnr->QueueTask(&Z4c::Z4cFloorChi, this, Z4c_ChiFloor, "Z4c_ChiFloor", Task_Run,
                    {Z4c_ExplRK});

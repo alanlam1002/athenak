@@ -19,6 +19,7 @@
 #include "z4c/z4c.hpp"
 #include "z4c/tmunu.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "scalar_field/scalar_field.hpp"
 
 namespace z4c {
 
@@ -43,6 +44,20 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   bool is_vacuum = (pmy_pack->ptmunu == nullptr) ? true : false;
   Tmunu::Tmunu_vars tmunu;
   if (!is_vacuum) tmunu = pmy_pack->ptmunu->tmunu;
+
+  // Massive scalar-tensor (Damour-Esposito-Farese) back-reaction (Phase 2, vacuum/
+  // massless: matter-trace and mass-term pieces are added in Phases 3/4). See
+  // src/scalar_field/PLAN.md and DEVELOPMENT_NOTES.md -- every coefficient below was
+  // cross-checked directly against ~/SACRA_2D/SACRA_MPI/bssn_st.f90 (not just the
+  // condensed plan equations, which turned out to have a wrong coefficient for the
+  // Gamma-tilde^i term; see DEVELOPMENT_NOTES.md).
+  bool has_scalar = (pmy_pack->pscalarfield != nullptr);
+  scalarfield::ScalarField::ScalarField_vars sf;
+  Real sf_omega_c = 0.0;
+  if (has_scalar) {
+    sf = pmy_pack->pscalarfield->sf;
+    sf_omega_c = pmy_pack->pscalarfield->opt.omega_c;
+  }
 
   // ===================================================================================
   // Main RHS calculation
@@ -478,6 +493,104 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     }
 
     // -----------------------------------------------------------------------------------
+    // Scalar-tensor back-reaction source terms (Phase 2). All quantities below are
+    // built from the *physical* 3-metric via the same conformal-variable + oopsi4
+    // convention as the rest of this kernel (dphi_d, Gamma_udd, g_uu, oopsi4, K are the
+    // ones already computed above). Guarded by has_scalar so pure-GR runs (no
+    // <scalarfield> block) are byte-identical to before this phase.
+    Real dalpha_sf = 0.0;
+    Real dtheta_sf = 0.0;
+    Real dk_sf = 0.0;
+    Real strtr_sf = 0.0;
+    AthenaPointTensor<Real, TensorSymm::SYM2, 3, 2> dA_sf_dd;
+    AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> dGam_sf_u;
+    dA_sf_dd.ZeroClear();
+    dGam_sf_u.ZeroClear();
+
+    if (has_scalar) {
+      AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> dsphi_d, dpi_d, momsca_d;
+      AthenaPointTensor<Real, TensorSymm::SYM2, 3, 2> ddsphi_dd, Ddsphi_dd;
+
+      for (int a = 0; a < 3; ++a) {
+        dsphi_d(a) = Dx<NGHOST>(a, idx, sf.sphi, m,k,j,i);
+        dpi_d(a)   = Dx<NGHOST>(a, idx, sf.vpi,  m,k,j,i);
+      }
+      for (int a = 0; a < 3; ++a) {
+        ddsphi_dd(a,a) = Dxx<NGHOST>(a, idx, sf.sphi, m,k,j,i);
+        for (int b = a + 1; b < 3; ++b) {
+          ddsphi_dd(a,b) = Dxy<NGHOST>(a, b, idx, sf.sphi, m,k,j,i);
+        }
+      }
+
+      // Physical-metric covariant Hessian of sphi -- identical construction to
+      // Ddalpha_dd above (conformal-covariant Hessian + chi-derivative corrections).
+      for (int a = 0; a < 3; ++a)
+      for (int b = a; b < 3; ++b) {
+        Ddsphi_dd(a,b) = ddsphi_dd(a,b) - 2.*(dphi_d(a)*dsphi_d(b) + dphi_d(b)*dsphi_d(a));
+        for (int c = 0; c < 3; ++c) {
+          Ddsphi_dd(a,b) -= Gamma_udd(c,a,b)*dsphi_d(c);
+          for (int d = 0; d < 3; ++d) {
+            Ddsphi_dd(a,b) += 2.*z4c.g_dd(m,a,b,k,j,i) * g_uu(c,d) * dphi_d(c) * dsphi_d(d);
+          }
+        }
+      }
+
+      Real Ddsphi = 0.0;
+      Real gradsphi2 = 0.0;
+      for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b) {
+        Ddsphi    += oopsi4 * g_uu(a,b) * Ddsphi_dd(a,b);
+        gradsphi2 += oopsi4 * g_uu(a,b) * dsphi_d(a) * dsphi_d(b);
+      }
+
+      Real sphi_ = sf.sphi(m,k,j,i);
+      Real pi_   = sf.vpi(m,k,j,i);
+      Real sphipi = sphi_*pi_;
+      Real sphi2 = SQR(sphi_);
+      Real omega_sphi2 = 2.0/sf_omega_c - 1.5*sphi2;
+
+      // Lapse gauge: (1+log) K-driver uses (Khat + 1.5*sphi*Pi) instead of bare Khat.
+      dalpha_sf = -3.0*z4c.alpha(m,k,j,i)*sphipi;
+
+      // Extra term feeding the Theta/Hamiltonian-like combination (bssn_st.f90's
+      // hamil_tmp scalar bracket).
+      dtheta_sf = -omega_sphi2*(SQR(pi_) + gradsphi2)
+                  - 2.*(-K*sphipi + sphi_*Ddsphi + gradsphi2*(1. + sphi2));
+
+      // Extra term feeding the K/Khat RHS (bssn_st.f90's fek scalar bracket, massless
+      // vacuum limit -- the -3*pi*omega_c*sphi^2*T matter term and mass-term pieces
+      // are added in Phases 3/4).
+      dk_sf = omega_sphi2*SQR(pi_)
+              + sphi_*Ddsphi - K*sphipi + gradsphi2*(1. + sphi2)
+              + 1.5*(SQR(pi_) - gradsphi2);
+
+      // Extra (already physical-trace-free once strtr_sf is added back via g_dd) term
+      // feeding the Aij RHS.
+      strtr_sf = (1./3.)*(omega_sphi2*gradsphi2 + sphi_*Ddsphi + gradsphi2*(1. + sphi2));
+      for (int a = 0; a < 3; ++a)
+      for (int b = a; b < 3; ++b) {
+        dA_sf_dd(a,b) = -(oopsi4*(omega_sphi2 + 1. + sphi2)*dsphi_d(a)*dsphi_d(b)
+                          + sphi_*oopsi4*Ddsphi_dd(a,b))
+                        + z4c.vA_dd(m,a,b,k,j,i)*sphipi;
+      }
+
+      // momsca_a := (Gamma-tilde-driver source) omega_sphi2*Pi*d_a(sphi) + sphi*d_a(Pi)
+      // + Pi*d_a(sphi)*(1+sphi^2) - Atilde_a^c d_c(sphi)*sphi - (K/3)*d_a(sphi)*sphi
+      for (int a = 0; a < 3; ++a) {
+        momsca_d(a) = omega_sphi2*pi_*dsphi_d(a) + sphi_*dpi_d(a)
+                    + pi_*dsphi_d(a)*(1. + sphi2) - (K/3.0)*dsphi_d(a)*sphi_;
+        for (int c = 0; c < 3; ++c)
+        for (int d = 0; d < 3; ++d) {
+          momsca_d(a) -= sphi_ * g_uu(c,d) * z4c.vA_dd(m,a,d,k,j,i) * dsphi_d(c);
+        }
+      }
+      for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b) {
+        dGam_sf_u(a) -= 2.*g_uu(a,b)*momsca_d(b);
+      }
+    }
+
+    // -----------------------------------------------------------------------------------
     // Assemble RHS
     //
     // Khat, chi, and Theta
@@ -489,6 +602,10 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     if(!is_vacuum) {
       rhs.vKhat(m,k,j,i) += 4.*M_PI * z4c.alpha(m,k,j,i) * (S + tmunu.E(m,k,j,i));
     }
+    // Scalar-tensor term
+    if (has_scalar) {
+      rhs.vKhat(m,k,j,i) += z4c.alpha(m,k,j,i) * dk_sf;
+    }
     rhs.chi(m,k,j,i) = Lchi - (1./6.) * opt.chi_psi_power *
       chi_guarded * z4c.alpha(m,k,j,i) * K;
     rhs.vTheta(m,k,j,i) = LTheta + z4c.alpha(m,k,j,i) * (
@@ -496,6 +613,10 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     // Matter term
     if(!is_vacuum) {
       rhs.vTheta(m,k,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) * tmunu.E(m,k,j,i);
+    }
+    // Scalar-tensor term
+    if (has_scalar) {
+      rhs.vTheta(m,k,j,i) += 0.5 * z4c.alpha(m,k,j,i) * dtheta_sf;
     }
     // If BSSN is enabled, theta is disabled.
     rhs.vTheta(m,k,j,i) *= opt.use_z4c;
@@ -511,6 +632,10 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
           rhs.vGam_u(m,a,k,j,i) -= 16.*M_PI * z4c.alpha(m,k,j,i)
                               * g_uu(a,b) * tmunu.S_d(m,b,k,j,i);
         }
+      }
+      // Scalar-tensor term
+      if (has_scalar) {
+        rhs.vGam_u(m,a,k,j,i) += z4c.alpha(m,k,j,i) * dGam_sf_u(a);
       }
     }
 
@@ -531,12 +656,21 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
         rhs.vA_dd(m,a,b,k,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) *
                 (oopsi4*tmunu.S_dd(m,a,b,k,j,i) - (1./3.)*S*z4c.g_dd(m,a,b,k,j,i));
       }
+      // Scalar-tensor term
+      if (has_scalar) {
+        rhs.vA_dd(m,a,b,k,j,i) += z4c.alpha(m,k,j,i) *
+                (dA_sf_dd(a,b) + z4c.g_dd(m,a,b,k,j,i)*strtr_sf);
+      }
     }
     // lapse function
     Real const f = opt.lapse_oplog * opt.lapse_harmonicf
                  + opt.lapse_harmonic * z4c.alpha(m,k,j,i);
     rhs.alpha(m,k,j,i) = opt.lapse_advect * Lalpha
                        - f * z4c.alpha(m,k,j,i) * z4c.vKhat(m,k,j,i);
+    // Scalar-tensor term
+    if (has_scalar) {
+      rhs.alpha(m,k,j,i) += dalpha_sf;
+    }
 
     if (opt.slow_start_lapse) {
       Real W2 = (z4c.chi(m,k,j,i) > opt.chi_min_floor)

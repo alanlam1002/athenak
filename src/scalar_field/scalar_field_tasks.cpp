@@ -50,8 +50,12 @@ void ScalarField::QueueScalarFieldTasks() {
                      Task_Run, {SF_CopyU});
       break;
   }
+  // SF_ExplRK must not overwrite the scalar field's u0 before Z4c_CalcRHS has read it
+  // (Phase 2 back-reaction reads sf.sphi/sf.vpi directly) -- both sectors are RK-evolved
+  // and this is not the "recompute fresh each stage" case MHD_SetTmunu is, so ordinary
+  // task-order luck is not enough; see DEVELOPMENT_NOTES.md for the full reasoning.
   pnr->QueueTask(&ScalarField::ExpRKUpdate, this, SF_ExplRK, "SF_ExplRK",
-                 Task_Run, {SF_CalcRHS});
+                 Task_Run, {SF_CalcRHS}, {Z4c_CalcRHS});
   pnr->QueueTask(&ScalarField::RestrictU, this, SF_RestU, "SF_RestU",
                  Task_Run, {SF_ExplRK});
   pnr->QueueTask(&ScalarField::SendU, this, SF_SendU, "SF_SendU",

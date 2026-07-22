@@ -4,39 +4,49 @@ cfl_number (dtau*sigma_c = O(10)), for the grey photon M1 single-zone
 Compton+backreaction test.
 
 Not wired into the tst/ pytest harness yet -- run by hand after executing
-AthenaK with both
-inputs/tests/rad_m1_photon_compton_backreaction_stiff_frozen.athinput and
-..._stiff_implicit.athinput, e.g.:
+AthenaK with all three of
+inputs/tests/rad_m1_photon_compton_backreaction_stiff_frozen.athinput,
+..._stiff_implicit.athinput, and ..._stiff_implicit_nolimiter.athinput, e.g.:
 
     ./src/athena -i ../inputs/tests/rad_m1_photon_compton_backreaction_stiff_frozen.athinput
     mv tab tab_frozen
     ./src/athena -i ../inputs/tests/rad_m1_photon_compton_backreaction_stiff_implicit.athinput
     mv tab tab_implicit
+    ./src/athena -i ../inputs/tests/rad_m1_photon_compton_backreaction_stiff_implicit_nolimiter.athinput
+    mv tab tab_nolimiter
     python ../inputs/tests/check_rad_m1_photon_compton_backreaction_stiff.py \
-        --frozen-tab-dir tab_frozen --implicit-tab-dir tab_implicit
+        --frozen-tab-dir tab_frozen --implicit-tab-dir tab_implicit \
+        --nolimiter-tab-dir tab_nolimiter
 
-Both athinputs share identical physics (rho, temp, kappa_s, <units>) with
-rad_m1_photon_compton_backreaction_singlezone.athinput -- only cfl_number
-(mild vs stiff), nlim/tlim, and compton_implicit differ -- so they relax
-toward the exact same independently-solved joint equilibrium
-(a_rad*T_final^4 + rho*T_final/(gamma-1) = E_tot(0)); see that test's check
-script and DEVELOPMENT.md's "Compton implementation" section for the
+All three athinputs share identical physics (rho, temp, kappa_s, <units>)
+with rad_m1_photon_compton_backreaction_singlezone.athinput -- only
+cfl_number (mild vs stiff), nlim/tlim, matter_implicit, and theta_limiter
+differ -- so they relax toward the exact same independently-solved joint
+equilibrium (a_rad*T_final^4 + rho*T_final/(gamma-1) = E_tot(0)); see that
+test's check script and DEVELOPMENT.md's Stage 5/6 sections for the
 derivation.
 
 This script does NOT require the frozen-opacity run to reach equilibrium --
 demonstrating that it does *not* (within this stiff run's few, large steps)
-is the entire point of the compton_implicit feature. Pass criteria:
-  1. Energy conservation (E_tot(t) == E_tot(0)) holds for BOTH runs -- this
-     is a hard invariant of the backreaction bookkeeping regardless of the
-     per-step opacity linearization's accuracy (radiation_m1_update.cpp's
-     DrEFN subtraction is exact by construction), so a violation on either
+is the entire point of the matter_implicit feature. Pass criteria:
+  1. Energy conservation (E_tot(t) == E_tot(0)) holds for ALL runs provided
+     -- this is a hard invariant of the backreaction bookkeeping regardless
+     of the per-step opacity linearization's accuracy (radiation_m1_update.cpp's
+     DrEFN subtraction is exact by construction), so a violation on any
      side is a real bug, not just reduced accuracy.
-  2. The implicit run's final (E, T) match the independently-solved
-     equilibrium within --equilibrium-tol.
+  2. The implicit run's (and, if provided, the nolimiter run's) final
+     (E, T) match the independently-solved equilibrium within
+     --equilibrium-tol.
   3. The implicit run's final error is smaller than the frozen run's final
      error by at least --improvement-factor -- the quantitative statement
      of "the quartic pre-solve is more accurate than the frozen approach
      at this stiffness", not just "implicit happens to be close".
+  4. If --nolimiter-tab-dir is given (Stage 6's proof point): that run's
+     final error must ALSO clear --improvement-factor against the frozen
+     run, on its own, with theta_limiter=false -- demonstrating the
+     solver-level J_new correction (radiation_m1_update.cpp) suffices by
+     itself, without the theta_limiter/source_limiter workaround Stage 5
+     needed.
 """
 import argparse
 import os
@@ -92,6 +102,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frozen-tab-dir", default="tab_frozen")
     parser.add_argument("--implicit-tab-dir", default="tab_implicit")
+    parser.add_argument("--nolimiter-tab-dir", default=None,
+                        help="optional: tab/ dir for "
+                             "..._stiff_implicit_nolimiter.athinput "
+                             "(matter_implicit=true, theta_limiter=false) -- "
+                             "Stage 6's proof that the solver-level fix "
+                             "suffices without the theta_limiter workaround")
     parser.add_argument("--conservation-tol", type=float, default=2e-5,
                         help="relative tolerance on E_tot(t) vs E_tot(0), each run")
     parser.add_argument("--equilibrium-tol", type=float, default=5e-2,
@@ -107,6 +123,11 @@ def main(argv=None):
                                       "photon_compton_backreaction_stiff_frozen")
     t_i, E_i, T_i, Etot_i = load_run(args.implicit_tab_dir,
                                       "photon_compton_backreaction_stiff_implicit")
+    nolimiter_run = None
+    if args.nolimiter_tab_dir is not None:
+        nolimiter_run = load_run(
+            args.nolimiter_tab_dir,
+            "photon_compton_backreaction_stiff_implicit_nolimiter")
 
     Etot0 = e_int(RHO, TEMP0) + 1e-30  # E(0) is at the radiation floor
 
@@ -121,7 +142,7 @@ def main(argv=None):
 
     ok = True
 
-    print("\n=== frozen (compton_implicit=false) ===")
+    print("\n=== frozen (matter_implicit=false) ===")
     print("   t          E(t)          T(t)        cons_rel_err")
     max_cons_err_f = 0.0
     for ti, Ei, Ti, Etoti in zip(t_f, E_f, T_f, Etot_f):
@@ -136,7 +157,7 @@ def main(argv=None):
               "independent of opacity accuracy)")
         ok = False
 
-    print("\n=== implicit (compton_implicit=true) ===")
+    print("\n=== implicit (matter_implicit=true, theta_limiter=true) ===")
     print("   t          E(t)          T(t)        cons_rel_err")
     max_cons_err_i = 0.0
     for ti, Ei, Ti, Etoti in zip(t_i, E_i, T_i, Etot_i):
@@ -158,21 +179,65 @@ def main(argv=None):
         print("FAIL: implicit run did not converge to the correct equilibrium")
         ok = False
 
+    final_T_rel_err_n = None
+    if nolimiter_run is not None:
+        t_n, E_n, T_n, Etot_n = nolimiter_run
+        print("\n=== nolimiter (matter_implicit=true, theta_limiter=false) ===")
+        print("   t          E(t)          T(t)        cons_rel_err")
+        max_cons_err_n = 0.0
+        for ti, Ei, Ti, Etoti in zip(t_n, E_n, T_n, Etot_n):
+            cons_rel_err = abs(Etoti - Etot0) / abs(Etot0)
+            max_cons_err_n = max(max_cons_err_n, cons_rel_err)
+            print("{:10.4f}  {:12.6e}  {:10.6e}  {:10.3e}".format(ti, Ei, Ti, cons_rel_err))
+        final_E_rel_err_n = abs(E_n[-1] - E_final_expected) / E_final_expected
+        final_T_rel_err_n = abs(T_n[-1] - T_final_expected) / T_final_expected
+        print("max conservation error = {:.3e}".format(max_cons_err_n))
+        print("final E = {:.6e}, target = {:.6e}, rel err = {:.3e}".format(
+            E_n[-1], E_final_expected, final_E_rel_err_n))
+        print("final T = {:.6e}, target = {:.6e}, rel err = {:.3e}".format(
+            T_n[-1], T_final_expected, final_T_rel_err_n))
+
+        if max_cons_err_n >= args.conservation_tol:
+            print("FAIL: nolimiter run did not conserve energy")
+            ok = False
+        if (final_E_rel_err_n >= args.equilibrium_tol or
+                final_T_rel_err_n >= args.equilibrium_tol):
+            print("FAIL: nolimiter run did not converge to the correct "
+                  "equilibrium -- the solver-level fix alone is not "
+                  "sufficient without theta_limiter")
+            ok = False
+
     print("\n=== comparison ===")
     improvement = final_T_rel_err_f / max(final_T_rel_err_i, 1e-300)
-    print("frozen final T rel err   = {:.3e}".format(final_T_rel_err_f))
-    print("implicit final T rel err = {:.3e}".format(final_T_rel_err_i))
+    print("frozen final T rel err            = {:.3e}".format(final_T_rel_err_f))
+    print("implicit final T rel err          = {:.3e}".format(final_T_rel_err_i))
     print("improvement factor (frozen/implicit) = {:.3e}, required >= {:.1f}".format(
         improvement, args.improvement_factor))
     if improvement < args.improvement_factor:
-        print("FAIL: compton_implicit=true was not meaningfully more accurate "
-              "than compton_implicit=false at this stiffness")
+        print("FAIL: matter_implicit=true was not meaningfully more accurate "
+              "than matter_implicit=false at this stiffness")
         ok = False
 
+    if final_T_rel_err_n is not None:
+        improvement_n = final_T_rel_err_f / max(final_T_rel_err_n, 1e-300)
+        print("nolimiter final T rel err         = {:.3e}".format(final_T_rel_err_n))
+        print("improvement factor (frozen/nolimiter) = {:.3e}, required >= {:.1f}".format(
+            improvement_n, args.improvement_factor))
+        if improvement_n < args.improvement_factor:
+            print("FAIL: matter_implicit=true, theta_limiter=false was not "
+                  "meaningfully more accurate than the frozen path -- the "
+                  "solver-level fix alone (Stage 6) is not sufficient "
+                  "without theta_limiter")
+            ok = False
+
     if ok:
-        print("\nPASS: both runs conserve energy; compton_implicit=true tracks "
-              "the true equilibrium; compton_implicit=false is measurably "
-              "worse at this stiffness, as expected")
+        msg = ("\nPASS: all runs conserve energy; matter_implicit=true tracks "
+               "the true equilibrium; matter_implicit=false is measurably "
+               "worse at this stiffness, as expected")
+        if final_T_rel_err_n is not None:
+            msg += ("; the nolimiter run confirms the solver-level fix "
+                    "(Stage 6) suffices without theta_limiter")
+        print(msg)
     else:
         print("\nFAIL: see above")
         return False

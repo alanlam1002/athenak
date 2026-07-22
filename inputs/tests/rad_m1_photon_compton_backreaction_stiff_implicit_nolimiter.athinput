@@ -1,16 +1,20 @@
 <comment>
 problem = grey photon M1 single zone Compton+backreaction test at the SAME
   deliberately STIFF cfl_number as
-  rad_m1_photon_compton_backreaction_stiff_frozen.athinput, but with
-  matter_implicit=true: the closed-form Planck+Compton quartic pre-solve
-  (radiation_m1_compton_implicit.hpp) computes a T_gas-self-consistent
-  opacity for this step instead of using the stale start-of-step T_gas, so
-  this run is expected to land near the independently-solved true
-  equilibrium and stay physical, unlike the frozen-opacity run at this same
-  stride.
+  rad_m1_photon_compton_backreaction_stiff_{frozen,implicit}.athinput, with
+  matter_implicit=true AND theta_limiter=false (unlike stiff_implicit.athinput,
+  which keeps theta_limiter=true/source_limiter=0.9999 for a like-for-like
+  comparison against stiff_frozen). This is Stage 6's actual proof point: the
+  quartic pre-solve's own energy-conserving J_new is now used directly to
+  correct Enew after source_update() (radiation_m1_update.cpp), which
+  structurally bounds the per-step energy transfer to at most the gas's
+  entire internal energy -- so this run is expected to reach the same
+  correct joint equilibrium as stiff_implicit.athinput WITHOUT any external
+  limiter, proving the fix works at the solver level, not just because the
+  limiter workaround is still doing the work.
 
 <job>
-basename = photon_compton_backreaction_stiff_implicit  # name of run
+basename = photon_compton_backreaction_stiff_implicit_nolimiter  # name of run
 
 <time>
 evolution  = dynamic  # dynamic/kinematic/static
@@ -80,22 +84,10 @@ matter_sources = true  # default: true
 backreact = true       # let gas temperature respond -- the only change from
                        # rad_m1_photon_compton_singlezone.athinput
 
-theta_limiter = true   # required -- see rad_m1_photon_compton_backreaction_singlezone.athinput:
-                       # without it, the non-stiff explicit source branch
-                       # (radiation_m1_sources.hpp:154) can transfer more
-                       # energy than the gas reservoir holds in one step;
-                       # the limiter throttles theta so both stiff_frozen
-                       # and stiff_implicit are on equal, physical footing
-                       # for the frozen-vs-implicit comparison this pair
-                       # of tests exists to make
-source_limiter = 0.9999  # NOT the default (0.5) -- verified by hand that at
-                       # 0.5, theta locks near 0.5 every step regardless of
-                       # the true rate, making the limiter itself (a fixed
-                       # per-step decay) the dominant effect and masking any
-                       # difference between matter_implicit=false/true. At
-                       # 0.9999 the limiter is a true safety net and the
-                       # frozen-vs-implicit comparison reflects the actual
-                       # opacity physics.
+theta_limiter = false  # OFF -- the point of this test: matter_implicit's own
+                       # J_new correction (radiation_m1_update.cpp) should
+                       # bound the per-step energy transfer on its own, with
+                       # no external safety net needed.
 
 <photons>
 kappa_s = 1.0          # scattering opacity [code units]
@@ -106,7 +98,8 @@ kappa_p = 0.0          # Planck absorption/emission opacity [code units] -- off,
                        # closed-form target -- see the check script)
 power_opacity = false  # constant (non-Kramers) opacities
 compton = true         # enable Compton energy exchange (requires <units>, above)
-matter_implicit = true   # STIFF regime, closed-form quartic pre-solve (see comment above)
+matter_implicit = true   # STIFF regime, closed-form quartic pre-solve, J_new
+                         # used directly to correct Enew (see comment above)
 # arad is not set here: with <units> present, RadiationM1 derives it from
 # rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
 

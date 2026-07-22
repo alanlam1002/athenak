@@ -2,14 +2,14 @@
 problem = grey photon M1 single zone Compton-only relaxation test WITH
   radiation-pressure backreaction (backreact=true) -- Compton and
   backreaction have never been validated together before this test.
-  compton_implicit=false (the existing, frozen-opacity default) at a mild
+  matter_implicit=false (the existing, frozen-opacity default) at a mild
   cfl_number, matching the existing Compton-only test's stride: at this
   stride the per-step Compton stiffness dtau*sigma_c << 1, so the frozen
   approach is already accurate and this is a baseline sanity check that the
   combination works at all, not a stress test. See
   rad_m1_photon_compton_backreaction_stiff_frozen.athinput /
   ..._stiff_implicit.athinput for the actual point of the
-  compton_implicit=true feature (large cfl, where the frozen path lags/
+  matter_implicit=true feature (large cfl, where the frozen path lags/
   overshoots and the quartic pre-solve fixes it).
 
 <job>
@@ -107,7 +107,7 @@ kappa_p = 0.0          # Planck absorption/emission opacity [code units] -- off,
                        # closed-form target -- see the check script)
 power_opacity = false  # constant (non-Kramers) opacities
 compton = true         # enable Compton energy exchange (requires <units>, above)
-compton_implicit = false  # baseline: existing frozen-opacity path
+matter_implicit = false  # baseline: existing frozen-opacity path
 # arad is not set here: with <units> present, RadiationM1 derives it from
 # rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
 

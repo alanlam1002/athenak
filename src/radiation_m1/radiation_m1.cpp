@@ -193,18 +193,12 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
                 << "Compton requires enabling units" << std::endl;
       std::exit(EXIT_FAILURE);
     }
-    photon_op_params.is_compton_implicit =
-        pin->GetOrAddBoolean("photons", "compton_implicit", false);
-    if (photon_op_params.is_compton_implicit && !(photon_op_params.is_compton)) {
+    photon_op_params.is_matter_implicit =
+        pin->GetOrAddBoolean("photons", "matter_implicit", false);
+    if (photon_op_params.is_matter_implicit && params.src_update != Implicit) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl
-                << "compton_implicit requires compton=true" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-    if (photon_op_params.is_compton_implicit && params.src_update != Implicit) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl
-                << "compton_implicit requires src_update = implicit" << std::endl;
+                << "matter_implicit requires src_update = implicit" << std::endl;
       std::exit(EXIT_FAILURE);
     }
     if (isunits) {

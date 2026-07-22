@@ -1,12 +1,12 @@
 <comment>
 problem = grey photon M1 single zone Compton+backreaction test at a
   deliberately STIFF cfl_number (large implicit stride, dtau*sigma_c = O(10)),
-  with compton_implicit=false (the existing frozen-opacity path): the target
+  with matter_implicit=false (the existing frozen-opacity path): the target
   a_rad*T^4 the implicit E/F solve relaxes toward is evaluated at T_gas from
   the *start* of the step, not the true end-of-step T_gas, so at this stride
   the frozen path is expected to lag or even overshoot into an unphysical
   T_gas. Compare against rad_m1_photon_compton_backreaction_stiff_implicit.athinput
-  (identical except compton_implicit=true), which should stay close to the
+  (identical except matter_implicit=true), which should stay close to the
   independently-solved true equilibrium at this same stride. See
   rad_m1_photon_compton_backreaction_singlezone.athinput for the mild-cfl
   baseline where the two approaches are expected to agree.
@@ -94,7 +94,7 @@ source_limiter = 0.9999  # NOT the default (0.5) -- verified by hand that at
                        # 0.5, theta locks near 0.5 every step regardless of
                        # the true rate, making the limiter itself (a fixed
                        # per-step decay) the dominant effect and masking any
-                       # difference between compton_implicit=false/true. At
+                       # difference between matter_implicit=false/true. At
                        # 0.9999 the limiter is a true safety net and the
                        # frozen-vs-implicit comparison reflects the actual
                        # opacity physics.
@@ -108,7 +108,7 @@ kappa_p = 0.0          # Planck absorption/emission opacity [code units] -- off,
                        # closed-form target -- see the check script)
 power_opacity = false  # constant (non-Kramers) opacities
 compton = true         # enable Compton energy exchange (requires <units>, above)
-compton_implicit = false  # STIFF regime, frozen-opacity path (see comment above)
+matter_implicit = false  # STIFF regime, frozen-opacity path (see comment above)
 # arad is not set here: with <units> present, RadiationM1 derives it from
 # rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
 

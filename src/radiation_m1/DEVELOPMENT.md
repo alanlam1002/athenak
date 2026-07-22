@@ -75,15 +75,24 @@ guarded 4 more silently-wrong-physics/unguarded-typo gaps, all found via
 Explore-agent code survey and verified with no regression to the existing
 test suite.
 
-Stage 5 (implicit Compton, `compton_implicit`, see below) is also done: a
-closed-form quartic pre-solve (ported from the discrete-ordinate module's
-`FourthPolyRoot`) fixes the frozen-opacity Compton channel's accuracy at
-large per-step stiffness, verified to be `~2×10^5` times more accurate than
-the frozen approach at a stiff `cfl_number`, with zero regression to any
-existing test. Along the way, found and worked around (test-level, not
-solver-level) a real, previously-latent energy-accounting gap in the
-non-stiff explicit source branch under `backreact=true` — see Stage 5 for
-details; it's generic to that branch, not specific to Compton.
+Stage 5 (implicit Compton, see below) is also done: a closed-form quartic
+pre-solve (ported from the discrete-ordinate module's `FourthPolyRoot`)
+fixes the frozen-opacity Compton channel's accuracy at large per-step
+stiffness, verified to be `~2×10^5` times more accurate than the frozen
+approach at a stiff `cfl_number`, with zero regression to any existing
+test. Along the way, found a real, previously-latent energy-accounting gap
+in the non-stiff explicit source branch under `backreact=true`, initially
+worked around at the test-configuration level (`theta_limiter=true`).
+
+Stage 6 (see below) is also done: fixed that gap at the actual solver
+level instead — the quartic's own energy-conserving `J_new` (computed in
+Stage 5 but discarded there) is now used directly to correct `Enew`,
+structurally bounding the per-step transfer to at most the gas's own
+internal energy. Verified to reproduce the `theta_limiter=true` result
+bit-for-bit with the limiter *off*. Also generalized the feature
+(renamed `compton_implicit`→`matter_implicit`) to the Planck channel,
+fixing a rate-inclusion gap caught during the stage's own plan review
+before any code was written, and verified on a new Planck-only stiff test.
 
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
@@ -748,7 +757,7 @@ none of the 6 fixes above affect any already-validated configuration.
 - Kramers/`power_opacity` and EOSCompOSE testing generally — already listed
   as "not yet done" at the top of this file, unchanged by this stage.
 
-## Stage 5 — implicit Compton (`compton_implicit`) — DONE
+## Stage 5 — implicit Compton (`compton_implicit`, later renamed `matter_implicit` in Stage 6) — DONE
 
 Goal: the existing Compton implementation (Stage 1, "Compton implementation"
 above) folds the exchange rate into `eta_1_`/`abs_1_` using `T_gas` frozen at
@@ -903,3 +912,221 @@ scope for this stage.
   mismatch would need the same mitigation until the solver itself is fixed.
 - EOSCompOSE Compton, Kramers/`power_opacity` testing — unchanged from
   Stage 1's scope decision, still deferred.
+
+## Stage 6 — fix the backreaction energy-accounting gap at the solver level, and generalize to Planck (`matter_implicit`) — DONE
+
+Goal: Stage 5's `theta_limiter=true`/`source_limiter=0.9999` workaround
+fixed the observed blow-up, but only patches the symptom after the fact.
+This stage traces the actual solver architecture (three parallel
+Explore-agent investigations) to find and fix the real gap, and
+generalizes the fix beyond Compton — renaming the feature
+`compton_implicit` → `matter_implicit` in the process.
+
+**What the investigation found.**
+1. `source_update_ll`/the Hybridsj Newton solve (`radiation_m1_sources.hpp`)
+   is a closed, radiation-only system. Its unknowns are exactly
+   `(E, Fx, Fy, Fz)` — `T_gas`/gas energy never enters the residual,
+   Jacobian, or `SrcParams` struct anywhere; `eta`/`kabs`/`kscat` are
+   frozen constants for the whole Newton iteration. The gas's conserved
+   energy (`umhd0_(IEN)`, τ) is only ever read *after* this solve, inside
+   the `theta_limiter` block (`radiation_m1_update.cpp:619-678`) —
+   nothing checks it during the solve itself.
+2. Stage 5's own quartic pre-solve (`SolveComptonQuartic`) already computes
+   a self-consistent, energy-conserving `(T_new, J_new)` pair — but
+   **`J_new` was computed and then discarded**. Only `T_new` survived, to
+   refine `eta_local`/`abs_local`, which then fed into the same
+   gas-energy-blind solver as before. In the exact flat/static/single-zone
+   regime all existing tests use, this is a mathematical no-op (the
+   existing linear `Jnew` formula and the quartic's fixed-point equation
+   are algebraically identical when `J(E,F)=E`, i.e. `v=0`) — which is why
+   Stage 5's tests already passed despite this. In the general case
+   (motion, curvature, nonzero flux) the Newton solve's full nonlinear
+   `J(E,F)` mapping is *not* guaranteed to agree with the quartic's
+   locally-derived answer, silently reopening the same stale-target risk
+   in an as-yet-untested regime.
+3. The sibling discrete-ordinate (DO) module (`radiation_source.cpp`'s
+   `RadFluidCoupling`) never needs a limiter, because its own quartic root
+   directly *becomes* the channel's answer (intensity + explicit
+   `m_old - m_new` fluid feedback) rather than merely refining an opacity
+   estimate fed into a separate solve — no shared Jacobian, no iteration
+   between the quartic and the transport update, at all. This is the
+   design principle Stage 6 mirrors.
+
+**Chosen fix: make `Enew` itself authoritative from `J_new`**, rather than
+embedding `T_gas` as a genuine 5th Newton unknown (the fully general
+alternative — new residual row, new Jacobian terms, touching the
+hand-coded solver shared with neutrino/`bns_nurates` transport — remains
+documented future work below, not attempted here).
+
+Right after the existing post-solve fluid-frame recompute
+(`radiation_m1_update.cpp`, `Jnew = calc_J_from_rT(T_dd, u_u)`), when the
+quartic succeeded for this cell, `Enew` is corrected so its own
+fluid-frame projection matches the quartic's `J_new` instead of whatever
+the general nonlinear solve produced:
+```
+Enew += (J_new - Jnew) / (w_lorentz * w_lorentz);
+apply_floor(...);   // re-floor: the nudge happens after the last existing
+                    // floor/causality check
+Jnew = J_new;
+```
+`Fnew_d` (momentum/flux) is left exactly as solved — the quartic's
+derivation has no flux term. This correction is derived, not guessed: a
+follow-up Explore pass traced `assemble_rT`/`calc_J_from_rT`
+(`radiation_m1_helpers.hpp`) and confirmed the composed fluid-frame
+projection `J(E)` is *exactly* linear in `E` alone (holding `F_d`, `P_dd`,
+`n_d`, `u_u` fixed), with `dJ/dE = w_lorentz^2` (from `n_d·u_u =
+-w_lorentz`) — so this is a single closed-form nudge, not an approximation
+of the boost. (Reusing the already-computed `P_dd`/`chi` at the nudged `E`
+*is* a first-order approximation — `P_dd` is itself linear in `E` too, so
+a fully self-consistent re-closure would shift it by an amount
+second-order in the nudge — matching the same "estimate away from the
+static/flat case" caveat already documented for the Stage 5 pre-solve, not
+a new kind of approximation.)
+
+**Why this removes the blow-up (the mechanism, not just "it conserves").**
+The Stage 5 frozen path was *already* energy-conserving by construction
+(`DrEFN` transfers exactly what radiation gained) — it still blew up
+because nothing bounded the transfer to what the gas actually holds, so
+`E` overshot, `DrEFN` drove the gas below its floor, and only *then* did
+things go wrong (silently, via the floor clamp). The quartic closes this
+at the source: it sets `J_new = Etot_star − (rho/gm1)·T_new` with `T_new
+≥ 0` enforced (checked in `SolveComptonQuartic`), so the largest
+fluid-frame energy the radiation can gain is `J_new − Jstar ≤
+(rho/gm1)·T_star` — at most the gas's *entire* internal energy, never
+more. Feeding that bounded `J_new` into `Enew` structurally prevents the
+overshoot the limiter was patching. Caveat: this reservoir bound is exact
+in the fluid frame, while backreaction is applied in the lab frame — the
+two coincide in the static/flat case (the only regime tested) and diverge
+with motion/curvature, which is why `theta_limiter` stays as the
+general-case backstop.
+
+**Generalized beyond Compton.** Both the Compton channel (rate
+`sigma_compton = kappa_s·rho·4·T·inv_t_electron`) and the Planck channel
+(rate `sigma_p = rho·kappa_p`) drive `J` toward the same LTE target
+`arad·T⁴`, so their rates simply add — meaning the identical
+stale-target-vs-reservoir mismatch can happen with `compton=false,
+kappa_p>0` too, exactly the "generic, not Compton-specific" gap flagged as
+deferred at the end of Stage 5.
+
+- **A real gap caught while verifying this stage's own plan, before any
+  code was written**: `SolveComptonQuartic` originally used *only*
+  `sigma_c_star` (Compton) as its rate — it never received `kappa_p` —
+  even though the frozen-opacity kernel it refines
+  (`radiation_m1_calc_opacities_photons.cpp:122-128`) already uses the
+  **combined** rate `sigma_p+sigma_compton` for both `eta_1_` and
+  `abs_1_`. A naive "just add a `coef4≈0` guard for `kappa_s=0`" fix would
+  have compiled and looked reasonable, but would have made the Planck-only
+  case silently a no-op (`sigma_c_star=0` ⟹ `T_new=T_star` ⟹ no update at
+  all). **Fixed properly**: `SolveComptonQuartic` now takes `kappa_p` and
+  solves with the combined rate `sigma_tot_star = sigma_c_star +
+  rho·kappa_p` — pure Compton (`kappa_p=0`) is unchanged, pure Planck
+  (`kappa_s=0`) now correctly relaxes `T` toward equilibrium, and mixed
+  channels now match the frozen kernel's own combined rate exactly
+  (removing a Stage-5 "improvement-or-neutral" approximation where the
+  mixed-channel `T_new` had been solved with a Compton-only rate). A
+  defensive `sigma_tot_star≈0` branch (reached only when `kappa_s=kappa_p=0`,
+  i.e. no coupling at all) returns `T_new=T_star`/`J_new=Jstar` directly,
+  since `FourthPolyRoot`'s cubic-resolvent algebra divides by `coef4` and
+  would otherwise blow up (`pow(coef4,-2/3) → ∞`).
+- **A second, narrower gap caught while re-verifying this fix (before
+  committing, not part of the original plan)**: the call site in
+  `radiation_m1_update.cpp` passed `photon_op_params_.kappa_s` to the
+  quartic directly, unlike the frozen-opacity kernel
+  (`radiation_m1_calc_opacities_photons.cpp:94,201`), which gates the
+  Compton contribution by `is_compton` — `compton=false` alone does not
+  zero `kappa_s`. So a cell with `compton=false` but `kappa_s` left
+  nonzero in the athinput (and `<units>` present, needed for `arad`,
+  which also makes `inv_t_electron` nonzero regardless of `compton`)
+  would have silently included a spurious Compton term the frozen path
+  correctly excludes. **Fixed**: gate `kappa_s` by `is_compton` at the
+  call site (`kappa_s_gated = is_compton ? kappa_s : 0.0`), matching the
+  opacity kernel. Not triggered by any test in this repo (every Compton
+  test has `compton=true`; the new Planck test explicitly sets
+  `kappa_s=0.0`) — re-verified all 5 Compton/Planck-backreaction
+  single-zone tests bit-identical after the fix, confirming zero
+  behavioral change to anything currently validated.
+- **Renamed** `compton_implicit`→`matter_implicit` (`<photons>/matter_implicit`;
+  `photon_op_params.is_matter_implicit`), and **dropped** the "requires
+  `compton=true`" constructor guard in `radiation_m1.cpp` (kept "requires
+  `src_update=implicit`"). Internal file/function names
+  (`radiation_m1_compton_implicit.hpp`, `SolveComptonQuartic`) are
+  unchanged — the derivation is still the same rate-linearized quartic,
+  now fed the combined rate.
+
+**Verification.**
+- The 3 existing Compton+backreaction athinputs (renamed
+  `compton_implicit`→`matter_implicit`, otherwise untouched, still with
+  `theta_limiter=true`/`source_limiter=0.9999`) re-ran to **bit-identical**
+  results vs. Stage 5 — confirming the new `Enew` correction is a
+  provable no-op in the already-tested static/flat regime, exactly as the
+  linearity derivation predicts.
+- **New**: `rad_m1_photon_compton_backreaction_stiff_implicit_nolimiter.athinput`
+  — identical to `..._stiff_implicit.athinput` except `theta_limiter=false`
+  — is Stage 6's actual proof point. Result: **bit-identical** to the
+  `theta_limiter=true` run (`T` final relative error `5.1e-6`, matching
+  the true equilibrium `T_final=1.067e-5`; max conservation error
+  `1.05e-5`) — the solver-level fix alone, with zero external limiter,
+  reproduces exactly what Stage 5 needed the limiter for.
+  `check_rad_m1_photon_compton_backreaction_stiff.py` extended with an
+  optional `--nolimiter-tab-dir` to check this third variant directly
+  against the frozen run (`~2×10^5`× more accurate, clearing the same
+  `10×`-improvement bar as the `theta_limiter=true` case).
+- **New**: `rad_m1_photon_planck_backreaction_stiff.athinput` — the Planck-
+  only (`compton=false, kappa_s=0, kappa_p=10`) analogue, same stiff `cfl`,
+  same physical calibration (so the identical target equilibrium applies),
+  `matter_implicit=true`, `theta_limiter=false`. **PASS**: converges to
+  within `5.1e-6`/`7.2e-6` (T/E) of the true equilibrium by `t≈2`
+  (`tlim=5`), conservation error `1.25e-5` — confirming the generalization
+  works, not just in principle but numerically, once the rate-inclusion
+  gap above was actually fixed.
+  `check_rad_m1_photon_planck_backreaction_stiff.py` (new, same two-check
+  pattern as the singlezone check).
+- **Checked empirically**: the *mild*-cfl Compton+backreaction case (which
+  exercises the `SrcThin`/explicit branch, `cdt*kabs<1`, rather than
+  Hybridsj) also converges cleanly with `matter_implicit=true,
+  theta_limiter=false` — no overshoot at all (first step already lands at
+  `T=2.23e-5`, within a factor `~2` of the `T_final=1.067e-5` target, vs.
+  the original ~4-orders-of-magnitude overshoot with the frozen path), then
+  decays smoothly and monotonically (unlike the frozen path's earlier
+  oscillation) — crossing below `1%` relative error by `t≈0.09`, `0.1%` by
+  `t≈0.14`, and reaching the final `4.7e-6`/`7.4e-6` (T/E) relative error
+  by `tlim=1.0`; conservation error `1.31e-5`. Confirms the correction is
+  applied unconditionally after `source_update()` regardless of which
+  internal branch fired, as the code structure implies — not formalized as
+  its own athinput/check-script pair (the two stiff tests above already
+  rigorously prove the claim); documented here as the empirical
+  confirmation the Stage 6 plan called for.
+- **Negative-path guard still fires**: `matter_implicit=true` with
+  `src_update=explicit` hits the (unchanged) fatal error immediately.
+- **Full regression**: all 7 existing CPU pytest tests still pass, zero
+  change — confirms neither the `Enew` correction nor the
+  `SolveComptonQuartic` rate generalization affects any
+  already-validated configuration (all of which have `matter_implicit`
+  at its default `false`).
+
+**`theta_limiter`'s narrowed (but still real) remaining role.** This fix
+makes `theta_limiter` structurally unnecessary for the specific failure
+mode Stage 5 found and fixed — it does not remove `theta_limiter` from the
+code, and it remains the only safeguard for: momentum/flux backreaction
+(the quartic has no flux term to correct against); the neutrino/
+`bns_nurates` transport path this module also serves (entirely untouched
+by this stage — `matter_implicit` only gates on `opacity_type==Photons`);
+and any cell where the quartic fails or `matter_implicit` is off.
+
+**Deferred, not fixed here**:
+- Embedding `T_gas` as a genuine 5th Newton unknown (full flux/motion/
+  curvature self-consistency) — the fully general alternative to this
+  stage's local/no-flux stopgap; would touch the hand-coded Jacobian
+  shared with neutrino/`bns_nurates` transport, real new development.
+- Momentum (F) backreaction reservoir-checking — `theta_limiter` remains
+  the only safeguard (the quartic has no flux term to correct against).
+- The `SrcFail`/`SrcEquil`/`SrcScat` unchecked-`src_signal` gap found
+  during this stage's investigation (`source_update_ll`'s return signal
+  is captured into a local variable in `radiation_m1_update.cpp` but
+  never inspected, so a non-converged Newton solve or an
+  equilibrium/scattering-dominated shortcut silently leaves
+  `Enew`/`Fnew_d` at the pre-solve estimate) — a separate, adjacent
+  latent issue, unrelated to backreaction specifically, documented but
+  not fixed here.
+- EOSCompOSE, neutrino/`bns_nurates` transport (`nspecies_>1`) — both
+  entirely untouched, unchanged from prior scope decisions.

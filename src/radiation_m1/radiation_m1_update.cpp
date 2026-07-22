@@ -158,7 +158,7 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   auto &photon_op_params_ = pmy_pack->pradm1->photon_op_params;
   Real gm1_{};
   if (ismhd && params_.opacity_type == Photons &&
-      photon_op_params_.is_compton_implicit) {
+      photon_op_params_.is_matter_implicit) {
     gm1_ = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
   }
 
@@ -474,32 +474,54 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
               // Estimate interaction with matter
               const Real dtau = beta_dt * (adm.alpha(m, k, j, i) / w_lorentz);
 
-              // [Compton-implicit] Replace the frozen-opacity eta_1_/abs_1_
-              // for this cell with a closed-form Compton quartic pre-solve,
-              // self-consistent in T_gas/J at this cell's pre-coupling
-              // ("star") state -- see radiation_m1_compton_implicit.hpp and
-              // DEVELOPMENT.md's "Compton implementation" section. Assumes
-              // Primitive::IdealGas (safe: compton=true+EOSCompOSE already
-              // hard-errors at opacity-parse time, before this can run).
-              // Falls back to the existing frozen-opacity arrays on failure
-              // or when the feature is off -- zero behavior change for
-              // every currently-validated test.
+              // [matter-implicit] Replace the frozen-opacity eta_1_/abs_1_
+              // for this cell with a closed-form Planck+Compton quartic
+              // pre-solve, self-consistent in T_gas/J at this cell's
+              // pre-coupling ("star") state -- see
+              // radiation_m1_compton_implicit.hpp and DEVELOPMENT.md's
+              // Stage 6 section. Assumes Primitive::IdealGas (safe:
+              // EOSCompOSE already hard-errors at opacity-parse time,
+              // before this can run). Falls back to the existing
+              // frozen-opacity arrays on failure or when the feature is
+              // off -- zero behavior change for every currently-validated
+              // test.
+              //
+              // The quartic's own (T_new, J_new) pair is energy-conserving
+              // by construction (Etot_star = J_new + (rho/gm1)*T_new, with
+              // T_new>=0 enforced), so J_new can never imply more energy
+              // transfer than the gas actually holds. J_new is captured
+              // here and used *after* source_update() below to correct
+              // Enew directly -- not just to refine the opacity target fed
+              // into that (gas-energy-blind) solve, which is only
+              // guaranteed to reproduce J_new in the flat/static/no-flux
+              // limit (see DEVELOPMENT.md Stage 6).
               Real eta_local = eta_1_(m, nuidx, k, j, i);
               Real abs_local = abs_1_(m, nuidx, k, j, i);
+              Real J_new{};
+              bool matter_implicit_ok = false;
               if (params_.opacity_type == Photons &&
-                  photon_op_params_.is_compton_implicit) {
+                  photon_op_params_.is_matter_implicit) {
                 const Real rho_gas = w0_(m, IDN, k, j, i);
                 const Real T_star = w0_(m, IEN, k, j, i) / rho_gas;
-                Real T_new{}, J_new{};
+                // Gate kappa_s by is_compton, matching the frozen-opacity
+                // kernel (radiation_m1_calc_opacities_photons.cpp:94,201):
+                // kappa_s alone doesn't disable the Compton channel --
+                // compton=false must zero it out even if kappa_s is left
+                // nonzero in the athinput.
+                const Real kappa_s_gated =
+                    photon_op_params_.is_compton ? photon_op_params_.kappa_s : 0.0;
+                Real T_new{};
                 if (SolveComptonQuartic(
                         rho_gas, T_star, Jstar, gm1_,
-                        photon_op_params_.kappa_s, photon_op_params_.arad,
+                        kappa_s_gated, photon_op_params_.kappa_p,
+                        photon_op_params_.arad,
                         photon_op_params_.inv_t_electron, dtau, volform,
                         T_new, J_new)) {
+                  matter_implicit_ok = true;
                   // Rate stays frozen at T_star (matching the quartic's own
                   // linearization); only the emission target moves to T_new.
-                  const Real sigma_c_star = photon_op_params_.kappa_s *
-                                            rho_gas * 4.0 * T_star *
+                  const Real sigma_c_star = kappa_s_gated * rho_gas * 4.0 *
+                                            T_star *
                                             photon_op_params_.inv_t_electron;
                   abs_local = sigma_c_star + rho_gas * photon_op_params_.kappa_p;
                   eta_local = abs_local * photon_op_params_.arad *
@@ -565,6 +587,25 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
               AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> T_dd{};
               assemble_rT(n_d, Enew, Fnew_d, P_dd, T_dd);
               Jnew = calc_J_from_rT(T_dd, u_u);
+
+              // [matter-implicit] Make Enew authoritative from the quartic's
+              // energy-conserving J_new (see comment above the quartic
+              // call), instead of whatever the gas-energy-blind Newton/
+              // explicit solve above produced. calc_J_from_rT(assemble_rT(
+              // n_d,E,F_d,P_dd),u_u) is exactly linear in E alone (holding
+              // F_d, P_dd, n_d, u_u fixed), with dJ/dE = w_lorentz^2 (from
+              // n_d.u_u = -w_lorentz) -- so nudging E to move J from Jnew to
+              // J_new is this one closed-form correction, not a full
+              // reassembly. Fnew_d (momentum/flux) is left exactly as
+              // solved -- the quartic has no flux term to correct against.
+              // Re-floor afterward: the last apply_floor before this point
+              // is at the source_update() call above, so the nudged Enew
+              // has not yet been floor/causality-checked.
+              if (matter_implicit_ok) {
+                Enew += (J_new - Jnew) / SQR(w_lorentz);
+                apply_floor(g_uu, Enew, Fnew_d, params_);
+                Jnew = J_new;
+              }
 
               // Compute changes in radiation energy and momentum
               DrEFN[nuidx][M1_E_IDX] = Enew - Estar;

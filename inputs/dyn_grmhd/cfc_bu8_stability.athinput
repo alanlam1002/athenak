@@ -67,6 +67,18 @@
 # every other cfc_tov* input in this repo) -- note this means the AMR-regrid
 # path (SetADMVariablesToXNS in xns_rotstar.cpp) is NOT exercised by this run;
 # that needs a separate refinement=adaptive test as a follow-up.
+#
+# 2026-07-23, second revision (user code review): xns_rotstar.cpp's velocity
+# primitive was missing the Lorentz factor entirely -- it wrote the bare
+# Eulerian-observer v^i straight into IVX/IVY/IVZ, but AthenaK's dyn_grmhd
+# primitives store W*v^i (confirmed via primitive_solver.hpp and every other
+# ID-import pgen: lorene_bns.cpp/kadath_bns.cpp/sgrid_bns.cpp/elliptica.cpp).
+# This under-supplied the star's true angular momentum and produced the large
+# rho_max(t) adjustment transient the user flagged from job 248450's diagnostic
+# plot. Fixed (see src/cfc/DEVELOPMENT.md). Also added rho-max/alpha-min/ang-mom
+# history diagnostics (XNSRotStarHistory, mirrors TOVHistory in dyngr_tov.cpp
+# plus a total-angular-momentum volume integral) -- user_hist=true below enrolls
+# these as extra .mhd.hst columns.
 
 <comment>
 problem  = Stability of a rapidly rotating neutron star (Gmunu sec. 3.3.2, BU8), CFC metric solve, XNS initial data
@@ -174,6 +186,9 @@ mg_debug_defect_by_level = false # 2026-07-23: off for this run -- the debug
 
 <problem>
 id_dir = /sakura/ptmp/tlam/XNS_runs/rot_bu8_gr_pol2
+user_hist = true        # 2026-07-23: enroll XNSRotStarHistory (rho-max, alpha-min,
+                         # ang-mom) as extra .mhd.hst columns, alongside the
+                         # standard mass/momentum/energy columns
 
 <output1>
 file_type   = rst

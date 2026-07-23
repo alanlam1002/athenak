@@ -3527,8 +3527,84 @@ src/cfc/
       per-solve debug screen output served its purpose for this
       investigation and is no longer needed) -- 16 nodes, same
       `cfc_bu8_stability.athinput`/`cfc_bu8_stability_test/` otherwise
-      unchanged. Result not yet known as of this writing (see the run
-      directory for current status); the previous (pre-Surf.dat-fix)
-      diagnostics/movies were moved to `old_run_presurffix/` in that
-      directory rather than deleted, since they were generated from the
-      halo-contaminated initial data and are superseded, not just stale.
+      unchanged. The previous (pre-Surf.dat-fix) diagnostics/movies were
+      moved to `old_run_presurffix/` in that directory rather than deleted,
+      since they were generated from the halo-contaminated initial data and
+      are superseded, not just stale.
+      **Result: completed cleanly.** Reached `tlim=200.0` exactly at
+      cycle 2321 (~75 min wall time on 16 nodes), zero `FATAL ERROR`/NaN/inf
+      messages anywhere in the log across the entire run. Baryon mass
+      conservation from `cfc_bu8_stability.mhd.hst`: `M0=1.377519325298131`,
+      `M(t=200)=1.377487860418838`, max `|M(t)-M0|/M0` over the whole run
+      `= 2.284e-5` -- tighter than the first corrected-ID run's shorter
+      duration, confirming the Surf.dat-fixed initial data plus the
+      higher-resolution/full-z-domain configuration (from the earlier
+      corner-defect fix) is stable well beyond the point the original,
+      buggy-ID run diverged (t~30). This is the first fully clean, full-
+      duration BU8 rotating-star run in this investigation. **However**, see
+      the next bullet -- the user inspected the `rho_max(t)` diagnostic and
+      correctly judged the star not actually stable (a large-amplitude
+      transient, not the small perturbation response a converged equilibrium
+      should show); a third, more serious ID bug (missing Lorentz factor) was
+      found and fixed as a result.
+    - **Third bug found and fixed: missing Lorentz factor in the velocity
+      primitive (2026-07-23, user diagnostic review)**. `XNSInterpToADMAndPrim`
+      set `w0(IVX/IVY/IVZ)` directly to the Eulerian-observer coordinate-basis
+      3-velocity `v^i` (`vx=-vphi*x2; vy=vphi*x1;`, `vphi` = `Hydroeq.dat`
+      column 4, confirmed via `XNSMAIN.f90`/`HYDROEQ.f90` to be
+      `v^phi = u^phi/(alpha u^0) + beta^phi/alpha`, the standard 3+1 Eulerian
+      velocity). But AthenaK's dyn_grmhd primitives do **not** store `v^i`
+      itself -- confirmed via `src/eos/primitive-solver/primitive_solver.hpp:
+      508-535,570` (`ConToPrim` builds/stores `Wv_u`; comment: "Athena passes
+      in Wv, not v") and cross-checked against every other ID-import pgen that
+      sets a genuine nonzero velocity (`pgen/dyn_grmhd/lorene/lorene_bns.cpp:
+      263-277`, `kadath/kadath_bns.cpp:406-408`, `sgrid/sgrid_bns.cpp:331-333`,
+      `elliptica/elliptica.cpp:399-401`), all of which compute
+      `vsq = gamma_ij v^i v^j`, `W=1/sqrt(1-vsq)`, and write `W*v^i`. This pgen
+      was missing that factor entirely -- the star started with too little
+      physical angular momentum, hence the large adjustment transient.
+      **Fix**: in `XNSInterpToADMAndPrim`'s star-interior branch, after
+      building `vx,vy,vz` from `vphi`, compute
+      `vsq = psi4*(SQR(vx)+SQR(vy)+SQR(vz))` (`gamma_ij v^i v^j` with
+      `gamma_ij=psi4*delta_ij`, CFC's conformally-flat Cartesian metric;
+      mirrors `lorene_bns.cpp`'s `Primitive::SquareVector(vu,g3d)` call,
+      inlined since our metric is trivially diagonal), clamp
+      `vsq=fmin(vsq,0.9999)` for numerical safety near the surface/mass-
+      shedding limit, `lorentz_w=1/sqrt(1-vsq)`, then multiply `vx,vy,vz` by
+      `lorentz_w` before returning. Verified via a 1-cycle check (job 248459):
+      zero FATAL errors, `rho_max(t=0)=1.279e-3` (matches the model's central
+      density), `max|W*v_phi|~0.347` (physically sane for a near-mass-shedding
+      rotator: naive `Omega*R_eq=0.02633*11.24=0.296`, Lorentz-boosted to
+      ~0.35), and a clean, artifact-free t=0 density slice.
+    - **New history diagnostics (2026-07-23, user request via `/btw`)**: added
+      `XNSRotStarHistory` (`xns_rotstar.cpp`), enrolled via
+      `user_hist_func = &XNSRotStarHistory;` in `UserProblem()` and
+      `<problem> user_hist = true` in the athinput. Mirrors `TOVHistory` in
+      `dyngr_tov.cpp` for `rho-max`/`alpha-min` (same `Kokkos::Max`/`Min`
+      reduction, same manual `MPI_MAX`/`MPI_MIN`-then-zero-non-root-copies
+      hack needed since `history.cpp`'s own post-reduction step is always
+      `MPI_SUM`), plus a new `ang-mom` field: the total angular momentum about
+      the z-axis, `integral sqrt(gamma)*(x*S_y - y*S_x) d^3x` (`S_i` the
+      undensitized ADM momentum density). Confirmed via `dyn_grmhd.cpp`'s own
+      `SetTmunu` (`tmunu.S_d(a) = cons(IM1+a)*ivol`, `ivol=1/sqrt(gamma)`) that
+      the evolved conserved variable `u0(IM1+a)` is already `sqrt(gamma)*S_a`
+      -- so the integrand needs **no explicit `psi^6`/`sqrt(detg)` factor in
+      code**, just `vol=dx1*dx2*dx3` times `(x*u0(IM2) - y*u0(IM1))`, exactly
+      mirroring `history.cpp`'s own `LoadMHDHistoryData` mass-sum idiom
+      (`vol=dx1*dx2*dx3`, `hvars[IDN]=vol*u0_(IDN)`, no metric factor) --
+      contrast `LoadZ4cHistoryData`'s `vol=dx1*dx2*dx3*sqrt(|detg|)`, needed
+      there only because *that* function's fields are not pre-densitized.
+      **Implementation note**: `HistoryOutput` writes each `PhysicsModule`
+      block to its own separate file (`history.cpp:401-416`) -- these three
+      new fields land in `<basename>.user.hst`, not `<basename>.mhd.hst`
+      (initially overlooked when first verifying this; the values were there
+      all along, just in the sibling file). Verified via job 248461 (1-cycle,
+      run together with the Lorentz-factor fix above): zero FATAL errors,
+      `cfc_bu8_surffix_check.user.hst` shows `rho-max=1.2794e-3` (matches job
+      248459's independent `bu8_bin_reader.py` cross-check to 4 sig figs),
+      `alpha-min=0.7107` (sane lapse), `ang-mom=1.2125` (right order of
+      magnitude for this star's expected angular momentum; changed by only
+      ~3e-6 relative between the 2 cycles, consistent with near-conservation).
+    - **Next**: full `tlim=200` production resubmission with both fixes
+      together, superseding job 248450 (missing Lorentz factor) and the
+      cancelled job 248460 (fixed but missing the history diagnostics).

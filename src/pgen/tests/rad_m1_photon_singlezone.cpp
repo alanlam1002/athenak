@@ -80,6 +80,15 @@ void ProblemGenerator::RadiationM1PhotonSingleZoneTest(ParameterInput *pin,
   Real vx = pin->GetReal("problem", "vx");
   Real vy = pin->GetReal("problem", "vy");
   Real vz = pin->GetReal("problem", "vz");
+  // erad (optional, default: start from the radiation floor -- the original
+  // behavior of this pgen, unaffected unless a caller opts in): initial
+  // radiation energy density E, F_i=0, both measured in the coordinate/normal
+  // frame -- the natural "isotropic in the coordinate frame" IC for a moment
+  // scheme (E, F_i already ARE normal-frame moments here), needed to
+  // reproduce arXiv:2302.04283 Section 3.6's equilibration test, which starts
+  // with both gas and radiation already populated and lets them jointly
+  // relax, rather than radiation starting at vacuum.
+  Real erad = pin->GetOrAddReal("problem", "erad", -1.0);
 
   Primitive::EOS<Primitive::IdealGas, Primitive::ResetFloor> &eos =
       static_cast<dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *>(
@@ -119,7 +128,10 @@ void ProblemGenerator::RadiationM1PhotonSingleZoneTest(ParameterInput *pin,
 
         for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
           uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_E_IDX, m1_nvars_), k, j, i) =
-              m1_params_.rad_E_floor;
+              (erad >= 0.0) ? erad : m1_params_.rad_E_floor;
+          uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FX_IDX, m1_nvars_), k, j, i) = 0.0;
+          uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FY_IDX, m1_nvars_), k, j, i) = 0.0;
+          uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_FZ_IDX, m1_nvars_), k, j, i) = 0.0;
           if (nspecies_ > 1) {
             uradm1_(m, radiationm1::CombinedIdx(nuidx, M1_N_IDX, m1_nvars_), k, j, i) =
                 m1_params_.rad_N_floor;

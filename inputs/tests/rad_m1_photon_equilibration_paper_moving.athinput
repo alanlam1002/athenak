@@ -1,0 +1,123 @@
+<comment>
+problem = Grey photon M1 single-zone equilibration test, matched to
+  arXiv:2302.04283 Section 3.6 "Equilibration" (moving case). Identical to
+  rad_m1_photon_equilibration_paper_static.athinput except the fluid moves at
+  the paper's exact choice u^1=1 (contravariant spatial four-velocity),
+  i.e. ordinary velocity vx = u1/W = 1/sqrt(2) = 0.7071067811865475, W=sqrt(2).
+  Unlike the discrete-ordinate module's rad_relax.cpp (an intensity-based
+  method that needed a new rad_frame=coordinate option to keep the initial
+  field isotropic in the coordinate frame -- see
+  rad_relax_paper_moving.athinput), M1's E, F_i ARE ALREADY coordinate/normal-
+  frame moments by construction, so simply setting erad=1 (E0=urad0) with
+  F_i=0 (the pgen's new default whenever erad is given) already IS the
+  paper's coordinate-frame-isotropic IC -- no extra M1-side machinery needed.
+  Companion DO-side run: rad_relax_paper_moving.athinput. Both must jointly
+  relax to thermal AND momentum equilibrium (paper Eq. 70); see
+  check_rad_relax_paper_equilibration.py (Stage 7).
+
+<job>
+basename = photon_equilibration_paper_moving  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.3      # well-resolved (many steps per coupling time 1/kappa_p=10)
+nlim       = -1       # cycle limit
+tlim       = 20.0     # time limit -- matches the DO-side run
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 5         # Number of zones in X1-direction
+x1min  = -2.5      # minimum value of X1
+x1max  = 2.5       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 5          # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 1.666666666666667  # Gamma=5/3, matches the paper
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = eddington
+src_update = implicit
+opacity_type = photons
+
+gr_sources = false     # default: true
+matter_sources = true  # default: true
+backreact = true       # let gas temperature AND momentum respond
+
+theta_limiter = false  # OFF -- Stage 6's solver-level fix suffices alone;
+                       # note this is energy-only (Stage 6's deferred item:
+                       # momentum backreaction still relies on theta_limiter
+                       # as the only reservoir guard in general -- flagged
+                       # here as a live test of that limitation, since this
+                       # is the first moving+backreact=true M1 test)
+
+<photons>
+kappa_s = 0.0          # no Compton/scattering -- paper's alpha_s = 0
+kappa_a = 0.0          # Rosseland absorption opacity [code units] -- unused
+kappa_p = 0.1          # Planck absorption/emission opacity -- plays the
+                       # paper's coupling rate alpha_a = 0.1
+power_opacity = false  # constant (non-Kramers) opacities
+compton = false        # Planck-only
+matter_implicit = true  # quartic pre-solve (Stage 5/6)
+arad = 1.0             # radiation constant -- paper's unit choice
+
+<problem>
+pgen_name = rad_m1_photon_singlezonetest
+rho  = 1.0    # initial density [code]
+temp = 2.0    # initial gas temperature T_gas0 = pgas0/rho = 2 (paper's choice)
+erad = 1.0    # initial radiation energy density urad0 = 1, isotropic in the
+              # coordinate/normal frame (see comment above)
+vx = 0.7071067811865475  # ordinary velocity s.t. u^1 = W*vx = 1 (paper's choice)
+vy = 0.0    # y velocity
+vz = 0.0    # z velocity
+
+<output1>
+file_type   = tab         # Binary data dump
+variable    = mhd_w       # Primitive variables
+dt          = 0.05
+
+<output2>
+file_type   = tab        # output format
+variable    = rad_m1_E    # choice of variables to output
+dt          = 0.05
+
+<output3>
+file_type   = tab        # output format
+variable    = rad_m1_F    # choice of variables to output -- momentum coupling
+dt          = 0.05

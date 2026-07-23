@@ -1,0 +1,75 @@
+<comment>
+problem = Discrete-ordinate (DO) equilibration test, matched to arXiv:2302.04283
+  Section 3.6 "Equilibration" (moving case). Identical physics to
+  rad_relax_paper_static.athinput (Gamma=5/3, rho=1, pgas0=2, urad0=1,
+  alpha_s=0, alpha_a=0.1) except the fluid now has contravariant spatial
+  four-velocity u^1=1 (paper's exact choice), i.e. ordinary velocity
+  v1 = u1/W = 1/sqrt(2) = 0.70710678, W=sqrt(2). The paper's moving test
+  explicitly keeps the INITIAL radiation field isotropic in the coordinate
+  frame (not comoving with the fluid) -- rad_relax.cpp's original v1-boost
+  behavior instead makes the initial field isotropic in the FLUID frame
+  (no momentum needing to relax away), so this run uses the new
+  <problem>/rad_frame=coordinate option added to rad_relax.cpp for Stage 7
+  specifically to reproduce the paper's IC. Paper's coupled ODE for this case
+  is Eq. 70; see check_rad_relax_paper_equilibration.py.
+
+<job>
+basename = relax_paper_moving  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.3       # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1       # cycle limit
+tlim       = 20.0     # time limit -- several coupling times (alpha_a)^-1=10
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 4         # Number of zones in X1-direction
+x1min  = 0.0       # minimum value of X1
+x1max  = 1.0       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = 0.0       # minimum value of X2
+x2max  = 1.0       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<coord>
+general_rel = true  # w/ general relativity
+minkowski = true    # flat space
+
+<hydro>
+eos         = ideal    # EOS type
+reconstruct = plm      # spatial reconstruction method
+rsolver     = hlle     # Riemann-solver to be used
+gamma       = 1.666666666666667  # Gamma=5/3, matches the paper's equilibration test
+
+<radiation>
+nlevel = 2     # geodesic-mesh angular resolution (0-D test -- physics is
+               # insensitive to this; chosen to match the existing
+               # rad_diffusion.athinput default)
+arad = 1.0     # radiation constant (paper's unit choice: arad=1)
+kappa_s = 0.0  # scattering opacity -- paper's alpha_s = 0
+kappa_a = 0.1  # absorption opacity -- paper's alpha_a = 0.1
+kappa_p = 0.0  # planck minus rosseland opacity -- unused here
+
+<problem>
+erad = 1.0            # initial radiation energy density urad0 = 1
+temp = 3.0             # e_gas0 = pgas0/(Gamma-1) = 3 (see comment above)
+v1   = 0.7071067811865475  # ordinary velocity s.t. u^1 = W*v1 = 1 (paper's choice)
+rad_frame = coordinate     # isotropic in the COORDINATE frame (paper's exact IC)
+
+<output1>
+file_type   = tab            # output format
+data_format = %24.16e        # output data format
+variable    = rad_hydro_w    # dens,velx,vely,velz,eint + r00..r33 + r00_ff..r33_ff
+dt          = 0.05           # output cadence

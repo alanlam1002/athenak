@@ -94,6 +94,17 @@ bit-for-bit with the limiter *off*. Also generalized the feature
 fixing a rate-inclusion gap caught during the stage's own plan review
 before any code was written, and verified on a new Planck-only stiff test.
 
+Stage 7 (see below) is also done: the first of a planned multi-stage effort
+(Stages 7-12) to reproduce the DO module's own paper (arXiv:2302.04283)
+test suite with both M1 and DO and compare directly — starting with
+§3.6 "Equilibration", the test this module already had the closest existing
+analogue for. Both DO's `rad_relax.cpp` and M1's
+`rad_m1_photon_singlezone.cpp` needed a small, additive IC extension to
+express the paper's exact test; both codes converge to the same
+independently-derived analytic equilibrium (static case) and conserve
+energy-momentum while reaching a mutually consistent equilibrium (moving
+case), with zero regression to any existing test.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -453,14 +464,14 @@ Recommended order (cheapest / fewest new mechanisms first):
      (`T=0.724491`, `E=0.275506`) match to `1.3e-6`/`7.4e-6` relative error
      (tolerance `1e-3`). All four single-zone tests re-ran clean (no
      regression).
-   - **No DO-module comparison for this item**: that module has no existing
-     homogeneous/uniform-single-zone pgen (only `rad_linear_wave` and
-     `rad_beam`, both spatial-transport setups, `pgen.cpp:962-996`); writing
-     one just for this comparison would mean adding code to the independent
-     reference module itself, undercutting the point of using it as a
-     check — skipped as disproportionate scope for one comparison point
-     (unlike items 2/3, which reused already-existing, already-verified
-     DO-module pgens).
+   - **No DO-module comparison for this item at the time this stage was
+     written** — this passage was wrong about the DO module's own pgen
+     inventory: it does have a homogeneous single-zone pgen,
+     `rad_relax.cpp` (`inputs/radiation/relax.athinput`), missed here because
+     this stage only searched for spatial-transport analogues
+     (`rad_linear_wave`, `rad_beam`). **Addressed in Stage 7**, which found
+     and used `rad_relax.cpp` for exactly this kind of comparison (the
+     paper's own "Equilibration" test, arXiv:2302.04283 §3.6) — see below.
    - **No animation**: genuinely 0-D (homogeneous single-zone) — nothing
      spatial to animate. Time-series plots (`E(t)`, `T_gas(t)`,
      conservation residual) under
@@ -1138,3 +1149,123 @@ and any cell where the quartic fails or `matter_implicit` is off.
   not fixed here.
 - EOSCompOSE, neutrino/`bns_nurates` transport (`nspecies_>1`) — both
   entirely untouched, unchanged from prior scope decisions.
+
+## Stage 7 — cross-check against the discrete-ordinate paper's own test suite: Equilibration (arXiv:2302.04283 §3.6) — DONE
+
+Goal: this module has so far been cross-checked against the sibling
+discrete-ordinate (DO) finite-solid-angle module (`src/radiation/`) on two
+tests (diffusion, beam — Stage 2). The DO module's own paper
+(White et al. 2023, arXiv:2302.04283, "An Extension of the Athena++ Code
+Framework for Radiation-Magnetohydrodynamics in General Relativity Using a
+Finite-Solid-Angle Discretization") has a full Section 3 test suite (10
+subsections); this is the first of a planned multi-stage effort
+(Stages 7-12) to reproduce each one with both M1 and DO and compare directly,
+starting with the cheapest, highest-reuse test: §3.6 "Equilibration" — a
+homogeneous matter-radiation coupling test with no spatial transport, which
+this module already has a near-exact structural analogue for (the single-zone
+LTE/backreaction tests, Stages 1-6).
+
+**Two small, targeted pgen extensions were needed to reproduce the paper's
+exact test, both additive with defaults preserving all prior behavior
+(verified: full 7-test CPU regression suite re-ran with zero change):**
+
+1. **`rad_relax.cpp` (DO side) didn't support the paper's moving-case initial
+   condition.** The paper's moving equilibration test explicitly keeps the
+   initial radiation field isotropic in the *coordinate* frame (not comoving
+   with the fluid) specifically so that both energy *and* momentum must
+   relax — but the existing pgen's `v1` boost always produced an initial
+   field isotropic in the *fluid* frame instead (no momentum mismatch to
+   relax away, since the field starts already comoving-isotropic). Added a
+   new `<problem>/rad_frame` option (`fluid`, the original default and
+   behavior; `coordinate`, new) that skips the fluid-frame boost when setting
+   the initial intensity, by using the trivial (unboosted) redshift factor
+   `n0_f=1` regardless of the fluid's velocity — the same formula the code
+   already used for the `v1=0` case, just applied unconditionally.
+2. **`rad_m1_photon_singlezone.cpp` (M1 side) always started the radiation
+   field at the floor (vacuum).** Every prior single-zone/backreaction test
+   deliberately started this way (radiation relaxing *toward* a fixed or
+   backreacting gas), but the paper's equilibration test starts with *both*
+   gas and radiation already populated and lets them jointly relax — a
+   genuinely different IC this pgen had no way to express. Added an optional
+   `<problem>/erad` parameter (default: unset, preserving the exact original
+   floor-start behavior) that sets the initial `E` directly, with `F_i=0`.
+   Since M1's `(E, F_i)` are already coordinate/normal-frame moments by
+   construction (unlike the DO module's intensity field), this direct
+   assignment *is* the paper's coordinate-frame-isotropic IC with no further
+   transformation needed — simpler than the DO-side fix, for the same reason
+   M1 needed no analogous change for the v≠0 case.
+
+**A parameter-naming quirk found, not a bug — worth documenting.** `rad_relax.cpp`'s
+`<problem>/temp` is assigned directly to the internal-energy-density
+primitive (`IEN`) with a code comment "assumes gm1=1" — i.e. it is only
+literally a temperature when Γ=2. For this stage's Γ=5/3 test, `temp` was
+set to the actual desired value of `IEN` (internal energy density
+`e_gas,0 = pgas,0/(Γ-1) = 3.0`), not `pgas,0/ρ`. No code change made (fixing
+the parameter's literal meaning would change behavior for the existing,
+already-validated `Γ=2` `relax.athinput`); documented here and in the new
+athinput's comments instead.
+
+**A primitive-variable convention, confirmed while writing the check script.**
+Both codes' `velx` output column is the *contravariant spatial four-velocity*
+`u¹ = W·v` (standard SR-hydro primitive convention in both modules), **not**
+the ordinary velocity `v` — confirmed directly from raw tab output (`u¹=1.0`
+exactly at `t=0` for the paper's `u¹=1` choice, input as ordinary
+`vx=1/√2` in both athinputs, which the codes' own boost formulas convert to
+`u¹=W·vx=1` internally). Not a bug, but easy to misread when writing
+independent Python cross-checks — the moving-case check script initially
+computed `w_lorentz = 1/√(1-v²)` directly from this column and hit a
+division-by-zero (`v` interpreted as `1.0`) before this was caught and fixed.
+
+**New matched inputs** (all four share `Γ=5/3, ρ=1, pgas,0=2` ⟹
+`e_gas,0=3`, `urad,0=1`, `α_s=0`, `α_a=0.1`, paper's unit choice
+`arad=k_B/(μm_p)=1`):
+- `inputs/radiation/rad_relax_paper_static.athinput` (DO, static)
+- `inputs/radiation/rad_relax_paper_moving.athinput` (DO, moving,
+  `rad_frame=coordinate`, `u¹=1`)
+- `inputs/tests/rad_m1_photon_equilibration_paper_static.athinput` (M1,
+  static, `matter_implicit=true`, `theta_limiter=false`, Planck-only
+  `kappa_p=0.1` playing the paper's `α_a`)
+- `inputs/tests/rad_m1_photon_equilibration_paper_moving.athinput` (M1,
+  moving, `vx=1/√2` ⟹ `u¹=1`, `erad=1.0`)
+
+The DO-side inputs require the dedicated `-D PROBLEM=rad_relax` build
+(`build_relax_sakura.sh`, modeled on `build_diffref_sakura.sh` — mutually
+exclusive with the M1 `built_in_pgens` build, same pattern as Stage 2's
+diffusion cross-check). New check script
+`inputs/tests/check_rad_relax_paper_equilibration.py`.
+
+**Verification — static case.** Independently re-integrated the paper's
+exact ODE (Eq. 69, `scipy.solve_ivp`, no dependence on either code) and its
+closed-form equilibrium (Eq. 68, `T_equil=1.214799` via `scipy.brentq`). Both
+DO and M1 track this reference trajectory closely throughout (see
+`stage7_equilibration_static.png`) and converge to it: final `T_gas` relative
+error `4.2×10⁻⁶` (DO) / `8.8×10⁻⁶` (M1); final `u_rad` relative error
+`3.5×10⁻⁶` (DO) / `5.0×10⁻⁶` (M1).
+
+**Verification — moving case.** No independent ODE re-derivation was
+attempted (the paper's Eq. 70 for this case is a materially separate
+derivation from Eq. 69, involving coupled intensity evolution — a real
+applied-math task, deferred). Instead checked the invariant both codes must
+obey regardless of closure or angular resolution: total coordinate-frame
+energy-momentum (`T⁰⁰_matter+R⁰⁰`, `T⁰¹_matter+R⁰¹`) is conserved —
+confirmed to `~10⁻⁶` relative error in both codes independently — and that
+both converge to a *consistent* final state (`stage7_equilibration_moving.png`):
+final `T_gas` agrees to `0.6%`, ordinary velocity `v` to `1.5×10⁻²` absolute,
+coordinate-frame radiation energy density (`R⁰⁰`/`E`) to `3.0%`. The `u¹(t)`
+trajectories show the same qualitative signature in both codes — an initial
+rise (radiation drag accelerates the fluid before momentum equilibrates) then
+monotonic decay back down as the system reaches joint thermal+momentum
+equilibrium — with M1 running systematically a few percent higher, consistent
+with M1's exact-Eddington closure vs. the DO module's finite (`nlevel=2`)
+angular resolution on a non-Eddington intensity field; not investigated
+further as a source of disagreement, since both the sign and magnitude are
+within what the differing closure/resolution would predict.
+
+**Regression**: full 7-test CPU pytest suite re-ran with zero change after
+both pgen edits (both are opt-in, defaulting to prior behavior).
+
+**Not in scope / deferred**: Stages 8-12 (diffusion advected variant,
+hohlraum, BH beams, colliding beams, linear waves) — see the approved plan
+for the full roadmap; three paper tests (radiating disk, shocks, Schwarzschild
+atmosphere) have no existing pgen scaffolding on either side and are deferred
+as separate future stages, each a substantial standalone development effort.

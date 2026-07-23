@@ -128,6 +128,10 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
   if (use_mhd) {
     dd = 1.0 / (3.0 * pmbp->pradm1->photon_op_params.kappa_s * rho);
   }
+  // Gaussian width parameter, matching rad_diffusion.cpp's <problem>/nu
+  // convention (E(x,0)=exp(-nu^2 x^2)). Default nu=3 (nusq=9) preserves the
+  // exact previously-hardcoded IC for every existing test.
+  Real nusq_diag = SQR(pin->GetOrAddReal("problem", "nu", 3.0));
 
   // set metric to minkowski, initialize velocity to zero
   par_for(
@@ -153,7 +157,7 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
 
         Real E{};
         if (erf) {
-          E = Kokkos::exp(-9. * x1 * x1);
+          E = Kokkos::exp(-nusq_diag * x1 * x1);
         } else {
           E = (x1 < 0);
         }
@@ -161,16 +165,22 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
         Real J = 3. * E / (4. * lorentz_w * lorentz_w - 1.);
         Real Fx = (4. / 3.) * J * lorentz_w * lorentz_w * vx;
         if (erf && use_mhd) {
-          // Add the static diffusive flux F = -D*dE/dx = D*2*nu^2*x*E (nu^2=9,
-          // matching the exp(-9x^2) Gaussian above), i.e. the flux consistent
-          // with the exact solution of the diffusion equation at t=0 (see
-          // src/pgen/rad_diffusion.cpp's `fr`, simplified to v1=0). Without
-          // this, the M1 solver starts from a "non-equilibrated" F=0 IC and
-          // needs a spin-up transient (~1/kscat) before flux and gradient are
-          // correctly related, which contaminates early-time measurements of
-          // the spreading rate (found via a cross-check against the
-          // discrete-ordinate rad_diffusion.cpp module).
-          Fx += dd * 2. * 9. * x1 * E;
+          // Add the static diffusive flux F = -D*dE/dx = D*2*nu^2*x*E, i.e.
+          // the flux consistent with the exact solution of the diffusion
+          // equation at t=0 (see src/pgen/rad_diffusion.cpp's `fr`,
+          // simplified to v1=0). Without this, the M1 solver starts from a
+          // "non-equilibrated" F=0 IC and needs a spin-up transient
+          // (~1/kscat) before flux and gradient are correctly related,
+          // which contaminates early-time measurements of the spreading
+          // rate (found via a cross-check against the discrete-ordinate
+          // rad_diffusion.cpp module). This is a v1=0-simplified flux
+          // correction -- NOT the full boosted self-similar solution
+          // rad_diffusion.cpp uses for v1!=0 (which additionally shears
+          // the Gaussian in time via boosted coordinates tp,xp) -- a
+          // deliberately cheaper approximation for the moving case, valid
+          // as a smooth IC but not an exact match to the DO module's own
+          // advected analytic solution (see Stage 9, DEVELOPMENT.md).
+          Fx += dd * 2. * nusq_diag * x1 * E;
         }
 
         AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};

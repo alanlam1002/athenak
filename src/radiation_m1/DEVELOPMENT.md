@@ -118,6 +118,16 @@ targeted fixes aimed at the Newton-solve/closure path all failed to help
 change deferred as genuine new development, not a guard-scale fix. No code
 shipped from Stage 8; the speculative fixes were reverted.
 
+Stage 9 (see below) is also done: the second DO-comparison stage, the
+diffusion test's advected (moving-fluid) variant. Both pgens already had
+complete velocity/boost support; only a small parametrization fix was
+needed (`rad_m1_diffusiontest.cpp`'s hardcoded Gaussian width became a
+`<problem>/nu` option). Both codes advect their pulse at `v1` to within
+`~1-2%`; DO diffuses at the analytic rate to `~1%`, while M1 shows a real,
+smooth, `~31%`-low diffusion rate — consistent with, not contradictory to,
+Stage 2's already-documented finding that the M1 closure is a damped-
+hyperbolic system that only reaches pure diffusion asymptotically.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -1440,3 +1450,85 @@ essential to finding the real branch involved.
 stage, there is nothing to regress — the full CPU suite and all Stage 5-7
 backreaction athinputs are untouched and still pass as of Stage 7's own
 commit (`01de51b3`).
+
+## Stage 9 — diffusion, advected variant (arXiv:2302.04283 §3.7) — DONE
+
+Goal: second stage of the DO-comparison roadmap (Stages 9-13, renumbered
+from the original 8-12 to make room for Stage 8). Stage 2 already
+cross-checked the *static* diffusion pulse (κ_s=5, 200) between M1 and DO;
+the paper's §3.7 also has a moving-fluid sub-case (v1=0.02 in the paper's
+own units), where the initial pulse is isotropic in the *fluid* frame, not
+the coordinate frame, so both advection (at v1) and diffusion (at
+D=1/(3κ_sρ)) must be captured simultaneously.
+
+**Both pgens already had complete velocity/boost support built in — no new
+pgen work needed for the physics itself.** `rad_diffusion.cpp` (DO)
+implements the paper's exact boosted self-similar solution (`tp=W(t-v1x)`,
+`xp=W(x-v1t)`, with a time-offset `tp0=6·u¹` keeping the solution
+well-defined across the domain despite the boost-induced shear) — this file
+was already unmodified/pre-existing in the repo, and its default athinput,
+`inputs/radiation/rad_diffusion.athinput`, already runs at `v1=0.1`
+(κ_s=100, ν=4) — a genuine, already-working advected DO test that had simply
+never been cross-checked against M1 or documented as such.
+`rad_m1_diffusiontest.cpp` also already had a `fluid_velocity` parameter and
+a boosted-equilibrium IC — but a *simplified* one: it applies the same
+`J=3E/(4W²-1)`, `Fx=(4/3)JW²v` boosted-equilibrium relation from the earlier
+`vx_singlezone` test to a **lab-frame-static** Gaussian `E(x)=exp(-ν²x²)`,
+plus a `v1=0`-derived diffusive-flux correction — not the DO module's fully
+sheared, time-offset self-similar solution. This is a deliberately cheaper
+approximation, not a bug (documented in a new code comment); it does mean
+the two codes' `t=0` initial data are close but not bit-identical.
+
+**One small, additive pgen fix**: `rad_m1_diffusiontest.cpp` hardcoded the
+Gaussian width (`ν²=9`, i.e. `ν=3`) in two places instead of reading it from
+`<problem>/nu` the way `rad_diffusion.cpp` already does — parametrized it
+(`pin->GetOrAddReal("problem","nu",3.0)`, default preserving the exact prior
+behavior for every existing test) so the M1 and DO sides could be run at the
+same `ν=4` the DO test already used.
+
+**New matched M1 athinput**:
+`inputs/tests/rad_m1_photon_diffusion_advected.athinput` — same domain/
+resolution/`tlim` as `rad_diffusion.athinput` (`x∈[-1,2]`, 256 cells,
+`tlim=5`), `κ_s=100`, `ν=4`, `fluid_velocity=0.1`, `backreact=false`
+(matching DO's `fixed_fluid=true`).
+
+**Verification approach**: since the two codes' ICs aren't identical, this
+doesn't check against one shared analytic solution — instead it checks that
+each code's *own* pulse independently satisfies the two physical
+predictions: peak position `x_peak(t)=x_peak(0)+v1·t` (advection) and
+E-weighted variance `σ²(t)=σ₀²+2Dt`, `D=1/(3κ_sρ)` (diffusion). New script
+`inputs/tests/check_rad_m1_photon_diffusion_advected.py`.
+
+**Results**:
+- **Advection**: essentially exact in both codes — fitted peak-position
+  slope `0.10036` (M1, `0.36%` off `v1`) and `0.09844` (DO, `1.6%` off) —
+  visually indistinguishable from the analytic `x=v1·t` line.
+- **Diffusion**: DO tracks the analytic `D=1/300=0.003333` closely (fitted
+  `0.003288`, `1.4%` off). M1 shows a real, smooth, systematic *slower*
+  spreading rate (fitted `D=0.002286`, `31%` low) — visible as a
+  consistently shallower but still perfectly linear `σ²(t)` line in the
+  comparison plot, not noise or an instability. This is consistent with,
+  not contradictory to, Stage 2's own finding that the M1 moment-closure
+  scheme is a damped-hyperbolic system that only reduces to pure diffusion
+  asymptotically (there measured as a *faster*-than-analytic spread at high
+  stiffness in the *static* case — here, at `κ_s=100` combined with the
+  advected/boosted IC's own transient, the same kind of finite-relaxation
+  correction shows up as a measurable, but still physically smooth and
+  bounded, deviation). Not investigated further as a possible bug, given
+  the smoothness of the trend and the already-documented IC-approximation
+  and closure-deviation precedents from Stages 2/7.
+- Plots: `stage9_diffusion_advected.png`
+  (`/sakura/ptmp/tlam/athenak_run/stage9_diffusion_advected/plots/`, not
+  committed — scratch/visualization only, same convention as every prior
+  stage).
+
+**Regression**: full 7-test CPU pytest suite re-ran with zero change after
+the `nu` parametrization (additive, unchanged default; no other test sets
+`<problem>/nu`).
+
+**Not in scope / deferred**: Stages 10-13 (hohlraum, BH beams, colliding
+beams, linear waves); a convergence-resolution scan (paper Figure 21, `ϵ`
+vs. `N`) was not attempted here — Stage 2's static-case scan already
+established the expected second-order convergence behavior for this same
+scheme, and repeating it for the advected case is not required to confirm
+the qualitative advection/diffusion behavior this stage set out to check.

@@ -84,22 +84,21 @@ void ProblemGenerator::RadiationM1BeamTest(ParameterInput *pin,
   // opacity_type=photons needs real density/pressure to compute opacities
   // from (CalcOpacityPhotons_IdealGas_ reads w0_(IDN)/w0_(IEN)), so it uses
   // the real <mhd> fluid instead of the placeholder pradm1->w0 the toy/
-  // neutrino models get by with. Only wired up for the 1D Minkowski beam so
-  // far -- the 2D isotropic/Kerr-Schild BH branches are a curved-spacetime
-  // beam-bending test that's a different, more complex problem.
+  // neutrino models get by with. [Stage 10] Previously only wired up for the
+  // 1D Minkowski beam -- un-guarded after tracing that nothing downstream
+  // actually depends on dimensionality here: the density/pressure-fill
+  // kernel below is already dimension-agnostic, and the 2D BH boundary
+  // condition (ApplyBeamSourcesBlackHole, radiation_m1_beams.cpp) computes
+  // its injected (E,F) directly from the local metric at each ghost cell,
+  // independent of opacity_type/use_mhd entirely. Both the isotropic and
+  // Kerr-Schild metric branches below are Schwarzschild-only (no spin
+  // parameter read) -- a spinning BH beam is a separate, real extension,
+  // not covered by this un-guard.
   bool use_mhd = (pmbp->pradm1->params.opacity_type == radiationm1::Photons);
   dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *ptest_ideal =
       nullptr;
   Real mb = 1.0;
   if (use_mhd) {
-    if (!pmbp->pmesh->one_d) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl
-                << "opacity_type = photons is only wired up for the 1D "
-                   "Minkowski beam test so far, not the 2D isotropic/"
-                   "Kerr-Schild BH beam" << std::endl;
-      exit(EXIT_FAILURE);
-    }
     ptest_ideal =
         dynamic_cast<dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *>(
             pmbp->pdyngr);

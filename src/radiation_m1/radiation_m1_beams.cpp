@@ -187,7 +187,17 @@ void ApplyBeamSourcesBlackHole(Mesh *pmesh) {
                   u0_(m, CombinedIdx(nuidx, M1_FX_IDX, nvars_), k, j, is - i - 1) = F_d(1);
                   u0_(m, CombinedIdx(nuidx, M1_FY_IDX, nvars_), k, j, is - i - 1) = F_d(2);
                   u0_(m, CombinedIdx(nuidx, M1_FZ_IDX, nvars_), k, j, is - i - 1) = F_d(3);
-                  u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, is - i - 1) = 1.0;
+                  // [Stage 10] M1_N_IDX only exists for multi-species
+                  // (neutrino) runs -- nvars_ is 4 (E,Fx,Fy,Fz only) for
+                  // single-species photon runs, so writing it unconditionally
+                  // is an out-of-bounds access. This function was previously
+                  // only ever exercised by toy/neutrino opacity tests (where
+                  // nspecies_>1 and this slot exists); un-guarding
+                  // opacity_type=photons for the 2D BH branch (Stage 10) is
+                  // the first photon-opacity run to reach it.
+                  if (nspecies_ > 1) {
+                    u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, is - i - 1) = 1.0;
+                  }
                 }
               }
             }
@@ -202,8 +212,10 @@ void ApplyBeamSourcesBlackHole(Mesh *pmesh) {
                       0.0;
                   u0_(m, CombinedIdx(nuidx, M1_FZ_IDX, nvars_), k, j, is - i - 1) =
                       0.0;
-                  u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, is - i - 1) =
-                      0.0;
+                  if (nspecies_ > 1) {
+                    u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, is - i - 1) =
+                        0.0;
+                  }
                 }
               }
             }

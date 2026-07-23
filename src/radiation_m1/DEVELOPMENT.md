@@ -128,6 +128,18 @@ smooth, `~31%`-low diffusion rate — consistent with, not contradictory to,
 Stage 2's already-documented finding that the M1 closure is a damped-
 hyperbolic system that only reaches pure diffusion asymptotically.
 
+Stage 10 (see below) found and fixed two real bugs (an overly conservative
+guard blocking `opacity_type=photons` for 2D curved-spacetime beams, and a
+genuine out-of-bounds array write in `ApplyBeamSourcesBlackHole` only
+reachable by single-species/photon runs — plus an unrelated header-parsing
+bug in `vis/python/bin_convert.py`), but the underlying capability itself —
+a photon-opacity beam test around a Schwarzschild BH — is **not yet
+working**: the run completes without crashing but blows up to `Inf`/`NaN`
+starting at the photon sphere, apparently because `gr_sources=true` has
+never before been combined with `opacity_type=photons` in this module's
+history. Paused (not root-caused) at the user's request; treat this specific
+combination as known-broken, not just untested.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -409,7 +421,11 @@ Recommended order (cheapest / fewest new mechanisms first):
    `radiation_m1_beams.cpp:18-46`, independent of `opacity_type`). Guarded
    with a fatal error if `opacity_type=photons` is selected together with the
    2D isotropic/Kerr-Schild BH branches (curved-spacetime beam bending is a
-   different, more complex test, out of scope here).
+   different, more complex test, out of scope here). **Guard removed in
+   Stage 10** — but the underlying capability that guard was protecting
+   users from is still not actually working (a real numerical blow-up, not
+   yet root-caused) — see Stage 10 below before relying on this combination
+   for anything.
    See `rad_m1_photon_beam_1d.athinput`, `check_rad_m1_photon_beam_1d.py`.
    - **Closure choice matters**: must use `closure_fun=minerbo` (the code
      default), not `eddington` — `eddington` pins `chi=1/3` (isotropic
@@ -1532,3 +1548,126 @@ vs. `N`) was not attempted here — Stage 2's static-case scan already
 established the expected second-order convergence behavior for this same
 scheme, and repeating it for the advected case is not required to confirm
 the qualitative advection/diffusion behavior this stage set out to check.
+
+## Stage 10 — beams around black holes (arXiv:2302.04283 §3.2-3.3) — TWO BUGS FIXED, CORE CAPABILITY NOT YET WORKING (paused)
+
+Goal: third DO-comparison stage — the paper's nonspinning equatorial/inclined
+beam test around a Schwarzschild BH (§3.3), which also covers §3.2.1's
+"three coordinate systems" test in spirit (M1's existing isotropic/
+Kerr-Schild branches). Spin (§3.3's a=1/2 case) and Snake coordinates
+(§3.2.2) were explicitly out of scope for this pass — see below.
+
+**Investigation.** M1's `rad_m1_beams.cpp` has had 2D isotropic/Kerr-Schild
+metric branches since early in this module's history, but `opacity_type=
+photons` was fatal-error-guarded to the 1D Minkowski case only ("a
+different, more complex problem," Stage 2). Tracing the guard found nothing
+downstream actually depends on it: the density/pressure-fill kernel is
+already dimension-agnostic, and the 2D BH boundary condition
+(`ApplyBeamSourcesBlackHole`, `radiation_m1_beams.cpp`) computes its
+injected `(E,F)` directly from the local metric, independent of opacity
+type. **Removed the guard.**
+
+Also found, by inspection, that AthenaK's standard `<coord>` block
+(`general_rel=true, minkowski=false`) *is* Cartesian Kerr-Schild
+(`coordinates/cartesian_ks.hpp`) — the exact same textbook
+Kerr-Schild-Schwarzschild embedding M1's own manual `kerr-schild` metric
+branch computes by hand at zero spin. This means the DO module's
+`RadiationBeam` (`pgen_name=rad_beam`, using the standard `<coord>` block)
+and M1's `kerr-schild` branch describe *literally the same spacetime in the
+same coordinates* at `a=0` — no isotropic-radius conversion needed between
+the two codes, domain/impact-parameter choices transfer directly. Also
+found neither side's beam metric currently supports spin at all (M1's
+branches read no spin parameter; the paper's a=1/2 case is out of scope
+here regardless).
+
+**Bug #1 — real, fixed.** First empirical run (M1, un-guarded, 2D,
+`opacity_type=photons`) segfaulted immediately via a `Kokkos::View` bounds
+check: `ApplyBeamSourcesBlackHole` unconditionally wrote
+`M1_N_IDX` (neutrino number density, index 4) regardless of `nspecies_` —
+harmless for every prior caller of this function (toy/neutrino tests, always
+multi-species, so the slot exists), but a genuine out-of-bounds write for a
+single-species photon run (`nvars_=4`, valid indices 0-3 only). This is the
+first-ever photon-opacity caller of this function. **Fixed**: guarded both
+writes (the beam-band branch and the zero-fill `else` branch) with
+`if (nspecies_ > 1)`, matching the pattern used everywhere else in this
+module. Verified: full 7-test CPU regression suite still passes (this
+function is also used by the already-working 1D beam test, `nspecies_=1`
+there too, so this is a real behavioral change for that path as well —
+zero output change confirmed).
+
+**Bug #2 — unrelated, in shared vis/python tooling, fixed.** The 2D beam
+test's spatial field can't use `file_type=tab` (AthenaK's tab writer only
+supports 1D slices) — switched to `file_type=bin` and
+`vis/python/bin_convert.py`'s `read_binary()`. That reader's header parser
+did `key, value = line.split("=")` (4 occurrences) — breaks on any athinput
+comment line containing more than one literal `=` character (this stage's
+own athinput comments do, e.g. "b=5.5"), a latent bug in shared
+infrastructure that would affect any `.bin` output whose parameter file has
+a wrapped comment with embedded `=`. **Fixed**: `split("=", 1)` at all 4
+occurrences — strictly more correct (a key/value line should only ever
+split on the first `=`), zero behavior change for any header line that
+doesn't hit the bug.
+
+**Core capability — NOT yet working.** With both bugs fixed, the M1 run
+completes without crashing (351 cycles to `tlim=14`, clean exit) — but the
+output is not physically valid. Visualized `E(x,y,t)`: at `t=3` the beam has
+genuinely entered the domain (visible top-left, correct entry point/
+direction), but a **ring of `Inf`-valued cells appears sitting almost
+exactly at `r=3M` — the photon sphere** — and by `t=6` the entire domain has
+gone to `NaN`/`Inf`, with only scattered finite fragments surviving to
+`t=14`. This is a genuine numerical blow-up, not cosmetic. `DEBUG_BUILD`
+instrumentation on a smaller/slower debug build showed the mechanism before
+this visual confirmation: the Hybridsj Newton solve (`source_update`) was
+failing pervasively from cycle 0 — both the requested `Minerbo` closure and
+its internal `Eddington` fallback (`radiation_m1_sources.hpp:263-267`) —
+averaging roughly 2 failures per cell per cycle across the whole domain, not
+localized to a few problem cells at the start (though the blow-up's spatial
+pattern at `t=3` does end up concentrated at the photon sphere, where
+lensing/redshift are most extreme). **Working hypothesis, not yet
+investigated**: this is the first M1 test in the module's entire history to
+combine `gr_sources=true` (genuine curved-spacetime GR source terms) with
+`opacity_type=photons` and the Hybridsj Newton solve — every prior
+photon-M1 test (Stages 1-9) used flat spacetime (`gr_sources=false`), so
+this specific combination has simply never been exercised before now.
+Because `source_update`'s return signal (`src_signal`) is computed but never
+checked by the caller (a separate, already-documented gap from Stage 6 —
+"`SrcFail`/`SrcEquil`/`SrcScat` unchecked `src_signal`"), the Newton solve's
+repeated failure was silently absorbed rather than surfaced, until the field
+itself blew up.
+
+**DO side — not yet completed.** Building a matched
+`rad_beam_bh_schwarzschild.athinput` (Cartesian Kerr-Schild, `a=0`,
+`<rad_srcterms>`-based point beam source, modeled on the already-validated
+flat-space `do_beam_1d.athinput`) required several rounds of mechanical
+fixes for parameters this test path needs that the flat-space template
+didn't (`dexcise`/`pexcise` when `excise=true`; `<hydro>/reconstruct`+
+`rsolver`; `angular_fluxes=true`, required here — unlike the flat case —
+since it's the mechanism representing gravity's effect on null geodesics in
+this discretization). Paused with one more missing-parameter error
+(`<radiation>/arad` also required once a `<hydro>` fluid is present) — not
+yet resolved, since the M1-side blow-up means there's no working comparison
+target yet regardless.
+
+**Disposition**: both real bugs (guard, `M1_N_IDX` out-of-bounds,
+`bin_convert.py` header parser) are fixed and committed — genuine, verified,
+zero-regression improvements independent of whether the beam test itself
+ultimately works. The core capability (2D curved-spacetime beam + photon
+opacity) remains **not validated** — produces a real blow-up at the photon
+sphere, root cause not yet investigated beyond the working hypothesis
+above. **Do not trust `opacity_type=photons` combined with `gr_sources=true`
+and a non-Minkowski `<adm>/metric` for any purpose until this is
+root-caused** — every existing validated photon-M1 test is unaffected
+(all use `gr_sources=false`, flat spacetime), but this specific new
+combination should be treated as known-broken, not just "not yet tried."
+New athinputs (`rad_m1_photon_beam_schwarzschild.athinput`,
+`rad_beam_bh_schwarzschild.athinput`) are committed as a starting point for
+whoever picks this back up, with their current known-blocking state
+documented above rather than silently left half-finished.
+
+**Not in scope / deferred**: root-causing the GR-sources+photons+Hybridsj
+blow-up (a real investigation, comparable in shape to Stage 8, not started);
+completing the DO-side athinput; the spinning BH case (§3.3's a=1/2,
+porting `RadiationKerrOrbitBeam` from `~/athenak_IAS` — real new M1
+development too, since M1's metric branches read no spin parameter at all);
+Snake coordinates (§3.2.2); Stages 11-13 (colliding beams, linear waves) —
+unaffected by this stage, roadmap numbering unchanged.

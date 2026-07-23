@@ -41,6 +41,8 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
 
   ZL_eta = pin->GetOrAddReal(block, "ZL_eta", 1.0);
 
+  enforce_eos_equilibrium = pin->GetOrAddBoolean(block, "enforce_eos_equilibrium", false);
+
   m_electron = pin->GetOrAddReal(block, "m_electron", 0.5109989499961642);
   m_muon     = pin->GetOrAddReal(block, "m_muon"    , 105.65837549724458);
   m_u_quark  = pin->GetOrAddReal(block, "m_u_quark" , 5.0);
@@ -220,6 +222,15 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
         Real e_ln = ColdEnergyLeptons(nY[0], nY[2]);
         Real e_q = ColdEnergyQuarks(nY[1], nY[3]);
         Real e_lq = ColdEnergyLeptons(nY[1], nY[3]);
+        // Enthalpy: computed directly from the analytic building blocks (same pattern
+        // as p_n/p_q, e_n/e_q above) and checked against the thermodynamic identity
+        // h = (P+E)/n using the tabulated P, E.
+        Real h_n = (nY[4] > 0.0) ? ColdEnthalpyNucleons(nY[0], nY[2]) : 0.0;
+        Real h_q = (nY[4] < 1.0) ? ColdEnthalpyQuarks(nY[1], nY[3]) : 0.0;
+        Real h_g = (ZL_eta < 1.0) ? ColdEnthalpyLeptons(n, nY[5]) : 0.0;
+        Real h_analytic = (h_n * nY[4] + h_q * (1.0-nY[4]) + (1.0-ZL_eta) * h_g) / n;
+        Real h_tab = (p_tab + e_tab) / n;
+        Real h_reldiff = h_analytic/h_tab - 1.0;
         Real e_mu = GetHeavyLeptonFraction(nY[0] * fabs(nY[2]), m_idiff_mu_e);
         Real chp_e = ChemPoFermion(nY[0] * fabs(nY[2]) * (1.0-e_mu), m_electron);
         Real chp_mu = ChemPoFermion(nY[0] * fabs(nY[2]) * (e_mu), m_muon);
@@ -278,10 +289,17 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
                   << e_n << ", " 
                   << e_q << ", " 
                   << e_ln << ", " 
-                  << e_lq << ", " 
-                  << e_mu << ", " 
-                  << chp_e << ", " 
+                  << e_lq << ", "
+                  << e_mu << ", "
+                  << chp_e << ", "
                   << chp_mu
+                  << " ]" << std::endl
+                  << in << ", H = [ tab=" << h_tab
+                  << ", analytic=" << h_analytic
+                  << ", h_n=" << h_n
+                  << ", h_q=" << h_q
+                  << ", h_g=" << h_g
+                  << ", reldiff=" << h_reldiff
                   << " ]" << std::endl;
       }
     }
@@ -325,6 +343,18 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
           Real p_reldiff = p_cold/p_tab - 1.0;
           Real e_reldiff = e_cold/e_tab - 1.0;
 
+          // Enthalpy: same analytic building blocks as the on-grid loop above (matches
+          // ColdEnthalpy()'s own combination, computed directly here to also report the
+          // h_n/h_q/h_g breakdown).
+          Real nY_h[6] = {0.0};
+          ConvertPrimitive(n_test, y, nY_h);
+          Real h_n = (nY_h[4] > 0.0) ? ColdEnthalpyNucleons(nY_h[0], nY_h[2]) : 0.0;
+          Real h_q = (nY_h[4] < 1.0) ? ColdEnthalpyQuarks(nY_h[1], nY_h[3]) : 0.0;
+          Real h_g = (ZL_eta < 1.0) ? ColdEnthalpyLeptons(n_test, nY_h[5]) : 0.0;
+          Real h_analytic = (h_n*nY_h[4] + h_q*(1.0-nY_h[4]) + (1.0-ZL_eta)*h_g) / n_test;
+          Real h_tab = (p_tab + e_tab) / n_test;
+          Real h_reldiff = h_analytic/h_tab - 1.0;
+
           std::cout << "Test offgrid " << in << " t=" << t
                     << " n = " << n_test
                     << " Y = [ " << f << ", " << yn << ", " << yln << ", " << ylq << " ]"
@@ -332,6 +362,8 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
                     << ", reldiff=" << p_reldiff << " ]"
                     << " E = [ tab=" << e_tab << ", cold=" << e_cold
                     << ", reldiff=" << e_reldiff << " ]"
+                    << " H = [ tab=" << h_tab << ", analytic=" << h_analytic
+                    << ", reldiff=" << h_reldiff << " ]"
                     << std::endl;
         }
       }

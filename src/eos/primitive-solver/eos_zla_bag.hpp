@@ -64,6 +64,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     n_species = 0;
     eos_units = MakeNuclear();
     m_initialized = false;
+    enforce_eos_equilibrium = false;
 
     // These will be set properly when the table is read
     m_id_log_nb = std::numeric_limits<Real>::quiet_NaN();
@@ -265,6 +266,18 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Calculate sound speed for the cold part.
   KOKKOS_INLINE_FUNCTION Real ColdSoundSpeed2(Real n, Real *Y) const {
     assert (m_initialized);
+    // The analytic derivative below is the *frozen* sound speed (dP/dn, de/dn at
+    // fixed composition). The tabulated cs2 column is the *equilibrium* sound speed,
+    // which also includes the (dP/dY)(dY_eq/dn) terms from composition varying with
+    // density along the beta-equilibrium sequence -- these are systematically
+    // different (frozen cs is a few % to ~20% too high through the stellar interior).
+    // When enforce_eos_equilibrium is set, use the table's own equilibrium value
+    // directly instead, consistent with GetEquilibriumComposition/ConvertPrimitive.
+    if (enforce_eos_equilibrium) {
+      Real n_tab = Kokkos::fmin(Kokkos::fmax(n, min_n), max_n);
+      Real cs = eval_at_n(ECCS, n_tab);
+      return cs*cs;
+    }
     Real nY[6] = {0.0};
     ConvertPrimitive(n, Y, nY);
     Real dEdn_N = 0.0;
@@ -440,6 +453,15 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Y: (f n, f n_N, f Y_qN n_N, (1-f) Y_qQ n_Q)
   /// (n_N, n_Q, Y_qN, Y_qQ, f, Y_qG)
   KOKKOS_INLINE_FUNCTION void ConvertPrimitive(Real n, const Real *Y, Real nY[6]) const{
+    // If enforce_eos_equilibrium is set, ignore the (possibly mis-advected) passive
+    // scalar composition entirely and always use the table's own equilibrium
+    // composition at this density instead -- makes pressure/energy a pure function
+    // of n throughout the EOS, matching a density-only (e.g. hybrid) table.
+    Real y_eq[MAX_SPECIES];
+    if (enforce_eos_equilibrium) {
+      GetEquilibriumComposition(n, y_eq);
+      Y = y_eq;
+    }
     nY[4] = Y[0];                                 // Volume fraction
     if ( Y[0] > 0.0 ) {
       nY[0] = Y[1] * n / Y[0];                    // Nucleon number density
@@ -679,6 +701,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
          ( EnthalpyFermion(nQ * y_u * ONE_3RD, m_u_quark)
          + EnthalpyFermion(nQ * y_d * ONE_3RD, m_d_quark)
          + EnthalpyFermion(nQ * y_s * ONE_3RD, m_s_quark) )
+         + Bag_av * SQR(3.0 * nQ)
          + ZL_eta * ColdEnthalpyLeptons(n, yq);
   }
 
@@ -1134,6 +1157,27 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     eos_units = units;
   }
 
+  /// Look up the table's own equilibrium (beta-equilibrium, cold-catalyzed)
+  /// composition at number density n, in the same {f, Y_n, Y_n*Y_l,N, (1-Y_n)*Y_l,Q}
+  /// convention as the primitive species array. Used by ConvertPrimitive when
+  /// enforce_eos_equilibrium is set, to substitute this for the passed-in
+  /// (advected) composition.
+  KOKKOS_INLINE_FUNCTION void GetEquilibriumComposition(Real n, Real y[MAX_SPECIES])
+      const {
+    // Clamp to the table's density range: called from ConvertPrimitive on every EOS
+    // evaluation, including unconverged trial densities visited mid-iteration by the
+    // C2P root solve, which can stray outside [min_n, max_n].
+    Real n_tab = Kokkos::fmin(Kokkos::fmax(n, min_n), max_n);
+    Real f   = eval_at_n(ECFVOL, n_tab);
+    Real yn  = eval_at_n(ECYN,   n_tab);
+    Real yln = eval_at_n(ECYLN,  n_tab);
+    Real ylq = eval_at_n(ECYLQ,  n_tab);
+    y[0] = f;
+    y[1] = yn;
+    y[2] = yn*yln;
+    y[3] = (1.0 - yn)*ylq;
+  }
+
  private:
   /// Low level evaluation function, not intended for outside use.
   KOKKOS_INLINE_FUNCTION Real eval_at_n(int vi, Real n) const {
@@ -1157,7 +1201,13 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Evaluate interpolation weight for density.
   KOKKOS_INLINE_FUNCTION void weight_idx_ln(Real *w0, Real *w1, int *in, Real log_n)
       const {
-    *in = (log_n - m_log_nb(0))*m_id_log_nb;
+    int i = static_cast<int>((log_n - m_log_nb(0))*m_id_log_nb);
+    // Clamp so that both in+0 and in+1 stay in bounds. Without this, a log_n that
+    // rounds up to the table's last bin edge (e.g. from a floating-point-imprecise
+    // clamp to max_n, or an unconverged trial density visited mid C2P-iteration)
+    // reads m_table(iv, m_nn), one past the end.
+    i = (i < 0) ? 0 : ((i > m_nn-2) ? m_nn-2 : i);
+    *in = i;
     *w1 = (log_n - m_log_nb(*in))*m_id_log_nb;
     *w0 = 1.0 - (*w1);
     return;
@@ -1194,6 +1244,9 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   Real Bag_B;
   // Parameters for Phase Transition
   Real ZL_eta;
+  // If true, ConvertPrimitive always substitutes the table's own equilibrium
+  // composition at the current density instead of the passed-in (advected) Y.
+  bool enforce_eos_equilibrium;
 
   // bool to protect against access of uninitialized table and prevent repeated reading
   // of table

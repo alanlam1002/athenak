@@ -641,16 +641,33 @@ void FinalizeTOV(ParameterInput *pin, Mesh *pm) {
 // History function
 void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // Select the number of outputs and create labels for them.
-  pdata->nhist = 4;
+  // r_f_lo/r_f_mlo/r_f_mhi/r_f_hi track the radial extent of the nucleon-volume-fraction
+  // (f) mixed-phase shell -- for the g=0 Gibbs construction the transition is gradual (no
+  // sharp interface), so these bracket where f crosses 0.01, 0.5 (from below and above),
+  // and 0.99, letting the shell width and any drift/smearing be monitored over time.
+  pdata->nhist = 10;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "press-max";
   pdata->label[3] = "Yl,N-max";
+  pdata->label[4] = "r_f_lo";
+  pdata->label[5] = "r_f_mlo";
+  pdata->label[6] = "r_f_mhi";
+  pdata->label[7] = "r_f_hi";
+  pdata->label[8] = "f-min";
+  pdata->label[9] = "f-max";
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
   auto &adm = pm->pmb_pack->padm->adm;
   int& nvars_ = pm->pmb_pack->pmhd->nmhd;
+  auto &size_ = pm->pmb_pack->pmb->mb_size;
+  // Yl,N-max (nvars_+2) and f (nvars_+0) are ZlaBag's 4-species layout -- guard against
+  // out-of-bounds reads for EOS policies with fewer scalars (e.g. dyn_eos=compose with
+  // nscalars=0, used as an automatically-in-equilibrium comparison run).
+  int nscal_ = pm->pmb_pack->pmhd->nscalars;
+  bool have_yln_ = (nscal_ > 2);
+  bool have_f_ = (nscal_ > 0);
 
   // loop over all MeshBlocks in this pack
   auto &indcs = pm->pmb_pack->pmesh->mb_indcs;
@@ -664,8 +681,16 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   Real alpha_min = -rho_max;
   Real prs_max = std::numeric_limits<Real>::max();
   Real yln_max = std::numeric_limits<Real>::max();
+  Real rmax = std::numeric_limits<Real>::max();
+  // r_f_lo/r_f_mhi/r_f_hi want the smallest r satisfying their condition -> seed with
+  // +rmax so unmatched cells never win a Min reduction; r_f_mlo wants the largest r
+  // below 0.5 -> seed with -rmax so unmatched cells never win a Max reduction.
+  Real r_f_lo = rmax, r_f_mlo = -rmax, r_f_mhi = rmax, r_f_hi = rmax;
+  Real f_min = rmax, f_max = -rmax;
   Kokkos::parallel_reduce("TOVHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min, Real &mb_prs_max, Real &mb_yln_max) {
+  KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min, Real &mb_prs_max,
+  Real &mb_yln_max, Real &mb_rflo, Real &mb_rfmlo, Real &mb_rfmhi, Real &mb_rfhi,
+  Real &mb_fmin, Real &mb_fmax) {
     // compute n,k,j,i indices of thread
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
@@ -677,8 +702,26 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     mb_max = fmax(mb_max, w0_(m,IDN,k,j,i));
     mb_alp_min = fmin(mb_alp_min, adm.alpha(m, k, j, i));
     mb_prs_max = fmax(mb_prs_max, w0_(m, IPR,k,j,i));
-    mb_yln_max = fmax(mb_yln_max, w0_(m, nvars_+2,k,j,i));
-  }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(prs_max), Kokkos::Max<Real>(yln_max));
+    if (have_yln_) { mb_yln_max = fmax(mb_yln_max, w0_(m, nvars_+2,k,j,i)); }
+
+    if (have_f_) {
+      Real x1v = CellCenterX(i-is, nx1, size_.d_view(m).x1min, size_.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size_.d_view(m).x2min, size_.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, size_.d_view(m).x3min, size_.d_view(m).x3max);
+      Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
+      Real f = w0_(m, nvars_, k, j, i);
+
+      if (f <= 0.01) { mb_rflo = fmin(mb_rflo, r); }
+      if (f < 0.5)   { mb_rfmlo = fmax(mb_rfmlo, r); }
+      if (f >= 0.5)  { mb_rfmhi = fmin(mb_rfmhi, r); }
+      if (f >= 0.99) { mb_rfhi = fmin(mb_rfhi, r); }
+      mb_fmin = fmin(mb_fmin, f);
+      mb_fmax = fmax(mb_fmax, f);
+    }
+  }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(prs_max),
+     Kokkos::Max<Real>(yln_max), Kokkos::Min<Real>(r_f_lo), Kokkos::Max<Real>(r_f_mlo),
+     Kokkos::Min<Real>(r_f_mhi), Kokkos::Min<Real>(r_f_hi), Kokkos::Min<Real>(f_min),
+     Kokkos::Max<Real>(f_max));
 
   // Currently AthenaK only supports MPI_SUM operations between ranks, but we need MPI_MAX
   // and MPI_MIN operations instead. This is a cheap hack to make it work as intended.
@@ -688,15 +731,33 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     MPI_Reduce(MPI_IN_PLACE, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &prs_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &r_f_lo, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &r_f_mlo, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &r_f_mhi, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &r_f_hi, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &f_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &f_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
   } else {
     MPI_Reduce(&rho_max, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&alpha_min, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
     MPI_Reduce(&prs_max, &prs_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&yln_max, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&r_f_lo, &r_f_lo, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&r_f_mlo, &r_f_mlo, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&r_f_mhi, &r_f_mhi, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&r_f_hi, &r_f_hi, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&f_min, &f_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&f_max, &f_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     rho_max = 0.;
     alpha_min = 0.;
     prs_max = 0.;
     yln_max = 0.;
+    r_f_lo = 0.;
+    r_f_mlo = 0.;
+    r_f_mhi = 0.;
+    r_f_hi = 0.;
+    f_min = 0.;
+    f_max = 0.;
   }
 #endif
 
@@ -705,6 +766,12 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[1] = alpha_min;
   pdata->hdata[2] = prs_max;
   pdata->hdata[3] = yln_max;
+  pdata->hdata[4] = r_f_lo;
+  pdata->hdata[5] = r_f_mlo;
+  pdata->hdata[6] = r_f_mhi;
+  pdata->hdata[7] = r_f_hi;
+  pdata->hdata[8] = f_min;
+  pdata->hdata[9] = f_max;
 }
 
 void TOVRefinementCondition(MeshBlockPack *pmbp) {

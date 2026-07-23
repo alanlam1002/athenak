@@ -1,0 +1,124 @@
+<comment>
+problem = grey photon M1 1D plane-parallel hohlraum test (arXiv:2302.04283
+  Section 3.4, closure_fun=minerbo). Companion DO-side test:
+  inputs/tests/hohlraum_1d.athinput (built via -DPROBLEM=rad_hohlraum, see
+  build_hohlraum_sakura.sh -- was dead code before Stage 11, see
+  src/pgen/rad_hohlraum.cpp).
+
+  Setup: an infinite wall at x=0 maintains a fixed, isotropic radiation
+  field (energy density 1, full 4*pi sphere) behind it; radiation
+  free-streams off the wall into initially-empty (vacuum) space for x>0.
+  Just outside the wall (x=0+, only the outward hemisphere contributes),
+  the field has E=1/2, F_x=1/4 (flux factor 1/2) -- these are the fixed
+  values continuously injected into the M1 module's ghost zones via the
+  existing 1D "beam" boundary mechanism (ApplyBeamSources1D,
+  radiation_m1_beams.cpp), generalized in Stage 11 via the new
+  <problem>/wall_E, wall_flux_factor keys (defaults reproduce the original
+  hardcoded pencil-beam values E=1,ff=1 exactly -- zero regression).
+
+  Paper's closed-form solution (their Eq. 61) for x<t:
+    R^tt = (1/2)(1-x/t), R^tx = (1/4)(1-x^2/t^2), R^xx = (1/6)(1-x^3/t^3)
+  (all moments vanish for x>t). At x=0 the exact Eddington factor
+  R^xx/R^tt = 1/3 (matches M1's eddington closure exactly); at the front
+  x=t it approaches 1 (fully beamed) -- no single, spatially-uniform M1
+  closure can represent both regimes at once. This test is run under BOTH
+  closure_fun=minerbo (this file, flux-factor-aware, matches the code's
+  beam-test default) and =eddington (rad_m1_photon_hohlraum_eddington.
+  athinput) specifically to show that gap.
+
+<job>
+basename = photon_hohlraum_minerbo  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.4      # ordinary CFL -- a real transport test
+nlim       = -1       # cycle limit (safety margin; tlim below is the real limit)
+tlim       = 0.75     # matches the paper's Figure 11 comparison time, and
+                      # the pre-existing (but previously unbuildable)
+                      # hohlraum_1d.athinput's tlim
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 128       # matches the paper ("we use 128 cells in x") and the
+                   # pre-existing hohlraum_1d.athinput
+x1min  = 0.0       # minimum value of X1
+x1max  = 1.0       # maximum value of X1 -- front at x=c*t=0.75 stays
+                   # inside the domain, matching hohlraum_1d.athinput
+ix1_bc = outflow   # inner-X1 boundary flag -- required: the wall value is
+                   # injected into the ghost zones on this face only when
+                   # this flag is "outflow" (radiation_m1_beams.cpp,
+                   # ApplyBeamSources1D -- same mechanism as the existing
+                   # 1D beam test, just with different injected values)
+ox1_bc = outflow   # outer-X1 boundary flag -- lets radiation exit cleanly
+
+nx2    = 1         # Number of zones in X2-direction (1D test)
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction (1D test)
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 128        # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# metric defaults to minkowski -- this needs to be here
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = minerbo  # flux-factor-aware closure -- see header comment
+src_update = implicit
+opacity_type = none    # pure vacuum free-streaming test -- no fluid, no
+                      # opacities at all (matches the DO-side hohlraum
+                      # pgen, which has no <mhd>/<hydro> state either).
+                      # Same default this module already ships with
+                      # (radiation_m1.cpp: GetOrAddString(...,"none")),
+                      # exercised here for the first time by an M1 pgen.
+
+gr_sources = false     # flat spacetime, no need for GR source terms
+matter_sources = false # no opacities (opacity_type=none) -- nothing to
+                      # couple to
+backreact = false      # no fluid present to backreact onto
+
+rad_E_floor = 0.0      # keep the pre-front vacuum region at exactly zero,
+                      # matching the existing beam test's convention
+rad_eps = 0.01         # loosen the causality-bound margin from the default
+                      # 1e-14 -- matches the existing beam test (not
+                      # actually needed here since the wall's flux factor
+                      # is 1/2, well inside the causal bound, but kept for
+                      # consistency)
+
+theta_limiter = false  # default: false
+
+<problem>
+pgen_name = rad_m1_beamtest
+wall_E = 0.5            # E just outside the wall (x=0+, vacuum side) --
+                        # the exact solution's R^tt(x=0,t>0) = 1/2 (only
+                        # the wall's outward hemisphere reaches the vacuum)
+wall_flux_factor = 0.5  # F_x/E just outside the wall -- exact solution's
+                        # R^tx(x=0,t>0)/R^tt(x=0,t>0) = (1/4)/(1/2) = 1/2
+
+<output1>
+file_type   = tab      # 1D tab output
+variable    = rad_m1_E # choice of variables to output
+dt          = 0.05     # output increment
+data_format = %24.16e  # output precision -- matches hohlraum_1d.athinput
+
+<output2>
+file_type   = tab       # 1D tab output
+variable    = rad_m1_F  # choice of variables to output (Fx, Fy, Fz)
+dt          = 0.05      # output increment
+data_format = %24.16e   # output precision

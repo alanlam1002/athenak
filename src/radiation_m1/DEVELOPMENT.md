@@ -140,6 +140,28 @@ never before been combined with `opacity_type=photons` in this module's
 history. Paused (not root-caused) at the user's request; treat this specific
 combination as known-broken, not just untested.
 
+Stage 11 (see below) is also done: the third DO-comparison stage, the 1D
+plane-parallel hohlraum (arXiv:2302.04283 §3.4). Found the DO-side pgen
+(`src/pgen/rad_hohlraum.cpp`) was genuine dead code — it defined
+`ProblemGenerator::Hohlraum`, not the `ProblemGenerator::UserProblem` entry
+point the `-D PROBLEM=` dedicated-build dispatch actually calls, so it was
+never reachable under either dispatch mechanism despite an athinput already
+existing for it; renamed, built for the first time (`build_hohlraum_sakura.
+sh`), and confirmed it runs. M1 got a small additive parametrization
+(`rad_m1_beams.cpp`'s hardcoded pencil-beam boundary values became
+`<problem>/wall_E`/`wall_flux_factor`, defaults unchanged) reusing the
+existing 1D beam ghost-cell-injection mechanism to drive a hohlraum wall
+instead of a beam. Both codes reproduce the exact solution's qualitative
+shape; the standout, precisely-quantified result is that M1's `eddington`
+closure propagates the radiation front at `1/√3 ≈ 0.577` times the true
+light speed rather than at `c` (measured front position `x/t = 0.573`,
+`<1%` off `1/√3`) — a direct, textbook consequence of fixing `chi=1/3`
+everywhere, confirmed here for the first time in this module with a genuine
+independent analytic reference. `minerbo` gets the front position right but
+smears/overshoots the profile broadly, since no single spatially-uniform
+closure can track the exact solution's Eddington factor sweeping from `1/3`
+at the wall to `1` at the front.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -1357,7 +1379,7 @@ Minerbo with `backreact=true` and nonzero velocity together.
 
 **Not in scope / deferred (Stage 7 itself; Stage 8 picks up the blow-up)**:
 the DO-comparison roadmap continues as Stages 9-13 (diffusion advected
-variant, hohlraum, BH beams, colliding beams, linear waves) — renumbered by
+variant, BH beams, hohlraum, colliding beams, linear waves) — renumbered by
 one to make room for Stage 8's blow-up investigation; three paper tests
 (radiating disk, shocks, Schwarzschild atmosphere) have no existing pgen
 scaffolding on either side and remain deferred as separate future stages,
@@ -1542,7 +1564,7 @@ E-weighted variance `σ²(t)=σ₀²+2Dt`, `D=1/(3κ_sρ)` (diffusion). New scri
 the `nu` parametrization (additive, unchanged default; no other test sets
 `<problem>/nu`).
 
-**Not in scope / deferred**: Stages 10-13 (hohlraum, BH beams, colliding
+**Not in scope / deferred**: Stages 10-13 (BH beams, hohlraum, colliding
 beams, linear waves); a convergence-resolution scan (paper Figure 21, `ϵ`
 vs. `N`) was not attempted here — Stage 2's static-case scan already
 established the expected second-order convergence behavior for this same
@@ -1669,5 +1691,176 @@ blow-up (a real investigation, comparable in shape to Stage 8, not started);
 completing the DO-side athinput; the spinning BH case (§3.3's a=1/2,
 porting `RadiationKerrOrbitBeam` from `~/athenak_IAS` — real new M1
 development too, since M1's metric branches read no spin parameter at all);
-Snake coordinates (§3.2.2); Stages 11-13 (colliding beams, linear waves) —
-unaffected by this stage, roadmap numbering unchanged.
+Snake coordinates (§3.2.2); Stage 11 (hohlraum, see below) and Stages 12-13
+(colliding beams, linear waves) — unaffected by this stage, roadmap
+numbering unchanged.
+
+## Stage 11 — 1D plane-parallel hohlraum (arXiv:2302.04283 §3.4) — DONE
+
+Goal: fourth DO-comparison stage — the paper's simplest "hohlraum" test
+(following Ryan & Dolence 2020): an infinite wall at `x=0` maintains a
+fixed, isotropic radiation field behind it (coordinate-frame energy density
+1, full `4π` sphere); radiation free-streams off the wall into initially-
+empty space for `x>0`, no scattering/absorption at all (`κ=0` everywhere —
+this test isolates pure vacuum transport/angular representation, not
+opacity handling). The paper gives a closed-form solution (their Eq. 61)
+for the coordinate-frame moments at `x<t`:
+
+```
+R^tt = (1/2)(1 - x/t),   R^tx = (1/4)(1 - x²/t²),   R^xx = (1/6)(1 - x³/t³)
+```
+
+(all vanish for `x>t`). Two features make this a genuinely different kind
+of test than Stages 7/9: the exact field is angularly *discontinuous* (a
+sharp on/off hemisphere boundary, not a smooth distribution), and its
+effective Eddington factor `R^xx/R^tt` is not constant — it's exactly `1/3`
+at the wall (`x=0`) but rises to `1` (fully beamed) at the causal front
+(`x=t`). No single, spatially-uniform M1 closure can represent both ends of
+that range simultaneously — this stage exists to show exactly how each
+closure choice fails, not just that it does.
+
+**Investigation — DO's own hohlraum pgen was dead code.**
+`src/pgen/rad_hohlraum.cpp` (already present, unmodified until this stage)
+defines `void ProblemGenerator::Hohlraum(ParameterInput*, const bool)`.
+Every other file living directly in `src/pgen/` (as opposed to
+`src/pgen/tests/`) is a dedicated-build-only pgen, reached via
+`cmake -D PROBLEM=<file>`, which sets `USER_PROBLEM_ENABLED=1`
+(`CMakeLists.txt:93-97`) and makes `CallProblemGenerator()`
+(`pgen.cpp:936-938`) call `UserProblem(pin, is_restart)` directly —
+bypassing the runtime `pgen_name` string-dispatch table entirely. Both of
+this module's other dedicated-build pgens (`rad_relax.cpp`, `rad_diffusion.
+cpp`, both already validated in Stages 7/9) correctly define
+`ProblemGenerator::UserProblem`. `rad_hohlraum.cpp` did not — it defined a
+member function named `Hohlraum`, which is neither in the runtime dispatch
+table (confirmed via grep: `pgen.cpp` has no `"hohlraum"` string-compare
+branch at all) nor the name the dedicated-build path looks for. The
+pre-existing `inputs/tests/hohlraum_1d.athinput` (also already present,
+`pgen_name = hohlraum`) was therefore **never actually runnable** — the
+`pgen_name` key is itself vestigial for a dedicated-build pgen (ignored
+under `USER_PROBLEM_ENABLED`), and even if it weren't, no code path would
+have found a matching function either way. A pre-existing regression-test
+script, `tst/scripts/radiation/hohlraum.py`, exists too (with its own
+1D convergence-survey analysis, `nlevel=[3,5]`) but is not referenced
+anywhere in `run_test_suite.py`/`run_tests.py` — also orphaned, never
+actually executed by the test harness. **Fix**: renamed
+`ProblemGenerator::Hohlraum` → `ProblemGenerator::UserProblem` (one-line,
+matches the established convention exactly); added
+`build_hohlraum_sakura.sh` (modeled on `build_diffref_sakura.sh`) since
+this is the first time the file has ever been built. Confirmed the build
+succeeds and `hohlraum_1d.athinput` now runs cleanly to `tlim=0.75`.
+Wiring the orphaned `tst/scripts/radiation/hohlraum.py` into the actual
+test-suite runner is a separate, broader test-infrastructure decision, left
+untouched — out of scope for this stage (same "guard, don't redesign"
+discipline as every prior stage's bug fixes).
+
+**M1 side — reused the existing 1D beam ghost-cell injection mechanism.**
+M1 has no dedicated "hohlraum" pgen; instead of writing one from scratch,
+Stage 11 generalizes the existing 1D beam test's boundary mechanism
+(`RadiationM1BeamTest` / `ApplyBeamSources1D`, `rad_m1_beams.cpp` +
+`radiation_m1_beams.cpp`), which already refreshes fixed `(E, F_x, F_y,
+F_z)` conserved values into the `ix1_bc=outflow` ghost zones every step —
+previously only ever used with the hardcoded pencil-beam values `E=1,
+F_x=E`. Added `<problem>/wall_E` (default `1.0`) and
+`<problem>/wall_flux_factor` (default `1.0`, so `F_x = wall_flux_factor *
+E`) — the defaults exactly reproduce the original hardcoded values, zero
+regression to the existing beam test. For the hohlraum wall, the physically
+correct injected values are the exact solution's own `x=0⁺` boundary
+values: `E=1/2` (only the wall's outward hemisphere reaches the vacuum
+side — the wall's own interior field, behind `x=0`, has the full isotropic
+`E=1` the paper describes, but that's never simulated directly), `F_x=1/4`
+(flux factor `1/2`) — set via `wall_E=0.5, wall_flux_factor=0.5`. Ran with
+`opacity_type=none` (the module's own pre-existing default, exercised for
+the first time by any M1 pgen this session) rather than `photons`, since
+this test needs no fluid at all — matching the DO-side pgen exactly (no
+`<mhd>`/`<hydro>` block, no opacities, pure vacuum transport), and avoiding
+the `<mhd> dyn_eos=ideal` requirement `opacity_type=photons` would impose
+for no physical reason here. `gr_sources=false`, `matter_sources=false`,
+`backreact=false`, flat Minkowski metric, `rad_E_floor=0.0` (clean vacuum
+signal ahead of the front, matching the existing beam test's convention).
+Ran two variants, identical except for `closure_fun`: `rad_m1_photon_
+hohlraum_minerbo.athinput` and `rad_m1_photon_hohlraum_eddington.athinput`
+— specifically to expose the closure-dependent behavior the physics setup
+above predicts.
+
+**M1's own moments, recovered without any new output plumbing.** The DO
+side's `rad_coord` output gives `R^{αβ}` directly in the coordinate frame
+(`derived_variables.cpp`); M1 has no equivalent. But this test's fluid is
+static, flat, `gr_sources=false` (`α=1, β=0, v=0`), so the Eulerian/
+coordinate frame *is* the fluid frame here — M1's own evolved `(E, F_x)`
+already equal `R^tt, R^tx` directly, no transform needed. `R^xx` is
+recovered from the closure relation for a purely 1D field aligned with
+`F`: `P^xx = χ(ξ)·E` with `ξ=|F_x|/E`, using the same `closure_fun()`
+formula the solver itself uses (`radiation_m1_closure.hpp`) —
+`χ_eddington=1/3`; `χ_minerbo = 1/3 + ξ²(6-2ξ+6ξ²)/15` — reproduced
+independently in the check script rather than read from any solver-internal
+state, keeping this an external check. New script:
+`inputs/tests/check_rad_m1_photon_hohlraum.py`.
+
+**Results** (all three runs completed cleanly to `t=0.75`, no crashes; DO
+used the pre-existing input's `nlevel=1`, i.e. `Nang=10·1²+2=12` — a very
+coarse geodesic grid, deliberately not increased for this pass, see below):
+
+- Both codes reproduce the exact solution's qualitative shape: a plateau
+  near the wall descending to zero at the causal front. DO's coarse-`Nang`
+  curve shows a visible staircase (each angular bin is essentially "on" or
+  "off" against this discontinuous field, exactly the effect the paper's
+  own Figure 12 describes for its lowest-resolution `Nang=12` panel) but
+  tracks the front position correctly and stays reasonably close to exact
+  in between steps. Aggregate `L1` error (`Σ|R-R_exact|·Δx`, summed over
+  `tt+tx+xx`, trapezoidal): DO `3.93e-2`.
+- **M1 eddington: wrong front speed, precisely quantified.** The front
+  (half-max crossing of `E`) sits at `x/t = 0.573` at `t=0.75` — matching
+  `1/√3 = 0.5774` to `<1%`. This is the expected, textbook consequence of a
+  fixed `χ=1/3` closure: linearizing the M1 system about vacuum with a
+  constant Eddington factor gives characteristic (signal) speeds of `±1/√3`
+  relative to `c`, not `±1` — the classic P1/Eddington sub-luminal-front
+  artifact, confirmed here quantitatively for the first time in this
+  module with a genuine independent analytic reference (previous tests
+  either used `closure_fun=minerbo`, which doesn't have this specific
+  failure mode, or didn't have sharp enough fronts to measure a speed
+  against). `L1` error: `1.37e-1` (worse than DO's coarse grid, dominated
+  by this systematic front-position error, not noise).
+- **M1 minerbo: correct front position, broad smearing/overshoot instead.**
+  Flux-factor-aware closure lets `χ→1` as `ξ→1`, so the front itself
+  reaches the right place — but the transition is smeared over a much
+  wider region than either the exact solution or DO's result, and
+  noticeably *overshoots* the exact curve through the bulk of the profile
+  (visible in all three moments, `stage11_hohlraum_1d.png`) rather than
+  cleanly saturating at the wall value and dropping at `x=t`. This is the
+  same class of finding as Stage 9's "M1 diffuses slower than analytic" and
+  Stage 7's Eddington/aberration gap: no single spatially-uniform closure
+  can track a field whose *true* Eddington factor is spatially varying
+  (`1/3` at the wall, `1` at the front) — Minerbo gets the endpoints right
+  in principle but blends between them differently than the true angular
+  structure does. `L1` error: `1.29e-1` (similar magnitude to eddington's,
+  but from a qualitatively different failure mode — smearing/overshoot
+  rather than wrong front speed).
+- Plot: `stage11_hohlraum_1d.png`
+  (`/sakura/ptmp/tlam/athenak_run/stage11_hohlraum/plots/`, not committed —
+  scratch/visualization only, same convention as every prior stage).
+
+**On DO's `nlevel=1`**: this stage deliberately did not repeat the paper's
+own angular-resolution convergence scan (Figures 11-13) — the pre-existing
+`hohlraum_1d.athinput`'s `nlevel=1` was kept as-is (only its output cadence
+would need to change for a scan; the file's `tlim`/`nx1`/domain already
+match the paper exactly) since the qualitative point of this stage (closure
+behavior at the two ends of the field's angular range) doesn't depend on
+DO's angular resolution — DO is the reference here, not the subject under
+test. A convergence scan is available as a natural follow-up (the orphaned
+`tst/scripts/radiation/hohlraum.py` already contains one, using
+`nlevel=[3,5]`) if ever needed.
+
+**Regression**: full 7-test CPU pytest suite re-ran with zero change after
+the `wall_E`/`wall_flux_factor` parametrization (additive, unchanged
+defaults exactly reproduce the prior hardcoded pencil-beam values;
+`test_rad_m1_photon_beam_1d_cpu.py`, which directly exercises the changed
+`rad_m1_beams.cpp`, passed along with the other 6).
+
+**Not in scope / deferred**: the 2D hohlraum variant (paper §3.4's second
+test, two radiating walls with reflecting boundaries elsewhere) — DO's
+`rad_hohlraum.cpp` already handles it (same dead-code fix applies,
+`inputs/radiation/hohlraum_2d.athinput` exists), but the M1 side would need
+a genuinely new 2D pgen (the 1D beam-injection mechanism reused above only
+covers `ix1_bc`); the angular-resolution convergence scan (see above);
+Stages 12-13 (colliding beams, linear waves) — unaffected by this stage,
+roadmap numbering unchanged.

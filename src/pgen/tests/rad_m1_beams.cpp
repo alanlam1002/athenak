@@ -267,12 +267,17 @@ void ProblemGenerator::RadiationM1BeamTest(ParameterInput *pin,
   HostArray1D<Real> beam_vals_host;
   Kokkos::realloc(beam_vals_host, 4);
   if (pmbp->pmesh->one_d) {
-    Real E = 1;
+    // [Stage 11] wall_E/wall_flux_factor let the same injected-ghost-cell
+    // mechanism drive a hohlraum wall (isotropic emission, flux factor 1/2)
+    // instead of only a pencil beam -- defaults (E=1, ff=1 -> Fx=E) exactly
+    // reproduce the original hardcoded pencil-beam values, zero regression.
+    Real E = pin->GetOrAddReal("problem", "wall_E", 1.0);
+    Real flux_factor = pin->GetOrAddReal("problem", "wall_flux_factor", 1.0);
     AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> F_d{};
     AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
     g_uu(0, 0) = -1;
     g_uu(1, 1) = g_uu(2, 2) = g_uu(3, 3) = 1;
-    Real Fx = E;
+    Real Fx = flux_factor * E;
     Real Fy = 0;
     Real Fz = 0;
     pack_F_d(0, 0, 0, Fx, Fy, Fz, F_d);

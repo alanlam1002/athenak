@@ -34,7 +34,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                 "inputs", "tests"))
 from m1_tab_utils import read_profile  # noqa: E402
 
 DO_BASENAME = "hohlraum_1d"

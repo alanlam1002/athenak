@@ -23,7 +23,8 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "vis", "python"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                 "vis", "python"))
 from bin_convert import read_binary  # noqa: E402
 
 X_CROSS = 0.7684186294419217

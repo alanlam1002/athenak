@@ -1321,7 +1321,7 @@ The DO-side inputs require the dedicated `-D PROBLEM=rad_relax` build
 (`build_relax_sakura.sh`, modeled on `build_diffref_sakura.sh` — mutually
 exclusive with the M1 `built_in_pgens` build, same pattern as Stage 2's
 diffusion cross-check). New check script
-`inputs/tests/check_rad_relax_paper_equilibration.py`.
+`tst/scripts/radiation_m1/check_rad_relax_paper_equilibration.py`.
 
 **Verification — static case.** Independently re-integrated the paper's
 exact ODE (Eq. 69, `scipy.solve_ivp`, no dependence on either code) and its
@@ -1562,7 +1562,7 @@ doesn't check against one shared analytic solution — instead it checks that
 each code's *own* pulse independently satisfies the two physical
 predictions: peak position `x_peak(t)=x_peak(0)+v1·t` (advection) and
 E-weighted variance `σ²(t)=σ₀²+2Dt`, `D=1/(3κ_sρ)` (diffusion). New script
-`inputs/tests/check_rad_m1_photon_diffusion_advected.py`.
+`tst/scripts/radiation_m1/check_rad_m1_photon_diffusion_advected.py`.
 
 **Results**:
 - **Advection**: essentially exact in both codes — fitted peak-position
@@ -1821,7 +1821,7 @@ formula the solver itself uses (`radiation_m1_closure.hpp`) —
 `χ_eddington=1/3`; `χ_minerbo = 1/3 + ξ²(6-2ξ+6ξ²)/15` — reproduced
 independently in the check script rather than read from any solver-internal
 state, keeping this an external check. New script:
-`inputs/tests/check_rad_m1_photon_hohlraum.py`.
+`tst/scripts/radiation_m1/check_rad_m1_photon_hohlraum.py`.
 
 **Results** (all three runs completed cleanly to `t=0.75`, no crashes; DO
 used the pre-existing input's `nlevel=1`, i.e. `Nang=10·1²+2=12` — a very
@@ -2027,3 +2027,21 @@ resolutions, not repeated here — same reasoning as Stage 11's hohlraum,
 this stage's point is the qualitative/quantitative M1-vs-DO contrast, not
 a convergence study); Stage 13 (linear waves) — unaffected by this stage,
 roadmap numbering unchanged.
+
+**Housekeeping (post-Stage 12): plot-generating comparison scripts moved
+into `tst/`.** The four DO-vs-M1 comparison scripts that generate plots
+(Stages 7, 9, 11, 12 — `check_rad_relax_paper_equilibration.py`,
+`check_rad_m1_photon_diffusion_advected.py`, `check_rad_m1_photon_
+hohlraum.py`, `check_rad_m1_photon_colliding_beams.py`) moved from
+`inputs/tests/` to `tst/scripts/radiation_m1/` (new directory), at the
+user's request, to consolidate them into the test repository proper.
+Their `m1_tab_utils`/`bin_convert` imports were updated to still find those
+shared modules in their original locations (`inputs/tests/`,
+`vis/python/`) via a relative path; all four re-verified to still run
+correctly against previously-saved output from their new location. The
+*other* `check_rad_m1_photon_*.py` scripts (singlezone, beam_1d, diffusion,
+compton/scattering/backreaction variants, etc.) deliberately stayed in
+`inputs/tests/` — they're wired into the pytest CI
+(`tst/test_suite/radiation_m1/__init__.py` explicitly bootstraps `sys.path`
+to find them there), and moving them would mean reworking that CI plumbing
+for no benefit (they don't generate plots, they're pass/fail assertions).

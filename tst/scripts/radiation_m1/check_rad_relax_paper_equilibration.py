@@ -39,7 +39,8 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..",
+                                 "inputs", "tests"))
 from m1_tab_utils import load_series  # noqa: E402
 
 GAMMA = 5.0 / 3.0

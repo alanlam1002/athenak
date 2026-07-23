@@ -95,15 +95,22 @@ fixing a rate-inclusion gap caught during the stage's own plan review
 before any code was written, and verified on a new Planck-only stiff test.
 
 Stage 7 (see below) is also done: the first of a planned multi-stage effort
-(Stages 7-12) to reproduce the DO module's own paper (arXiv:2302.04283)
-test suite with both M1 and DO and compare directly — starting with
-§3.6 "Equilibration", the test this module already had the closest existing
-analogue for. Both DO's `rad_relax.cpp` and M1's
+(Stages 9-13, renumbered — see Stage 8) to reproduce the DO module's own
+paper (arXiv:2302.04283) test suite with both M1 and DO and compare
+directly — starting with §3.6 "Equilibration", the test this module already
+had the closest existing analogue for. Both DO's `rad_relax.cpp` and M1's
 `rad_m1_photon_singlezone.cpp` needed a small, additive IC extension to
 express the paper's exact test; both codes converge to the same
 independently-derived analytic equilibrium (static case) and conserve
 energy-momentum while reaching a mutually consistent equilibrium (moving
-case), with zero regression to any existing test.
+case), with zero regression to any existing test. Confirming *why* the
+moving case's small M1-DO gap exists (M1's Eddington closure vs. the true
+anisotropic field) surfaced a real, previously-unknown bug: switching M1 to
+the flux-aware `Minerbo` closure with `backreact=true` and nonzero velocity
+causes a catastrophic, unguarded momentum-backreaction blow-up (energy grows
+without bound; not contained by `theta_limiter`, unlike Stage 5's analogous
+energy-channel blow-up). Documented; **Stage 8 (below) is the open
+investigation into it.**
 
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
@@ -1159,7 +1166,8 @@ tests (diffusion, beam — Stage 2). The DO module's own paper
 Framework for Radiation-Magnetohydrodynamics in General Relativity Using a
 Finite-Solid-Angle Discretization") has a full Section 3 test suite (10
 subsections); this is the first of a planned multi-stage effort
-(Stages 7-12) to reproduce each one with both M1 and DO and compare directly,
+(originally Stages 7-12, renumbered to 9-13 to make room for Stage 8 — see
+below) to reproduce each one with both M1 and DO and compare directly,
 starting with the cheapest, highest-reuse test: §3.6 "Equilibration" — a
 homogeneous matter-radiation coupling test with no spatial transport, which
 this module already has a near-exact structural analogue for (the single-zone
@@ -1255,17 +1263,101 @@ coordinate-frame radiation energy density (`R⁰⁰`/`E`) to `3.0%`. The `u¹(t)
 trajectories show the same qualitative signature in both codes — an initial
 rise (radiation drag accelerates the fluid before momentum equilibrates) then
 monotonic decay back down as the system reaches joint thermal+momentum
-equilibrium — with M1 running systematically a few percent higher, consistent
-with M1's exact-Eddington closure vs. the DO module's finite (`nlevel=2`)
-angular resolution on a non-Eddington intensity field; not investigated
-further as a source of disagreement, since both the sign and magnitude are
-within what the differing closure/resolution would predict.
+equilibrium — with M1 running systematically a few percent higher.
+
+**Why M1 and DO differ here — confirmed, not just hypothesized.** The
+working hypothesis was M1's `closure_fun=eddington` (used in both moving-case
+athinputs): it fixes the fluid-frame radiation pressure tensor to always be
+isotropic (`χ=1/3` exactly, hard-coded in `radiation_m1_closure.hpp` —
+independent of the flux factor, unlike `Minerbo`/`Kershaw`), whereas the
+actual field here is *not* isotropic in the fluid frame — it starts isotropic
+in the *coordinate* frame (the paper's IC), and at `u¹=1` (`W=√2`, `v≈0.71c`)
+a coordinate-isotropic field is strongly aberrated when viewed from the
+fluid's own rest frame. The DO module can represent that real anisotropy
+(discretized intensities); M1's Eddington closure cannot, so the momentum-
+coupling term (`H_a` in `calc_rad_sources`) is driven by a stress tensor
+that's wrong precisely during the (large, early-time) anisotropic phase —
+consistent with the observed pattern (M1 retains more residual bulk velocity,
+less energy in `E`/`T_gas`, at fixed conserved total).
+
+**Testing this hypothesis surfaced a separate, more serious problem — a new,
+previously-unknown backreaction instability.** Reasoning that `closure_fun=minerbo`
+(`χ` responds to the flux factor, capturing anisotropy) should narrow the
+M1-DO gap, I reran the moving M1 test with it changed (otherwise identical:
+`backreact=true`, `theta_limiter=false`, `matter_implicit=true`). Instead of
+narrowing, the run **blew up**: `u¹` swings to `5.5` then oscillates, `dens`
+drifts from `1.0` to as low as `0.25` and back to `1.41` (should stay
+*exactly* `1.0` — this is a homogeneous, periodic, 0-D-equivalent setup, so
+any drift at all is a red flag), gas temperature crashes to its floor, and
+total coordinate-frame energy (`T⁰⁰_matter+E`, the same conserved quantity
+verified to `~10⁻⁶` in the Eddington run) grows without physical bound: `11 →
+72` by `t≈2.7`, then plateaus at the wrong, non-conserved value. Retrying
+with `theta_limiter=true` — the only safeguard Stage 6 left in place for
+momentum backreaction specifically — **did not stabilize it**: total energy
+instead climbs continuously and unboundedly (`11 → 87` by `t=19.2`, still
+rising, gas temperature pinned at exactly `0` the whole time), unlike the
+original Stage 5 energy-channel blow-up, which `theta_limiter` *did* fully
+contain.
+
+This is the momentum-channel analogue of Stage 5's original energy blow-up,
+and it is real: Stage 6 explicitly documented "Momentum (F) backreaction
+reservoir-checking" as deferred, unaddressed by its `Enew` correction (which
+only bounds the energy transfer). That this is the *first* M1 test in this
+module's history combining `backreact=true`, nonzero velocity, and a
+non-Eddington closure simultaneously is presumably why it was never triggered
+before. That `theta_limiter=true` does not contain it (unlike the energy
+case) suggests the root cause sits somewhere `theta_limiter` doesn't reach —
+current leading hypothesis, not yet confirmed: Stage 6's `Enew` correction
+reuses the already-computed `P_dd`/`χ` at the nudged `E` as a documented
+first-order approximation, which is harmless under Eddington (`χ=1/3` is a
+fixed constant, no feedback loop) but could be far worse under Minerbo, where
+`χ` itself depends on a flux factor that may be swinging wildly during
+exactly this kind of anisotropic, moving, backreacting evolution — a
+potential feedback loop Eddington structurally cannot have. **Not
+investigated further in Stage 7** — real root-causing is Stage 8's job (see
+below).
 
 **Regression**: full 7-test CPU pytest suite re-ran with zero change after
-both pgen edits (both are opt-in, defaulting to prior behavior).
+both pgen edits (both are opt-in, defaulting to prior behavior); the Minerbo
+blow-up is confined to the new, not-previously-exercised
+`backreact=true`+moving+non-Eddington combination — no existing test uses
+Minerbo with `backreact=true` and nonzero velocity together.
 
-**Not in scope / deferred**: Stages 8-12 (diffusion advected variant,
-hohlraum, BH beams, colliding beams, linear waves) — see the approved plan
-for the full roadmap; three paper tests (radiating disk, shocks, Schwarzschild
-atmosphere) have no existing pgen scaffolding on either side and are deferred
-as separate future stages, each a substantial standalone development effort.
+**Not in scope / deferred (Stage 7 itself; Stage 8 picks up the blow-up)**:
+the DO-comparison roadmap continues as Stages 9-13 (diffusion advected
+variant, hohlraum, BH beams, colliding beams, linear waves) — renumbered by
+one to make room for Stage 8's blow-up investigation; three paper tests
+(radiating disk, shocks, Schwarzschild atmosphere) have no existing pgen
+scaffolding on either side and remain deferred as separate future stages,
+each a substantial standalone development effort.
+
+## Stage 8 — investigate the Minerbo-closure momentum-backreaction blow-up found in Stage 7 — IN PROGRESS
+
+Goal: root-cause and fix the momentum-channel backreaction instability found
+while confirming Stage 7's M1-vs-DO closure explanation (see above): with
+`backreact=true`, nonzero fluid velocity, and `closure_fun=minerbo`, total
+coordinate-frame energy is not conserved (grows without bound), gas
+temperature crashes to its floor, and (most tellingly, since this is a
+homogeneous periodic box) `dens` itself drifts away from its initial value —
+reproducible with
+`inputs/tests/rad_m1_photon_equilibration_paper_moving.athinput` +
+`closure_fun=minerbo`, both with `theta_limiter=false` (unbounded blow-up,
+plateaus at a wrong non-conserved value) and `theta_limiter=true` (does not
+even plateau — energy climbs continuously). This is the first M1 test in the
+module's history to combine `backreact=true`, `v≠0`, and a non-Eddington
+closure at once, which is presumably why the gap survived Stage 6's own
+"deferred, not fixed" momentum-backreaction item without being hit until now.
+
+Leading hypothesis (stated in Stage 7 above, not yet confirmed): Stage 6's
+`Enew` correction reuses the already-computed `P_dd`/`χ` at the nudged `E`,
+documented at the time as a first-order approximation that's exact under
+Eddington (`χ=1/3` fixed) but untested under a flux-dependent closure —
+possibly creating a feedback loop (wrong `χ` → wrong stress → wrong
+correction → wrong `χ` next step) that Eddington cannot exhibit at all.
+Not yet investigated: whether `dens` drifting is a genuine conserved-density
+violation or a symptom of something upstream (e.g. a NaN/inf transient
+similar to Stage 2's diffusion-test floor/Newton-solver interaction, which
+also only manifested once a specific new combination of features was first
+exercised together).
+
+**Status**: documented, not yet root-caused. Next: plan-mode investigation.

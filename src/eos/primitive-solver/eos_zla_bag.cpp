@@ -41,8 +41,6 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
 
   ZL_eta = pin->GetOrAddReal(block, "ZL_eta", 1.0);
 
-  enforce_eos_equilibrium = pin->GetOrAddBoolean(block, "enforce_eos_equilibrium", false);
-
   m_electron = pin->GetOrAddReal(block, "m_electron", 0.5109989499961642);
   m_muon     = pin->GetOrAddReal(block, "m_muon"    , 105.65837549724458);
   m_u_quark  = pin->GetOrAddReal(block, "m_u_quark" , 5.0);

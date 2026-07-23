@@ -59,6 +59,22 @@ its Riemann solver and conserved-to-primitive conversion.
 ## convergent error at the star's core for both fields -- this is expected
 ## "lagged psi^6" cold-start behavior inherent to the diagnostic, not a bug; see
 ## round 16). No outstanding open follow-ups from this investigation thread.
+##
+## Status update (2026-07-23): the paragraph above describes item 9's own
+## investigation thread specifically (as of that point) -- it predates and does
+## not reflect items 10-23 below. Since then: AMR support landed (item 12);
+## multipole/Robin outer BCs replaced the original zerofixed truncation (items
+## 16-17); P_i/eta were merged into one solve (item 18); psi/alpha_psi's
+## convergence check switched to relative solution change (item 20); two more
+## genuine bugs were found and fixed in the shared coarse-fine/prolongation
+## machinery (item 21, `ProlongateFCMG`'s child-parity clamp and
+## `RestrictCoeffOctets`'s missing octet-to-root branch); a second, rotating-
+## star pgen was added and successfully evolved a full test to completion
+## (item 23). **One thread is currently open**: item 22 (migration-test
+## per-cycle convergence plateau at a refined-region boundary/the R=40
+## mesh-explosion divergence), explicitly paused mid-investigation, not fixed.
+## Read the numbered items below for the current, authoritative state --
+## don't rely on this header alone.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -1854,6 +1870,13 @@ src/cfc/
       exactly what `u_p_beta`/`eta_beta`'s existing cold-zero default produces
       after reconstruction -- so there is currently nothing to gain here. Left
       as a known gap for a future pgen with genuinely nonzero initial shift.
+      **Update (item 23, 2026-07-23)**: that future pgen now exists
+      (`xns_rotstar.cpp`, a rotating star with genuinely nonzero `beta^phi`) --
+      the gap described above is confirmed still present (`u_p_beta`/`eta_beta`
+      still cold-start from zero every run, the pgen has no way to seed them),
+      but turned out not to matter in practice: item 23's run converged and
+      evolved stably regardless. Still an open, un-implemented optimization if
+      warm-starting the shift solve is ever needed for a harder configuration.
     - **Verified**: rebuilt cleanly; a single-rank smoke test
       (`cfc_tov.athinput`, `mg_verbose=2`, 3 cycles) shows every solve block
       (including the now-seeded `psi`/`alpha_psi` ones) converging smoothly
@@ -3314,3 +3337,198 @@ src/cfc/
       cfc_tov_migration_test/` (parfile/sub.sh already staged there) with
       `mg_threshold` adjusted, or by digging into either open sub-question
       above.
+    - **The "different problem next" this was paused for is item 23** (BU8
+      rotating-star stability test) -- which hit its own, related-but-distinct
+      AMR-refinement-boundary divergence, resolved there by raising resolution
+      and dropping an equatorial reflecting BC. This migration test's own two
+      open sub-questions above are still unresolved and untouched.
+
+23. **RESOLVED (2026-07-23) -- "Stability of a rapidly rotating neutron star"
+    test (Gmunu sec. 3.3.2, model "BU8") diverged after ~100 stable cycles, via
+    a new (rotation-specific) coefficient blowup at a refined-region CORNER;
+    fixed by higher resolution + dropping the equatorial reflect BC.** New
+    files: `src/utils/xns/xns_rotator.hpp` (reads/bilinearly interpolates the
+    external XNS code's 2D `(r,theta)` tabulated equilibrium) and
+    `src/pgen/dyn_grmhd/xns_rotstar.cpp` (the pgen -- sets `padm->adm`/`pmhd->w0`
+    initial guess from that table, converted to Cartesian via the flat-space
+    identity `V^x=-V^phi*y, V^y=V^phi*x` for both `beta^phi` and `v^phi`; also
+    registers `SetADMVariablesToXNS` as the `padm->SetADMVariables` callback,
+    confirmed mandatory since `MeshRefinement::AdaptiveMeshRefinement()`
+    unconditionally calls it on every regrid for any CFC-only run, independent
+    of `is_dynamic`). Both build cleanly (`-D PROBLEM=dyn_grmhd/xns_rotstar`).
+    Initial data: XNS's bundled `RotBU8UnMagPol2` reference config
+    (`RHOINI=1.28e-3, K1=100, GAMMA=2, OMG=2.633e-2`, uniform rotation,
+    unmagnetized) -- converged XNS result matches its own reference
+    `LogFile.dat` to 10+ significant figures (Komar mass `1.6911876652765`,
+    circumferential radius `19.2496` km, axis ratio `0.594306`), run staged at
+    `/sakura/ptmp/tlam/XNS_runs/rot_bu8_gr_pol2/`.
+    - New input `inputs/dyn_grmhd/cfc_bu8_stability.athinput`: unlike every
+      prior `cfc_tov*` input, a rotating star has only axisymmetry-about-z plus
+      equatorial (`z->-z`) reflection symmetry, NOT full octant symmetry
+      (`v^x=-v^phi*y`/`v^y=v^phi*x` do not obey the usual mirror parity through
+      `x=0`/`y=0` individually) -- so `x1`/`x2` span the full `+/-45` range (no
+      reflect), only `x3` gets `ix3_bc=reflect`. Root grid `3x3x1` MeshBlocks
+      (`16^3` cells each, `dx=1.875`, same finest-`dx=0.234375`/meshblock-size
+      convention as `cfc_tov_migration.athinput` -- MeshBlock cell counts must
+      be a power of 2, a hard multigrid requirement, confirmed by a `FATAL
+      ERROR in Multigrid::Multigrid` hit during initial local testing with a
+      non-power-of-2 size). `refined_region1` deliberately confined to the
+      single CENTRAL root MeshBlock (which straddles the origin, spanning
+      exactly `x1,x2` in `[-15,15]`) -- a rotating star centered at the origin
+      can't be confined to a single *corner* root block the way the
+      octant-symmetric migration test's star could, but a central block that
+      straddles the origin works the same way. `init_omega=0.5`,
+      `mg_threshold=3e-3`, `mg_npresmooth=mg_npostsmooth=3`,
+      `mg_debug_defect_by_level=true` all set proactively from the start,
+      carrying forward item 22's precedent rather than discovering the need
+      after a stalled run. 632 total MeshBlocks.
+    - **Result**: `CFC::InitializeMetric()` converged cleanly and quickly on
+      this genuinely new (rotating, near-mass-shedding) matter distribution --
+      geometric decay `max|delta psi|` `0.110 -> 5.1e-11` over 32 iterations,
+      no divergence, confirmed both in a local single-rank smoke test and at
+      the start of the full cluster run (job 248441, 4 nodes/8 ranks). The
+      subsequent evolution then ran **stably for ~100 cycles** (`t=0` to
+      `t~29.25`): the `.mhd.hst` `mass` column stayed constant to 10
+      significant figures (`0.8990139291...`) the entire time, i.e. this
+      rotating equilibrium is being evolved essentially perfectly for a
+      substantial stretch -- then, within the next 1-2 cycles (`t~29.9` to
+      `t=30.097`, cycle 100->101), it **diverged catastrophically**: the `.hst`
+      `mass`/`tot-E` columns jump to `~1.49e92`/`~1.49e82` (obviously
+      unphysical, effectively NaN-adjacent), and
+      `MultigridDriver::SolveIterative` (the `psi`/conformal-factor solve --
+      the only driver `mg_debug_defect_by_level`'s diagnostic is wired into,
+      per item 21's scope decision) threw its "Failed to converge" clamp
+      repeatedly with the reported defect escalating from `O(1-10)` to
+      `O(1e17)-O(1e21)` across consecutive stage-solves within that same
+      cycle -- a genuine, fast runaway, not a slow drift.
+    - **Diagnostic (`mg_debug_defect_by_level`, reused unmodified)**: the
+      worst-defect cells at the moment of blowup cluster tightly at
+      `x1,x2 ~ +/-14.88` (just inside the refined-region/root-MeshBlock
+      boundary at `+/-15`) **and** `x3 ~ 0.12-0.23` (the first cell or two
+      above the equatorial `z=0` reflecting boundary) simultaneously -- i.e.
+      right at the CORNERS where `refined_region1`'s horizontal edge meets the
+      equatorial-symmetry boundary, not a generic interior or flat-boundary
+      location. The specific quantity that blows up first is `Coeff1(Ahat2)`
+      (`Ahat^ij Ahat_ij`, the shift/extrinsic-curvature source term in eq. 73)
+      -- reaching `~1e39`-`1e42` by the time it's caught -- which is the
+      rotation-specific analog of item 22's `Coeff0(Utilde)` blowup signature
+      for the `R=40` migration-test case: that star had no rotation/shift, so
+      `Ahat^2 = 0` identically there and `Utilde` (matter density) was the
+      coefficient that went bad first; this is the first CFC test where
+      `Ahat^2` is genuinely large and nonzero, and it is *this* coefficient
+      that fails first here.
+    - **Not root-caused.** Leading hypothesis (not yet confirmed): the same
+      general class of AMR-refinement-boundary robustness issue already
+      flagged as open in item 22 (a coarse-fine-interface truncation effect
+      feeding back destructively into a nonlinear coefficient under the right
+      conditions), but (a) manifesting through the curvature/shift coefficient
+      rather than the matter coefficient, since this is the first rotating
+      configuration tested, and (b) possibly compounded by occurring at a
+      genuine CORNER (two boundary types meeting: the static-refinement edge
+      and the equatorial-reflection edge) rather than a single flat boundary
+      plane, a combination no prior CFC test (all non-rotating, all either
+      unrefined-boundary-only or octant-symmetric) has exercised at once.
+      Notably this run's own refined-region footprint was deliberately kept
+      confined to a single root MeshBlock (learning directly from item 22's
+      `R=40` multi-root-block finding) -- and it still diverged, meaning
+      "confined to one root block" alone is not sufficient here; the
+      equatorial-boundary corner interaction appears to be a distinct
+      contributing factor item 22's own (non-rotating, non-equatorial-only)
+      test geometry never encountered.
+    - **Not yet decided**: whether to (a) loosen `mg_threshold` further /
+      increase smoothing more (the item-22-style band-aid, cheapest to try
+      first), (b) enlarge the refined region or move its horizontal edge
+      further from the star so the corner sits somewhere the field's curvature
+      is smaller (mirrors item 22's own `R=20/30` exploration), (c) rerun with
+      AMR entirely disabled (uniform resolution) to confirm whether the
+      refinement boundary specifically is required for the blowup or whether
+      it's something else entirely, or (d) investigate the corner-specific
+      interaction between the static-refinement and equatorial-reflection
+      boundaries directly. Paused here pending direction -- rerun from
+      `/sakura/ptmp/tlam/athenak_run/cfc_bu8_stability_test/` (parfile/sub.sh
+      staged there, points at `build_cfc_xns/src/athena`).
+    - **Fix applied and confirmed (job 248446, 2026-07-23), per user
+      direction**: two changes together, not isolated individually (so which
+      one was necessary/sufficient on its own is not yet known -- see below):
+      (1) resolution increased one more AMR level (`num_levels` 4->5,
+      `refined_region1 level` 3->4), finest `dx` `0.234375 -> 0.1171875` --
+      motivated by the star's rotation being close to mass-shedding and the
+      previous finest `dx` giving only `~28.5` cells across the polar radius
+      (`R_pole=R_eq*axis_ratio=11.24*0.594306=6.68`), below a judged floor of
+      "at least 30 cells across the polar radius" (now `~57`, `~96` across
+      `R_eq`); (2) the equatorial `ix3_bc=reflect` boundary was dropped
+      entirely -- `x3` now spans the same full `+/-45` range as `x1`/`x2` with
+      a plain outer BC, and `refined_region1` was correspondingly widened to
+      the symmetric cube `[-15,15]` in all three directions (still confined to
+      exactly the one central root MeshBlock, now `3x3x3=27` root blocks
+      instead of `3x3x1=9`, `5760` total MeshBlocks, run on 16 nodes/32 ranks).
+      **Result**: `CFC::InitializeMetric()` converged cleanly again on the
+      finer grid; the full `tlim=100` run (1118 cycles) completed with **zero**
+      `FATAL ERROR`s -- no recurrence of the corner defect blowup at all.
+      `.mhd.hst` mass conserved to `~1.4e-6` relative drift end-to-end
+      (`1.377580224...` at `t=0` to `1.377578328...` at `t=100`); kinetic
+      energy terms show only small bounded oscillations, no runaway. Confirms
+      the hypothesis above (this was the same class of AMR-refinement-boundary
+      robustness issue as item 22, sensitive to both resolution and the
+      reflecting-boundary corner) without yet isolating which of the two
+      changes was doing the work -- if that distinction matters for a future,
+      cheaper-resolution run, it would need an isolated A/B (higher-res with
+      reflect still on, or full-domain at the original resolution) to
+      separate them; not done here since the user's direction was to apply
+      both together and this fully resolved the failure on the first retry.
+    - **Second bug found and fixed (2026-07-23, user code review): the
+      exterior/atmosphere test used a spherical radius (`r > xns.rmax()`),
+      which is wrong for an oblate star, and separately relied on a bare
+      density threshold that XNS's own non-vacuum exterior solution can
+      exceed.** `xns_rotstar.cpp`'s original atmosphere test was `rho <=
+      dfloor` on the *interpolated* Hydroeq.dat density -- but XNS's tabulated
+      solution outside the actual stellar surface is not vacuum (it's the
+      solver's own smooth continuation, with nonzero, non-monotonic density
+      that can sit above a typical evolution-code `dfloor`, e.g. `1e-14`).
+      Confirmed visually: the pre-fix density slices showed a distinct
+      "halo" -- a ring of matter-like density (`~1e-8`-`1e-10`) extending all
+      the way out to `r=20` (the table's own `rmax()`, used at the time as
+      the only exterior cutoff), well beyond the star's actual oblate surface
+      (`R_eq~11.3`, `R_pole~6.8`-`6.9`) -- and that ring was being assigned a
+      nonzero rotational velocity from the table's `v^phi`, i.e. spurious
+      "rotating atmosphere" matter that shouldn't exist.
+      - **Fix**: `xns::XNSRotator` (`xns_rotator.hpp`) now also reads XNS's
+        `Surf.dat` (confirmed format: `NTH` values, no header, the actual
+        stellar surface radius `R_surf(theta)` at each of `Grid.dat`'s own
+        theta cell centers -- `XNSMAIN.f90:838-840`,
+        `WRITE(13,*) R(WSURF(IX)+1)`) into a new `rsurf_` array, exposed via a
+        new `template<Loc> Real SurfaceRadius(Real theta) const` method
+        (bilinear-interpolated in theta only, since `Surf.dat` is 1D). The
+        theta-bracketing index logic (previously inlined in `Interpolate()`)
+        was factored into a shared private `ThetaBracket()` helper used by
+        both methods, to avoid duplicating it.
+      - `xns_rotstar.cpp`'s `XNSInterpToADMAndPrim` now computes
+        `r_surf = xns_star.SurfaceRadius(theta)` and uses `atmosphere = (r >
+        r_surf)` -- a physically correct, shape-aware test -- instead of the
+        density threshold. Inside that radius, `rho`/`p` are still floored as
+        a safety net (`fmax(rho,dfloor)`), but that's no longer what decides
+        atmosphere-vs-star. The `r > xns.rmax()` branch is unchanged and still
+        needed (points genuinely outside the table's own solved domain, where
+        there is no data at all regardless of the star's shape).
+      - **Simplified input**: `<problem>` now takes one `id_dir` parameter
+        (the directory containing `Grid.dat`/`Hydroeq.dat`/`Surf.dat`) instead
+        of separate `grid_file`/`hydro_file` paths, since all three files
+        always come from the same XNS run directory.
+      - **Verified**: rebuilt cleanly; a dedicated 1-cycle check job (248449,
+        `/sakura/ptmp/tlam/athenak_run/cfc_bu8_surffix_check/`) ran with
+        **zero** `FATAL ERROR`s, and `t=0` density slices (with
+        `plot_slice.py --grid` MeshBlock overlays) confirm the halo is gone --
+        density now cuts cleanly to `dfloor` exactly at the star's actual
+        oblate surface, matching `Surf.dat`'s `R_eq~11.3`/`R_pole~6.8`-`6.9`
+        with no extended halo region at all.
+    - **Follow-up production run (job 248450, 2026-07-23)**: with the
+      Surf.dat fix in place, resubmitted the full test at `tlim=200` (double
+      the first corrected-ID run) and `mg_debug_defect_by_level=false` (the
+      per-solve debug screen output served its purpose for this
+      investigation and is no longer needed) -- 16 nodes, same
+      `cfc_bu8_stability.athinput`/`cfc_bu8_stability_test/` otherwise
+      unchanged. Result not yet known as of this writing (see the run
+      directory for current status); the previous (pre-Surf.dat-fix)
+      diagnostics/movies were moved to `old_run_presurffix/` in that
+      directory rather than deleted, since they were generated from the
+      halo-contaminated initial data and are superseded, not just stale.

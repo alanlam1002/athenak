@@ -1,0 +1,206 @@
+# Athena++ (Kokkos version) input file for the "stability of a rapidly rotating
+# neutron star" test, following Cheong et al. 2021 (Gmunu paper, arXiv:2012.07322)
+# sec. 3.3.2. Model "BU8" (Stergioulas et al. 2004 naming): uniformly rotating,
+# unmagnetized, polytropic K=100/Gamma=2, central density rhoc=1.28e-3, central
+# rotation rate Omega=2.633e-2 (all in c=G=Msun=1 units) -- close to the
+# mass-shedding limit, T/W near its maximum for this EOS/rotation-law family.
+#
+# Initial data generated with the external XNS code (Bucciantini & Del Zanna 2011;
+# Pili et al.), via its bundled RotBU8UnMagPol2 reference configuration -- run in
+# /sakura/ptmp/tlam/XNS_runs/rot_bu8_gr_pol2/, converged result matches the repo's
+# own reference LogFile.dat to 10+ significant figures: Komar mass 1.6911876652765
+# Msun, circumferential radius 19.2496 km, polar/equatorial axis ratio 0.594306.
+# Read in and interpolated onto this Cartesian AMR grid by the new
+# dyn_grmhd/xns_rotstar pgen (src/pgen/dyn_grmhd/xns_rotstar.cpp), which sets an
+# initial guess for the ADM metric + hydro primitives from XNS's tabulated 2D
+# (r,theta) equilibrium; CFC::InitializeMetric() then Picard-iterates this to a
+# self-consistent solution (same contract as the TOV pgen, see dyngr_tov.cpp).
+#
+# Domain/symmetry (IMPORTANT, differs from the non-rotating cfc_tov*.athinput
+# inputs here): a rotating star only has axisymmetry about z; it does NOT have
+# full octant symmetry (v^x, v^y do not obey the usual mirror parity through
+# x=0 or y=0 individually, since v^x=-v^phi*y, v^y=v^phi*x flip only one
+# component under x->-x or y->-y, not both consistently with a scalar
+# reflection BC), so x1/x2 span the full +/-45 range with no reflect, as before.
+#
+# 2026-07-23 REVISION, per user direction after the first attempt (below)
+# diverged around t~30: (1) drop the equatorial ix3_bc=reflect BC entirely --
+# x3 now also spans the FULL +/-45 range with plain outer BCs, matching x1/x2,
+# rather than assuming z->-z reflection symmetry. This removes the equatorial
+# boundary as a variable: the first attempt's divergence was traced (see
+# src/cfc/DEVELOPMENT.md item 23) to defect blowup concentrated exactly at the
+# CORNER where refined_region1's edge met the ix3_bc=reflect boundary, so this
+# revision tests whether that reflecting-boundary corner was a contributing
+# factor. (2) Resolution increased by one more refinement level: the star's
+# rotation is close to mass-shedding and the previous finest dx=0.234375 gave
+# only ~28.5 cells across the polar radius (R_pole=R_eq*axis_ratio=11.24*
+# 0.594306=6.68) -- below the "at least 30 cells across the polar radius"
+# floor judged necessary for a rapidly-spinning star. num_levels bumped
+# 4->5 (finest dx=1.875/16=0.1171875), giving ~57 cells across R_pole and ~96
+# across R_eq=11.24.
+#
+# Resolution/AMR footprint rationale (unchanged from the first attempt, still
+# applies): per src/cfc/DEVELOPMENT.md item 22's migration-test investigation,
+# CFC's InitializeMetric()/AMR combination is known to have unresolved
+# robustness issues once a refined region spans MULTIPLE root MeshBlocks (the
+# R=40 case there: mesh grew from 701->2024 blocks and hit a hydro-side
+# coefficient blowup at the many new coarse-fine interfaces). A rotating star
+# centered at the origin can't be confined to a single corner root block the
+# way the (octant-symmetric) migration test's star could -- but it CAN be
+# confined to a single CENTRAL root block if that block straddles the origin.
+# Root grid here uses 3 equal-width MeshBlocks per direction, ALL THREE now
+# (dx=1.875, meshblock 16 cells -> width 30, same dx/meshblock-size convention
+# as cfc_tov_migration.athinput -- MeshBlock cell counts must be a power of 2,
+# a hard multigrid requirement), so the middle block spans exactly
+# [-15,15] in x1, x2, AND x3 alike -- refined_region1 is set to exactly that
+# cube, confining all refinement to the ONE central root block in all three
+# directions (26 other root blocks stay fully unrefined, no spillover risk).
+#
+# dfloor uses this repo's established 1e-14 (cfc_tov_migration.athinput's value),
+# not yet the paper's own extreme rho_atmo=1e-20 (which the paper notes requires
+# their positivity-preserving limiter/MP5 reconstruction specifically) -- revisit
+# once this more conservative floor is confirmed working.
+#
+# tlim=100 (~0.49 ms, T_unit=GMsun/c^3~4.9264e-3 ms) matches the first attempt
+# for a direct comparison -- the previous run's divergence hit at t~30, so this
+# comfortably covers past that point. mesh_refinement is "static" here (matching
+# every other cfc_tov* input in this repo) -- note this means the AMR-regrid
+# path (SetADMVariablesToXNS in xns_rotstar.cpp) is NOT exercised by this run;
+# that needs a separate refinement=adaptive test as a follow-up.
+
+<comment>
+problem  = Stability of a rapidly rotating neutron star (Gmunu sec. 3.3.2, BU8), CFC metric solve, XNS initial data
+
+<job>
+basename = cfc_bu8_stability
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 48       # number of cells in x1-direction (root level), dx=1.875
+x1min  = -45.0    # minimum x1
+x1max  = 45.0     # maximum x1
+ix1_bc = diode    # inner boundary -- NOT reflect (rotation breaks x-mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 48       # number of cells in x2-direction (root level), dx=1.875
+x2min  = -45.0    # minimum x2
+x2max  = 45.0     # maximum x2
+ix2_bc = diode    # inner boundary -- NOT reflect (rotation breaks y-mirror parity)
+ox2_bc = diode    # outer boundary
+
+nx3    = 48       # number of cells in x3-direction (root level), dx=1.875 --
+                  # now full +/-45 range, matching x1/x2 (no reflect)
+x3min  = -45.0    # minimum x3
+x3max  = 45.0     # maximum x3
+ix3_bc = diode    # inner boundary -- NOT reflect (see 2026-07-23 revision note)
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # 3 MeshBlocks in x1 -- middle block spans exactly [-15,15].
+                  # Must be a power of 2 (multigrid requirement) -- matches
+                  # cfc_tov_migration.athinput's own meshblock/dx convention.
+nx2  = 16        # 3 MeshBlocks in x2 -- middle block spans exactly [-15,15]
+nx3  = 16        # 3 MeshBlocks in x3 -- middle block spans exactly [-15,15]
+                  # (full domain now, same treatment as x1/x2)
+
+<mesh_refinement>
+refinement          = static
+max_nmb_per_rank    = 200
+num_levels          = 5
+refinement_interval = 1
+
+<refined_region1>
+level = 4        # finest level; dx = 1.875/2^4 = 0.1171875 (~96 cells across
+                  # R_eq=11.24, ~57 across R_pole=6.68 -- at least 30 across
+                  # the polar radius, per user direction)
+x1min = -15.0    # matches the middle root MeshBlock's own boundary exactly --
+x1max = 15.0     # confines all refinement to that single central root block,
+x2min = -15.0    # in all three directions alike
+x2max = 15.0
+x3min = -15.0
+x3max = 15.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 200        # ~0.99 ms -- 2026-07-23: doubled from the first
+                        # corrected-ID run (tlim=100) now that the Surf.dat
+                        # atmosphere fix is verified (see problem/id_dir note
+                        # and src/cfc/DEVELOPMENT.md item 23)
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = wenoz      # spatial reconstruction method
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-14    # atmosphere density -- this repo's established value
+                         # (paper's own rho_atmo=1e-20 is more extreme, revisit later)
+tfloor      = 1.0e-10
+c2p_tol     = 2.49e-13
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma -- matches XNS's K1=100/
+                         # GAMMA=2 polytrope so P=kappa*rho^Gamma holds at t=0
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = true
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 0.5       # under-relax InitializeMetric()'s psi Picard iteration --
+                         # proactive per DEVELOPMENT.md item 22 (this star's
+                         # 2M/R and rotation rate are comparably demanding to the
+                         # migration test's compact star that needed this)
+mg_threshold   = 3.0e-3  # loosened per item 22's AMR+CFC precedent
+mg_npresmooth  = 3       # more smoothing per level, same precedent
+mg_npostsmooth = 3
+mg_debug_defect_by_level = false # 2026-07-23: off for this run -- the debug
+                         # screen output served its diagnostic purpose for the
+                         # earlier divergence investigation (item 23) and is
+                         # not needed now that this configuration is confirmed
+                         # stable
+
+<problem>
+id_dir = /sakura/ptmp/tlam/XNS_runs/rot_bu8_gr_pol2
+
+<output1>
+file_type   = rst
+dt          = 50.0      # 2 checkpoints over the run
+
+<output2>
+file_type   = hst      # History data dump -- the primary diagnostic for this test
+dt          = 1.0
+data_format = %20.15e
+
+<output3>
+file_type   = bin      # Binary output -- sanity-check density/velocity slices
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x3    = 0.0
+id = prim_xy
+
+<output4>
+file_type   = bin      # Binary output -- sanity-check density/velocity slices
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x2    = 0.0
+id = prim_xz
+
+<output5>
+file_type   = bin      # Binary output -- sanity-check metric slices
+variable    = adm
+dcycle      = 25
+slice_x3    = 0.0
+id = adm_xy

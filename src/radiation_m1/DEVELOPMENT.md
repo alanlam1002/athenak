@@ -109,8 +109,14 @@ anisotropic field) surfaced a real, previously-unknown bug: switching M1 to
 the flux-aware `Minerbo` closure with `backreact=true` and nonzero velocity
 causes a catastrophic, unguarded momentum-backreaction blow-up (energy grows
 without bound; not contained by `theta_limiter`, unlike Stage 5's analogous
-energy-channel blow-up). Documented; **Stage 8 (below) is the open
-investigation into it.**
+energy-channel blow-up). **Stage 8 (below) investigated it**: found the
+failing case runs through `SrcThin` (the plain-forward-Euler branch), where
+Stage 6's energy correction turns out to be a structural no-op, so three
+targeted fixes aimed at the Newton-solve/closure path all failed to help
+(one made it measurably worse) — real root cause is believed to be
+`SrcThin`'s velocity-blind stiffness classification, a solver branch-dispatch
+change deferred as genuine new development, not a guard-scale fix. No code
+shipped from Stage 8; the speculative fixes were reverted.
 
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
@@ -1331,7 +1337,7 @@ one to make room for Stage 8's blow-up investigation; three paper tests
 scaffolding on either side and remain deferred as separate future stages,
 each a substantial standalone development effort.
 
-## Stage 8 — investigate the Minerbo-closure momentum-backreaction blow-up found in Stage 7 — IN PROGRESS
+## Stage 8 — investigate the Minerbo-closure momentum-backreaction blow-up found in Stage 7 — INVESTIGATED, NOT FIXED (deferred)
 
 Goal: root-cause and fix the momentum-channel backreaction instability found
 while confirming Stage 7's M1-vs-DO closure explanation (see above): with
@@ -1348,16 +1354,89 @@ module's history to combine `backreact=true`, `v≠0`, and a non-Eddington
 closure at once, which is presumably why the gap survived Stage 6's own
 "deferred, not fixed" momentum-backreaction item without being hit until now.
 
-Leading hypothesis (stated in Stage 7 above, not yet confirmed): Stage 6's
-`Enew` correction reuses the already-computed `P_dd`/`χ` at the nudged `E`,
-documented at the time as a first-order approximation that's exact under
-Eddington (`χ=1/3` fixed) but untested under a flux-dependent closure —
-possibly creating a feedback loop (wrong `χ` → wrong stress → wrong
-correction → wrong `χ` next step) that Eddington cannot exhibit at all.
-Not yet investigated: whether `dens` drifting is a genuine conserved-density
-violation or a symptom of something upstream (e.g. a NaN/inf transient
-similar to Stage 2's diffusion-test floor/Newton-solver interaction, which
-also only manifested once a specific new combination of features was first
-exercised together).
+**Investigation.** Two Explore agents traced two independently-real,
+independently-confirmed gaps in `radiation_m1_update.cpp`: (1) Stage 6's
+`Enew` correction never recomputes `χ`/`P_dd` at the nudged `E` — an exact
+no-op under Eddington (`χ=1/3` fixed) but a genuine staleness under a
+flux-dependent closure, since the stale `χ` persists uncorrected into the
+next step's closure seed; (2) `theta_limiter`'s `theta` is bounded purely
+from energy quantities (`DrEFN[E_IDX]`, the gas's `IEN` reservoir) —
+`umhd0_(IM1/IM2/IM3)` and `DrEFN[FX/FY/FZ_IDX]` are never read, so `theta`
+cannot contain a momentum-dominated transfer, contrary to what Stage 6's
+"`theta_limiter` remains the only safeguard" framing assumed. A third gap
+was also confirmed: `apply_floor` never touches `umhd0_` at all, so a
+non-finite backreaction increment would write straight into the fluid's
+conserved state with no sanitization, unlike the radiation-side pair.
 
-**Status**: documented, not yet root-caused. Next: plan-mode investigation.
+**Three targeted fixes were implemented and tested — none resolved the
+blow-up; one made it measurably worse.** (1) Recomputing `χ`/`P_dd` after
+the `Enew` correction had zero effect on the failing case. (2) The
+`theta_limiter` momentum-reservoir bound had zero effect (see below, why).
+(3) A new *unconditional* structural clamp on the momentum transfer
+magnitude (bounding it to a `source_limiter` fraction of the gas energy
+reservoir, applied regardless of `theta_limiter` — mirroring how the
+quartic's energy correction is itself unconditional) made the run
+*measurably worse*: final total energy reached `~1.2×10⁵` (vs. `~65-87`
+without this fix), and `dens` itself began swinging violently between
+`0.25` and `1.41` — a strong signal that clamping momentum alone, while
+leaving the real driver untouched, was pushing `umhd0_(IEN)` into states
+the EOS's `reset_floor` policy can only recover from by resetting the whole
+primitive state (density included), which radiation backreaction never
+touches directly and so can only move this way.
+
+**Refined root cause (the actual mechanism, confirmed via `DEBUG_BUILD`
+instrumentation).** A temporary diagnostic build (`CMAKE_BUILD_TYPE=Debug`,
+enabling the module's existing `DEBUG_BUILD` printf instrumentation, plus a
+temporary print of `src_signal`/`χ`/`Enew`/`J_new` around the `source_update`
+call — not committed) revealed the failing test takes `SrcSignal::SrcThin`
+(`radiation_m1_sources.hpp`'s non-stiff, plain-forward-Euler branch,
+`cdt·kabs<1 && cdt·kscat<1`) at every step checked — **not** the Hybridsj
+Newton solve the original investigation focused on. More tellingly: the
+quartic's `J_new` came out numerically equal to the explicit branch's own
+locally-computed `Jnew` at every step, because both formulas use the same
+quartic-refined `(eta_local, abs_local)` once `matter_implicit_ok` is true —
+meaning the Stage 6 correction is a **structural no-op here**, not because
+the physics is static/flat (Stage 6's documented no-op condition), but
+because in the `SrcThin` branch specifically, the correction has nothing new
+to add: it just reproduces what the explicit step already computes. So none
+of the three fixes above could possibly have mattered — they all targeted
+consumers of `Enew`/`χ` *downstream* of where the actual runaway originates,
+which is `E` growing without bound from repeated `SrcThin` steps themselves.
+
+**Working theory (not yet confirmed at the same rigor as the above):**
+`SrcThin`'s stiffness classification (`cdt·kabs<1 && cdt·kscat<1`) is a
+purely local, velocity-blind check on the opacity alone. For a moving,
+backreacting fluid, the boost between lab and fluid frames can make the
+*effective* per-step coupling far stiffer than that check accounts for — a
+modest fluid-frame flux boosts into a large lab-frame `Fnew_d` as the
+fluid's own velocity grows from the *previous* step's momentum kick, which
+can then drive an even larger kick next step — a feedback loop the local
+`cdt·kabs<1` test has no way to see coming. If correct, this means
+`SrcThin`'s branch selection itself needs to become velocity-aware (or
+`backreact=true`+`v≠0` needs to force the stiffer Hybridsj branch
+regardless of the local opacity check) — a change to the solver's own
+branch-dispatch logic, not a post-hoc correction on either channel's
+result. This is exactly the kind of fix Stage 5 originally deferred for the
+*energy* channel ("making the `SrcThin` branch itself energy-aware... force
+the stiffer Newton branch whenever the LTE target vastly exceeds the local
+gas reservoir... deferred here, real new development") — Stage 8's finding
+is that the same gap also applies to momentum, and is not closed by Stage
+6's quartic correction (which only ever touches `Enew`, and turns out to be
+a no-op in exactly this branch).
+
+**Disposition**: the three speculative fixes above were implemented,
+tested, found not to help (and in one case to actively worsen the observed
+symptom), and have been **reverted** — `radiation_m1_update.cpp` is
+unchanged from Stage 6/7 as of this stage. Nothing in this stage's
+investigation affects any already-validated test (no code changes shipped).
+Deferred as a real, nontrivial fix to the solver's branch-dispatch logic
+itself — out of scope for a "guard, don't redesign" pass; a future stage
+should pick this up starting from the working theory above, ideally with
+the `DEBUG_BUILD` `src_signal` instrumentation made a permanent (compile-time
+gated) diagnostic rather than a throwaway temporary edit, since it was
+essential to finding the real branch involved.
+
+**Negative-result verification note**: since no code shipped from this
+stage, there is nothing to regress — the full CPU suite and all Stage 5-7
+backreaction athinputs are untouched and still pass as of Stage 7's own
+commit (`01de51b3`).

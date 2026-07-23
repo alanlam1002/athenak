@@ -198,6 +198,7 @@ add_executable(
         pgen/tests/rad_m1_spheretest.cpp
         pgen/tests/rad_m1_photon_singlezone.cpp
         pgen/tests/rad_m1_hybridsj.cpp
+        pgen/tests/rad_m1_colliding_beams.cpp
         radiation_m1/radiation_m1_toy.hpp
         radiation_m1/radiation_m1_calc_opacities_photons.cpp
 )

@@ -963,6 +963,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     RadiationLinearWave(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_beam") == 0) {
     RadiationBeam(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_crossing_beams") == 0) {
+    RadiationCrossingBeams(pin, is_restart);
   } else if (pgen_fun_name.compare("shock_tube") == 0) {
     ShockTube(pin, is_restart);
   } else if (pgen_fun_name.compare("shwave") == 0) {
@@ -995,6 +997,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     RadiationM1DiffusionTest(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_m1_veljumptest") == 0) {
     RadiationM1VelocityJumpTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_m1_crossing_beams") == 0) {
+    RadiationM1CrossingBeams(pin, is_restart);
   // else, name not set on command line or input file, print warning and quit
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl

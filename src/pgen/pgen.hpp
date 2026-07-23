@@ -71,6 +71,7 @@ class ProblemGenerator {
   void SphericalCollapse(ParameterInput *pin, const bool restart);
   void RadiationLinearWave(ParameterInput *pin, const bool restart);
   void RadiationBeam(ParameterInput *pin, const bool restart);
+  void RadiationCrossingBeams(ParameterInput *pin, const bool restart);
   void Z4cBoostedPuncture(ParameterInput *pin, const bool restart);
   void Z4cLinearWave(ParameterInput *pin, const bool restart);
   void Diffusion(ParameterInput *pin, const bool restart);
@@ -81,6 +82,7 @@ class ProblemGenerator {
   void RadiationM1LatticeTest(ParameterInput *pin, const bool restart);
   void RadiationM1DiffusionTest(ParameterInput *pin, const bool restart);
   void RadiationM1VelocityJumpTest(ParameterInput *pin, const bool restart);
+  void RadiationM1CrossingBeams(ParameterInput *pin, const bool restart);
   void RadiationM1SingleZoneTest(ParameterInput *pin, const bool restart);
   template <class EOSPolicy, class ErrorPolicy>
   void RadiationM1SingleZoneTest_(ParameterInput *pin, const bool restart);

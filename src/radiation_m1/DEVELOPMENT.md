@@ -162,6 +162,33 @@ smears/overshoots the profile broadly, since no single spatially-uniform
 closure can track the exact solution's Eddington factor sweeping from `1/3`
 at the wall to `1` at the front.
 
+Stage 12 (see below) is also done: the fifth DO-comparison stage, and the
+paper's own headline "M1 fails this" test — colliding beams
+(arXiv:2302.04283 §3.1). Ported `RadiationCrossingBeams` and its
+maximum-entropy angular-projection helpers from `~/athenak_IAS` (DO side;
+athenak_m1's own `rad_beam.cpp` had no such capability), stripped of the
+dyn_radiation branches this module doesn't have. Found and fixed a real
+bug while porting: the mechanism's per-step "boundary refresh" is a
+geometric no-op for this test's interior source (`x0=2/15 > x1min=0`, so
+the ghost zone is always "behind" the source) — without a genuine
+continuous point source, the whole pre-filled pattern simply free-streamed
+out through the outflow boundaries (domain-integrated `R^tt`: `1648→1.3e-3`
+by `t=2.5` in a diagnostic run), nothing like the paper's claimed steady
+state. Fixed by re-asserting the analytic profile every step within a
+`source_radius` disk (matching the paper's own "radius of 1/10") around
+each source point — a genuine continuous emitter, confirmed to plateau
+(not drain) once fixed. New M1 pgen (`RadiationM1CrossingBeams`) reuses the
+existing 2D beam boundary-injection pattern, generalized to two
+simultaneous beams. Result: DO's field shows a clean "X" (both beams cross
+and continue undisturbed on their original trajectories, matching the
+paper's Figure 4); M1's field shows the beams merging at the crossing and
+continuing downstream as a single band centered on the average direction —
+quantitatively confirmed via a downstream peak/valley ratio that grows
+monotonically for DO (`1.07→6.93`, genuinely re-separating) while staying
+flat at `~1.00-1.01` for M1 (never splits) — an unambiguous, direct
+measurement of the exact failure mode the paper describes, not just a
+citation of it.
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -1863,4 +1890,140 @@ test, two radiating walls with reflecting boundaries elsewhere) — DO's
 a genuinely new 2D pgen (the 1D beam-injection mechanism reused above only
 covers `ix1_bc`); the angular-resolution convergence scan (see above);
 Stages 12-13 (colliding beams, linear waves) — unaffected by this stage,
+roadmap numbering unchanged.
+
+## Stage 12 — colliding beams (arXiv:2302.04283 §3.1) — DONE
+
+Goal: fifth DO-comparison stage, and the paper's own headline "M1 fails
+this" test: "Two beams crossing in vacuum will merge into a single beam
+pointing in the average direction of the two when using M1... this test is
+failed by M1 and commonly employed closure methods." Per explicit user
+instruction, both sides were actually built and run — not just cited — to
+measure the M1 failure directly and quantitatively.
+
+**DO side — ported from `~/athenak_IAS`.** athenak_m1's own `rad_beam.cpp`
+had no colliding-beams capability at all; IAS's copy of the same file has a
+substantially richer pgen suite, including `ProblemGenerator::
+RadiationCrossingBeams` and its helpers (`CrossingBeamData`,
+`SetAllAngleMomentWeights`, `CrossingBeamProfile`, `FillCrossingBeams`,
+`CrossingBeamBoundary`, plus the linear-algebra helpers `SolveLinear3`/
+`SolveLinear4`). Ported verbatim except for one deliberate simplification:
+every `pmbp->pdynrad` (dyn_radiation) branch was dropped — this module has
+no dyn_radiation submodule, only the static-background `pmbp->prad` path
+is needed. `SetAllAngleMomentWeights` is a positive all-angle maximum-
+entropy projection of a requested beam direction onto the geodesic angular
+grid (exact zeroth moment, exact first moment along the requested
+direction up to the grid's realizable flux factor) — this is what lets the
+DO module represent each beam as a clean, causal ray rather than an
+ad-hoc top-hat over nearby angular bins. Wired into the runtime pgen_name
+dispatch table (`pgen.cpp`/`pgen.hpp`) as `rad_crossing_beams`, alongside
+the existing `rad_beam`.
+
+**Bug found while porting: the ported mechanism cannot actually sustain a
+beam whose source sits inside the domain — found by direct measurement,
+not inspection.** `RadiationCrossingBeams` do two things: (a) once, at
+`t=0`, fill the *entire* domain with the analytic ray-profile value
+(`FillCrossingBeams(mesh, false)`) — an initial condition that already
+looks like the correct downstream steady-state pattern; (b) every step,
+refresh the `ix1_bc=user` *ghost* zone with the same profile
+(`CrossingBeamBoundary` → `FillCrossingBeams(mesh, true)`), the mechanism
+presumably meant to keep sustaining the beam over time. The paper's own
+source location (`x0=2/15`) sits *inside* the domain (`x1min=0 < x0`) —
+and a ghost cell at `x<x1min<x0` is always "behind" the source in
+`CrossingBeamProfile`'s `along>=0` causality check, so refreshing it is a
+geometric no-op: **nothing is ever actually re-injected**. First diagnostic
+run confirmed this directly: domain-integrated `R^tt` fell from `1648` at
+`t=0` to `1.3e-3` by `t=2.5` — the entire pre-filled pattern simply
+free-streamed out through the outflow boundaries with nothing replacing
+it, nowhere close to the paper's claimed "steady state." (This same gap is
+presumably latent in `~/athenak_IAS`'s own copy too — no companion
+athinput or test-suite entry exists there for this pgen either; like
+Stage 11's hohlraum pgen, this appears to be previously-unexercised code.)
+
+**Fix**: added `CrossingBeamData::source_radius` (default `0.1`, matching
+the paper's own "radius of 1/10") and changed `FillCrossingBeams`'s
+per-step (`boundaries_only=true`) fill condition to *also* re-assert the
+analytic profile every step within `source_radius` of either source
+point — a genuine continuous point source, not just an initial condition,
+directly implementing the paper's "radiation emitted in one source cell is
+augmented rather than replaced by radiation... through which it
+subsequently passes." Re-verified: domain-integrated `R^tt` now plateaus
+(`1648→1499→1462`, settling by `t≈1.5-2.0`, matching the domain's own
+light-crossing time) instead of draining to zero — a genuine steady state.
+
+**M1 side — new pgen, `RadiationM1CrossingBeams`
+(`src/pgen/tests/rad_m1_colliding_beams.cpp`).** M1 has no angular
+resolution at all — only one `(E, F_d)` pair per cell — so there is no
+way to represent two simultaneous beam directions in the same cell
+regardless of closure; wherever the two beams' paths overlap, the solver
+can only carry their vector-summed flux. Reuses the same boundary-ghost-
+cell injection pattern as the existing 2D beam test (`ApplyBeamSources2D`,
+`radiation_m1_beams.cpp`), generalized to two simultaneous beams with
+independent y-bands and directions (`ApplyM1CollidingBeamSources2D`, new
+function, does not touch the existing tested `radiation_m1_beams.cpp` at
+all — kept fully separate to avoid any regression risk). Both beam sources
+are placed at the domain's actual left edge (`x=x1min=0`, `ix1_bc=
+outflow`) rather than at the paper's interior `x0=2/15` — a documented
+simplification (M1 has no existing interior volumetric point-source
+mechanism, and unlike the DO port above, placing the M1 source *at* the
+true domain edge sidesteps the exact "ghost zone is behind the source"
+problem entirely, so no analogous fix was needed on this side). This
+shifts the crossing point's exact location relative to each domain's own
+coordinates but does not change the qualitative physics under test.
+`closure_fun=minerbo` (not eddington, which cannot represent a directed
+beam at all — matches the existing beam test's established convention);
+`opacity_type=none` (pure vacuum transport, no fluid needed, matching the
+DO-side companion). Also fixed a real lifetime bug found via direct
+observation while first testing this pgen: a plain (non-pointer)
+`DvceArray1D` member on a namespace-scope global struct is destructed at
+static-storage-duration cleanup time, which runs *after*
+`Kokkos::finalize()` — triggered a "Kokkos allocation is being deallocated
+after Kokkos::finalize was called" warning/backtrace at every run's exit.
+Fixed by heap-allocating via `new` and deliberately never freeing, the
+same idiom `~/athenak_IAS`'s own `crossing_beams.angular_weights` already
+uses for exactly this reason.
+
+**Results** (both runs to `t=2.5`, matching the paper's own `t=5/2`;
+geometry matches the paper exactly: `y=1/2±11/30`, beam angle `±π/6`,
+domain `[0,1.6]×[0,1]`, `96×60` cells; DO used a geodesic grid with
+`nlevel=5`, `Nang=252` — resolved enough to show the effect clearly, not a
+formal convergence study):
+
+- **Visually** (`stage12_colliding_beams_2d.png`): DO's field forms a
+  clean "X" — the two beams cross at `(0.768, 0.5)` and continue
+  undisturbed on their original `∓π/6` trajectories afterward, exactly
+  matching the paper's own Figure 4. M1's field shows the two beams
+  approaching and merging into a single bright region at the crossing,
+  then continuing downstream as **one** broadening band centered on
+  `y=0.5` (the exact average of the two beams' directions, since the
+  setup is `y↔1-y` mirror-symmetric) — visibly failing to re-diverge into
+  two beams the way DO's does.
+- **Quantitatively** (`check_rad_m1_photon_colliding_beams.py`, a
+  peak/valley ratio at each of several downstream `y`-profiles — robust to
+  the sub-percent numerical noise that made naive local-maxima counting
+  unreliable on DO's own ray-effect-textured profile): DO's peak/valley
+  ratio grows monotonically downstream of the crossing, `1.07` at `x=0.9`
+  (barely past crossing) up to `6.93` at `x=1.5` (fully re-separated, deep
+  valley at `y=0.5`) — a genuinely bimodal, deepening double-peak
+  structure. M1's ratio stays at `1.00-1.01` at **every** downstream
+  location checked — a single, symmetric, unimodal peak throughout, never
+  splitting. This is an unambiguous, direct, quantitative confirmation of
+  the paper's claim, not just a qualitative visual impression.
+- Plots: `stage12_colliding_beams_2d.png`, `stage12_colliding_beams_
+  profiles.png` (`/sakura/ptmp/tlam/athenak_run/stage12_colliding_beams/
+  plots/`, not committed — scratch/visualization only, same convention as
+  every prior stage).
+
+**Regression**: full 7-test CPU pytest suite re-ran with zero change (the
+new M1 pgen is a wholly new file, touching no existing code path; the DO
+port only adds new functions/dispatch entries to `rad_beam.cpp`/`pgen.cpp`/
+`pgen.hpp`, none of which any existing test exercises).
+
+**Not in scope / deferred**: the spinning-BH colliding-beams analogue, or
+any GR extension of this test — the paper's own §3.1 is flat-spacetime
+only, so this wasn't attempted; a formal DO angular-resolution convergence
+scan for this specific test (the paper's Figure 4 compares two
+resolutions, not repeated here — same reasoning as Stage 11's hohlraum,
+this stage's point is the qualitative/quantitative M1-vs-DO contrast, not
+a convergence study); Stage 13 (linear waves) — unaffected by this stage,
 roadmap numbering unchanged.

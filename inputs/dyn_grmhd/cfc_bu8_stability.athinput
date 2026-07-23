@@ -171,11 +171,33 @@ enforce_maximum = true
 
 <cfc>
 init_verbose = true
-init_omega   = 0.5       # under-relax InitializeMetric()'s psi Picard iteration --
-                         # proactive per DEVELOPMENT.md item 22 (this star's
-                         # 2M/R and rotation rate are comparably demanding to the
-                         # migration test's compact star that needed this)
-mg_threshold   = 3.0e-3  # loosened per item 22's AMR+CFC precedent
+init_omega   = 1.0       # 2026-07-23 REVISION: the 0.5 under-relaxation was
+                         # applied proactively (per item 22's precedent for a
+                         # different, non-rotating test) but never actually
+                         # verified necessary for BU8 -- it turned out to be
+                         # the cause of the outer Picard loop stalling short of
+                         # init_tol (0.88x/iteration decay vs. omega=1.0's
+                         # near-immediate convergence to exactly 0 by iteration
+                         # 25 of 50). Removing it also improved accuracy
+                         # (mass/ang-mom mismatch vs. XNS's initial data
+                         # dropped from 0.05%/0.10% to 0.0014%/0.019%). See
+                         # DEVELOPMENT.md.
+mg_threshold   = 1.0e-10 # 2026-07-23 REVISION: item 22's loosened 3.0e-3 (for
+                         # the nonlinear psi/alpha_psi solvers) was found to
+                         # silently under-converge psi for THIS star -- with
+                         # only 3-4 V-cycles run per Picard iteration, psi
+                         # disagreed with the XNS initial data by several
+                         # percent near the center (and up to ~30% in the
+                         # derived mass/angular-momentum integrals). Tightened
+                         # back to the base-class default (1e-10); verified no
+                         # convergence failures at this tolerance for this
+                         # configuration (3-5 V-cycles per Picard iteration
+                         # after the first, since each is warm-started). See
+                         # DEVELOPMENT.md.
+mg_poisson_threshold = 1.0e-10 # dedicated (not shared with mg_threshold above)
+                         # threshold for the X^i/beta^i vector-Poisson solves --
+                         # also tightened to 1e-10, matching mg_threshold above,
+                         # per user direction; see DEVELOPMENT.md
 mg_npresmooth  = 3       # more smoothing per level, same precedent
 mg_npostsmooth = 3
 mg_debug_defect_by_level = false # 2026-07-23: off for this run -- the debug

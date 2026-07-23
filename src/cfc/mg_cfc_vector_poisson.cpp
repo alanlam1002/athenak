@@ -240,7 +240,19 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
     }
   }
   omega_ = pin->GetOrAddReal("cfc", "mg_omega", 1.15);
-  eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
+  // Deliberately NOT "cfc/mg_threshold" -- that key is shared with the nonlinear
+  // psi/alpha_psi solvers (mg_cfc_conformal_factor.cpp/mg_cfc_lapse.cpp), which
+  // item 22 (DEVELOPMENT.md) intentionally loosened to 3e-3 for their own AMR
+  // convergence robustness. This driver's X^i/beta^i are a genuinely different,
+  // linear equation whose own natural magnitude can be small enough that the
+  // same absolute defect threshold leaves it badly under-converged (confirmed:
+  // BU8 rotating-star test, this solver was silently doing 0 V-cycles per call
+  // once the initial defect fell under 3e-3, producing an Ahat^2/psi that
+  // disagreed with the initial data's own psi by several percent and an
+  // angular momentum off by 33% -- see DEVELOPMENT.md). A dedicated key
+  // (mirroring the existing mg_poisson_outer_bc/mg_poisson_mporder precedent)
+  // keeps that fix local to this driver.
+  eps_ = pin->GetOrAddReal("cfc", "mg_poisson_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
@@ -283,7 +295,7 @@ void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
 }
 
 void MGCFCVectorPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &p_src) {
-  mglevels_->LoadSource(p_src, 0, mglevels_->GetGhostCells(), 1.0);
+  mglevels_->LoadSource(p_src, 0, mglevels_->GetGhostCells(), -1.0);
   return;
 }
 

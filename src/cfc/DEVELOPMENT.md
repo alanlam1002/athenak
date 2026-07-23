@@ -69,12 +69,20 @@ its Riemann solver and conserved-to-primitive conversion.
 ## genuine bugs were found and fixed in the shared coarse-fine/prolongation
 ## machinery (item 21, `ProlongateFCMG`'s child-parity clamp and
 ## `RestrictCoeffOctets`'s missing octet-to-root branch); a second, rotating-
-## star pgen was added and successfully evolved a full test to completion
-## (item 23). **One thread is currently open**: item 22 (migration-test
-## per-cycle convergence plateau at a refined-region boundary/the R=40
-## mesh-explosion divergence), explicitly paused mid-investigation, not fixed.
-## Read the numbered items below for the current, authoritative state --
-## don't rely on this header alone.
+## star pgen was added (item 23) and, after five rounds of user-driven bug
+## hunting (an oblate-surface/atmosphere bug, a missing Lorentz factor in the
+## velocity primitive, a sign error in the X^i/beta^i vector-Poisson source,
+## psi/alpha_psi's own convergence threshold being too loose for this star's
+## accuracy, and an unnecessary/counterproductive under-relaxation
+## (`init_omega=0.5`) stalling the outer Picard loop short of convergence),
+## now reproduces the initial data's own `psi`/mass/angular momentum to
+## ~0.001%-0.02% (mass/ang-mom) with the outer loop reaching exact convergence
+## well inside its iteration cap -- full production run with all five fixes in
+## place still in progress as of this writing (job 248477). **One thread is
+## currently open**: item 22 (migration-test per-cycle convergence plateau at
+## a refined-region boundary/the R=40 mesh-explosion divergence), explicitly
+## paused mid-investigation, not fixed. Read the numbered items below for the
+## current, authoritative state -- don't rely on this header alone.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -3342,6 +3350,72 @@ src/cfc/
       AMR-refinement-boundary divergence, resolved there by raising resolution
       and dropping an equatorial reflecting BC. This migration test's own two
       open sub-questions above are still unresolved and untouched.
+    - **Note (item 23, 2026-07-23)**: BU8 later found `mg_threshold=3e-3`
+      (inherited from this item's own conclusion) too loose for psi/
+      alpha_psi's *accuracy* on a rotating star specifically (not a robustness/
+      convergence-failure concern like this item's own migration-test context)
+      -- BU8's production input now uses `1e-10` instead. This is a different
+      test's own tuning, not a correction to this item's conclusion for the
+      migration test, whose own robustness tradeoff (loosen threshold to avoid
+      hitting the divergence clamp) is still the relevant one there.
+    - **Ruled out (2026-07-23): the `LoadPoissonSource` sign fix (item 23) does
+      NOT fix this item's per-cycle clamp trip.** BU8's investigation also
+      found (and fixed) a real sign error in `MGCFCVectorPoissonDriver::
+      LoadPoissonSource` (`fac` was `+1.0`, should be `-1.0` per the same
+      stencil-sign convention `gravity::MGGravityDriver` establishes) -- since
+      this migration-test star also has nonzero velocity (hence nonzero
+      `S_i`/`X^i`, not just BU8's rotation), it was worth checking whether this
+      same bug was contributing to this item's own still-open clamp-trip
+      problem. Rebuilt `build_cfc` (the TOV pgen's own build dir, separate from
+      BU8's `build_cfc_xns`) with the fix and reran the exact "current best
+      configuration" (`R=30`, `mg_threshold=mg_poisson_threshold=3e-3`,
+      `mg_npresmooth=mg_npostsmooth=3`, `init_omega=0.5` -- `mg_poisson_
+      threshold` explicitly set to match the old shared-key value, isolating
+      just the sign fix as the one change) for a quick capped (`nlim=20`) test
+      (job 248484). **Result: no improvement, if anything very slightly
+      worse** -- `FATAL ERROR ... Failed to converge` now trips at the cycle
+      3->4 transition (`defect=6.03e-3`) instead of cycle 4->5
+      (`defect=7.11e-3` previously) -- same order of magnitude above
+      threshold either way. Consistent with this item's own existing diagnosis
+      (`mg_debug_defect_by_level`: the plateau sits at `refined_region1`'s
+      edge/corner and tracks `delta_psi`'s own local `~M/(2r)` value there,
+      i.e. an inherent 2:1-refinement-jump truncation-order effect per item
+      21, not a matter-source sign/normalization bug) -- the sign fix is a
+      real, independent bugfix (matters for BU8's `beta^i`/frame-dragging
+      sign) but is not relevant to this item's own open problem. This item's
+      own two open sub-questions (further loosen `mg_threshold`, or
+      investigate the plateau/`R=40` divergence more fundamentally) remain
+      exactly as they were.
+    - **Also ruled out (2026-07-23): tightening `mg_threshold`/
+      `mg_poisson_threshold` (BU8's other fix) to `1e-8` makes this item's
+      problem WORSE, not better.** Same `R=30`/`init_omega=0.5`/`mg_npresmooth=
+      mg_npostsmooth=3` configuration, `mg_threshold=mg_poisson_threshold=
+      1.0e-8` (from `3.0e-3`), quick capped test (job 248548, 4 nodes -- the
+      16-node BU8 production job was using most of the account's `136`-node
+      QOS cap at the time, see below). **Result**: during `t=0`
+      `InitializeMetric()`, every single inner psi V-cycle solve now "fails to
+      converge" (the per-solve defect plateaus around `5.1e-4`, essentially
+      unchanged regardless of the target threshold -- confirms this is a real
+      floor, not merely "hasn't finished iterating yet"), though the *outer*
+      Picard loop's own `dpsi` still decreased smoothly throughout (reaching
+      `5e-6` by iteration 49, hitting the `init_iter_max=50` cap). Once
+      evolution started, the per-cycle solve immediately failed at cycle 0's
+      very first stage and the run terminated after cycle 1 (`nlim=0`) -- markedly
+      *worse* than the `3e-3` baseline's cycle-4/5 trip, not better. This is the
+      expected, consistent result given the plateau's already-diagnosed nature
+      (an inherent, non-vanishing truncation-order defect at the coarse-fine
+      interface, not a tunable convergence-tolerance problem) -- unlike BU8's
+      *outer* Picard-loop stall (which genuinely could reach a true fixed
+      point, just needed more iterations/no under-relaxation), this item's
+      *inner*, per-solve defect has a hard floor that no threshold change can
+      cross. This item's own two open sub-questions remain unresolved; no new
+      avenue found by either of BU8's two fixes.
+    - **Aside, resource note**: this quick test needed to run on 4 nodes
+      instead of the usual 16 -- the account's SLURM QOS node cap (`136`) was
+      fully saturated by other concurrently-running jobs (BU8's own 16-node
+      production run plus several unrelated jobs from other work), so a
+      16-node request sat pending (`QOSMaxNodePerUserLimit`) instead of
+      starting.
 
 23. **RESOLVED (2026-07-23) -- "Stability of a rapidly rotating neutron star"
     test (Gmunu sec. 3.3.2, model "BU8") diverged after ~100 stable cycles, via
@@ -3602,9 +3676,189 @@ src/cfc/
       run together with the Lorentz-factor fix above): zero FATAL errors,
       `cfc_bu8_surffix_check.user.hst` shows `rho-max=1.2794e-3` (matches job
       248459's independent `bu8_bin_reader.py` cross-check to 4 sig figs),
-      `alpha-min=0.7107` (sane lapse), `ang-mom=1.2125` (right order of
-      magnitude for this star's expected angular momentum; changed by only
-      ~3e-6 relative between the 2 cycles, consistent with near-conservation).
-    - **Next**: full `tlim=200` production resubmission with both fixes
-      together, superseding job 248450 (missing Lorentz factor) and the
-      cancelled job 248460 (fixed but missing the history diagnostics).
+      `alpha-min=0.7107` (sane lapse). **Correction (see next bullet)**:
+      `ang-mom=1.2125` was *not* actually a sane match -- it (and `mass`) were
+      both substantially wrong, discovered once compared against the initial
+      data's own reported values, not just checked for plausibility.
+    - **Fourth bug found and fixed: `mg_threshold` too loose for psi/alpha_psi's
+      own accuracy on this configuration, plus a real sign error in the X^i/
+      beta^i vector-Poisson source (2026-07-23, user diagnostic review)**.
+      Job 248462 (first full-run attempt with the Lorentz-factor fix) was
+      cancelled by the user mid-run after they cross-checked the new
+      `ang-mom`/`mass` history columns against XNS's own `LogFile.dat`
+      (`ANGUL. MOMENT. (E) = 1.8128063487726112`, `REST MASS = 1.8255846452192752`)
+      and found both substantially off (`mass=1.379`, 24.5% low; `ang-mom=1.2125`,
+      33% low) -- not the "right order of magnitude" match the previous bullet
+      assumed. The user correctly identified the diagnostic to isolate this:
+      compare `psi` after `CFC::InitializeMetric()` against the initial data's
+      own `psi` -- these should match for a genuine equilibrium. They did not:
+      AthenaK's converged `psi` was up to ~6-7% low near the star's center
+      relative to the XNS table (extracted via `plot_slice.py --dump-npz` on
+      the `adm_psi4` field vs. `Hydroeq.dat`'s own `psi` column).
+      - **Ruled out first** (each independently verified correct, to make sure
+        the search stayed on the real cause): re-integrating XNS's own
+        `Grid.dat`/`Hydroeq.dat`/`Surf.dat` tables directly in Python (same
+        atmosphere cut, same Lorentz-factor formula as `xns_rotstar.cpp`)
+        reproduced `REST MASS`/`ANGUL. MOMENT.` to 7 significant figures --
+        confirming the Surf.dat atmosphere cut and the Lorentz-factor fix
+        (previous bullet) are both correct, and the bug is specifically in
+        AthenaK's own metric *re-solve*, not the pgen's initial-data
+        transcription. `CFC::InitializeMetric()`'s outer Picard loop itself
+        was also confirmed tightly convergent (`max|delta psi|` decaying
+        geometrically to `~1e-10`), ruling out "just hasn't finished
+        converging yet" at the outer-loop level.
+      - **Bug A (found first, real but not the dominant cause): wrong sign in
+        `MGCFCVectorPoissonDriver::LoadPoissonSource`** (`mg_cfc_vector_poisson.cpp`).
+        `CFCVectorPoissonStencil::Apply` is identical in form to
+        `gravity::GravityStencil::Apply`; gravity's own precedent
+        (`mg_gravity.cpp`: `LoadSource(u0, IDN, ng, -four_pi_G_)`) establishes
+        that solving `Delta(u) = C` via this stencil requires
+        `LoadSource(..., fac=-1.0)` when the array passed in already equals the
+        full intended RHS `C` (as `p_src`/`eta_src` do here, already carrying
+        their own `8*pi`/`16*pi` factors). The code had `fac=+1.0` -- solving
+        the sign-flipped equation. **Fixed**: changed to `fac=-1.0`.
+        Mathematically this does *not* change `psi`/`mass`/`ang-mom` (a global
+        sign flip of `X^i` flips `Adual^ij` linearly, but `Ahat^2 = sum
+        (Adual^ab)^2`, feeding `psi`'s own equation, is invariant to that flip)
+        -- confirmed empirically too (job 248470: `mass`/`ang-mom` unchanged
+        from before the sign fix). It *does* matter for `beta^i`'s own source
+        (Gmunu eq. 75's `2*Adual^ij*D_j(alpha*psi^-6)` term uses `Adual^ij`
+        linearly, not squared) and hence `vK_dd`'s physical sign/frame-dragging
+        direction -- a real, independent bug, fixed regardless of it not being
+        this particular symptom's cause.
+      - **Bug B (the actual dominant cause): `<cfc> mg_threshold=3e-3`
+        (item 22's AMR-robustness loosening) was too loose for psi/alpha_psi's
+        own accuracy on this star.** Diagnosed by adding one-off `DEBUG
+        <SolverName>(this=...) eps_=...` prints (temporary, since removed) to
+        all three `Solve()` methods (`mg_cfc_vector_poisson.cpp`,
+        `mg_cfc_conformal_factor.cpp`, `mg_cfc_lapse.cpp`) to unambiguously
+        identify which trace belonged to which solver in the interleaved
+        `mg_verbose=2` log. This revealed `ConformalFactor`'s own solve
+        stopping after only 2-3 V-cycles once its defect fell just under
+        `3e-3` (e.g. `0.0029537 < 0.003`) -- correct per its own (deliberately
+        loose) threshold, but nowhere near machine precision, and evidently
+        not accurate enough for this star's own equilibrium to be preserved.
+        A first attempt narrowed this down incorrectly: giving the X^i/beta^i
+        vector-Poisson solves their own tight, dedicated
+        `mg_poisson_threshold` (new `<cfc>` key, mirroring the existing
+        `mg_poisson_outer_bc`/`mg_poisson_mporder` precedent) while leaving
+        `mg_threshold` (psi/alpha_psi) at the loose `3e-3` reproduced the
+        *exact same* `mass=1.379`/`ang-mom=1.2125` deficit (job 248468/9/70) --
+        proving the vector-Poisson threshold was NOT the culprit (consistent
+        with Bug A's sign-invariance argument: `Ahat^2` doesn't care how
+        tightly `X^i` itself converges once it's converged at all, since the
+        earlier `mg_poisson_threshold` fix already had it converging to
+        `~1e-8`-`1e-9`, plenty tight). **Fixed**: tightened `mg_threshold`
+        itself to `1e-10` (job 248471, later corroborated by an earlier
+        coarser test at `1e-8`, job 248467) -- the per-call V-cycles
+        themselves converge cleanly at this tolerance every time (3-5
+        V-cycles per Picard iteration after the first, each warm-started); see
+        the next bullet, though, for a genuine (separate) convergence-rate
+        issue this surfaced at the *outer* Picard-loop level.
+      - **Final verification (job 248471, mg_threshold=mg_poisson_threshold=
+        1e-8)**: `psi` now matches the XNS initial data's own `psi` to
+        **~0.01% or better**, from the stellar center out to `r~19` (was up to
+        6-7% low at the center before) -- direct point-by-point comparison via
+        `plot_slice.py --dump-npz` on `adm_psi4` vs. `Hydroeq.dat`'s `psi`
+        column. `mass=1.824618089` vs. XNS's `1.8255846452192752` (0.05% off,
+        was 24.5%); `ang-mom=1.811048179` vs. XNS's `1.8128063487726112`
+        (0.10% off, was 33%). **Per user direction, production uses
+        `mg_threshold=mg_poisson_threshold=1e-10`** (tighter than the `1e-8`
+        used in this last verification run, since no per-call convergence cost
+        was found at `1e-8` and `1e-10` is the base class's own original
+        default before item 22 ever loosened it).
+      - **New finding (2026-07-23, discovered while starting the job 248475
+        production run): the outer `CFC::InitializeMetric()` Picard loop's own
+        contraction rate slowed substantially once X^i is genuinely resolved
+        each iteration, and this "final verification" run (248471) was itself
+        silently hitting the 50-iteration cap (`<cfc>/init_iter_max`, default),
+        not truly converging to `init_tol=1e-10`.** Re-examining job 248471's
+        full log (not just the final `psi`/mass/ang-mom comparison) shows the
+        exact same `### WARNING in CFC::InitializeMetric ... did not converge
+        after 50 iterations` message, stalled at `max|delta psi|=2.09333e-05`
+        -- i.e. the excellent `~0.01%` psi match documented above was itself
+        obtained from a *non-fully-converged* outer state, not a truly
+        converged one. Before the threshold fixes (loose `mg_threshold=3e-3`),
+        this same outer loop showed a clean, exact `0.5x`-per-iteration decay
+        (exactly matching `init_omega=0.5`) all the way to `~1e-10` within 29
+        iterations (job 248461) -- consistent with X^i's own under-convergence
+        effectively *decoupling* the outer iteration (a frozen/inaccurate X^i
+        each step behaves, for the psi-update alone, like simple linear
+        relaxation). With X^i properly resolved every step (post-fix), the
+        outer loop is now iterating the *genuinely coupled* (psi, X^i)
+        fixed-point map, whose own natural contraction rate for this star
+        turns out to be much slower (~0.88x/iteration, not `0.5x`) -- at that
+        rate, reaching `1e-10` from the post-iteration-1 value needs roughly
+        150 iterations, not 50. The per-call multigrid V-cycles are not at
+        fault (each one converges to its own `eps_` correctly every time;
+        occasional "Slow convergence: defect ratio=..." lines are the
+        standard, benign multigrid diagnostic, not failures). Job 248475 (the
+        `tlim=200` production run) hit the identical cap/warning at
+        essentially the same `~2.09e-5` value. Per user direction, job 248475
+        was initially left running to investigate the stall separately (see
+        below) -- it was later cancelled and resubmitted once the actual
+        cause was found (next bullet).
+      - **Root cause found and fixed: `init_omega=0.5` (the under-relaxation
+        itself) was causing the stall, not helping it.** `init_omega=0.5` was
+        applied proactively to BU8 per item 22's precedent (a *different*,
+        non-rotating migration-test star that genuinely needed under-
+        relaxation for robustness) but was never actually verified as
+        necessary for BU8 itself. Direct A/B test in
+        `cfc_bu8_surffix_check/` (job 248476, `init_omega=1.0`, otherwise
+        identical to the stalled configuration): the outer loop converges
+        almost immediately -- `max|delta psi|` drops from `0.223754` (iteration
+        0) to `1.28373e-06` (iteration 1, a single step!), then decays
+        smoothly to *exactly* `0` by iteration 25 of the 50 available, no
+        warning at all. Compare the `omega=0.5` trace's own iteration-0/1
+        values (`0.111877 -> 0.017713`, only a `~6x` drop) -- the
+        under-relaxation was directly responsible for both the slow ~0.88x/
+        iteration asymptotic decay *and* the iteration-1 bottleneck. Removing
+        it also **improved accuracy**, not just speed: `mass=1.825610933` vs.
+        XNS's `1.8255846452192752` (`0.0014%` off, vs. `0.05%` with the
+        stalled `omega=0.5` run) and `ang-mom=1.812464081` vs. XNS's
+        `1.8128063487726112` (`0.019%` off, vs. `0.10%`) -- consistent with
+        letting the Picard loop actually reach its fixed point instead of
+        stopping partway. **Fixed**: production `cfc_bu8_stability.athinput`
+        now uses `init_omega=1.0` (no under-relaxation). `mg_npresmooth`/
+        `mg_npostsmooth=3` (also inherited from item 22's migration-test
+        precedent) were left unchanged -- no evidence yet that they're
+        similarly unnecessary for BU8, and changing multiple things at once
+        would have muddied this A/B test.
+    - **Final production run (jobs 248477 + 248639, 2026-07-23): SUCCESS.**
+      Full `tlim=200` run with all five fixes together (Surf.dat surface cut,
+      Lorentz factor, vector-Poisson sign, `mg_threshold`/
+      `mg_poisson_threshold=1e-10`, `init_omega=1.0`) -- supersedes job 248450
+      (missing Lorentz factor), job 248460 (Lorentz-fixed but missing history
+      diagnostics, cancelled before completion), job 248462 (Lorentz+history-
+      fixed but still using the too-loose `mg_threshold=3e-3`, cancelled once
+      the `ang-mom`/`mass` mismatch against `LogFile.dat` was found), and job
+      248475 (threshold-fixed but still under-relaxed and hence non-fully-
+      converged at `t=0`, cancelled once the under-relaxation was identified
+      as the cause). Job 248477 ran to `t=169.49` (cycle 1825) before hitting
+      its wall-clock limit with zero FATAL/NaN errors; job 248639 restarted
+      from the last checkpoint and completed the remaining `~30.5` time units
+      cleanly, reaching `tlim=200.0` exactly at cycle 2121 -- zero FATAL/NaN
+      across the entire combined run.
+      **Diagnostics** (`cfc_bu8_stability.mhd.hst`/`.user.hst`, both segments
+      concatenated continuously): baryon mass conserved to
+      `max|M(t)-M0|/M0 = 1.19e-8` over the *entire* `tlim=200` run (vs.
+      `2.28e-5` for the earlier, still-buggy "successful" run, item 23's first
+      pass) -- essentially machine-precision-level conservation. Angular
+      momentum conserved to `1.32e-5` relative drift. `M0=1.825610932873623`
+      vs. XNS's `REST MASS=1.8255846452192752` (`0.0014%` off);
+      `ang-mom(t=0)=1.812464080932092` vs. XNS's `ANGUL. MOMENT.=
+      1.8128063487726112` (`0.019%` off) -- both matching the dedicated
+      verification run (job 248476) that first established these fixes work.
+      **`rho_max(t)` now shows only a small-amplitude oscillation
+      (`~0.0012793`-`0.0012800`, `~0.02%` peak-to-peak variation) around the
+      model's central density, with no large transient at all** -- a
+      qualitatively different, physically correct result compared to the
+      first "successful" run (item 23's earlier pass) that the user correctly
+      judged as *not actually stable* from exactly this diagnostic (a `~30%`
+      adjustment transient before settling into a persistent oscillation).
+      This is the genuine, validated confirmation that the BU8 rotating-star
+      equilibrium is preserved by this module to high accuracy. Diagnostic
+      plots/movies regenerated in `cfc_bu8_stability_test/` (superseding
+      `old_run_underrelaxed/`, `old_run_loosethreshold/`,
+      `old_run_novelocityfix/`, `old_run_presurffix/`, each preserved for
+      comparison, not deleted).

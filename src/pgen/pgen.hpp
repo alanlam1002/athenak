@@ -83,6 +83,7 @@ class ProblemGenerator {
   void RadiationM1DiffusionTest(ParameterInput *pin, const bool restart);
   void RadiationM1VelocityJumpTest(ParameterInput *pin, const bool restart);
   void RadiationM1CrossingBeams(ParameterInput *pin, const bool restart);
+  void RadiationM1LinearWave(ParameterInput *pin, const bool restart);
   void RadiationM1SingleZoneTest(ParameterInput *pin, const bool restart);
   template <class EOSPolicy, class ErrorPolicy>
   void RadiationM1SingleZoneTest_(ParameterInput *pin, const bool restart);

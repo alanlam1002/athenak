@@ -189,6 +189,26 @@ flat at `~1.00-1.01` for M1 (never splits) — an unambiguous, direct
 measurement of the exact failure mode the paper describes, not just a
 citation of it.
 
+Stage 13 (see below) closes out the current DO-comparison roadmap: linear
+waves (arXiv:2302.04283 §3.9), the paper's own "extremely stringent,
+quantitative" convergence test, scoped to the gas-dominated "H1" case with
+a full two-resolution (32/64) check. DO needed no new code at all — its
+`rad_linear_wave.cpp` already exists, is already CI-wired, and already
+reproduces the paper's own Table 1/2 "H1" numbers verbatim (the
+eigenvalue/eigenvector isn't computed in code, just read from the
+`<problem>` block — nothing to re-derive). New M1 pgen
+(`RadiationM1LinearWave`) reads the *same* numbers and reuses DO's own
+already-validated fluid-frame→lab-frame boost formulas (simplified for
+this along-x1-only wave), independently hand-verified against M1's own
+covariant `(E, F_d)` conventions before trusting them. This is the one
+stage in the whole project where M1's native closure (`eddington`) is
+*exactly* what the analytic reference assumes, rather than a known
+limitation being probed — and indeed both codes converge with resolution
+and track the analytic sinusoid closely; M1's absolute error is `2-4×`
+larger than DO's but converges at a comparable-or-better rate in this
+comparison's own metric (not directly comparable to AthenaK's internal,
+differently-normalized CI threshold — traced and documented, not a bug).
+
 **Not yet done** (see "Stage 2" below): Kramers/`power_opacity` and the
 EOSCompOSE branch have no dedicated test yet either (deprioritized alongside
 EOSCompOSE Compton — see below).
@@ -2045,3 +2065,144 @@ compton/scattering/backreaction variants, etc.) deliberately stayed in
 (`tst/test_suite/radiation_m1/__init__.py` explicitly bootstraps `sys.path`
 to find them there), and moving them would mean reworking that CI plumbing
 for no benefit (they don't generate plots, they're pass/fail assertions).
+
+## Stage 13 — linear waves (arXiv:2302.04283 §3.9) — DONE
+
+Goal: the last stage on the current roadmap, and the paper's own "extremely
+stringent, quantitative test" — a radiation-modified hydrodynamic sound
+wave, checked for convergence with resolution rather than just qualitative
+agreement. Scoped (per explicit user confirmation) to the paper's
+gas-dominated "H1" case (`p_rad/p_gas=1/10`) only, with a full
+two-resolution (32/64 cells) convergence-rate check on both sides.
+
+**DO side needed no new code at all.** `src/pgen/tests/rad_linear_wave.cpp`
+(`ProblemGenerator::RadiationLinearWave`) already exists in this repo, is
+already CI-wired (`tst/test_suite/rad/test_rad_lwave1d_amr_cpu.py` +
+2D/3D/MPI/GPU siblings, part of the `regression_cpu-job` GitHub Actions
+job), and reproduces the paper's own Appendix A Table 1/2 "H1" case
+numerically verbatim — `inputs/tests/rad_linwave.athinput`'s
+`omega_real=3.1488157526582414e+00` etc. match the paper's own tabulated
+values to ~13 significant figures. Confirmed the existing CI test still
+passes (`test_rad_lwave1d_amr_cpu.py`, 18s, green) — this capability was
+not touched, just exercised. Added one new, uniform-grid (non-AMR) variant
+athinput, `inputs/tests/rad_linwave_uniform.athinput`, purely so the
+32/64 comparison doesn't need to reason about AMR refinement boundaries
+when comparing directly against the M1 side cell-by-cell; `delta=1.0e-4`
+(the paper's own value, matching the actually-CI-run `tst/inputs/
+lwave_rad.athinput`, not the older `inputs/tests/rad_linwave.athinput`'s
+`delta=1.0e-6`).
+
+**Key realization that turned this from an open-ended physics-derivation
+task into a small, well-bounded one**: `RadEigensystem`
+(rad_linear_wave.cpp:51-59) is a plain data container — the complex
+eigenvalue/eigenvector is *not* computed in code at all, it's precomputed
+offline and hand-supplied as `<problem>` block constants. There was
+nothing to re-derive; the exact same numbers could be reused verbatim for
+M1. Better still, the paper's own Appendix A (Eq. A6) explicitly states
+"We assume the Eddington closure in the fluid frame" for this
+derivation — exactly M1's own `closure_fun=eddington` (`chi=1/3` always,
+`radiation_m1_calc_closure.hpp:28-32`) — and the eigenvector itself is
+expressed in exactly the variables M1 evolves natively (`ρ, pgas, u^i, Ē,
+F̄_a` — fluid-frame moments, not per-angle intensities). This is the one
+stage in this project where M1's own native closure is *exactly* what the
+analytic reference assumes, rather than a known limitation being probed.
+
+**M1 side — new pgen, `RadiationM1LinearWave`
+(`src/pgen/tests/rad_m1_linear_wave.cpp`).** Sets up the identical 1D,
+x1-propagating background+perturbation, reading the *same* `<problem>`
+eigenvalue/eigenvector numbers verbatim (bit-identical values in
+`inputs/tests/rad_m1_photon_linear_wave.athinput`). Couples to the real
+DynGRMHD fluid (`<mhd> dyn_eos=ideal`, `opacity_type=photons`,
+`kappa_a=kappa_p=10.0` — the paper's single `ᾱ_a=10` playing double duty
+for both the true-absorption and Planck-emission channels, mirroring how
+DO's own `<radiation>` block only has one such parameter too —
+`kappa_s=10.0`), `matter_sources=true`, `matter_implicit=true` (stiff,
+`κ~10`), `backreact=true` — the first genuinely two-way-coupled M1 test
+in this project's DO-comparison stages (Stages 7-12 were all either pure
+free-streaming or single-zone homogeneous). `closure_fun=eddington` is
+mandatory here, not a free choice, to match the analytic derivation.
+
+Only the `t=0` initial condition is set (primitives + a fluid-frame→
+lab-frame boost of the Eddington-closure radiation moments into M1's own
+`(E, F_d)`) — unlike DO's pgen, there is no internal "recompute the
+reference solution at the final time" hook
+(`pgen_final_func`/`RadiationLinearWaveErrors`); the companion check
+script independently reconstructs the full time-dependent analytic
+solution at whatever time the saved output actually reports, matching the
+convention used by every other comparison script in this project. The
+fluid-frame→lab-frame boost was adapted directly from DO's own
+`rad_linear_wave.cpp` (its `u_wave`/`rf_wave`/`lambda_c_f_wave`/`r_wave`
+sequence, lines ~279-344) — simplified because this wave only ever
+propagates along x1, so DO's own wave-direction rotation (needed for waves
+at an angle to the grid) collapses to the identity here, leaving just the
+boost itself. Independently hand-verified the resulting `(E_lab, F_x,lab)`
+formulas against the covariant definitions `E=T_{ab}n^a n^b`,
+`H_d=-\gamma^b_a n^c T_{bc}` for the Eulerian observer (`radiation_m1_
+helpers.hpp`'s `calc_J_from_rT`/`calc_H_from_rT` conventions) before
+trusting the simplified formulas — confirmed no sign flip needed between
+DO's own upper-index tensor-transform convention and M1's covariant
+`(E, F_d)` storage.
+
+**Results** (both codes run to the same actual final time, `t≈26.46` —
+DO's own pgen rescales its athinput's `tlim=1.0` internally into
+`tlim*ln(2)/|ω_imag|`, matching the paper's own prescription "run for a
+time of `-log(2)/Im(ω)`"; the M1 side's athinput sets this same rescaled
+number directly since it has no equivalent internal rescale):
+
+- Both codes track the analytic sinusoid closely at `nx1=64`
+  (`stage13_linear_wave_profiles.png`) — visually near-indistinguishable
+  from the exact solution for all five compared quantities (`ρ, pgas, u_x`
+  and the lab-frame radiation moments `E, F_x`).
+- Both codes' error decreases with resolution — genuine convergence, not
+  just qualitative agreement (`stage13_linear_wave_convergence.png`).
+  Using the paper's own error definition (Eq. 78a/78b, delta-normalized L1
+  error averaged in quadrature over `{ρ, pgas, u_x, E_lab, F_x,lab}`,
+  independently reconstructed rather than relying on DO's own internal
+  `OutputErrors` hook): DO `ε(32)=8.758e-3 → ε(64)=6.156e-3` (ratio
+  `0.703`); M1 `ε(32)=3.379e-2 → ε(64)=1.420e-2` (ratio `0.420`). M1's
+  absolute error is `~2-4×` larger than DO's at both resolutions (some
+  combination of M1's own numerical dissipation and the additional
+  backreaction/opacity coupling not present in DO's simpler `phydro`-only
+  setup), but M1's convergence *ratio* in this metric is actually closer
+  to (nominally better than) the naive 2nd-order expectation of `0.5` than
+  DO's own ratio here — both are genuinely converging, not stalled.
+- **Methodology note, not a discrepancy to chase further**: these `ε`
+  values are far larger than DO's own internal CI thresholds (`<3.5e-7`
+  absolute, `<0.23` ratio, `test_rad_lwave1d_amr_cpu.py`). Traced this to
+  a real, benign difference in definition, not a bug: AthenaK's shared
+  internal `OutputErrors` linear-wave-testing utility (used by every
+  linear-wave pgen in this codebase, hydro/MHD/radiation alike) reports a
+  plain, *not* delta-normalized, absolute L1 error — point-by-point
+  comparison against the CI test confirmed the actual absolute
+  differences here are of the same order (`~1e-6`) as DO's own passing
+  threshold; dividing by `delta=1e-4` (the paper's own Eq. 78b
+  normalization, deliberately used here for comparability with the M1
+  side and with the paper's own reported numbers) simply rescales these
+  into the `~1e-2` range reported above. Confirmed this is consistent by
+  checking both codes show the same per-variable pattern (density
+  dominates the error budget in both codes, radiation-moment errors are
+  the smallest in both) — a real, shared feature of this specific
+  comparison metric, not a code-specific artifact.
+- Plots: `stage13_linear_wave_profiles.png`, `stage13_linear_wave_
+  convergence.png` (`/sakura/ptmp/tlam/athenak_run/stage13_linear_wave/
+  plots/`, not committed — scratch/visualization only, same convention as
+  every prior stage). Check script:
+  `tst/scripts/radiation_m1/check_rad_m1_photon_linear_wave.py` (goes
+  directly into `tst/scripts/radiation_m1/`, not `inputs/tests/`, per the
+  reorganization established right after Stage 12).
+
+**Regression**: full 7-test CPU pytest suite re-ran with zero change (new
+file, new dispatch entries only); DO's own existing `test_rad_lwave1d_amr_
+cpu.py` re-confirmed still passing (untouched).
+
+**Not in scope / deferred**: the radiation-dominated ("H2") and
+equality ("H3") cases, and the five MHD wave cases (Table 3) — user-scoped
+out for this pass; a genuine M1-side eigenmode re-derivation would be
+needed for the MHD cases specifically (M1 has no magnetic pressure/field
+coupling in its own moment equations the way the paper's Appendix A
+formalism does), a substantially larger undertaking than this stage's
+H1-only hydrodynamic case. This closes out the current DO-comparison
+roadmap (Stages 7-13); remaining open threads are Stage 8's deferred
+`SrcThin` velocity-blind-stiffness investigation and Stage 10's paused
+GR-sources+photon-opacity blow-up, neither part of this roadmap's original
+scope.

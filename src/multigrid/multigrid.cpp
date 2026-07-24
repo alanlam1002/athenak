@@ -922,13 +922,17 @@ void Multigrid::ComputeCorrection() {
   int js = 0, je = js + (indcs_.nx2 >> ll) + 2*ngh_ - 1;
   int ks = 0, ke = ks + (indcs_.nx3 >> ll) + 2*ngh_ - 1;
 
+  // Damping factor for the coarse-grid correction (default 1.0, undamped --
+  // see MultigridDriver::CorrectionOmega()'s doc comment).
+  const Real omega = pmy_driver_->CorrectionOmega();
+
   if (on_host_) {
     auto u = u_[current_level_].h_view;
     auto uold = uold_[current_level_].h_view;
     par_for("Multigrid::ComputeCorrection", HostExeSpace(),
             m0, m1, v0, v1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
-      u(m, v, k, j, i) -= uold(m, v, k, j, i);
+      u(m, v, k, j, i) = omega * (u(m, v, k, j, i) - uold(m, v, k, j, i));
     });
   } else {
     auto u = u_[current_level_].d_view;
@@ -936,7 +940,7 @@ void Multigrid::ComputeCorrection() {
     par_for("Multigrid::ComputeCorrection", DevExeSpace(),
             m0, m1, v0, v1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
-      u(m, v, k, j, i) -= uold(m, v, k, j, i);
+      u(m, v, k, j, i) = omega * (u(m, v, k, j, i) - uold(m, v, k, j, i));
     });
   }
 }

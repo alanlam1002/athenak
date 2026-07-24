@@ -114,6 +114,16 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
 
+    // 2026-07-24: damps the FAS coarse-grid correction (u - uold) applied during
+    // prolongation, separate from mg_omega_psi_'s per-point Newton damping below.
+    // Added to test whether an inaccurate coarse-grid correction explained why
+    // psi's outer Picard loop converges to the wrong answer for a compact
+    // migration-test star -- empirically ruled out (see DEVELOPMENT.md item 24):
+    // damping left the wrong answer unchanged (same ratio to analytic), only
+    // slowed/destabilized convergence. Kept as a generically useful, zero-risk-
+    // when-unused knob, not because it fixed the problem it was built to test.
+    Real CorrectionOmega() const override { return mg_correction_omega_; }
+
     friend class MGCFCConformalFactor;
 
   private:
@@ -121,6 +131,12 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // the per-point Newton step (1.0 = undamped); psi_floor_ prevents psi = u+1
     // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
     Real mg_omega_psi_, psi_floor_;
+
+    // Damping factor for the coarse-grid correction (see CorrectionOmega() above
+    // and MultigridDriver::CorrectionOmega()'s doc comment in multigrid.hpp).
+    // Default 1.0 (undamped, byte-identical to pre-2026-07-24 behavior) via
+    // <cfc> mg_correction_omega.
+    Real mg_correction_omega_;
 
     // Relative-change convergence check (DEVELOPMENT.md item 20) -- tried, found
     // no measurable improvement over the base class's defect-norm SolveMG(), and

@@ -228,6 +228,11 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
+  // 2026-07-24: damps the FAS coarse-grid correction itself (see CorrectionOmega()
+  // in mg_cfc_conformal_factor.hpp) -- distinct from mg_omega_psi_ above, which
+  // damps each point's own Newton step, not the correction prolongated in from a
+  // coarser level. Default 1.0 = undamped, no behavior change unless set.
+  mg_correction_omega_ = pin->GetOrAddReal("cfc", "mg_correction_omega", 1.0);
   // Temporary diagnostic (2026-07-20, plan addendum) -- see DebugReportDefectByLevel's
   // doc comment below. Default false, zero cost/behavior change when left off.
   mg_debug_defect_by_level_ = pin->GetOrAddBoolean("cfc", "mg_debug_defect_by_level",

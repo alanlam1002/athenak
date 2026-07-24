@@ -423,6 +423,18 @@ class MultigridDriver {
   virtual void Solve(Driver *pdriver, int step, Real dt = 0.0) = 0;
   void PrepareForAMR();
   int GetCoffset() const { return coffset_; }
+  // Damping factor applied to the FAS coarse-grid correction (u - uold) before
+  // it's prolongated back onto the next-finer level, in ComputeCorrection() and
+  // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
+  // caller -- gravity, the CFC vector-Poisson solvers -- gets byte-identical
+  // behavior). Overridden by MGCFCConformalFactorDriver as a hypothesis test
+  // (2026-07-24) for why psi's outer Picard loop converges to the wrong answer
+  // for a compact migration-test star -- empirically found NOT to be the cause
+  // (damping the correction left the wrong answer unchanged, only slowed/
+  // destabilized convergence), so the actual root cause lies elsewhere (see
+  // src/cfc/DEVELOPMENT.md item 24). Left in place as a generically useful,
+  // zero-risk-when-unused knob, not because it fixed anything.
+  virtual Real CorrectionOmega() const { return 1.0; }
   void MGRootBoundary();
   void TransferFromBlocksToRoot(bool initflag);
   void TransferFromRootToBlocks(bool folddata);

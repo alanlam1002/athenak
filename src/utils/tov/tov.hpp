@@ -27,18 +27,22 @@ class TOVStar {
 
   template<class TOVEOS>
   void RHS(Real r, Real P_pt, Real m_pt, Real alp_pt, Real R_pt, TOVEOS& eos,
-           Real& dP, Real& dm, Real& dalp, Real& dR) {
+           Real& dP, Real& dm, Real& dalp, Real& dR, Real& dmb) {
     // In our units, the equations take the form
     // dP/dr = -(e + P)/(1 - 2m/r)(m + 4\pi r^3 P)/r^2
     // dm/dr = 4\pi r^2 e
     // d\alpha dr = \alpha/(1 - 2m/r) (m + 4\pi r^3 P)/r^2
     // dR/dr = R/r (1 - 2m/r)^(-1/2)
+    // dMb/dr = 4\pi r^2 sqrt(A) rho, A = 1/(1-2m/r) = g_rr -- baryon (rest) mass,
+    // the proper-volume integral of the rest-mass density rho (not the total
+    // energy density e used by dm above).
     // Handle the case when r ~= 0 because the integrand is indeterminate.
     if (r < 1e-3*dr) {
       dP = 0.0;
       dm = 0.0;
       dalp = 0.0;
       dR = 1.0;
+      dmb = 0.0;
       return;
     }
 
@@ -52,6 +56,7 @@ class TOVStar {
     //dalp = alp_pt*A * B;
     dalp = A * B;
     dR = R_pt/r*sqrt(A);
+    dmb = 4.0*M_PI*SQR(r)*sqrt(A)*rho;
   }
 
  public:
@@ -162,12 +167,14 @@ class TOVStar {
   DualArray1D<Real> R; // Array of radial coordinates
   DualArray1D<Real> R_iso; // Array of isotropic radial coordinates
   DualArray1D<Real> M; // Integrated mass, M(r)
+  DualArray1D<Real> Mb; // Integrated baryon (rest) mass, Mb(r)
   DualArray1D<Real> P; // Pressure, P(r)
   DualArray1D<Real> alpha; // Lapse, \alpha(r)
 
   Real R_edge; // Radius of star
   Real R_edge_iso; // Radius of star in isotropic coordinates
   Real M_edge; // Mass of star
+  Real Mb_edge; // Baryon (rest) mass of star
   int n_r; // Point where pressure falls below floor.
 };
 
@@ -180,6 +187,7 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
   Kokkos::realloc(tov.R, tov.npoints);
   Kokkos::realloc(tov.R_iso, tov.npoints);
   Kokkos::realloc(tov.M, tov.npoints);
+  Kokkos::realloc(tov.Mb, tov.npoints);
   Kokkos::realloc(tov.P, tov.npoints);
   Kokkos::realloc(tov.alpha, tov.npoints);
 
@@ -187,6 +195,7 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
   auto &R = tov.R.h_view;
   auto &R_iso = tov.R_iso.h_view;
   auto &M = tov.M.h_view;
+  auto &Mb = tov.Mb.h_view;
   auto &P = tov.P.h_view;
   auto &alp = tov.alpha.h_view;
   int npoints = tov.npoints;
@@ -197,6 +206,7 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
   R(0) = 0.0;
   R_iso(0) = 0.0;
   M(0) = 0.0;
+  Mb(0) = 0.0;
   P(0) = eos.template GetPFromRho<LocationTag::Host>(tov.rhoc);
   // FIXME: Assumes ideal gas!
   //P(0) = tov.kappa*pow(tov.rhoc, tov.gamma);
@@ -209,44 +219,45 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
     Real r, P_pt, alp_pt, m_pt, R_pt;
 
     // First stage
-    Real dP1, dm1, dalp1, dR1;
+    Real dP1, dm1, dalp1, dR1, dmb1;
     r = i*dr;
     P_pt = P(i);
     alp_pt = alp(i);
     m_pt = M(i);
     R_pt = R_iso(i);
-    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP1, dm1, dalp1, dR1);
+    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP1, dm1, dalp1, dR1, dmb1);
 
     // Second stage
-    Real dP2, dm2, dalp2, dR2;
+    Real dP2, dm2, dalp2, dR2, dmb2;
     r = (i + 0.5)*dr;
     P_pt = fmax(P(i) + 0.5*dr*dP1,0.0);
     m_pt = M(i) + 0.5*dr*dm1;
     alp_pt = alp(i) + 0.5*dr*dalp1;
     R_pt = R_iso(i) + 0.5*dr*dR1;
-    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP2, dm2, dalp2, dR2);
+    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP2, dm2, dalp2, dR2, dmb2);
 
     // Third stage
-    Real dP3, dm3, dalp3, dR3;
+    Real dP3, dm3, dalp3, dR3, dmb3;
     P_pt = fmax(P(i) + 0.5*dr*dP2,0.0);
     m_pt = M(i) + 0.5*dr*dm2;
     alp_pt = alp(i) + 0.5*dr*dalp2;
     R_pt = R_iso(i) + 0.5*dr*dR2;
-    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP3, dm3, dalp3, dR3);
+    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP3, dm3, dalp3, dR3, dmb3);
 
     // Fourth stage
-    Real dP4, dm4, dalp4, dR4;
+    Real dP4, dm4, dalp4, dR4, dmb4;
     r = (i + 1)*dr;
     P_pt = fmax(P(i) + dr*dP3,0.0);
     m_pt = M(i) + dr*dm3;
     alp_pt = alp(i) + dr*dalp3;
     R_pt = R_iso(i) + dr*dR3;
-    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP4, dm4, dalp4, dR4);
+    tov.RHS(r, P_pt, m_pt, alp_pt, R_pt, eos, dP4, dm4, dalp4, dR4, dmb4);
 
     // Combine all the stages together
     R(i+1) = (i + 1)*dr;
     P(i+1) = P(i) + dr*(dP1 + 2.0*dP2 + 2.0*dP3 + dP4)/6.0;
     M(i+1) = M(i) + dr*(dm1 + 2.0*dm2 + 2.0*dm3 + dm4)/6.0;
+    Mb(i+1) = Mb(i) + dr*(dmb1 + 2.0*dmb2 + 2.0*dmb3 + dmb4)/6.0;
     alp(i+1) = alp(i) + dr*(dalp1 + 2.0*dalp2 + 2.0*dalp3 + dalp4)/6.0;
     R_iso(i+1) = R_iso(i) + dr*(dR1 + 2.0*dR2 + 2.0*dR3 + dR4)/6.0;
 
@@ -268,10 +279,12 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
   int n_r = tov.n_r;
   tov.R_edge = Interpolate(tov.pfloor, P(n_r-1), P(n_r), R(n_r-1), R(n_r));
   tov.M_edge = Interpolate(tov.R_edge, R(n_r-1), R(n_r), M(n_r-1), M(n_r));
+  tov.Mb_edge = Interpolate(tov.R_edge, R(n_r-1), R(n_r), Mb(n_r-1), Mb(n_r));
 
   // Replace the edges of the star.
   P(n_r) = tov.pfloor;
   M(n_r) = tov.M_edge;
+  Mb(n_r) = tov.Mb_edge;
   alp(n_r) = Interpolate(tov.R_edge, R(n_r-1), R(n_r), alp(n_r-1), alp(n_r));
   R(n_r) = tov.R_edge;
   R_iso(n_r) = Interpolate(tov.R_edge, R(n_r-1), R(n_r), R_iso(n_r-1), R_iso(n_r));
@@ -300,19 +313,22 @@ TOVStar TOVStar::ConstructTOV(ParameterInput *pin, TOVEOS& eos, bool verbose) {
     std::cout << "Radial step: " << tov.dr << "\n";
     std::cout << "Radius (Schwarzschild): " << tov.R_edge << "\n";
     std::cout << "Radius (Isotropic): " << tov.R_edge_iso << "\n";
-    std::cout << "Mass: " << tov.M_edge << "\n\n";
+    std::cout << "Mass: " << tov.M_edge << "\n";
+    std::cout << "Baryon mass: " << tov.Mb_edge << "\n\n";
   }
 
   // Sync the views to the GPU
   tov.R.template modify<HostMemSpace>();
   tov.R_iso.template modify<HostMemSpace>();
   tov.M.template modify<HostMemSpace>();
+  tov.Mb.template modify<HostMemSpace>();
   tov.alpha.template modify<HostMemSpace>();
   tov.P.template modify<HostMemSpace>();
 
   tov.R.template sync<DevExeSpace>();
   tov.R_iso.template sync<DevExeSpace>();
   tov.M.template sync<DevExeSpace>();
+  tov.Mb.template sync<DevExeSpace>();
   tov.alpha.template sync<DevExeSpace>();
   tov.P.template sync<DevExeSpace>();
 

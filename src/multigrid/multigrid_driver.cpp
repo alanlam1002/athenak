@@ -1097,6 +1097,12 @@ void MultigridDriver::ProlongateAndCorrectOctets() {
   constexpr Real w0[3] = {5.0, 30.0, -3.0};
   constexpr Real w1[3] = {-3.0, 30.0, 5.0};
   constexpr Real inv = 1.0 / 32768.0;
+  // Damping factor for the coarse-grid correction (default 1.0, undamped --
+  // see CorrectionOmega()'s doc comment in multigrid.hpp). Applied here too
+  // (not just Multigrid::ComputeCorrection()) since octet-level prolongation
+  // computes and applies its own correction inline rather than going through
+  // that shared function.
+  const Real omega = CorrectionOmega();
 
   if (flev == 0) { // from root to octets
     auto root_u_h = GetRootData_h();
@@ -1128,7 +1134,7 @@ void MultigridDriver::ProlongateAndCorrectOctets() {
                 for (int b = 0; b < 3; ++b)
                   for (int c = 0; c < 3; ++c)
                     sum += wk[a]*wj[b]*wi[c] * cbuf[a][b][c];
-              oct.U(v, ngh+dk, ngh+dj, ngh+di) += sum * inv;
+              oct.U(v, ngh+dk, ngh+dj, ngh+di) += omega * sum * inv;
             }
           }
         }
@@ -1168,7 +1174,7 @@ void MultigridDriver::ProlongateAndCorrectOctets() {
                 for (int b = 0; b < 3; ++b)
                   for (int c = 0; c < 3; ++c)
                     sum += wk[a]*wj[b]*wi[c] * cbuf[a][b][c];
-              foct.U(v, ngh+dk, ngh+dj, ngh+di) += sum * inv;
+              foct.U(v, ngh+dk, ngh+dj, ngh+di) += omega * sum * inv;
             }
           }
         }
@@ -1811,18 +1817,33 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
   // For zerofixed: ghost = -interior (antisymmetric reflection)
   // For zerograd:  ghost = +interior (symmetric reflection)
   // For multipole: ghost = 2*phi_mp - interior (linear extrapolation)
-  // We implement zerofixed and zerograd here. Multipole at octet level
-  // uses the same reflection approach (the root-level multipole already
-  // sets the correct values; octets near the boundary inherit from the
-  // root through the coarser-level boundary exchange).
-  // mg_robin falls into the same bucket as multipole here: the sign ternary below
-  // only special-cases mg_zerofixed, so any face marked mg_robin silently gets the
-  // sign=+1 (zerograd-like) reflection instead of the true 1/r^n falloff -- this
-  // function has no physical-position math at all (deriving one from loc/nrbx*_
-  // would be new, non-trivial arithmetic), and no current CFC input ever places
-  // refinement at the outer domain boundary (always concentrated near the star),
-  // so this gap is accepted, not fixed, for now. See DEVELOPMENT.md's Robin BC
-  // entry for the explicit scope decision.
+  // For mg_robin (2026-07-24, closes the previously-documented gap): ghost =
+  // interior anchor * (r_anchor/r_ghost)^robin_order_, using this octet's own
+  // physical position -- derived from its LogicalLocation exactly the same way
+  // the outer-face checks below already derive `maxlx1/2/3` (nrbx*_ << lev),
+  // just carried one step further into an actual coordinate. See
+  // DEVELOPMENT.md's Robin BC entry for the derivation and why this was
+  // originally deferred (assumed to need new arithmetic that, on a closer
+  // read, was already half-present in this same function).
+  Real nmax1 = static_cast<Real>(nrbx1_ << lev);
+  Real nmax2 = static_cast<Real>(nrbx2_ << lev);
+  Real nmax3 = static_cast<Real>(nrbx3_ << lev);
+  Real ow1 = (pmy_mesh_->mesh_size.x1max - pmy_mesh_->mesh_size.x1min) / nmax1;
+  Real ow2 = (pmy_mesh_->mesh_size.x2max - pmy_mesh_->mesh_size.x2min) / nmax2;
+  Real ow3 = (pmy_mesh_->mesh_size.x3max - pmy_mesh_->mesh_size.x3min) / nmax3;
+  Real ox1min = pmy_mesh_->mesh_size.x1min + static_cast<Real>(loc.lx1) * ow1;
+  Real ox2min = pmy_mesh_->mesh_size.x2min + static_cast<Real>(loc.lx2) * ow2;
+  Real ox3min = pmy_mesh_->mesh_size.x3min + static_cast<Real>(loc.lx3) * ow3;
+  // fcbuf=true treats the whole octet as a single coarse cell (nc_cbuf below),
+  // fcbuf=false as its real 2-cell core -- matches the existing l/r distinction
+  // above exactly, just extended to a cell width instead of an index.
+  Real dx1_eff = fcbuf ? ow1 : 0.5*ow1;
+  Real dx2_eff = fcbuf ? ow2 : 0.5*ow2;
+  Real dx3_eff = fcbuf ? ow3 : 0.5*ow3;
+  Real rorder = static_cast<Real>(robin_order_);
+  auto pos1 = [&](int i) { return ox1min + (static_cast<Real>(i-ngh)+0.5)*dx1_eff; };
+  auto pos2 = [&](int j) { return ox2min + (static_cast<Real>(j-ngh)+0.5)*dx2_eff; };
+  auto pos3 = [&](int k) { return ox3min + (static_cast<Real>(k-ngh)+0.5)*dx3_eff; };
 
   auto apply_bc = [&](Real *data, int nc) {
     auto ref = [&](int v, int k, int j, int i) -> Real& {
@@ -1831,72 +1852,263 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
 
     // inner x1
     if (loc.lx1 == 0 && mg_mesh_bcs_[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
-      for (int v = 0; v < nvar_; ++v)
-        for (int k = 0; k < nc; ++k)
-          for (int j = 0; j < nc; ++j)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, k, j, ngh-1-n) = sign * ref(v, k, j, ngh+n);
+      if (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k);
+            for (int j = 0; j < nc; ++j) {
+              Real yv = pos2(j);
+              Real r_a = Kokkos::sqrt(SQR(pos1(ngh)) + SQR(yv) + SQR(zv));
+              Real u_a = ref(v, k, j, ngh);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(pos1(ngh-1-n)) + SQR(yv) + SQR(zv));
+                ref(v, k, j, ngh-1-n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        // 2026-07-25: closes the octet-level multipole gap (mirrors mg_robin's own
+        // fix above) -- see DEVELOPMENT.md. One phis evaluation per transverse
+        // cell, reused for every ghost depth (unlike Robin's per-depth ratio),
+        // paired symmetrically with interior cell ngh+n (matches zerofixed/
+        // zerograd's own pairing, not Robin's fixed-anchor convention).
+        Real xf = ox1min - mpo_[0];
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k) - mpo_[2];
+            for (int j = 0; j < nc; ++j) {
+              Real yv = pos2(j) - mpo_[1];
+              Real phis = EvalMultipolePhi(xf, yv, zv, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, j, ngh-1-n) = 2.0*phis - ref(v, k, j, ngh+n);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k)
+            for (int j = 0; j < nc; ++j)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, j, ngh-1-n) = sign * ref(v, k, j, ngh+n);
+      }
     }
     // outer x1
     int maxlx1 = nrbx1_ << lev;
     if (loc.lx1 == maxlx1-1
         && mg_mesh_bcs_[BoundaryFace::outer_x1] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
       int ie = fcbuf ? ngh : ngh + 1;
-      for (int v = 0; v < nvar_; ++v)
-        for (int k = 0; k < nc; ++k)
-          for (int j = 0; j < nc; ++j)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, k, j, ie+n+1) = sign * ref(v, k, j, ie-n);
+      if (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k);
+            for (int j = 0; j < nc; ++j) {
+              Real yv = pos2(j);
+              Real r_a = Kokkos::sqrt(SQR(pos1(ie)) + SQR(yv) + SQR(zv));
+              Real u_a = ref(v, k, j, ie);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(pos1(ie+n+1)) + SQR(yv) + SQR(zv));
+                ref(v, k, j, ie+n+1) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        Real xf = ox1min + ow1 - mpo_[0];  // ox1max = ox1min + ow1
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k) - mpo_[2];
+            for (int j = 0; j < nc; ++j) {
+              Real yv = pos2(j) - mpo_[1];
+              Real phis = EvalMultipolePhi(xf, yv, zv, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, j, ie+n+1) = 2.0*phis - ref(v, k, j, ie-n);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k)
+            for (int j = 0; j < nc; ++j)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, j, ie+n+1) = sign * ref(v, k, j, ie-n);
+      }
     }
     // inner x2
     if (loc.lx2 == 0 && mg_mesh_bcs_[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
-      for (int v = 0; v < nvar_; ++v)
-        for (int k = 0; k < nc; ++k)
-          for (int i = 0; i < nc; ++i)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, k, ngh-1-n, i) = sign * ref(v, k, ngh+n, i);
+      if (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k);
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i);
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh)) + SQR(zv));
+              Real u_a = ref(v, k, ngh, i);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh-1-n)) + SQR(zv));
+                ref(v, k, ngh-1-n, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        Real yf = ox2min - mpo_[1];
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k) - mpo_[2];
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i) - mpo_[0];
+              Real phis = EvalMultipolePhi(xv, yf, zv, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, ngh-1-n, i) = 2.0*phis - ref(v, k, ngh+n, i);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k)
+            for (int i = 0; i < nc; ++i)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, ngh-1-n, i) = sign * ref(v, k, ngh+n, i);
+      }
     }
     // outer x2
     int maxlx2 = nrbx2_ << lev;
     if (loc.lx2 == maxlx2-1
         && mg_mesh_bcs_[BoundaryFace::outer_x2] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
       int je = fcbuf ? ngh : ngh + 1;
-      for (int v = 0; v < nvar_; ++v)
-        for (int k = 0; k < nc; ++k)
-          for (int i = 0; i < nc; ++i)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, k, je+n+1, i) = sign * ref(v, k, je-n, i);
+      if (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k);
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i);
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(je)) + SQR(zv));
+              Real u_a = ref(v, k, je, i);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(je+n+1)) + SQR(zv));
+                ref(v, k, je+n+1, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        Real yf = ox2min + ow2 - mpo_[1];  // ox2max = ox2min + ow2
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int k = 0; k < nc; ++k) {
+            Real zv = pos3(k) - mpo_[2];
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i) - mpo_[0];
+              Real phis = EvalMultipolePhi(xv, yf, zv, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, je+n+1, i) = 2.0*phis - ref(v, k, je-n, i);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int k = 0; k < nc; ++k)
+            for (int i = 0; i < nc; ++i)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, k, je+n+1, i) = sign * ref(v, k, je-n, i);
+      }
     }
     // inner x3
     if (loc.lx3 == 0 && mg_mesh_bcs_[BoundaryFace::inner_x3] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
-      for (int v = 0; v < nvar_; ++v)
-        for (int j = 0; j < nc; ++j)
-          for (int i = 0; i < nc; ++i)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, ngh-1-n, j, i) = sign * ref(v, ngh+n, j, i);
+      if (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int j = 0; j < nc; ++j) {
+            Real yv = pos2(j);
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i);
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh)));
+              Real u_a = ref(v, ngh, j, i);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh-1-n)));
+                ref(v, ngh-1-n, j, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        Real zf = ox3min - mpo_[2];
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int j = 0; j < nc; ++j) {
+            Real yv = pos2(j) - mpo_[1];
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i) - mpo_[0];
+              Real phis = EvalMultipolePhi(xv, yv, zf, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, ngh-1-n, j, i) = 2.0*phis - ref(v, ngh+n, j, i);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int j = 0; j < nc; ++j)
+            for (int i = 0; i < nc; ++i)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, ngh-1-n, j, i) = sign * ref(v, ngh+n, j, i);
+      }
     }
     // outer x3
     int maxlx3 = nrbx3_ << lev;
     if (loc.lx3 == maxlx3-1
         && mg_mesh_bcs_[BoundaryFace::outer_x3] != BoundaryFlag::periodic) {
-      Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::mg_zerofixed)
-                  ? -1.0 : 1.0;
       int ke = fcbuf ? ngh : ngh + 1;
-      for (int v = 0; v < nvar_; ++v)
-        for (int j = 0; j < nc; ++j)
-          for (int i = 0; i < nc; ++i)
-            for (int n = 0; n < ngh; ++n)
-              ref(v, ke+n+1, j, i) = sign * ref(v, ke-n, j, i);
+      if (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::mg_robin) {
+        for (int v = 0; v < nvar_; ++v)
+          for (int j = 0; j < nc; ++j) {
+            Real yv = pos2(j);
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i);
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke)));
+              Real u_a = ref(v, ke, j, i);
+              for (int n = 0; n < ngh; ++n) {
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke+n+1)));
+                ref(v, ke+n+1, j, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
+              }
+            }
+          }
+      } else if (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::mg_multipole
+                 && mporder_ > 0) {
+        Real zf = ox3min + ow3 - mpo_[2];  // ox3max = ox3min + ow3
+        for (int v = 0; v < nvar_; ++v) {
+          const Real *mc = &mpcoeff_[v*25];
+          for (int j = 0; j < nc; ++j) {
+            Real yv = pos2(j) - mpo_[1];
+            for (int i = 0; i < nc; ++i) {
+              Real xv = pos1(i) - mpo_[0];
+              Real phis = EvalMultipolePhi(xv, yv, zf, mc, mporder_);
+              for (int n = 0; n < ngh; ++n)
+                ref(v, ke+n+1, j, i) = 2.0*phis - ref(v, ke-n, j, i);
+            }
+          }
+        }
+      } else {
+        Real sign = (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::mg_zerofixed)
+                    ? -1.0 : 1.0;
+        for (int v = 0; v < nvar_; ++v)
+          for (int j = 0; j < nc; ++j)
+            for (int i = 0; i < nc; ++i)
+              for (int n = 0; n < ngh; ++n)
+                ref(v, ke+n+1, j, i) = sign * ref(v, ke-n, j, i);
+      }
     }
   };
 

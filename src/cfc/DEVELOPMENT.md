@@ -78,11 +78,30 @@ its Riemann solver and conserved-to-primitive conversion.
 ## now reproduces the initial data's own `psi`/mass/angular momentum to
 ## ~0.001%-0.02% (mass/ang-mom) with the outer loop reaching exact convergence
 ## well inside its iteration cap -- full production run with all five fixes in
-## place still in progress as of this writing (job 248477). **One thread is
-## currently open**: item 22 (migration-test per-cycle convergence plateau at
-## a refined-region boundary/the R=40 mesh-explosion divergence), explicitly
-## paused mid-investigation, not fixed. Read the numbered items below for the
-## current, authoritative state -- don't rely on this header alone.
+## place completed successfully (jobs 248477+248639, see item 23's own final
+## bullet for the numbers). **Two threads are currently open**: item 22
+## (migration-test per-cycle convergence plateau at a refined-region
+## boundary/the R=40 mesh-explosion divergence) and item 24 (a separate,
+## deeper problem on the *same* migration-test star, found 2026-07-24:
+## `CFC::InitializeMetric()`'s outer Picard loop converges cleanly but to the
+## *wrong* `psi` -- ~2.7x off at the star's center -- for this compact star;
+## conclusively ruled out as an AMR/discretization effect via a uniform-grid
+## control run, root cause still open, likely in the outer iteration's own
+## fixed-point dynamics). Both explicitly paused mid-investigation, not fixed.
+##
+## Status update (2026-07-25): items 25-26 closed a real, independent gap found
+## while investigating item 24 (though ultimately not its cause): `Multigrid
+## Driver::ApplyPhysicalBoundariesOctet` never actually implemented `mg_robin`/
+## `mg_multipole` at the AMR-octet level despite claiming to in its own doc
+## comment, silently falling back to a cruder `zerograd`-like reflection
+## instead. Both are now implemented and verified (no NaN/regression, `beta^i`
+## correctly stays exactly `0` for a static star); `mg_multipole` was live for
+## `P_i`/`eta`'s vector-Poisson solve (`MGCFCVectorPoissonDriver`'s own
+## default), `mg_robin` was inert for every current test (`psi`/`alpha_psi`
+## never select it, and no test's refined region reaches the domain boundary
+## anyway) but is a real correctness fix for any future one that does. Read
+## the numbered items below for the current, authoritative state -- don't
+## rely on this header alone.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -2415,6 +2434,9 @@ src/cfc/
       scoped gap, matching this codebase's precedent of flagging rather than
       silently ignoring deferred octet work (item 3b, before item 12 closed
       it). Revisit if a future input ever places refinement at the domain edge.
+      **Closed (2026-07-25, item 25)**: the position derivation turned out
+      simpler than assumed here -- `ApplyPhysicalBoundariesOctet` now
+      implements `mg_robin` properly, see item 25.
     - New `BoundaryFlag::mg_robin` (`bvals.hpp`). New `int robin_order_` on the
       base `MultigridDriver` (default `1`, next to `mporder_`) -- the falloff
       power `n`, physically `1` for both solvers (Gmunu eq. 77/78's leading
@@ -2563,7 +2585,10 @@ src/cfc/
       `ApplyPhysicalBoundariesOctet` still has no physical-position math for any BC
       kind, no current CFC input refines mesh at the domain edge, and multipole at
       octet granularity keeps whatever fallback it already had before this item
-      (unchanged by this item).
+      (unchanged by this item). **Closed (2026-07-25, item 26)**: unlike `psi`/
+      `alpha_psi`'s Robin gap (inert for every current test), this one was live
+      for this driver's own default (`mg_poisson_outer_bc=multipole`) -- see item
+      26 for the fix and verification.
     - **Verification, no compiler in this sandbox**: `cpplint`-clean (line length,
       brace balance, checked directly) plus manual cross-check against gravity's
       own already-proven `Solve()`/multipole sequence (`mg_gravity.cpp`) as the
@@ -3416,6 +3441,15 @@ src/cfc/
       production run plus several unrelated jobs from other work), so a
       16-node request sat pending (`QOSMaxNodePerUserLimit`) instead of
       starting.
+    - **See also item 24 (2026-07-24)**: a *separate*, deeper problem found on
+      this same migration-test star -- `CFC::InitializeMetric()`'s own t=0
+      metric initialization converges to the wrong `psi`, independent of this
+      item's per-cycle dynamical-evolution plateau. The two are related (same
+      star, same test) but distinct symptoms/investigations; item 24's own
+      control tests (more smoothing, wider refined region, uniform grid with
+      no AMR at all) conclusively ruled out this item's own AMR-boundary
+      mechanism as the cause of *that* problem, so the two remain open,
+      unresolved questions, not the same bug.
 
 23. **RESOLVED (2026-07-23) -- "Stability of a rapidly rotating neutron star"
     test (Gmunu sec. 3.3.2, model "BU8") diverged after ~100 stable cycles, via
@@ -3862,3 +3896,223 @@ src/cfc/
       `old_run_underrelaxed/`, `old_run_loosethreshold/`,
       `old_run_novelocityfix/`, `old_run_presurffix/`, each preserved for
       comparison, not deleted).
+
+24. **Baryon mass added to the TOV solver (done); migration test's (item 22)
+    `CFC::InitializeMetric()` found to converge cleanly to the WRONG psi for
+    its compact star -- root cause narrowed to the outer Picard iteration
+    scheme itself, not AMR (2026-07-24).**
+    - **Baryon mass in `TOVStar` (`src/utils/tov/tov.hpp`)**: added
+      `dMb/dr = 4*pi*r^2*sqrt(A)*rho` (`A = 1/(1-2m/r) = g_rr`, the proper-
+      volume rest-mass integral in Schwarzschild-like coordinates) alongside
+      the existing `P`/`m`/`alpha`/`R_iso` RK4 integration -- a direct parallel
+      of the existing `dm = 4*pi*r^2*e` line, just using `rho` (rest-mass
+      density, already computed locally) instead of `e` (total energy
+      density) and the extra `sqrt(A)` proper-volume factor. New `Mb`/
+      `Mb_edge` members, printed as `Baryon mass: <value>` right after the
+      existing `Mass: <value>` line. Verified independently: an from-scratch
+      Python re-integration of the identical RK4 scheme (rhoc=8e-3, kappa=100,
+      Gamma=2) reproduces the C++ output to 5+ significant figures
+      (`Mass=1.447294`, `Baryon mass=1.534986`).
+    - **Metric-initialization check (the actual point of this investigation)**:
+      compared `CFC::InitializeMetric()`'s converged `psi4` for the migration
+      test's compact star (`rhoc=8e-3`, `2M/R_schw~0.5`) against the analytic
+      isotropic-TOV solution via `plot_slice.py --dump-npz` + the independent
+      Python re-integration above. Found a large, systematic discrepancy:
+      `psi4` at the star's center converges to `~2.22` vs. the analytic
+      `~5.91` (a factor `~2.7x` too small), decreasing to `~1.4x` off near the
+      edge. Density matches the analytic profile to `<0.3%` everywhere,
+      ruling out a pgen/primitive bug -- this is specifically the solved
+      metric that's wrong. Confirmed this is the direct cause of the
+      simulation's own `.mhd.hst` `mass` column reading `~0.597` at `t=0`
+      instead of the true `Mb_edge=1.535` (reconstructing the baryon mass
+      integral from the grid's own psi4+rho reproduces `~0.59`; substituting
+      the *analytic* psi4 with the same grid rho reproduces `~1.51`, close to
+      the true value) -- the low reported mass is a correct consequence of
+      the wrong metric, not a separate history-diagnostic bug.
+    - **Ruled out: `init_omega=1.0`** (removing the outer Picard loop's
+      under-relaxation, mirroring item 23's BU8 precedent) -- unlike BU8, this
+      genuinely diverges exponentially for this more compact star (`max|delta
+      psi|` grows `0.28 -> 1.29 -> 172 -> 7.6e24 -> NaN` over ~25 iterations,
+      confirmed via a real run then cancelled before it filled the disk with
+      NaN-cascade error spam). The existing `init_omega=0.5` workaround is
+      load-bearing for this star, unlike BU8's case.
+    - **Ruled out: AMR/refinement entirely.** Using the already-built
+      `mg_debug_analytic_residual_test` diagnostic (`mg_cfc_conformal_
+      factor.cpp`, dormant since item 21), isolated to exactly the outer
+      loop's very first iteration (`init_iter_max=1`, guaranteeing `Utilde`/
+      `Ahat^2` are built only from the pgen's own pristine analytic seed, not
+      a drifted later-iteration state): one V-cycle from the exact analytic
+      seed reproduces the star's *center* to `~0.00045` (excellent) -- the
+      discretization/coefficients are fine in isolation. Two cheap AMR-
+      configuration variations (more smoothing, `mg_npresmooth/postsmooth`
+      3->8; wider refined region, `[-7.5,7.5]`->`[-10,10]`) left the
+      converged center-ψ4 unchanged to 4 significant figures
+      (`2.219235`/`2.219067`/`2.219067`). **Decisive test (user-requested)**:
+      a uniform-resolution, single-level, no-`<mesh_refinement>`-at-all
+      control run (octant domain, half-width `21` (`~5x R_edge_iso~4.267`),
+      `nx1=128` -> `dx~0.164`, entirely different resolution/domain/shape from
+      every AMR-based run) reproduced essentially the *same* wrong answer
+      (`psi4` ratio to analytic `~0.383` vs. `~0.376` for every AMR variant --
+      a ~2% difference consistent with ordinary resolution effects, not a
+      qualitative fix). **This conclusively rules out AMR/refinement as the
+      cause, at any level or configuration.**
+    - **Current understanding, not yet resolved**: the wrong answer is a
+      robust, reproducible feature of `CFC::InitializeMetric()`'s outer Picard
+      iteration itself (rebuilding `Utilde`/`Ahat^2` from the current `psi`
+      every iteration, a long-range-coupled Poisson-type fixed point),
+      independent of spatial discretization entirely. Working hypothesis: this
+      compact star's coupled nonlinear fixed-point map may have multiple
+      self-consistent solutions, and the damped (`omega=0.5`) iteration is
+      being captured by the wrong one rather than staying near the correct
+      one it was seeded from -- a genuinely different class of problem than
+      anything in items 9/12/21 (which are all about the multigrid V-cycle's
+      own spatial-discretization accuracy, not the outer iteration's own
+      dynamics/uniqueness). Not yet root-caused further; the next
+      investigative step (not yet taken) would need to probe the outer
+      iteration's own map (e.g. perturbing the seed, or tracking the
+      map's local linearization/eigenvalues across iterations) rather than
+      anything spatial-discretization-related.
+    - **Also implemented this pass (separate from the above, per user
+      request), independent of whether it fixes the migration star**: a new
+      `<cfc> mg_correction_omega` damping knob for the FAS coarse-grid
+      correction (`u -= uold`, prolongated back onto a finer level), gated via
+      a new `virtual Real MultigridDriver::CorrectionOmega() const { return
+      1.0; }` hook (`multigrid.hpp`, default no-op -- zero behavior change for
+      gravity/vector-Poisson, which never override it), applied in both
+      `Multigrid::ComputeCorrection()` (`multigrid.cpp`) and
+      `MultigridDriver::ProlongateAndCorrectOctets()` (`multigrid_driver.cpp`,
+      the octet-level correction, computed inline there rather than through
+      `ComputeCorrection()`). Empirically found **not** to change the
+      migration star's converged answer at all (`mg_correction_omega=0.3`
+      gave the same `~0.376` ratio, just slower/noisier convergence with new
+      per-cycle "Failed to converge" messages) -- consistent with the
+      AMR-is-ruled-out finding above (damping a correction can't fix a
+      systematically wrong fixed point, only its convergence path). Kept in
+      the code as a generically useful, zero-risk-when-unused knob, not
+      reverted.
+
+25. **Robin BC implemented at the octet (AMR-refined) level of
+    `MultigridDriver::ApplyPhysicalBoundariesOctet` (2026-07-24) -- closes
+    the gap flagged (but deliberately deferred) in item 16's Robin BC entry.**
+    - **The gap**: `ApplyPhysicalBoundariesOctet` had no physical-position math
+      at all -- any face marked `BoundaryFlag::mg_robin` silently fell back to
+      the same `sign=+1` (zerograd-like) reflection every other non-
+      `mg_zerofixed` flag got. Item 16 deferred fixing this because deriving
+      an octet's physical position from its `LogicalLocation` was assumed to
+      need "genuinely new arithmetic with nothing existing to mirror," and no
+      current CFC test placed refinement at the actual domain boundary (item
+      22's migration test's own refined region is deep in the interior,
+      confirmed this session -- this fix was **not** expected to change that
+      test's own outcome, and empirically did not; see item 24 above).
+    - **Turned out simpler than assumed**: the needed building block,
+      `maxlx1 = nrbx1_ << lev` (number of octets spanning x1 at this
+      refinement level), was already computed and used in this exact
+      function's own outer-x1-face check. The octet's physical extent follows
+      directly: `octet_width = (mesh_size.x1max-mesh_size.x1min) / maxlx1`,
+      `octet_x1min = mesh_size.x1min + loc.lx1*octet_width` (same for x2/x3
+      via `nrbx2_/nrbx3_`/`loc.lx2/lx3`). Each `MGOctet` has a fixed 2-cell
+      core (`nc = 2+2*ngh`), so the per-axis cell width is `octet_width/2`
+      for the normal (`oct.u`) case or the whole `octet_width` for the
+      coarse-buffer (`fcbuf=true`, single-cell) case -- mirrors the existing
+      `l=ngh,r=ngh+1` vs. `r=ngh` distinction already coded for exactly this
+      purpose. The Robin fill formula itself (`u_ghost = u_anchor *
+      (r_anchor/(r_ghost+1e-30))^robin_order_`, true 3D radius, no
+      multipole-origin subtraction) is identical to the already-working
+      root-level (`MGRootBoundary`) and per-MeshBlock (`PhysicalBoundary`)
+      implementations -- just evaluated at this octet's own derived extent
+      instead of a MeshBlock's `mb_size` or the whole root grid.
+    - **Implementation**: `multigrid_driver.cpp`'s `ApplyPhysicalBoundariesOctet`
+      only -- computes the octet's own extent/effective-dx once per call, adds
+      an `if (... == BoundaryFlag::mg_robin)` branch (using the formula above)
+      ahead of the existing sign-based fallback in each of the 6 face blocks,
+      leaving every other flag's behavior (zerofixed/zerograd/multipole)
+      completely unchanged. No gating flag needed: `mg_robin` is only ever
+      written into `mg_mesh_bcs_` by `MGCFCConformalFactorDriver`/
+      `MGCFCLapseDriver`'s own constructors, so this is inherently scoped to
+      those two solvers with zero risk to gravity or the CFC vector-Poisson
+      solvers.
+    - **Verified via a dedicated test** (since no existing input exercises
+      this path): a small octant TOV1 (`rhoc=1.28e-3`) input adapted from
+      `cfc_tov_amr_ghosttest.athinput`, with `refined_region1` moved from the
+      innermost corner to the *outermost* one (`[19.2,25.6]^3`, touching
+      `x1max=x2max=x3max=25.6` on all three axes at once -- a harder stress
+      case than a single-face touch). Confirmed via direct A/B (git-stashing
+      the fix, rebuilding, rerunning the identical input): both pre- and
+      post-fix runs hit the *same* pre-existing "Failed to converge"/"Slow
+      convergence" (defect stuck at `~1.46e-6`) for this specific new
+      configuration -- confirming that symptom is unrelated to this change,
+      not a regression it introduces (no NaN/Inf in either case). The fix
+      itself produces a small, expected shift in the near-boundary `psi4`
+      profile (`1.081141` post-fix vs. `1.081263` pre-fix at the last real
+      cell before the boundary) with the profile remaining smooth and
+      monotonically decreasing toward the boundary in both cases (no kink,
+      no blowup) -- consistent with a correct, working Robin implementation
+      whose effect is modest at this star's distance/compactness scale, as
+      expected (item 24's own note that Robin at the octet level was never
+      expected to be large for a mild star this far from a compact source).
+
+26. **Multipole BC implemented at the octet (AMR-refined) level of
+    `ApplyPhysicalBoundariesOctet` (2026-07-25) -- direct counterpart to item
+    25's Robin fix, closing the analogous, previously-documented gap.**
+    - **The gap**: identical in shape to item 25's -- `ApplyPhysicalBoundaries
+      Octet`'s own top-of-function comment already described the intended
+      formula ("ghost = 2*phi_mp - interior, linear extrapolation") but the
+      `apply_bc` lambda never implemented it; any face marked `BoundaryFlag::
+      mg_multipole` fell through to the same `sign=+1` (zerograd-like)
+      fallback. **Unlike Robin, this one is live, not inert**: `psi`/
+      `alpha_psi`'s `mg_outer_bc` only ever accepts `"robin"`/`"zerofixed"`
+      (confirmed by re-reading `mg_cfc_conformal_factor.cpp`'s constructor --
+      multipole is never actually selected for them), but
+      `MGCFCVectorPoissonDriver` (the merged `P_i`/`eta` solve for both `X^i`
+      and `beta^i`, `nvar_=4`) defaults `mg_poisson_outer_bc` to `"multipole"`
+      (`mg_cfc_vector_poisson.cpp:210-216`, `autompo_=false`, fixed origin at
+      the coordinate origin) -- this driver's octets, created whenever *any*
+      CFC AMR run refines at all, hit this exact gap whenever refinement
+      reaches the domain boundary.
+    - **Formula, mirrored exactly from the already-working `MGRootBoundary`
+      host-path multipole block** (`multigrid_driver.cpp`, the `"Multipole
+      expansion boundaries on host"` block inside `MGRootBoundary` -- line
+      numbers not cited here since item 25's own edits to the earlier
+      `ApplyPhysicalBoundariesOctet` shifted everything after it in this same
+      file; search by comment text instead of a line range), the one to
+      mirror since octets are host-side code: per channel (`v=0..nvar_-1`,
+      reading `mpcoeff_[v*25]`, the existing per-channel flat-indexed
+      convention from item 18), evaluate `phis = EvalMultipolePhi(x-mpo_[0],
+      y-mpo_[1], z-mpo_[2], mc, mporder_)` **once** at the face coordinate
+      itself (the octet's own `ox1min`/`ox1max` etc., derived via item 25's
+      already-built octet-extent machinery -- reused as-is, no new position
+      derivation needed), then fill **every** ghost depth `n` with the same
+      `phis`: `ghost(ngh-1-n) = 2*phis - interior(ngh+n)`. Two shape
+      differences from Robin worth flagging for a future reader: (1) one
+      `phis` evaluation reused for all `n` (not re-evaluated per depth like
+      Robin's `r`-dependent ratio), and (2) the ghost/interior index pairing
+      is symmetric per-depth (`ngh-1-n` paired with `ngh+n`, matching
+      `zerofixed`/`zerograd`'s own existing convention) rather than Robin's
+      fixed-single-anchor convention -- using the wrong pairing would have
+      been an easy, subtle mistake to carry over from the Robin code shape.
+    - **Implementation**: `multigrid_driver.cpp`'s `ApplyPhysicalBoundariesOctet`
+      only -- one new `else if (... == BoundaryFlag::mg_multipole && mporder_
+      > 0)` branch per face (6 total), inserted between the existing `mg_robin`
+      branch (item 25) and the sign-based fallback, reusing the same octet-
+      extent/`pos1`/`pos2`/`pos3` helpers item 25 already added. No new gating:
+      `mg_multipole` is only ever written into `mg_mesh_bcs_` by
+      `MGCFCVectorPoissonDriver`'s own constructor, so zero risk elsewhere
+      (gravity and `psi`/`alpha_psi` never select it).
+    - **Verified**: rebuilt cleanly; reran item 25's own boundary-touching test
+      (`cfc_octet_robin_check`'s input, refined corner touching
+      `x1max=x2max=x3max` at once -- exercises `P_i`/`eta`'s octets there too,
+      not just `psi`/`alpha_psi`'s). No NaN/Inf (confirmed via explicit grep).
+      Same 63 "Failed to converge" FATAL count as pre-fix (this test's
+      pre-existing, unrelated convergence quirk, per item 25's own A/B
+      finding) -- consistent, not a regression. The stuck defect floor shifted
+      slightly (`~1.67e-6` vs. `~1.46e-6` pre-fix), consistent with the fix
+      genuinely perturbing `P_i`/`eta`'s own solve rather than being a no-op.
+      `beta^i` (built from `P_i`/`eta`) confirmed to remain **exactly** `0.0`
+      everywhere in this slice, as physically required for a static,
+      non-rotating star (`S_i=0` exactly, no momentum source to produce any
+      real multipole moment) -- a clean sanity check that the fix introduces
+      no spurious nonzero content where none should exist. As with item 25,
+      not expected to (and does not) change the still-open migration-test
+      investigation (item 24), whose own refined region doesn't reach the
+      domain boundary either -- this is a standalone correctness improvement
+      for any future test that does place AMR refinement near the domain edge.

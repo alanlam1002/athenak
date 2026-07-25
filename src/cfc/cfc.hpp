@@ -101,6 +101,17 @@ class CFC {
   // has no z4c free evolution, so ptmunu may not exist at all.
   DvceArray5D<Real> u_tilde;       // Ũ = psi^6 U, scalar
 
+  // 2026-07-25: raw (undensitized) U = Utilde/sqrt(detg), computed alongside
+  // u_tilde in AssembleVectorSource (an exact un-densitization, using the same
+  // g_dd that built the conserved state u_tilde derives from -- not a re-
+  // derivation from primitives). Used only by SolveConformalFactor's psi^5
+  // formulation (see mg_cfc_conformal_factor.cpp's ConformalFactorRHS doc
+  // comment), which InitializeMetric() uses by default (<cfc>
+  // init_use_psi5_source, default true since item 28) -- unused (but still
+  // computed; cheap) only for inputs that explicitly opt out, and never read
+  // by the per-stage CFC_SolvePsi task.
+  DvceArray5D<Real> u_raw;
+
   DvceArray5D<Real> u_stilde;                            // storage backing s_tilde_d
   AthenaTensor<Real, TensorSymm::NONE, 3, 1> s_tilde_d;  // S-tilde_i = psi^6 S_i
 
@@ -193,6 +204,18 @@ class CFC {
   // than any previously tested here (2M/R~0.34) -- see InitializeMetric's doc
   // comment for the mechanism. Default 1.0 keeps every existing test unaffected.
   Real cfc_init_omega_;
+
+  // 2026-07-25: <cfc> init_use_psi5_source (default true, see item 27/28,
+  // DEVELOPMENT.md). When true, InitializeMetric()'s SolveConformalFactor()
+  // calls use the self-consistent U_raw*psi^5 Newton formulation instead of
+  // the Utilde*psi^-1 one -- see mg_cfc_conformal_factor.cpp's
+  // ConformalFactorRHS doc comment. Converges much faster and just as
+  // accurately for every star tested so far EXCEPT the migration test's
+  // compact/unstable star, which diverges to NaN under it -- inputs known to
+  // be that compact MUST explicitly set this false. Does NOT affect the
+  // per-stage CFC_SolvePsi task, which always uses the default (false/
+  // Utilde*psi^-1) formulation regardless of this setting.
+  bool cfc_init_use_psi5_;
 
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per
   // field that cfc_reconstruct.cpp later finite-differences (mirrors
@@ -376,7 +399,11 @@ class CFC {
   // pmy_pack->padm->u_adm via cfc::AssembleConformalMetric -- the single con2prim
   // shared with dyn_grmhd (MHD_C2P) needs a valid g_dd to invert conserved to
   // primitive variables, and is queued to depend on this step (see QueueCFCTasks).
-  void SolveConformalFactor(Driver *pdriver, int stage);
+  // use_psi5_source (default false, the per-stage CFC_SolvePsi task's behavior):
+  // selects the alternate self-consistent Newton formulation (2026-07-25), see
+  // cfc_init_use_psi5_'s doc comment above -- only InitializeMetric() ever passes
+  // true.
+  void SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source = false);
 
   // Step 4: build S-tilde (trace of S_ij, needed by the lapse equation) from the
   // primitives MHD_C2P just recovered (pmy_pack->pmhd->w0) and EOS enthalpy -- no

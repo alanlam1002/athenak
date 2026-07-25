@@ -65,6 +65,22 @@ class MGCFCConformalFactor : public Multigrid {
   // as Multigrid's own GetCurrentData_h()-style accessors) rather than adding a
   // new friend declaration or touching src/multigrid/ itself.
   DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
+
+ private:
+  // 2026-07-25: the U-matter source term admits two algebraically-identical but
+  // numerically-different formulations (see ConformalFactorRHS's doc comment in
+  // the .cpp) -- "Utilde*psi^-1" (the default, matter source frozen from a
+  // previous outer-loop iterate) or "U_raw*psi^5" (fully self-consistent within
+  // one Newton solve, used only by CFC::InitializeMetric() when opted in). Per
+  // user direction, these are compiled as two separate template instantiations
+  // (UsePsi5 = false/true), not a runtime branch inside the per-point loop --
+  // SmoothPack/CalculateDefectPack/CalculateFASRHSPack (public overrides above)
+  // read MGCFCConformalFactorDriver::use_psi5_source_ ONCE and dispatch into
+  // whichever *Impl<UsePsi5> instantiation applies; the loop itself never
+  // re-checks the flag. See mg_cfc_conformal_factor.cpp for the bodies.
+  template <bool UsePsi5> void SmoothPackImpl(int color);
+  template <bool UsePsi5> void CalculateDefectPackImpl();
+  template <bool UsePsi5> void CalculateFASRHSPackImpl();
 };
 
 
@@ -101,6 +117,17 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
 
+    // 2026-07-25: selects the U-matter source formulation (see the private
+    // template dispatch note on MGCFCConformalFactor above, and
+    // ConformalFactorRHS's doc comment in the .cpp): false (default) = existing
+    // "Utilde*psi^-1" per-stage behavior, true = "U_raw*psi^5" self-consistent
+    // formulation used only by CFC::InitializeMetric() when <cfc>
+    // init_use_psi5_source is set. Must be called (cfc::CFC::SolveConformalFactor
+    // already does) before LoadMatterSource()/Solve() each call, since coeff_
+    // channel 0's physical meaning (Utilde vs U_raw) depends on which formulation
+    // was requested.
+    void SetUsePsi5Source(bool flag) { use_psi5_source_ = flag; }
+
     // seed the finest level's own solution array (the V-cycle's initial guess) from
     // an externally-supplied delta_psi field, instead of leaving it at whatever it
     // already held (a cold Kokkos-zero-initialized guess, on the very first call
@@ -113,6 +140,16 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
+
+    // 2026-07-25: template-dispatched Octet-level counterparts of
+    // SmoothPackImpl/CalculateDefectPackImpl/CalculateFASRHSPackImpl above --
+    // same UsePsi5 compile-time split, see MGCFCConformalFactor's private
+    // section for the rationale. SmoothOctet/etc. (public overrides above) read
+    // use_psi5_source_ directly (no static_cast needed here, unlike the
+    // per-level dispatchers) and instantiate the matching *Impl.
+    template <bool UsePsi5> void SmoothOctetImpl(MGOctet &oct, int rlev, int color);
+    template <bool UsePsi5> void CalculateDefectOctetImpl(MGOctet &oct, int rlev);
+    template <bool UsePsi5> void CalculateFASRHSOctetImpl(MGOctet &oct, int rlev);
 
     // 2026-07-24: damps the FAS coarse-grid correction (u - uold) applied during
     // prolongation, separate from mg_omega_psi_'s per-point Newton damping below.
@@ -131,6 +168,16 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // the per-point Newton step (1.0 = undamped); psi_floor_ prevents psi = u+1
     // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
     Real mg_omega_psi_, psi_floor_;
+
+    // 2026-07-25: selects the U-matter source formulation, see SetUsePsi5Source()
+    // above. Constructed false (byte-identical to pre-2026-07-25 behavior); the
+    // per-stage CFC_SolvePsi task always calls SetUsePsi5Source(false)
+    // explicitly. Only cfc::CFC::InitializeMetric() ever sets this true -- and
+    // does so BY DEFAULT since 2026-07-25 (<cfc> init_use_psi5_source now
+    // defaults true, see item 27/28, DEVELOPMENT.md), except for inputs that
+    // explicitly opt out (known-compact/unstable stars, e.g. the migration
+    // test, which diverges to NaN under this formulation).
+    bool use_psi5_source_ = false;
 
     // Damping factor for the coarse-grid correction (see CorrectionOmega() above
     // and MultigridDriver::CorrectionOmega()'s doc comment in multigrid.hpp).

@@ -38,6 +38,21 @@
 //! per physical field) without the second call clobbering the first. LoadMatterSource/
 //! LoadNonlinearCoefficient below therefore each do their own tiny single-channel
 //! par_for via the CoeffAtLevel() accessor instead of calling LoadCoefficients.
+//!
+//! 2026-07-25: coeff_ channel 0 can instead hold U_raw = Utilde/sqrt(detg) (the raw,
+//! undensitized ADM energy density), in which case the equation's U-term is written
+//! as U_raw*psi^5 rather than Utilde*psi^-1 -- algebraically identical (Utilde ==
+//! psi^6*U_raw by definition), but numerically different whenever the psi that built
+//! Utilde (a stale outer-loop iterate, frozen for the whole nonlinear solve) differs
+//! from the live Newton iterate multiplying psi^-1. This alternate formulation is
+//! used only by cfc::CFC::InitializeMetric() (<cfc> init_use_psi5_source, default
+//! true since 2026-07-25 -- see DEVELOPMENT.md item 27/28: much faster convergence,
+//! same accuracy, for every star tested EXCEPT the migration test's compact/
+//! unstable star, which MUST explicitly set this false or InitializeMetric()
+//! diverges to NaN). See ConformalFactorRHS's own doc comment below for the
+//! full derivation -- selected via a compile-time template parameter (UsePsi5), not
+//! a runtime flag inside the per-point loop, per the two formulations' separate
+//! compiled code paths.
 
 #include <algorithm>
 #include <cmath>
@@ -58,18 +73,57 @@
 
 namespace {
 
-// Per-point RHS(u) = 2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7 and its derivative
-// w.r.t. u (psi = u+1), shared by SmoothPack/CalculateDefectPack/CalculateFASRHSPack
-// so the three can never drift out of sync with each other.
+// Per-point RHS(u) and its derivative w.r.t. u (psi = u+1), shared by
+// SmoothPack/CalculateDefectPack/CalculateFASRHSPack (and their Octet
+// counterparts) so all six can never drift out of sync with each other.
+//
+// Two algebraically-identical formulations of the U-matter term are supported,
+// selected at COMPILE time via the UsePsi5 template parameter (2026-07-25, per
+// user direction -- see DEVELOPMENT.md's entry for the full derivation and
+// rationale; briefly:
+//   UsePsi5 = false (default, every per-stage CFC_SolvePsi call): u_matter is
+//     Utilde = psi^6*U, built once per outer/per-stage iteration from the
+//     CURRENT conserved state and held FIXED for the whole nonlinear solve.
+//     RHS's U-term is Utilde*psi^-1, i.e. Utilde is frozen at whatever psi
+//     built it (call it psi_prev), while the psi^-1 factor tracks the LIVE
+//     Newton iterate -- so effectively psi_prev^6*U*psi_current^-1, not the
+//     true equation's U*psi_current^5, whenever psi_prev != psi_current.
+//   UsePsi5 = true (CFC::InitializeMetric() only, <cfc> init_use_psi5_source,
+//     DEFAULT since 2026-07-25 -- opt out per-input if needed, see item 27/28):
+//     u_matter is U_raw = Utilde/sqrt(detg) (the raw,
+//     undensitized ADM energy density -- see cfc.cpp's AssembleVectorSource).
+//     RHS's U-term is U_raw*psi^5, using the SAME live Newton iterate for the
+//     entire psi^5 power, not split across a frozen psi_prev^6 and a live
+//     psi_current^-1. Since Utilde IS psi^6*U by definition, Utilde*psi^-1 and
+//     U_raw*psi^5 are the exact same physical quantity ONLY when psi_prev ==
+//     psi_current (i.e. at self-consistency) -- mid-solve, or across an outer
+//     Picard loop's iterations for a compact star where psi changes a lot per
+//     iteration, they diverge. UsePsi5=true removes that staleness entirely,
+//     folding the full nonlinear U-dependence into one self-consistent Newton
+//     solve, in an attempt to fix the compact-star wrong-psi convergence
+//     documented in DEVELOPMENT.md item 24.
+// Compiled as two fully separate instantiations (if constexpr, C++17) rather
+// than a runtime branch, so the per-point hot loop never re-checks a flag --
+// see mg_cfc_conformal_factor.hpp's *Impl<bool UsePsi5> declarations.
+template <bool UsePsi5>
 KOKKOS_INLINE_FUNCTION
-void ConformalFactorRHS(Real u, Real u_tilde, Real ahat_sq, Real *rhs, Real *drhs_du) {
+void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real *rhs, Real *drhs_du) {
   Real psi = u + 1.0;
   Real psi_inv = 1.0 / psi;
   Real psi_inv2 = psi_inv * psi_inv;
   Real psi_inv7 = psi_inv2 * psi_inv2 * psi_inv2 * psi_inv;
   Real psi_inv8 = psi_inv7 * psi_inv;
-  *rhs = 2.0 * M_PI * u_tilde * psi_inv + 0.125 * ahat_sq * psi_inv7;
-  *drhs_du = -2.0 * M_PI * u_tilde * psi_inv2 - 0.875 * ahat_sq * psi_inv8;
+  Real u_term, du_term;
+  if constexpr (UsePsi5) {
+    Real psi4 = psi * psi * psi * psi;
+    u_term = u_matter * psi4 * psi;      // U_raw * psi^5
+    du_term = 5.0 * u_matter * psi4;
+  } else {
+    u_term = u_matter * psi_inv;         // Utilde * psi^-1
+    du_term = -u_matter * psi_inv2;
+  }
+  *rhs = 2.0 * M_PI * u_term + 0.125 * ahat_sq * psi_inv7;
+  *drhs_du = 2.0 * M_PI * du_term - 0.875 * ahat_sq * psi_inv8;
 }
 
 template <typename ViewType>
@@ -112,6 +166,12 @@ MGCFCConformalFactor::~MGCFCConformalFactor() {
 }
 
 void MGCFCConformalFactor::SmoothPack(int color) {
+  bool use_psi5 = static_cast<MGCFCConformalFactorDriver*>(pmy_driver_)->use_psi5_source_;
+  if (use_psi5) { SmoothPackImpl<true>(color); } else { SmoothPackImpl<false>(color); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactor::SmoothPackImpl(int color) {
   int ll = nlevel_-1-current_level_;
   int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
   int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
@@ -141,7 +201,7 @@ void MGCFCConformalFactor::SmoothPack(int color) {
     for (int i = is + c; i <= ie; i += 2) {
       Real u_old = u(m,0,k,j,i);
       Real rhs, drhs_du;
-      ConformalFactorRHS(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+      ConformalFactorRHS<UsePsi5>(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
       Real lap = ConformalFactorLap(u, m, k, j, i);
       Real fprime = 6.0 - dx2*drhs_du;
       Real u_new = u_old - omega*(lap - (rhs + src(m,0,k,j,i))*dx2)/fprime;
@@ -152,6 +212,12 @@ void MGCFCConformalFactor::SmoothPack(int color) {
 }
 
 void MGCFCConformalFactor::CalculateDefectPack() {
+  bool use_psi5 = static_cast<MGCFCConformalFactorDriver*>(pmy_driver_)->use_psi5_source_;
+  if (use_psi5) { CalculateDefectPackImpl<true>(); } else { CalculateDefectPackImpl<false>(); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactor::CalculateDefectPackImpl() {
   int ll = nlevel_-1-current_level_;
   int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
   int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
@@ -174,13 +240,20 @@ void MGCFCConformalFactor::CalculateDefectPack() {
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
     Real rhs, drhs_du;
-    ConformalFactorRHS(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+    ConformalFactorRHS<UsePsi5>(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i),
+                                 &rhs, &drhs_du);
     Real lap = ConformalFactorLap(u, m, k, j, i);
     def(m,0,k,j,i) = (rhs + src(m,0,k,j,i)) - lap*idx2;
   });
 }
 
 void MGCFCConformalFactor::CalculateFASRHSPack() {
+  bool use_psi5 = static_cast<MGCFCConformalFactorDriver*>(pmy_driver_)->use_psi5_source_;
+  if (use_psi5) { CalculateFASRHSPackImpl<true>(); } else { CalculateFASRHSPackImpl<false>(); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactor::CalculateFASRHSPackImpl() {
   int ll = nlevel_-1-current_level_;
   int is = ngh_, ie = is+(indcs_.nx1>>ll)-1;
   int js = ngh_, je = js+(indcs_.nx2>>ll)-1;
@@ -198,7 +271,8 @@ void MGCFCConformalFactor::CalculateFASRHSPack() {
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
     Real rhs, drhs_du;
-    ConformalFactorRHS(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+    ConformalFactorRHS<UsePsi5>(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i),
+                                 &rhs, &drhs_du);
     Real lap = ConformalFactorLap(u, m, k, j, i);
     src(m,0,k,j,i) += lap*idx2 - rhs;
   });
@@ -1245,6 +1319,12 @@ void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet() {
 // this driver's own members, no static_cast needed (unlike SmoothPack, which is
 // a Multigrid, not MultigridDriver, method).
 void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
+  if (use_psi5_source_) { SmoothOctetImpl<true>(oct, rlev, color); }
+  else { SmoothOctetImpl<false>(oct, rlev, color); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactorDriver::SmoothOctetImpl(MGOctet &oct, int rlev, int color) {
   int ngh = mgroot_->GetGhostCells();
   Real root_dx = mgroot_->GetRootDx();
   Real dx = root_dx / static_cast<Real>(1 << rlev);
@@ -1255,8 +1335,8 @@ void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) 
       for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
         Real u_old = oct.U(0,k,j,i);
         Real rhs, drhs_du;
-        ConformalFactorRHS(u_old, oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                            &rhs, &drhs_du);
+        ConformalFactorRHS<UsePsi5>(u_old, oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                                     &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         Real fprime = 6.0 - dx2*drhs_du;
         Real u_new = u_old - mg_omega_psi_*(lap - (rhs + oct.Src(0,k,j,i))*dx2)/fprime;
@@ -1268,6 +1348,12 @@ void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) 
 }
 
 void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
+  if (use_psi5_source_) { CalculateDefectOctetImpl<true>(oct, rlev); }
+  else { CalculateDefectOctetImpl<false>(oct, rlev); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactorDriver::CalculateDefectOctetImpl(MGOctet &oct, int rlev) {
   int ngh = mgroot_->GetGhostCells();
   Real root_dx = mgroot_->GetRootDx();
   Real dx = root_dx / static_cast<Real>(1 << rlev);
@@ -1276,8 +1362,8 @@ void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
         Real rhs, drhs_du;
-        ConformalFactorRHS(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                            &rhs, &drhs_du);
+        ConformalFactorRHS<UsePsi5>(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                                     &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         oct.Def(0,k,j,i) = (rhs + oct.Src(0,k,j,i)) - lap*idx2;
       }
@@ -1286,6 +1372,12 @@ void MGCFCConformalFactorDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
 }
 
 void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
+  if (use_psi5_source_) { CalculateFASRHSOctetImpl<true>(oct, rlev); }
+  else { CalculateFASRHSOctetImpl<false>(oct, rlev); }
+}
+
+template <bool UsePsi5>
+void MGCFCConformalFactorDriver::CalculateFASRHSOctetImpl(MGOctet &oct, int rlev) {
   int ngh = mgroot_->GetGhostCells();
   Real root_dx = mgroot_->GetRootDx();
   Real dx = root_dx / static_cast<Real>(1 << rlev);
@@ -1294,8 +1386,8 @@ void MGCFCConformalFactorDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
         Real rhs, drhs_du;
-        ConformalFactorRHS(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                            &rhs, &drhs_du);
+        ConformalFactorRHS<UsePsi5>(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
+                                     &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         oct.Src(0,k,j,i) += lap*idx2 - rhs;
       }

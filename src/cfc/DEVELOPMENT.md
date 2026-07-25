@@ -102,6 +102,18 @@ its Riemann solver and conserved-to-primitive conversion.
 ## anyway) but is a real correctness fix for any future one that does. Read
 ## the numbered items below for the current, authoritative state -- don't
 ## rely on this header alone.
+##
+## Status update (2026-07-25, #2): items 27-28 tried a self-consistent
+## `U_raw*psi^5` alternative to `InitializeMetric()`'s psi Newton solve
+## (compile-time-templated via `<cfc> init_use_psi5_source`) as another
+## attempt at item 24. Diverges to NaN on the migration test (extreme
+## compactness, `2M/R~0.5`) even under heavy Newton damping -- item 24
+## remains OPEN, that input now explicitly sets `init_use_psi5_source=false`.
+## But it converges cleanly and accurately -- and much faster (2-3 outer
+## iterations vs. 25-80+) -- for both the mild "BU0" star and the rotating
+## "BU8" star, so as of 2026-07-25 it is `InitializeMetric()`'s new DEFAULT
+## for every other star (item 28). Per-stage `CFC_SolvePsi` is unaffected
+## either way.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4116,3 +4128,175 @@ src/cfc/
       investigation (item 24), whose own refined region doesn't reach the
       domain boundary either -- this is a standalone correctness improvement
       for any future test that does place AMR refinement near the domain edge.
+
+27. **Self-consistent `U_raw*psi^5` Newton formulation for
+    `CFC::InitializeMetric()`'s psi solve (item 24 follow-up, 2026-07-25):
+    diverges to NaN for the migration test's compact/unstable star, but
+    converges cleanly (matching analytic TOV to ~0.02%) for the mild/stable
+    "BU0" star -- the instability appears tied to compactness, not the
+    formulation itself.**
+    - **Motivation**: item 24 traced `CFC::InitializeMetric()`'s wrong-psi
+      convergence to the outer Picard loop itself (AMR/discretization already
+      ruled out). `SolveConformalFactor`'s Newton kernel evaluates the U-term
+      as `Utilde*psi^-1`, where `Utilde = psi_prev^6*U` was built from the
+      *previous* outer iteration's metric and held FIXED for the whole
+      nonlinear V-cycle, while `psi^-1` tracks the LIVE Newton iterate --
+      since `Utilde*psi^-1 = psi_prev^6*U*psi_current^-1`, this is only
+      exactly the true equation's `U*psi_current^5` when `psi_prev ==
+      psi_current`, which is never true mid-solve and may differ a lot
+      across outer iterations for a compact star. Proposed fix (user):
+      replace the source with the algebraically-identical `U_raw*psi^5`
+      (`U_raw = Utilde/sqrt(detg)`, the raw undensitized energy density,
+      computed exactly via the g_dd that built `Utilde`), using the SAME live
+      Newton iterate for the whole `psi^5` power -- removes the outer-loop
+      staleness entirely, folding the full nonlinearity into one
+      self-consistent Newton solve.
+    - **Design**: `ConformalFactorRHS` (`mg_cfc_conformal_factor.cpp`) is now
+      a `template <bool UsePsi5>` function (`if constexpr`-branched, C++17)
+      instead of a single formula -- per user direction, compiled as two
+      genuinely separate code paths (not a runtime flag read inside the
+      per-point hot loop) for performance. All 6 call sites
+      (`SmoothPack`/`CalculateDefectPack`/`CalculateFASRHSPack` on
+      `MGCFCConformalFactor`, and their Octet counterparts on
+      `MGCFCConformalFactorDriver`) became thin one-line dispatchers (read
+      `use_psi5_source_` once, call the matching `*Impl<true/false>`
+      instantiation) wrapping the original bodies, now templated and calling
+      `ConformalFactorRHS<UsePsi5>`. New `cfc::CFC` member `u_raw` (computed
+      alongside `u_tilde` in `AssembleVectorSource`, an exact
+      un-densitization via `adm::SpatialDet`, cheap so always computed). New
+      `<cfc> init_use_psi5_source` input (default `false` as originally
+      implemented in this item -- **flipped to `true` by item 28**, see
+      below) read into `cfc_init_use_psi5_`, threaded only through
+      `SolveConformalFactor`'s new `use_psi5_source` parameter and only ever
+      set `true` by `InitializeMetric()`; the per-stage `CFC_SolvePsi` task
+      always passes the default `false` regardless of the `<cfc>` input.
+      Zero behavior change for every existing input at the time this item
+      landed (confirmed: rebuild + the flag defaulted off everywhere it
+      wasn't explicitly set) -- no longer true after item 28's default flip,
+      see that item's own "Safety follow-up" bullet for which inputs needed
+      an explicit override as a result.
+    - **Tested on the migration test** (same `cfc_tov_migration_baryon_check`
+      setup as item 24's original discovery,
+      `cfc_tov_migration_psi5_check/`, job 249208, `init_use_psi5_source =
+      true`, `init_omega = 0.5` unchanged): **diverges to NaN within
+      `InitializeMetric()`'s very first outer iteration** (iteration 0's own
+      `max|delta psi|` report is already `-1.79769e+308`, i.e. `Kokkos::Max`'s
+      identity value surviving untouched because every comparison against a
+      NaN `delta_psi` silently fails) -- ends in a wall of `NANS_IN_CONS`
+      con2prim errors at cycle 1. Re-tested with heavy Newton damping
+      (`cfc_tov_migration_psi5_damped_check/`, job 249209, `mg_omega_psi =
+      0.2`) to check whether this was merely a Newton step-size problem:
+      **same immediate NaN divergence**, ruling that out. The likely
+      mechanism (not confirmed via further diagnostics, given the clear
+      negative result): unlike the original `psi^-1` term (bounded,
+      monotonically DEcreasing in `psi`, self-limiting), the `psi^5` term is
+      unbounded and monotonically INcreasing -- `psi_floor_` only clamps
+      Newton's step from below, so nothing prevents an overshoot to a large
+      `psi` on a bad step (or from an inaccurate FAS coarse-grid correction
+      inherited from a coarser V-cycle level, per item 24's own already-ruled-
+      out `CorrectionOmega` hypothesis, now revisited under a much steeper
+      nonlinearity), after which `psi^5`/`psi^4` growth compounds every
+      subsequent iteration until overflow.
+    - **Retested on the stable "BU0" star** (2026-07-25, user request): the
+      migration star's divergence left open whether the `psi^5` formulation
+      is fundamentally unstable, or only for that star's high compactness
+      (`2M/R~0.5`, unstable branch). Re-ran on the milder, stable TOV1 star
+      already used throughout item 9/item 5's own "BU0/BU8 stand-in"
+      (`rhoc=1.28e-3`, `kappa=100`, `gamma=2`, `2M/R~0.29` -- same star as
+      `cfc_stability_v4`/`inputs/dyn_grmhd/cfc_tov_stability.athinput`,
+      `256^3` root + AMR to level 4), same setup, `nlim=1` (metric-init-only
+      check), `init_use_psi5_source=true`
+      (`cfc_bu0_psi5_check/`, job 249210): **converges cleanly in just 2
+      outer iterations** (`iteration 0: max|delta psi|=0.194`, `iteration 1:
+      max|delta psi|=0`), no NaN, no FATAL. Pointwise `psi^4`-vs-analytic
+      comparison (same `plot_slice.py --dump-npz` + independent Python
+      TOV re-integration pipeline used throughout this investigation, rhoc
+      changed to `1.28e-3` in a new `tov_reintegrate_bu0.py`) matches to
+      **~0.02%** (ratio `0.9998-0.9999`) from the star's center out through
+      the vacuum region -- as good as or better than item 9's own original
+      `~0.68%` validation of the DEFAULT formulation for this same star, and
+      dramatically faster (2 iterations vs. the migration star's ~82 with the
+      default formulation).
+    - **Conclusion**: `U_raw*psi^5` is NOT fundamentally broken -- it works
+      cleanly, accurately, and fast for a star well inside its numerically
+      well-behaved regime. The NaN divergence is specific to the migration
+      star's extreme compactness (unstable branch, `2M/R~0.5`), consistent
+      with the mechanism guessed above (the term's unboundedness above makes
+      Newton's linearization overshoot badly when the true solution's `psi`
+      is far from 1, which happens for a very compact star but not a mild
+      one). Item 24 (the migration test's own wrong-psi problem) remains
+      OPEN -- this formulation isn't a fix for that specific star without
+      additional stabilization (an upper `psi` ceiling, or clamping the
+      Newton step itself) that's out of scope here. See item 28 for the
+      follow-up BU8 test and the resulting decision to make this formulation
+      `InitializeMetric()`'s new default for every OTHER star.
+
+28. **BU8 (rotating star) tested with the psi^5 formulation; made the
+    default for `InitializeMetric()` (2026-07-25).**
+    - **Motivation**: item 27 showed `U_raw*psi^5` works cleanly and
+      accurately for the mild, non-rotating "BU0" star, but is unusable as-is
+      for the migration test's extreme, unstable-branch star. Before deciding
+      on a default, the user asked to test the intermediate case: BU8, the
+      rotating star (`rhoc=1.28e-3`, `Omega=2.633e-2`, mass ~1.69, moderately
+      but not extremely compact, near mass-shedding) already used for item 22/
+      23's own stability investigation -- a genuinely different regime (2D
+      structure, off-center matter distribution, XNS-tabulated initial data)
+      from both BU0 and the migration star.
+    - **Test**: reused `cfc_bu8_stability_test/`'s own already-verified setup
+      (`build_cfc_xns`, `xns_rotstar` pgen, `256`-ish AMR grid, `init_omega=
+      1.0`, `mg_threshold=mg_poisson_threshold=1.0e-10`), `nlim=1`
+      (metric-init-only check), `init_use_psi5_source=true`
+      (`cfc_bu8_psi5_check/`, job 249213, rebuilt `build_cfc_xns` first since
+      it shares the modified CFC source). Result: **converges in 3 outer
+      iterations** (`0.224` -> `3.15e-7` -> `1.83e-8` -> `0`) vs. the default
+      formulation's already-good ~25 iterations for this same star (item 23) --
+      a large speedup. One non-fatal `### FATAL ERROR in MultigridDriver::
+      SolveIterative` message appears ONCE, on the very first (cold-started)
+      inner V-cycle solve, before the outer loop's own iteration-0 report
+      (`defect=5.04e-10` vs. the very tight `threshold=1e-10` -- essentially
+      converged, just short of the strict threshold within the 40-iteration
+      cap); this message does NOT appear anywhere in the baseline run's own
+      `.out` file, so it is specific to `UsePsi5`'s first cold-start solve,
+      but is non-fatal (execution continues, no NaN, and every subsequent
+      outer iteration converges cleanly) and does not recur. **Physical
+      accuracy**: the converged baryon mass (`.mhd.hst`'s `mass` column at
+      `t=0`) is `1.825610965013746` vs. the baseline (default formulation)
+      run's `1.825610932873623` -- agree to `~2e-8` relative, i.e.
+      effectively the same converged solution, not just "no NaN."
+    - **Decision** (per user direction, "if it works, keep psi5 true by
+      default since it speeds up initialization for well-behaved regime"):
+      `<cfc> init_use_psi5_source`'s default flipped from `false` to `true`
+      in `cfc::CFC`'s constructor (`cfc.cpp`) -- `InitializeMetric()` now uses
+      the faster, self-consistent formulation unless an input explicitly
+      opts out. Per-stage `CFC_SolvePsi` is completely unaffected either way
+      (always calls `SolveConformalFactor` with the 2-argument, hardcoded-
+      `false` form -- this default only touches the one-time metric
+      initialization pass).
+    - **Safety follow-up (required, not optional)**: since this default now
+      has a demonstrated, non-graceful failure mode (NaN, not a warning) for
+      the migration test's compact/unstable star, that star's own inputs
+      needed an explicit opt-out added BEFORE the default flip could safely
+      land: `inputs/dyn_grmhd/cfc_tov_migration.athinput` (the canonical
+      source template) and `/sakura/ptmp/tlam/athenak_run/
+      cfc_tov_migration_test/parfile.par` (the main production run directory,
+      most likely to be resubmitted/restarted later) both gained
+      `init_use_psi5_source = false` with a comment pointing at this item.
+      The many now-historical, already-completed diagnostic-only run
+      directories from items 22/24 (`cfc_tov_migration_baryon_check/`,
+      `_moresmooth_check/`, `_widerregion_check/`, `_uniform_check/`,
+      `_corromega_check/`, `_omega1_check/`, `_residualtest*/`) were
+      deliberately NOT touched -- their results are already recorded and
+      analyzed, and they are not expected to be blindly resubmitted; if any
+      of them ever IS rerun, it would now hit the same NaN divergence unless
+      manually given the same override, so treat any future reuse of those
+      directories' `parfile.par` files as needing the same fix first.
+    - **No other current CFC input is known to need this override**: BU0
+      (item 27), BU8 (this item), and every octet/ghost-exchange smoke test
+      this session (`cfc_octet_robin_check` etc., much milder stars, `v_pert=
+      0`) either already worked or were never observed to diverge under the
+      default (pre-flip) formulation, and none of them hit anything close to
+      the migration star's `2M/R~0.5` compactness -- but this is not an
+      exhaustive guarantee for every possible future star, only a record of
+      what was actually tested. A future user hitting an unexpected NaN
+      during `InitializeMetric()` for a new, very compact star should try
+      `init_use_psi5_source=false` first, per this item.

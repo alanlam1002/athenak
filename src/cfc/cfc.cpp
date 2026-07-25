@@ -125,6 +125,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     delta_psi("cfc_delta_psi", 1, 1, 1, 1, 1),
     delta_alpha_psi("cfc_delta_alpha_psi", 1, 1, 1, 1, 1),
     u_tilde("cfc_u_tilde", 1, 1, 1, 1, 1),
+    u_raw("cfc_u_raw", 1, 1, 1, 1, 1),
     u_stilde("cfc_u_stilde", 1, 1, 1, 1, 1),
     s_tilde("cfc_s_tilde", 1, 1, 1, 1, 1),
     u_p_x("cfc_u_p_x", 1, 1, 1, 1, 1),
@@ -162,6 +163,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(delta_psi,       nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(delta_alpha_psi, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_tilde,  nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_raw,    nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_stilde, nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(s_tilde,  nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_p_x,    nmb, 4, ncells3, ncells2, ncells1);
@@ -251,6 +253,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   cfc_init_tol_ = pin->GetOrAddReal("cfc", "init_tol", 1.0e-10);
   cfc_init_verbose_ = pin->GetOrAddBoolean("cfc", "init_verbose", false);
   cfc_init_omega_ = pin->GetOrAddReal("cfc", "init_omega", 1.0);
+  // 2026-07-25: default true (see item 27/28, DEVELOPMENT.md) -- the psi^5
+  // formulation converges dramatically faster (2-3 outer iterations vs.
+  // 25-80+) and matches the default formulation's accuracy for every star
+  // tested EXCEPT the migration test's compact/unstable star (2M/R~0.5),
+  // which diverges to NaN under it. Any input known to be that compact
+  // (currently: cfc_tov_migration.athinput and its run-directory copies) MUST
+  // explicitly set init_use_psi5_source=false -- this default does not
+  // auto-detect or fall back, a bad guess here produces real NaN corruption,
+  // not a graceful degradation.
+  cfc_init_use_psi5_ = pin->GetOrAddBoolean("cfc", "init_use_psi5_source", true);
 }
 
 //----------------------------------------------------------------------------------------
@@ -466,7 +478,7 @@ void CFC::InitializeMetric(Driver *pdriver) {
     // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for the next
     // iteration's PrimToConInit.
     ComputeADual();
-    SolveConformalFactor(pdriver, 0);
+    SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
 
     // Under-relax the just-solved psi against the previous iteration's value
     // (cfc_init_omega_ < 1) when the plain Picard step is unstable (found for a
@@ -890,10 +902,22 @@ void CFC::AssembleVectorSource(bool for_shift) {
     // at all, it would just multiply and divide by the same value.
     auto &cons = pmy_pack->pmhd->u0;
     auto &u_tilde_ = u_tilde;
+    auto &u_raw_ = u_raw;
     par_for("cfc_assemble_vecX_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
       u_tilde_(m,0,k,j,i) = cons(m,IEN,k,j,i) + cons(m,IDN,k,j,i);
+
+      // U_raw = Utilde/sqrt(detg): the exact un-densitized ADM energy density,
+      // using the SAME g_dd that PrimToCon(Init) used to build cons this
+      // iteration -- feeds the alternate psi^5 Newton formulation (2026-07-25,
+      // InitializeMetric()-only, see mg_cfc_conformal_factor.cpp). Cheap, so
+      // computed unconditionally rather than gated on whether it'll be used.
+      Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+      Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+      Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+      Real detg = adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz);
+      u_raw_(m,0,k,j,i) = u_tilde_(m,0,k,j,i) / Kokkos::sqrt(detg);
 
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
@@ -1010,7 +1034,7 @@ void CFC::ComputeADual() {
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::SolveConformalFactor(Driver *pdriver, int stage)
 
-void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
+void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
   // Item 10 (DEVELOPMENT.md): on the very first call ever, seed the V-cycle's
@@ -1033,7 +1057,8 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage) {
     pmgd_psi->SeedInitialGuess(delta_psi, indcs.ng);
   }
 
-  pmgd_psi->LoadMatterSource(u_tilde, indcs.ng);
+  pmgd_psi->SetUsePsi5Source(use_psi5_source);
+  pmgd_psi->LoadMatterSource(use_psi5_source ? u_raw : u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
   // delta_psi member stores psi - 1, exactly the deviation RetrieveSolution() hands

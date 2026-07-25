@@ -143,6 +143,15 @@ its Riemann solver and conserved-to-primitive conversion.
 ## open (pre-existing, currently harmless) gap in CFC's own AMR-regrid
 ## support that would matter if `refinement=adaptive` were ever used with
 ## CFC (item 32, found in a separate session).
+##
+## Status update (2026-07-26, later): item 32's dynamic-AMR gap is now
+## RESOLVED and verified working end-to-end (item 33) -- CFC's own arrays
+## get AMR headroom, a new `CFC::ReinitializeMetricForAMR` regrid hook
+## re-solves the metric after every regrid, and a second, deeper pre-existing
+## bug (stale `coeff_` sizing in `LoadMatterSource`/`LoadNonlinearCoefficient`/
+## `LoadReactionCoefficient`, found while verifying the above) is also fixed.
+## `refinement=adaptive` is now a supported (if not yet performance-tuned)
+## configuration for CFC -- see item 33 for the full design and verification.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -3504,7 +3513,15 @@ src/cfc/
     registers `SetADMVariablesToXNS` as the `padm->SetADMVariables` callback,
     confirmed mandatory since `MeshRefinement::AdaptiveMeshRefinement()`
     unconditionally calls it on every regrid for any CFC-only run, independent
-    of `is_dynamic`). Both build cleanly (`-D PROBLEM=dyn_grmhd/xns_rotstar`).
+    of `is_dynamic`). **2026-07-26 update (item 33)**: this regrid-time call
+    is now SKIPPED for CFC runs specifically (`mesh_refinement.cpp`'s Step 11
+    gate gained a `pcfc == nullptr` condition) -- `CFC::ReinitializeMetricForAMR`
+    replaces its role for CFC, since re-deriving the metric from XNS's static
+    t=0 table on every regrid would discard any dynamical evolution since
+    then. The registration itself is still needed (t=0/restart setup still
+    calls it directly, unaffected by this), just no longer for the regrid
+    path described here -- see item 33 for the full story. Both build cleanly
+    (`-D PROBLEM=dyn_grmhd/xns_rotstar`).
     Initial data: XNS's bundled `RotBU8UnMagPol2` reference config
     (`RHOINI=1.28e-3, K1=100, GAMMA=2, OMG=2.633e-2`, uniform rotation,
     unmagnetized) -- converged XNS result matches its own reference

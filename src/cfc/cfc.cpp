@@ -43,7 +43,7 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
                           const DvceArray5D<Real> &delta_alpha_psi,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                          int mg_nghost) {
+                          int mg_nghost, DvceArray5D<Real> &ap6) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -54,13 +54,13 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
   int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
   int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
 
-  // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). Built as a genuine
-  // scratch DvceArray5D over the FULL array extent (not just the interior) so
-  // Dx<NGHOST> below has valid neighbor data at every interior point -- both fields
-  // are already ghost-exchanged by the time this runs (see CFC::QueueCFCTasks), so
-  // this pointwise pass is valid everywhere. delta_psi/delta_alpha_psi store psi-1/
-  // alpha*psi-1 (see cfc.hpp), so the physical values are reconstructed with +1.0.
-  DvceArray5D<Real> ap6("cfc_alpha_psi6", nmb, 1, ncells3, ncells2, ncells1);
+  // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). ap6 is a persistent
+  // CFC member (see cfc.hpp) passed in by the caller, sized identically to this full
+  // array extent (not just the interior) so Dx<NGHOST> below has valid neighbor data
+  // at every interior point -- both fields are already ghost-exchanged by the time
+  // this runs (see CFC::QueueCFCTasks), so this pointwise pass is valid everywhere.
+  // delta_psi/delta_alpha_psi store psi-1/ alpha*psi-1 (see cfc.hpp), so the physical
+  // values are reconstructed with +1.0.
   par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -95,15 +95,15 @@ void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                       const DvceArray5D<Real> &delta_alpha_psi,
                       const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                      int mg_nghost) {
+                      int mg_nghost, DvceArray5D<Real> &ap6) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
     case 2: BuildShiftSourceImpl<2>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost); break;
+                                     mg_nghost, ap6); break;
     case 3: BuildShiftSourceImpl<3>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost); break;
+                                     mg_nghost, ap6); break;
     case 4: BuildShiftSourceImpl<4>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost); break;
+                                     mg_nghost, ap6); break;
   }
 }
 
@@ -163,6 +163,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(delta_psi,       nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(delta_alpha_psi, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_tilde,  nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_plus_2s,    nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_alpha_psi6, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_raw,    nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_stilde, nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(s_tilde,  nmb, 1, ncells3, ncells2, ncells1);
@@ -267,6 +269,34 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // the pre-existing Picard-iteration behavior unless explicitly enabled.
   cfc_init_freeze_conserved_ = pin->GetOrAddBoolean("cfc", "init_freeze_conserved",
                                                      false);
+  // 2026-07-25 (user direction): the two modes above encode mutually
+  // incompatible assumptions about what's held fixed. init_freeze_conserved
+  // holds Utilde = psi^6*U (the WEIGHTED/densitized conserved source) fixed
+  // across RunXPsiSolvePass's single Newton solve -- exactly what the
+  // default (psi^-1) formulation's own Newton kernel already assumes
+  // (coeff_ channel 0 loaded once, held fixed for the whole solve).
+  // init_use_psi5_source instead holds U_raw (the RAW/undensitized quantity,
+  // i.e. implicitly the PRIMITIVES) fixed and lets Utilde=U_raw*psi^6 vary
+  // self-consistently as the Newton iterate itself changes -- the opposite
+  // assumption. Combining both would mean init_freeze_conserved's one-shot
+  // Utilde snapshot gets silently re-interpreted as "primitives fixed"
+  // inside the Newton solve, defeating its own purpose. Force
+  // init_use_psi5_source off whenever init_freeze_conserved is on (covers
+  // both an explicit init_use_psi5_source=true and its own default-true
+  // silently combining with a new init_freeze_conserved=true) -- warn so
+  // this isn't a silent behavior change from what the input literally says.
+  if (cfc_init_freeze_conserved_ && cfc_init_use_psi5_) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### WARNING in CFC::CFC" << std::endl
+                << "<cfc> init_freeze_conserved=true is incompatible with"
+                << " init_use_psi5_source=true (the latter defaults to true --"
+                << " see DEVELOPMENT.md items 27-29): freezing Utilde and letting"
+                << " the Newton solve treat U_raw=Utilde/psi^6 as the fixed"
+                << " quantity are contradictory assumptions. Forcing"
+                << " init_use_psi5_source=false for this run." << std::endl;
+    }
+    cfc_init_use_psi5_ = false;
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -501,11 +531,28 @@ void CFC::InitializeMetric(Driver *pdriver) {
     // guess) and held fixed; no outer Picard loop, no convergence check (there
     // is nothing being iterated to convergence). Falls through into the same
     // tail section the iterative path also uses, unchanged.
+    //
+    // 2026-07-25 bugfix: the informational dpsi print below must compare
+    // against the TRUE initial guess (psi4^0.25-1, the same formula
+    // SolveConformalFactor's own one-time psi_seeded_ block uses), NOT a
+    // deep_copy of delta_psi taken here -- delta_psi is still at its
+    // constructor-time value (zero) at this point in a fresh run, since
+    // psi_seeded_'s own seeding write into delta_psi happens INSIDE
+    // RunXPsiSolvePass (the first-ever SolveConformalFactor call), after
+    // this snapshot would otherwise have been taken. A deep_copy here would
+    // silently measure "the converged delta_psi's own magnitude vs. zero,"
+    // not "how far the one-shot solve moved psi from its starting guess" --
+    // recompute the same seed formula directly from adm.psi4 instead.
     int nmb = pmy_pack->nmb_thispack;
     DvceArray5D<Real> psi_before("cfc_init_psi_before", nmb, 1,
                                   delta_psi.extent_int(2), delta_psi.extent_int(3),
                                   delta_psi.extent_int(4));
-    Kokkos::deep_copy(psi_before, delta_psi);
+    auto &adm_ = pmy_pack->padm->adm;
+    auto &psi_before_seed = psi_before;
+    par_for("cfc_init_psi_before_seed", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25) - 1.0;
+    });
 
     RunXPsiSolvePass(pdriver);
 
@@ -1023,7 +1070,8 @@ void CFC::AssembleVectorSource(bool for_shift) {
       }
     });
     // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
-    BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, a_dd, p_src, mg_nghost);
+    BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, a_dd, p_src, mg_nghost,
+                      u_alpha_psi6);
 
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
@@ -1218,17 +1266,17 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   int ncells2 = u_tilde.extent_int(3);
   int ncells3 = u_tilde.extent_int(2);
 
-  // u_tilde + 2*s_tilde: local scratch, not a persistent member (only ever needed
-  // transiently, right before LoadReactionCoefficient reads it) -- sized identically
-  // to u_tilde/s_tilde (mesh-NGHOST depth) so LoadReactionCoefficient's ngh=indcs.ng
-  // call below is valid over the same full extent it ultimately reads.
-  DvceArray5D<Real> u_plus_2s("cfc_u_plus_2s", nmb, 1, ncells3, ncells2, ncells1);
+  // u_tilde + 2*s_tilde: persistent member (see cfc.hpp), fully overwritten below
+  // before LoadReactionCoefficient reads it -- sized identically to u_tilde/s_tilde
+  // (mesh-NGHOST depth) so LoadReactionCoefficient's ngh=indcs.ng call below is valid
+  // over the same full extent it ultimately reads.
   auto &u_tilde_ = u_tilde;
   auto &s_tilde_ = s_tilde;
+  auto &u_plus_2s_ = u_plus_2s;
   par_for("cfc_u_plus_2s", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    u_plus_2s(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
+    u_plus_2s_(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
   });
 
   // Item 10 (DEVELOPMENT.md): same one-shot warm-start idea as SolveConformalFactor

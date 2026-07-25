@@ -126,6 +126,23 @@ its Riemann solver and conserved-to-primitive conversion.
 ## likely closeable via this item; see item 29 for the full result and what's
 ## still untested (longer dynamical runs, combining with `init_use_psi5_
 ## source=true`).
+##
+## Status update (2026-07-26): both of item 29's own follow-ups landed.
+## `init_freeze_conserved`/`init_use_psi5_source` are now mutually exclusive
+## by construction (item 29's own new bullet) -- combining them was never
+## meaningful and can no longer happen silently. A `tlim=200` dynamical run
+## (item 30) confirmed excellent mass conservation through the star's first
+## oscillation/bounce (`t=0` to `~0.5ms`), so item 24/29's own `t=0`-
+## initialization result stands -- but surfaced a SEPARATE, still-OPEN
+## concern: the density field collapses to near-floor everywhere by
+## `t~0.55ms` and an unexplained `~14%` mass jump appears around the same
+## time, most likely tied to the migration test's *static* refined region
+## not tracking the star's post-bounce expansion (not yet root-caused, not
+## attributed to item 29). Also recorded: a performance fix hoisting two
+## per-call scratch allocations into persistent members (item 31), and an
+## open (pre-existing, currently harmless) gap in CFC's own AMR-regrid
+## support that would matter if `refinement=adaptive` were ever used with
+## CFC (item 32, found in a separate session).
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4022,7 +4039,10 @@ src/cfc/
       outer Picard loop described above entirely) reproduces the analytic
       solution to `~0.01-0.03%` on this same star -- appears to actually
       RESOLVE this item, pending the user's own confirmation before marking
-      it closed outright.
+      it closed outright. Note (2026-07-26): a longer `tlim=200` dynamical
+      run under `init_freeze_conserved=true` surfaced a SEPARATE, still-open
+      issue downstream of `t=0` (item 30) -- that finding does not reopen
+      this item's own `t=0`-initialization result, which remains excellent.
 
 25. **Robin BC implemented at the octet (AMR-refined) level of
     `MultigridDriver::ApplyPhysicalBoundariesOctet` (2026-07-24) -- closes
@@ -4361,9 +4381,13 @@ src/cfc/
       ghost-exchange, `SolveShift`, `ReconstructShift`, `AssembleADM`,
       ghost-exchange `ADM`) -- that section already runs exactly once
       regardless of how many (if any) outer iterations happened, so it needed
-      no changes at all. Orthogonal to `cfc_init_use_psi5_` (items 27/28):
-      `RunXPsiSolvePass` calls `SolveConformalFactor` with whatever that flag
-      is already set to, either way.
+      no changes at all. **Interaction with `cfc_init_use_psi5_` (items
+      27/28)**: `RunXPsiSolvePass` calls `SolveConformalFactor` with whatever
+      that flag is set to -- but per user direction, the two are mutually
+      incompatible (see the dedicated bullet below), so `CFC::CFC`'s
+      constructor forces `cfc_init_use_psi5_` false whenever
+      `cfc_init_freeze_conserved_` is true, rather than leaving them free to
+      combine.
     - **Verified**: rebuilt `build_cfc`/`build_cfc_xns` cleanly.
       **Regression check** (`cfc_migration_freezecons_regression/`, job
       249216, `init_freeze_conserved=false` explicit, `init_use_psi5_source=
@@ -4387,6 +4411,24 @@ src/cfc/
       throughout -- confirms the new mode doesn't regress an already-working
       case, and is at least as accurate as (if not marginally better than)
       both the iterative default and the `psi^5` formulation for this star.
+    - **Mutual-exclusivity safeguard with `cfc_init_use_psi5_` (2026-07-25,
+      per user direction)**: the two modes encode contradictory assumptions
+      about what's held fixed during the single Newton solve.
+      `init_freeze_conserved` holds `Utilde = psi^6*U` (the WEIGHTED/
+      densitized conserved source) fixed across `RunXPsiSolvePass`'s solve --
+      exactly what the default (`psi^-1`) Newton kernel already assumes.
+      `init_use_psi5_source` instead holds `U_raw = Utilde/psi^6` (i.e.
+      implicitly the PRIMITIVES) fixed and lets `Utilde` vary self-
+      consistently as the Newton iterate itself changes -- the opposite
+      assumption. Combining both would mean `init_freeze_conserved`'s
+      one-shot `Utilde` snapshot gets silently re-interpreted as "primitives
+      fixed" inside the Newton solve, defeating its own purpose. `CFC::CFC`'s
+      constructor now forces `cfc_init_use_psi5_` false whenever
+      `cfc_init_freeze_conserved_` is true (printing a `WARNING` when it does
+      so), covering both an explicit `init_use_psi5_source=true` and the
+      more likely silent case: `init_use_psi5_source`'s own default-`true`
+      (item 28) combining unintentionally with a newly-added
+      `init_freeze_conserved=true`.
     - **Conclusion**: this appears to genuinely RESOLVE the migration test's
       wrong-psi problem -- unlike items 27/28's `psi^5` attempt (which fixed
       the same root cause conceptually but proved numerically unstable for
@@ -4399,12 +4441,187 @@ src/cfc/
       unlike items 27/28, no default was changed by this item; `<cfc>
       init_freeze_conserved` stays opt-in, default `false`, so every existing
       input's behavior is unaffected unless explicitly set).
-    - **Not yet tested**: combining `init_freeze_conserved=true` with
-      `init_use_psi5_source=true` (both defaults/settings independent, never
-      tried together); whether the one-shot pass's implied primitive mismatch
-      (the tradeoff the user flagged up front) is small enough in practice to
-      not matter for subsequent dynamical evolution (only the metric-init
-      pass itself was checked here, `nlim=1` -- a longer run through several
-      cycles/stages, and a mass-conservation check analogous to items 22/23's
-      own `.mhd.hst` diagnostics, would be the natural next step before
-      switching the migration test's own production run over to this mode).
+    - **Update (2026-07-25/26)**: both open questions from this bullet's
+      original text are now resolved/answered. Combining `init_freeze_
+      conserved=true` with `init_use_psi5_source=true` is no longer possible
+      to do accidentally -- see the mutual-exclusivity safeguard bullet
+      above. Whether the one-shot pass's implied primitive mismatch stays
+      small enough through real dynamical evolution was tested via a
+      `tlim=200` run -- see item 30: mass conservation is excellent through
+      the star's first oscillation/bounce (`t=0` to `~0.5ms`), but a
+      separate, NOT-yet-root-caused issue appears downstream of that (item
+      30's own "Conclusion"), unrelated to this item's own `t=0`
+      initialization accuracy (still validated as excellent above).
+    - **Diagnostic-print bugfix (2026-07-25, found by user re-running the
+      check and asking why `max|delta psi - initial guess|` still printed
+      `~0.559` -- the exact same value as the very first test above)**: this
+      print's own "initial guess" snapshot (`Kokkos::deep_copy(psi_before,
+      delta_psi)`, taken at the very top of `InitializeMetric()`'s
+      `init_freeze_conserved` branch) was silently wrong -- `delta_psi` is
+      still at its CONSTRUCTOR value (zero) at that point on a fresh run;
+      the actual pgen-seeded initial guess (`psi4^0.25-1`, from `psi_
+      seeded_`'s one-time block in `SolveConformalFactor`) only gets written
+      into `delta_psi` *inside* `RunXPsiSolvePass` -- i.e., AFTER the
+      snapshot. So the print was really reporting "the converged delta_psi's
+      own magnitude vs. zero" (which is `~0.559` at the star's center simply
+      because that's the correct physical value of `psi-1` there -- NOT a
+      sign of any mismatch with the analytic solution; the actual accuracy
+      check, `psi^4` vs. analytic via `plot_slice.py`, already separately
+      confirmed `ratio 0.9997-1.0000` for this exact run). Fixed by
+      recomputing the true initial guess directly from `adm.psi4` (the same
+      formula `psi_seeded_`'s block uses) instead of snapshotting `delta_
+      psi` itself. Purely a diagnostic-print fix -- no change to `Run
+      XPsiSolvePass`, `SolveConformalFactor`, or any actual solve logic, so
+      the already-recorded accuracy numbers above are unaffected.
+
+30. **`tlim=200` dynamical-evolution test of `init_freeze_conserved=true` on
+    the migration test: excellent through the first bounce, but a separate,
+    unresolved issue appears afterward (2026-07-25/26).**
+    - **Motivation**: item 29 only validated the one-shot mode's `t=0`
+      metric-initialization accuracy (`nlim=1`). The user asked for a real
+      dynamical run (`tlim=200`, `cfc_migration_freezecons_tlim200/`) to see
+      whether the mode's accepted primitive/metric mismatch stays small
+      enough in practice once the star actually evolves, plus rho-max/
+      density diagnostics reusing the approach already established for BU8
+      (`plot_bu8_diagnostics.py`/`make_bu8_density_movies.py`).
+    - **Setup notes**: this run needed two fixes unrelated to item 29 itself
+      before it would even complete: (1) `mg_threshold=mg_poisson_
+      threshold=1.0e-8` (inherited from an unrelated, much earlier diagnostic
+      thread in this same input file) tripped `MultigridDriver::
+      SolveIterative`'s 40-iteration cap during dynamical evolution around
+      `t~71.7` -- the driver's own safety fallback (`pdriver->nlim = current
+      cycle`) then gets misreported by `Driver::Finalize`'s end-of-run print
+      as `"Terminating on wall clock limit"` regardless of the true cause
+      (that printout is a simple `else` fallback after checking `ncycle==
+      nlim`/`time>=tlim`, with no dedicated "convergence failure" case) --
+      reverted to `3.0e-3`, item 22's own already-established working value
+      for this test's dynamical evolution, which resolved it; (2) `sub.sh`'s
+      `#SBATCH -o` output file is OVERWRITTEN (not appended) by each new
+      `sbatch` submission, unlike the `.hst` files themselves (which the
+      *program* opens in append mode across restarts) -- worth remembering
+      for future multi-restart runs in this same style, since it means the
+      `.out` file alone is NOT a reliable full run history once a job has
+      been restarted more than once.
+    - **Diagnostics used**: `plot_migration_diagnostics.py`/
+      `make_density_movie.py` (this test's own pre-existing, purpose-built
+      scripts in `cfc_tov_migration_test/`, reused directly rather than the
+      BU8 scripts verbatim -- this star has full spherical symmetry, so one
+      slice plane suffices unlike BU8's rotation-induced axisymmetry, and
+      `dyngr_tov.cpp`'s own `TOVHistory` already provides a native `rho-max`
+      `.user.hst` column, unlike BU8's XNS-sourced pgen which needed a
+      bin-file-scanning fallback at the time those scripts were written).
+      Needed one further fix: `athena_read.hst` (the shared plotting
+      utility) silently keeps only the MOST RECENT header/data segment when
+      a `.hst` file has been appended across multiple restarts (of which
+      this run had several, from the threshold-trip fix above), which would
+      have discarded everything before the last restart -- added a local
+      `read_hst_concat()` helper (in the copied script, not the shared
+      utility) that stitches all segments together, dropping any row that
+      doesn't strictly exceed the running max time (handles the small
+      overlap a restart's own resumed checkpoint can produce).
+    - **Result, `t=0` to `~0.5ms` (the star's first oscillation/bounce)**:
+      excellent. Baryon mass agrees with the analytic value to `~0.03%` at
+      `t=0` and drifts by only another `~0.03%` through the bounce;
+      `rho_c(t)/rho_c(0)` rises smoothly to a peak of `~1.86` around
+      `t~0.31ms` then drops sharply as the star bounces -- exactly the
+      qualitative migration signature the paper describes, with no NaN, no
+      FATAL (after the threshold fix), and only the one already-explained
+      convergence-cap trip (fixed, not a recurrence).
+    - **Result, `t~0.5ms` onward -- OPEN, unresolved concern**: the density
+      field visually collapses to a near-uniform atmosphere-floor value
+      everywhere in the domain by `t~0.55ms` and stays that way through
+      `t=200` (no visible star structure in the 2D slices at all), even
+      though `rho-max` itself retains a real, non-floor residual (`~6e-5` at
+      `t=200`, `~130x` below the initial central density -- far more than
+      the paper's own factor-of-`~6` migration-to-stable-branch prediction).
+      Coincident with this, the (densitized, domain-integrated) baryon mass
+      JUMPS `~14%` (`1.535->1.757`) around `t~102` (code units, `~0.5ms`),
+      tracking a sharp `dt` crash-then-recovery in the same window, then
+      stays essentially perfectly constant (to 6 significant figures) for
+      the remaining `t~104` to `200` -- i.e. not an ongoing instability,
+      but a one-time, unexplained jump. `alpha-min` also drops to an
+      extreme `~2.2e-3` by `t=200`. No `NANS_IN_CONS`/con2prim-error
+      messages appear in this run's own log around that time (`dyn_error=
+      reset_floor` may reset silently without printing, so this doesn't
+      rule out a floor-related cause).
+    - **Conclusion -- explicitly NOT attributed to item 29**: this pattern
+      (mass jumping then becoming suspiciously exactly constant, density
+      visually vanishing, lapse going extreme) does not look like a clean
+      "migrate to the stable branch and oscillate" outcome, and is most
+      likely a separate, pre-existing numerical/resolution issue -- leading
+      hypothesis: the star's post-bounce expansion outrunning the *static*
+      refined region (fixed at `[-7.5,7.5]`, sized for the ORIGINAL compact
+      star, never adjusted for an expanded/disrupted state), possibly
+      combined with a floor/con2prim-reset consistency issue during the
+      violent bounce itself. This is downstream of, and independent from,
+      item 29's own `t=0` initialization accuracy (still validated as
+      excellent, see item 29's own numbers) -- item 29 is not implicated,
+      but this remains a genuinely OPEN question for follow-up (not yet
+      root-caused): does widening/deepening the static refined region
+      change this outcome; is there a silent floor-reset injecting mass;
+      does the same issue appear under the default iterative
+      initialization mode too (not yet checked, would help isolate whether
+      this is initialization-related at all).
+    - **Artifacts**: `cfc_migration_freezecons_tlim200/
+      migration_freezecons_diagnostics.png` (mass/rho_c vs. time, full
+      `t=0`-`200` history), `migration_freezecons_density_xy.mp4` (density
+      animation).
+
+31. **Persistent scratch buffers for `u_plus_2s`/`u_alpha_psi6`
+    (performance fix, 2026-07-25).**
+    - `SolveLapse` (`u_tilde + 2*s_tilde`) and `BuildShiftSource`
+      (`alpha*psi^-6`) each used to construct a fresh, full-mesh-extent
+      `DvceArray5D<Real>` scratch array -- a real device allocation -- on
+      EVERY call (i.e. every RK stage, every cycle). Both are now persistent
+      `cfc::CFC` members (`u_plus_2s`, `u_alpha_psi6`, declared in `cfc.hpp`
+      alongside every other intermediate field this class owns), allocated
+      once in the constructor (`Kokkos::realloc`, same mesh-`NGHOST`-depth
+      sizing as `u_tilde`) and fully overwritten (not read-before-written)
+      at the top of each call, exactly like every other persistent
+      scratch/intermediate array in this class already works. `BuildShift
+      Source`/`BuildShiftSourceImpl` (file-local free functions in
+      `cfc.cpp`) gained an explicit `DvceArray5D<Real> &ap6` parameter so
+      the caller (`AssembleVectorSource`) can pass `u_alpha_psi6` in,
+      instead of the function allocating its own local `ap6`.
+    - Pure performance change (avoids repeated device-memory allocation/
+      deallocation churn every stage/cycle) -- no intended difference in
+      numerical behavior, since both arrays are always fully overwritten
+      before being read either way.
+
+32. **CFC's own member arrays are not wired into AthenaK's dynamic-AMR
+    regrid path -- open, pre-existing gap, safe under every current test
+    (2026-07-25, found in a separate session, recorded here for
+    completeness).**
+    - `cfc::CFC`'s persistent member arrays (`u_x`, `u_beta`, `delta_psi`,
+      `u_tilde`, `u_p_x`, `coarse_u_x`, etc.) are sized once in the
+      constructor directly against `nmb_thispack`, with no `std::max(
+      nmb_thispack, pmesh->nmb_maxperrank)` headroom the way `hydro.cpp`/
+      `z4c.cpp` size their own arrays. `RedistAndRefineMeshBlocks`
+      (`src/mesh/mesh_refinement.cpp`) -- the function AthenaK's dynamic-AMR
+      path calls to remap `phydro`/`pmhd`/`pz4c`/`padm` arrays across a
+      block-count change -- never references `pcfc` anywhere (confirmed via
+      direct grep: zero `pcfc`/`cfc::` matches in that file).
+    - The four `MultigridDriver`-based solvers CFC owns (`pmgd_pietax`,
+      `pmgd_pietabeta`, `pmgd_psi`, `pmgd_alpha`) already have a working
+      per-block-count AMR resize hook (`Multigrid::ReallocateForAMR()`/
+      `MultigridDriver::PrepareForAMR()`) -- it's specifically `cfc::CFC`'s
+      OWN physics-facing arrays (declared directly in `cfc.hpp`, not owned
+      by a `Multigrid`/`MultigridDriver` subobject) that have no analogous
+      hook.
+    - **Why this hasn't bitten anyone**: every existing CFC test input uses
+      `refinement = static` (block count fixed at problem setup,
+      `AdaptiveMeshRefinement`/`RedistAndRefineMeshBlocks` never invoked
+      during the run) -- `cfc_bu8_stability.athinput` itself already flags a
+      `refinement=adaptive` test as unfinished follow-up work, so this isn't
+      a surprise regression, just a genuinely open item nobody has picked up
+      yet.
+    - **How to apply**: static/fixed mesh refinement (SMR set once at
+      problem start) is completely unaffected and safe to keep using as-is
+      -- this only matters before ever running CFC with true `refinement =
+      adaptive` (block count changing mid-run). Before attempting that: (1)
+      mirror hydro/z4c's `std::max(nmb_thispack, pmesh->nmb_maxperrank)`
+      constructor sizing for CFC's own arrays, and (2) hook `pcfc` into
+      `RedistAndRefineMeshBlocks`'s remap path the same way `phydro`/`pz4c`/
+      `padm` already are (see those blocks for the pattern to follow:
+      `DerefineCCSameRank`, `CopyCC`/`CopyForRefinementCC`/`RefineCC`, gated
+      on `!= nullptr`).

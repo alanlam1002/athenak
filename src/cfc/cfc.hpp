@@ -101,6 +101,13 @@ class CFC {
   // has no z4c free evolution, so ptmunu may not exist at all.
   DvceArray5D<Real> u_tilde;       // Ũ = psi^6 U, scalar
 
+  // Persistent scratch buffers for two per-stage transient quantities that used to
+  // be constructed fresh (a real device allocation) on every call to SolveLapse/
+  // BuildShiftSource -- hoisted here so they're allocated once, like every other
+  // intermediate field in this class, instead of every RK stage of every timestep.
+  DvceArray5D<Real> u_plus_2s;     // SolveLapse: u_tilde + 2*s_tilde
+  DvceArray5D<Real> u_alpha_psi6;  // BuildShiftSource: alpha*psi^-6
+
   // 2026-07-25: raw (undensitized) U = Utilde/sqrt(detg), computed alongside
   // u_tilde in AssembleVectorSource (an exact un-densitization, using the same
   // g_dd that built the conserved state u_tilde derives from -- not a re-
@@ -215,6 +222,13 @@ class CFC {
   // be that compact MUST explicitly set this false. Does NOT affect the
   // per-stage CFC_SolvePsi task, which always uses the default (false/
   // Utilde*psi^-1) formulation regardless of this setting.
+  //
+  // MUTUALLY INCOMPATIBLE with cfc_init_freeze_conserved_ below (the
+  // constructor forces this false whenever that's true, with a warning --
+  // see the constructor's own comment for why): this formulation implicitly
+  // holds U_raw (i.e. the primitives) fixed as psi iterates within a single
+  // Newton solve, the opposite assumption from freeze_conserved's "hold
+  // Utilde fixed."
   bool cfc_init_use_psi5_;
 
   // 2026-07-25: <cfc> init_freeze_conserved (default false, see item 29,
@@ -229,9 +243,13 @@ class CFC {
   // compact star, unlike the ~80-iteration outer loop, which drifts to a
   // wrong fixed point. The resulting metric's implied primitives may not
   // exactly match the pgen's original ones -- an accepted tradeoff, the same
-  // one every per-stage CFC_SolvePsi call already lives with. Orthogonal to
-  // cfc_init_use_psi5_ above (RunXPsiSolvePass respects whatever that's set
-  // to either way).
+  // one every per-stage CFC_SolvePsi call already lives with.
+  //
+  // MUTUALLY INCOMPATIBLE with cfc_init_use_psi5_ above -- see that member's
+  // own doc comment and the constructor's auto-override. When both are set
+  // (including via init_use_psi5_source's own default-true), the constructor
+  // forces cfc_init_use_psi5_ false so RunXPsiSolvePass's single Newton solve
+  // actually holds Utilde fixed, as this mode's own name promises.
   bool cfc_init_freeze_conserved_;
 
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per

@@ -295,6 +295,16 @@ void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
 }
 
 void MGCFCVectorPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &p_src) {
+  // Item 33 (DEVELOPMENT.md): called before Solve() (whose own PrepareForAMR()
+  // would otherwise keep mglevels_'s nmmb_/src_ sizing in sync with the current
+  // block count) -- Multigrid::LoadSource() loops over its own (possibly stale,
+  // pre-regrid) nmmb_, so without this call the newly-created blocks after a
+  // regrid would silently keep a zero source instead of the freshly-loaded one
+  // (an incomplete-initialization correctness gap, not a crash -- LoadSource's
+  // own internal nmmb_/src_ sizing stays self-consistent either way -- but still
+  // wrong physics for those blocks until the next call). Idempotent/cheap when
+  // nothing changed, matching the identical fix in the two nonlinear solvers.
+  mglevels_->ReallocateForAMR();
   mglevels_->LoadSource(p_src, 0, mglevels_->GetGhostCells(), -1.0);
   return;
 }

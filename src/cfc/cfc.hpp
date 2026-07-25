@@ -347,6 +347,39 @@ class CFC {
   // See cfc_init_freeze_conserved_'s doc comment (below) for the full rationale.
   void InitializeMetric(Driver *pdriver);
 
+  // Item 33 (DEVELOPMENT.md): regrid counterpart to InitializeMetric() above.
+  // MeshRefinement::AdaptiveMeshRefinement() calls this once per regrid event
+  // (block count/layout change), after pdriver->InitBoundaryValuesAndPrimitives
+  // has produced valid primitives on the new mesh but before any NewTimeStep
+  // priming -- mirroring Driver::Initialize()'s own t=0 ordering.
+  //
+  // CFC's own member arrays (delta_psi, u_x, u_p_x, etc.) are NOT remapped
+  // across a regrid the way padm->u_adm/pz4c->u0 are (RedistAndRefineMeshBlocks
+  // never references pcfc at all) -- they simply retain stale content at their
+  // old block indices once the block layout changes. This is harmless for the
+  // LINEAR X^i/beta^i (P_i/eta) solves: a multigrid V-cycle for a well-posed
+  // linear elliptic PDE with mg_zerofixed BCs converges to the same unique
+  // solution regardless of the initial guess -- a stale guess only costs a few
+  // extra V-cycles, not correctness. It is NOT harmless for the two NONLINEAR
+  // Newton solves (psi, alpha*psi): a Newton iteration seeded from a stale
+  // initial guess for a completely different block layout risks overshooting
+  // into psi<=0 (only caught by psi_floor_ as a last resort, not a substitute
+  // for a sane starting point). Resetting psi_seeded_/alpha_psi_seeded_ back to
+  // false forces InitializeMetric() to re-seed cleanly from adm.psi4/adm.alpha,
+  // which -- unlike CFC's own arrays -- IS properly CopyCC/CopyForRefinementCC/
+  // RefineCC'd across a regrid (the "else if (padm != nullptr)" branch in
+  // RedistAndRefineMeshBlocks, which fires for CFC runs since CFC never
+  // constructs pz4c).
+  //
+  // Note: mesh_refinement.cpp also narrows Step 11's existing
+  // "padm->SetADMVariables(...)" call to skip CFC runs (pcfc == nullptr guard),
+  // since that callback re-derives the metric from the pgen's STATIC t=0
+  // analytic/tabulated ID (e.g. SetADMVariablesToTOV/ToXNS) -- correct for a
+  // genuinely time-independent background, but would otherwise silently
+  // discard all of CFC's dynamical metric evolution since t=0 on every regrid.
+  // This method is what replaces it for CFC runs specifically.
+  void ReinitializeMetricForAMR(Driver *pdriver);
+
   // Task-graph entry points (TaskStatus(Driver*, int) is the signature
   // NumericalRelativity::QueueTask requires). Each is a thin wrapper around the
   // like-named private Step method below; kept separate so the "Step N" structure

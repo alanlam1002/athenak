@@ -544,6 +544,17 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
 void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_tilde,
                                                    int ngh) {
+  // Item 33 (DEVELOPMENT.md): this function's par_for loop bound below uses
+  // pmy_pack_->nmb_thispack directly (the CURRENT block count) rather than
+  // mglevels_'s own cached nmmb_ -- correct only if coeff_'s "m" dimension is
+  // already sized to match. Under dynamic AMR, cfc.cpp calls LoadMatterSource()
+  // BEFORE Solve() (whose own PrepareForAMR() is what normally keeps coeff_'s
+  // size in sync via ReallocateForAMR()) -- without this call, the very first
+  // LoadMatterSource() after a regrid writes into coeff_'s stale (pre-regrid)
+  // size, an out-of-bounds Kokkos::View access. ReallocateForAMR() is idempotent
+  // (a cheap early-return no-op whenever nmmb_ already matches nmb_thispack), so
+  // calling it here is safe regardless of whether Solve() already ran this cycle.
+  mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;
@@ -565,6 +576,8 @@ void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_til
 
 void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
     const DvceArray5D<Real> &a_sq, int ngh) {
+  // See LoadMatterSource's identical comment above (item 33, DEVELOPMENT.md).
+  mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;

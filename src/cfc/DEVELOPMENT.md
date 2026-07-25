@@ -4591,7 +4591,10 @@ src/cfc/
 32. **CFC's own member arrays are not wired into AthenaK's dynamic-AMR
     regrid path -- open, pre-existing gap, safe under every current test
     (2026-07-25, found in a separate session, recorded here for
-    completeness).**
+    completeness). RESOLVED 2026-07-26, see item 33 -- the fix actually
+    implemented there is NOT the field-by-field remap this item's own
+    "How to apply" bullet suggested; see item 33 for the design that was
+    used instead and why.**
     - `cfc::CFC`'s persistent member arrays (`u_x`, `u_beta`, `delta_psi`,
       `u_tilde`, `u_p_x`, `coarse_u_x`, etc.) are sized once in the
       constructor directly against `nmb_thispack`, with no `std::max(
@@ -4625,3 +4628,148 @@ src/cfc/
       `padm` already are (see those blocks for the pattern to follow:
       `DerefineCCSameRank`, `CopyCC`/`CopyForRefinementCC`/`RefineCC`, gated
       on `!= nullptr`).
+
+33. **Dynamic-AMR support for `cfc::CFC` -- implemented and verified working
+    (2026-07-26), closing item 32.**
+
+    Item 32's own suggested fix ("hook `pcfc` into `RedistAndRefineMeshBlocks`'s
+    remap path the same way `phydro`/`pz4c`/`padm` already are") turned out to
+    be the wrong shape for CFC specifically -- CFC's ~14 top-level arrays
+    (`delta_psi`, `u_x`, `u_p_x`, etc.) are all Newton-solve outputs / linear-
+    solve outputs, not genuinely-evolved conserved state the way `phydro->u0`/
+    `pz4c->u0` are, so field-by-field `DerefineCCSameRank`/`CopyCC`/
+    `CopyForRefinementCC`/`RefineCC` wiring for all 14 of them would have been
+    substantial, never-before-exercised new code for comparatively little
+    benefit. The design actually implemented instead mirrors `adm::ADM::
+    SetADMVariables` -- the existing escape hatch for metric fields not worth
+    restricting/prolonging field-by-field: re-derive the metric from a cheaper,
+    already-correctly-remapped source (here, `padm->adm.psi4`/`adm.alpha` plus
+    the primitives) rather than trying to carry CFC's own stale arrays across
+    the regrid.
+
+    **Design** (mechanical part, confirmed via 3 parallel Explore agents plus
+    direct reads of `driver.cpp`/`mesh_refinement.cpp`):
+    - `src/cfc/cfc.cpp`'s constructor: `int nmb = pmy_pack->nmb_thispack;`
+      became `int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->
+      nmb_maxperrank);` -- a one-line fix (mirrors `hydro.cpp`/`z4c.cpp`/
+      `adm.cpp`'s own idiom) that gives every one of CFC's ~20 constructor-
+      allocated arrays (14 primary + 6 `coarse_*` + the `mg_nghost`-depth
+      `u_p_src`) AMR headroom in one shot, since they all key off this single
+      local variable.
+    - New public method `CFC::ReinitializeMetricForAMR(Driver *pdriver)`
+      (`cfc.hpp`/`cfc.cpp`): resets the one-time `psi_seeded_`/
+      `alpha_psi_seeded_` flags to `false`, then calls `InitializeMetric(
+      pdriver)` verbatim (same Picard loop / `init_freeze_conserved` one-shot
+      mode, whichever `<cfc>` already selects). Resetting the seed flags is
+      the crux of the design: CFC's linear `X^i`/`beta^i` (`P_i`/`eta`) solves
+      don't care about their initial guess for correctness (a multigrid
+      V-cycle for a well-posed linear elliptic PDE with `mg_zerofixed` BCs
+      converges to the same unique solution regardless of starting point --
+      a stale guess only costs a few extra V-cycles), but the two NONLINEAR
+      Newton solves (`psi`, `alpha*psi`) genuinely do -- a bad starting point
+      risks Newton overshoot into `psi<=0` (`psi_floor_` is a last-resort
+      catch, not a substitute for a sane start). Forcing the reseed makes
+      `SolveConformalFactor`/`SolveLapse` re-seed from `adm.psi4`/`adm.alpha`,
+      which -- unlike CFC's own `delta_psi`/`delta_alpha_psi` -- IS properly
+      `CopyCC`'d across a regrid (confirmed: `RedistAndRefineMeshBlocks`'s
+      `else if (padm != nullptr) { CopyCC(padm->u_adm); }` branch at Step 6
+      fires for every CFC run, since CFC never constructs `pz4c`).
+    - `src/mesh/mesh_refinement.cpp`: `MeshRefinement::AdaptiveMeshRefinement`
+      calls `pmbp->pcfc->ReinitializeMetricForAMR(pdriver)` right after
+      `pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh)` and before any
+      `NewTimeStep` priming -- mirroring `Driver::Initialize()`'s own t=0
+      ordering exactly (primitives must be valid before the metric solve reads
+      them; the metric solve must run before the post-regrid dt estimate,
+      since GR timestep bounds read the lapse).
+    - Also in `mesh_refinement.cpp`: Step 11's existing `padm->
+      SetADMVariables(pm->pmb_pack)` call -- which already fires
+      unconditionally on every regrid for any `pz4c==nullptr && padm!=nullptr`
+      run, i.e. every CFC run today -- is now gated with an added
+      `&& (pm->pmb_pack->pcfc == nullptr)`. This closes a real, previously
+      undiscovered hazard found while implementing this item: CFC pgens
+      (`dyngr_tov.cpp`/`xns_rotstar.cpp`) set `SetADMVariables` to a callback
+      that re-derives the metric from the pgen's **static t=0** analytic/
+      tabulated initial data -- correct for the genuinely time-independent
+      backgrounds this callback mechanism was built for (Kerr-Schild, FLRW,
+      etc.), but for a CFC run it would silently discard all of CFC's
+      dynamical metric evolution since t=0 the moment AMR ever regridded. This
+      was latent (never triggered, since no CFC test used `refinement=
+      adaptive` before this item), not something introduced by this change --
+      but it had to be fixed as part of enabling dynamic AMR at all, since
+      `ReinitializeMetricForAMR` is what replaces its role for CFC runs.
+
+    **A second, deeper bug found and fixed while verifying the above** (not
+    anticipated by the design; found via bisection with temporary `std::cerr`
+    checkpoints plus `addr2line` against the actual crash backtrace, not
+    guesswork): the very first smoke test (small octant TOV setup, 8 root
+    MeshBlocks, `<mesh_refinement> refinement=adaptive`, a `min_max` density
+    criterion tuned to refine the block containing the star's core) crashed
+    with `Kokkos::View ERROR: out of bounds access ... extents [1,2,10,10,10]`
+    the moment the regrid-triggered `ReinitializeMetricForAMR` ran.
+    `addr2line` against the actual binary resolved the crash to
+    `MGCFCConformalFactorDriver::LoadMatterSource`'s host-side `par_for`
+    lambda. Root cause: `LoadMatterSource`/`LoadNonlinearCoefficient`
+    (`mg_cfc_conformal_factor.cpp`) and `LoadReactionCoefficient`
+    (`mg_cfc_lapse.cpp`) all use `pmy_pack_->nmb_thispack` directly (the
+    CURRENT, live block count) as their `par_for` loop bound when writing into
+    `mglevels_`'s own finest-level `coeff_` array -- but `coeff_`'s actual
+    allocated size is only kept in sync with the current block count inside
+    `Multigrid::ReallocateForAMR()`, which is called from `Solve()` (via
+    `PrepareForAMR()`). `cfc.cpp` calls `LoadMatterSource`/
+    `LoadNonlinearCoefficient`/`LoadReactionCoefficient` **before** calling
+    `Solve()` (`SolveConformalFactor`/`SolveLapse`'s existing call order,
+    unrelated to this item) -- so the very first call to these functions after
+    a regrid writes into `coeff_`'s still-stale (pre-regrid) allocation,
+    reading/writing out of bounds. This is a genuinely pre-existing latent bug
+    (not introduced by this item's own design above), just never triggered
+    before since no CFC test previously changed `nmb_thispack` mid-run.
+    `MGCFCVectorPoissonDriver::LoadPoissonSource` has the same "called before
+    Solve()" shape, but its underlying `Multigrid::LoadSource()` reads its own
+    cached `nmmb_` (not `pmy_pack_->nmb_thispack` directly) for both the loop
+    bound and the array's own size, so it stays internally self-consistent --
+    no crash, but a real correctness gap (newly-created blocks after a regrid
+    would silently keep a zero source instead of the freshly-loaded one, until
+    whatever next call happens to follow `Solve()`).
+
+    **Fix**: added `mglevels_->ReallocateForAMR();` as the first line of all
+    four functions (`LoadMatterSource`, `LoadNonlinearCoefficient`,
+    `LoadReactionCoefficient`, `LoadPoissonSource`). `ReallocateForAMR()` is
+    already idempotent (an early-return no-op whenever its cached `nmmb_`
+    already matches `pmy_pack_->nmb_thispack`), so this is safe and cheap
+    regardless of whether `Solve()` already ran this cycle.
+
+    **Verification**: a dedicated new test,
+    `/sakura/ptmp/tlam/athenak_run/cfc_amr_dynamic_check/` (octant-symmetric
+    TOV star, `rhoc=1.28e-3`, 8 root MeshBlocks at very coarse resolution
+    (`dx=1.6`), `<mesh_refinement> refinement=adaptive` with a `min_max`
+    density criterion tuned to refine the star's core block on the very first
+    check, `refinement_interval=0` to allow immediate refinement, `nlim=4`) --
+    no existing CFC input exercises `refinement=adaptive` at all, so this is a
+    from-scratch smoke test, not a resolution/accuracy study. After the fix:
+    the run completes cleanly through `nlim=4` with a real regrid event (`7
+    MeshBlocks created, 0 deleted by AMR`, `Current number of MeshBlocks =
+    15`), `CFC::InitializeMetric` visibly re-fires and re-converges right after
+    the regrid (`iteration 0: max|delta psi| = 5.3e-2` -> `iteration 2:
+    0.0`, confirming `ReinitializeMetricForAMR` actually ran), and the
+    reported baryon mass is continuous across the regrid event to ~7
+    significant figures (`0.19141739284` immediately before -> `0.19141739271`
+    immediately after) -- no discontinuity/glitch from the metric re-solve.
+    Per-rank output (`srun --output=perrank/rank_%t.out`) confirmed zero
+    `### FATAL ERROR` and zero crash signals on any of the 8 ranks; the only
+    warnings present (`Error occurred in PrimToCons`/NaN-then-reset messages,
+    `dyn_error=reset_floor` recovering) are pre-existing floor/atmosphere
+    noise from this smoke test's deliberately tiny `dfloor=1e-10` at very
+    coarse resolution -- already present in the very first pre-fix test run,
+    unrelated to AMR, and non-fatal by design.
+
+    **Known limitation, not addressed by this item**: `ReinitializeMetricForAMR`
+    reruns `InitializeMetric`'s full default iterative Picard loop (up to
+    `cfc_init_iter_max_` iterations) on every regrid event -- correct, but
+    potentially a real cost for a run that regrids often. A cheaper, regrid-
+    specific mode (e.g. always using the one-shot `init_freeze_conserved`-style
+    pass for regrids regardless of what's configured for t=0) is a plausible
+    future refinement, not attempted here (correctness first). Also still
+    open: whether `refinement=adaptive` is production-worthy for a real
+    (non-smoke-test) CFC physics run -- this item only establishes that the
+    mechanism itself works correctly, not that any specific science case
+    should switch to it.

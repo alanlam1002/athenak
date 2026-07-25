@@ -6,6 +6,7 @@
 //! \file cfc.cpp
 //! \brief implementation of the CFC class
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 
@@ -145,7 +146,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     coarse_u_pietabeta("cfc_coarse_u_pietabeta", 1, 1, 1, 1, 1),
     pbval_adm(nullptr),
     coarse_u_adm("cfc_coarse_u_adm", 1, 1, 1, 1, 1) {
-  int nmb = pmy_pack->nmb_thispack;
+  // Sized with AMR headroom (matches hydro.cpp/z4c.cpp/adm.cpp's own
+  // std::max(nmb_thispack, nmb_maxperrank) convention) so that a dynamic-AMR
+  // regrid never needs to reallocate any of CFC's own arrays -- see
+  // DEVELOPMENT.md item 33 and CFC::ReinitializeMetricForAMR.
+  int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
   // "Physical" CFC fields: every field that is either finite-differenced by
@@ -544,7 +549,13 @@ void CFC::InitializeMetric(Driver *pdriver) {
     // not "how far the one-shot solve moved psi from its starting guess" --
     // recompute the same seed formula directly from adm.psi4 instead.
     int nmb = pmy_pack->nmb_thispack;
-    DvceArray5D<Real> psi_before("cfc_init_psi_before", nmb, 1,
+    // Allocation size must match delta_psi's own (AMR-headroom-sized) extent --
+    // NOT nmb_thispack -- or the deep_copy/pointwise ops below (which read/write
+    // both arrays at the same index) hit a Kokkos extent-mismatch abort the
+    // moment nmb_maxperrank > nmb_thispack (see DEVELOPMENT.md item 33). The
+    // par_for/MDRangePolicy loop bounds below still correctly use nmb
+    // (nmb_thispack) -- only the currently-resident blocks need touching.
+    DvceArray5D<Real> psi_before("cfc_init_psi_before", delta_psi.extent_int(0), 1,
                                   delta_psi.extent_int(2), delta_psi.extent_int(3),
                                   delta_psi.extent_int(4));
     auto &adm_ = pmy_pack->padm->adm;
@@ -581,7 +592,10 @@ void CFC::InitializeMetric(Driver *pdriver) {
     }
   } else {
     int nmb = pmy_pack->nmb_thispack;
-    DvceArray5D<Real> psi_old("cfc_init_psi_old", nmb, 1,
+    // See the identical comment on psi_before above (item 33, DEVELOPMENT.md):
+    // allocation size must match delta_psi's own AMR-headroom-sized extent, not
+    // nmb_thispack, for the deep_copy/relax ops below to have matching extents.
+    DvceArray5D<Real> psi_old("cfc_init_psi_old", delta_psi.extent_int(0), 1,
                                delta_psi.extent_int(2), delta_psi.extent_int(3),
                                delta_psi.extent_int(4));
 
@@ -687,6 +701,18 @@ void CFC::InitializeMetric(Driver *pdriver) {
 
   ClearTailFields();
   return;
+}
+
+//----------------------------------------------------------------------------------------
+// See cfc.hpp's doc comment on this method for the full rationale (item 33,
+// DEVELOPMENT.md). Forces InitializeMetric()'s one-time psi/alpha_psi seeding to
+// fire again, re-seeding from the just-remapped adm.psi4/adm.alpha rather than
+// reusing CFC's own (post-regrid, block-layout-mismatched) delta_psi/
+// delta_alpha_psi as a Newton starting point.
+void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
+  psi_seeded_ = false;
+  alpha_psi_seeded_ = false;
+  InitializeMetric(pdriver);
 }
 
 //----------------------------------------------------------------------------------------

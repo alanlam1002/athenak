@@ -29,6 +29,7 @@
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "coordinates/adm.hpp"
+#include "cfc/cfc.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_amr.hpp"
@@ -156,6 +157,15 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 
     MeshBlockPack *pmbp = pmy_mesh->pmb_pack;
     pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh);
+
+    // CFC's own metric re-solve (item 33, DEVELOPMENT.md): must run after
+    // primitives are valid on the new mesh (above) and before any NewTimeStep
+    // priming below (GR timestep bounds read the lapse) -- mirrors
+    // Driver::Initialize()'s own t=0 ordering (InitBoundaryValuesAndPrimitives,
+    // then pcfc->InitializeMetric(), then the initial dt calc).
+    if (pmbp->pcfc != nullptr) {
+      pmbp->pcfc->ReinitializeMetricForAMR(pdriver);
+    }
 
     if (pmbp->phydro != nullptr) {
       (void) pmbp->phydro->NewTimeStep(pdriver, pdriver->nexp_stages);
@@ -660,8 +670,16 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   // Step 11.
   // Initialize quantities stored on the mesh associated with each physics, if necessary
   if ((nnew > 0) || (ndel > 0)) {
-    // With dynGRMHD, recalculate ADM variables
-    if ((pz4c == nullptr) && (padm != nullptr)) {
+    // With dynGRMHD, recalculate ADM variables. Skipped for CFC runs (item 33,
+    // DEVELOPMENT.md): pgen-supplied SetADMVariables callbacks (e.g.
+    // SetADMVariablesToTOV/ToXNS) re-derive the metric from the STATIC t=0
+    // analytic/tabulated initial data -- correct for a genuinely
+    // time-independent background, but would silently discard all of CFC's
+    // dynamical metric evolution since t=0 on every regrid. CFC's own
+    // AdaptiveMeshRefinement()-invoked ReinitializeMetricForAMR() (called later,
+    // once primitives are valid on the new mesh) is what replaces this for CFC
+    // runs specifically.
+    if ((pz4c == nullptr) && (padm != nullptr) && (pm->pmb_pack->pcfc == nullptr)) {
       padm->SetADMVariables(pm->pmb_pack);
     }
     // With radiation, compute tetrads and associated mesh arrays

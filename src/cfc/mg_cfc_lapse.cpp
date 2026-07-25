@@ -401,6 +401,10 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
 void MGCFCLapseDriver::LoadReactionCoefficient(
     const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
     const DvceArray5D<Real> &a_sq, int ngh) {
+  // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment (item 33,
+  // DEVELOPMENT.md) -- this function is called before Solve() (whose own
+  // PrepareForAMR() would otherwise keep coeff_'s size in sync), so force it here.
+  mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
   auto &indcs = pmy_pack_->pmesh->mb_indcs;

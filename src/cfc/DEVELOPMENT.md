@@ -107,13 +107,25 @@ its Riemann solver and conserved-to-primitive conversion.
 ## `U_raw*psi^5` alternative to `InitializeMetric()`'s psi Newton solve
 ## (compile-time-templated via `<cfc> init_use_psi5_source`) as another
 ## attempt at item 24. Diverges to NaN on the migration test (extreme
-## compactness, `2M/R~0.5`) even under heavy Newton damping -- item 24
-## remains OPEN, that input now explicitly sets `init_use_psi5_source=false`.
-## But it converges cleanly and accurately -- and much faster (2-3 outer
-## iterations vs. 25-80+) -- for both the mild "BU0" star and the rotating
-## "BU8" star, so as of 2026-07-25 it is `InitializeMetric()`'s new DEFAULT
-## for every other star (item 28). Per-stage `CFC_SolvePsi` is unaffected
-## either way.
+## compactness, `2M/R~0.5`) even under heavy Newton damping -- that input now
+## explicitly sets `init_use_psi5_source=false`. But it converges cleanly and
+## accurately -- and much faster (2-3 outer iterations vs. 25-80+) -- for both
+## the mild "BU0" star and the rotating "BU8" star, so as of 2026-07-25 it is
+## `InitializeMetric()`'s new DEFAULT for every other star (item 28).
+## Per-stage `CFC_SolvePsi` is unaffected either way.
+##
+## Status update (2026-07-25, #3): item 29 (same day, different mechanism)
+## appears to actually RESOLVE item 24 for the migration test: a new
+## `<cfc> init_freeze_conserved` one-shot mode, freezing Utilde/S-tilde_i at
+## the pgen's own initial metric guess and solving X^i/psi exactly ONCE (no
+## outer Picard loop at all), reproduces the analytic TOV solution to
+## `~0.01-0.03%` on the migration test's own compact star -- vs. the default
+## iterative mode's known-wrong `~0.376-0.71` ratio -- and is equally accurate
+## on the mild "BU0" star. Opt-in, default `false` (unlike item 28's default
+## flip, this one hasn't been made default anywhere yet). Item 24 is very
+## likely closeable via this item; see item 29 for the full result and what's
+## still untested (longer dynamical runs, combining with `init_use_psi5_
+## source=true`).
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4002,6 +4014,15 @@ src/cfc/
       systematically wrong fixed point, only its convergence path). Kept in
       the code as a generically useful, zero-risk-when-unused knob, not
       reverted.
+    - **See also items 27-29 (2026-07-25)**: three different follow-up
+      attempts at this item's own "not yet resolved" state above. Items
+      27-28 (`psi^5` Newton formulation) diverge for this exact star, ruled
+      out here specifically (though made the new default for milder stars).
+      Item 29 (`init_freeze_conserved`, a one-shot mode that sidesteps the
+      outer Picard loop described above entirely) reproduces the analytic
+      solution to `~0.01-0.03%` on this same star -- appears to actually
+      RESOLVE this item, pending the user's own confirmation before marking
+      it closed outright.
 
 25. **Robin BC implemented at the octet (AMR-refined) level of
     `MultigridDriver::ApplyPhysicalBoundariesOctet` (2026-07-24) -- closes
@@ -4300,3 +4321,90 @@ src/cfc/
       what was actually tested. A future user hitting an unexpected NaN
       during `InitializeMetric()` for a new, very compact star should try
       `init_use_psi5_source=false` first, per this item.
+
+29. **"Frozen-conserved" one-shot `InitializeMetric()` mode (`<cfc>
+    init_freeze_conserved`): appears to RESOLVE item 24's wrong-psi problem
+    for the migration test (2026-07-25).**
+    - **Motivation**: item 24 traced the migration test's wrong-psi
+      convergence to the outer Picard loop's own repeated re-freezing of
+      `Ũ = psi^6*U` against an evolving metric (not the discretized equation
+      itself -- that same investigation already found a single V-cycle seeded
+      from the exact analytic solution reproduces the star's center to
+      `~0.00045`). Items 27/28 tried fixing this via the Newton kernel's own
+      formulation (`psi^5`) -- that diverges for this star. The user's
+      alternative: stop rebuilding `Ũ`/`S-tilde_i` from fixed primitives
+      against an evolving metric every outer iteration; instead call
+      `PrimToConInit` ONCE, using whatever metric the pgen's own initial data
+      already provides, and hold the resulting `Ũ`/`S-tilde_i` fixed while
+      solving `X^i -> Adual^ij -> psi` exactly once -- "the same as doing one
+      CFC step," no outer loop, no convergence check. The implied primitives
+      may not exactly match the pgen's original ones afterward -- an accepted
+      tradeoff, the same one every per-stage `CFC_SolvePsi` call already lives
+      with (it never re-derives primitives from the converged metric either).
+    - **Design**: `InitializeMetric()`'s Picard-loop body (`PrimToConInit`,
+      `InitRecvXFields`, `SolveVectorPotential` + ghost exchange,
+      `ReconstructVectorPotential` + ghost exchange, `ClearXFields`,
+      `ComputeADual`, `SolveConformalFactor`) was extracted verbatim into a new
+      private method, `CFC::RunXPsiSolvePass(Driver*)` (`cfc.cpp`/`cfc.hpp`) --
+      a pure extract-method refactor, zero behavior change for the existing
+      iterative path (confirmed: nothing in the extracted block reads/writes
+      state that isn't already re-derived fresh each call). New `<cfc>`
+      boolean `init_freeze_conserved` (default `false`) selects a top-level
+      branch in `InitializeMetric()`: `true` calls `RunXPsiSolvePass` exactly
+      once (plus an informational `max|delta_psi - initial guess|` print if
+      `init_verbose`, no convergence gate -- there's nothing to converge);
+      `false` runs the pre-existing `for` loop (`psi_old`/`omega`-blend/
+      `dpsi`-check/`converged` bookkeeping, all unchanged, just now calling
+      `RunXPsiSolvePass` once per iteration instead of the inlined sequence).
+      Both branches fall through into the completely unmodified tail section
+      (final refresh `PrimToConInit`, `RescaleMatterSources`, `SolveLapse`,
+      ghost-exchange, `SolveShift`, `ReconstructShift`, `AssembleADM`,
+      ghost-exchange `ADM`) -- that section already runs exactly once
+      regardless of how many (if any) outer iterations happened, so it needed
+      no changes at all. Orthogonal to `cfc_init_use_psi5_` (items 27/28):
+      `RunXPsiSolvePass` calls `SolveConformalFactor` with whatever that flag
+      is already set to, either way.
+    - **Verified**: rebuilt `build_cfc`/`build_cfc_xns` cleanly.
+      **Regression check** (`cfc_migration_freezecons_regression/`, job
+      249216, `init_freeze_conserved=false` explicit, `init_use_psi5_source=
+      false` explicit): converges in ~82 iterations with the exact same
+      geometric-decay pattern as item 24's own original finding, ending at the
+      same known-wrong `psi^4` ratio (`~0.376` at center, `~0.71` at the edge)
+      -- confirms the extract-method refactor is byte-identical to the
+      pre-refactor iterative path. **New-mode test** (`cfc_migration_
+      freezecons_check/`, job 249217, `init_freeze_conserved=true`,
+      `init_use_psi5_source=false`): no NaN, no FATAL, one-shot pass reports
+      `max|delta psi - initial guess| = 0.558946`. Pointwise `psi^4`-vs-
+      analytic comparison (same `plot_slice.py --dump-npz` +
+      `tov_reintegrate.py` pipeline used throughout this investigation):
+      **ratio 0.9997-1.0000 from the star's center out to the edge** -- i.e.
+      this one-shot pass is as accurate as (matching or slightly exceeding)
+      item 24's own "exact analytic seed + 1 V-cycle" reference result,
+      dramatically better than the iterative default's `~0.376-0.71`.
+      **BU0 sanity check** (`cfc_bu0_freezecons_check/`, job 249219,
+      `init_freeze_conserved=true`, `init_use_psi5_source=false`, the same
+      mild TOV1 star from items 27/28): also clean, `ratio 0.9999-1.0000`
+      throughout -- confirms the new mode doesn't regress an already-working
+      case, and is at least as accurate as (if not marginally better than)
+      both the iterative default and the `psi^5` formulation for this star.
+    - **Conclusion**: this appears to genuinely RESOLVE the migration test's
+      wrong-psi problem -- unlike items 27/28's `psi^5` attempt (which fixed
+      the same root cause conceptually but proved numerically unstable for
+      this exact star), the frozen-conserved one-shot approach sidesteps the
+      outer Picard loop ENTIRELY rather than trying to make one Newton solve
+      more self-consistent, and empirically works cleanly for both the
+      compact/unstable star that broke everything else tried so far AND the
+      mild star. Item 24 is very likely CLOSEABLE via this item, pending the
+      user's own confirmation/decision (not marked closed unilaterally here --
+      unlike items 27/28, no default was changed by this item; `<cfc>
+      init_freeze_conserved` stays opt-in, default `false`, so every existing
+      input's behavior is unaffected unless explicitly set).
+    - **Not yet tested**: combining `init_freeze_conserved=true` with
+      `init_use_psi5_source=true` (both defaults/settings independent, never
+      tried together); whether the one-shot pass's implied primitive mismatch
+      (the tradeoff the user flagged up front) is small enough in practice to
+      not matter for subsequent dynamical evolution (only the metric-init
+      pass itself was checked here, `nlim=1` -- a longer run through several
+      cycles/stages, and a mass-conservation check analogous to items 22/23's
+      own `.mhd.hst` diagnostics, would be the natural next step before
+      switching the migration test's own production run over to this mode).

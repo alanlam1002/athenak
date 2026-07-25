@@ -263,6 +263,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // auto-detect or fall back, a bad guess here produces real NaN corruption,
   // not a graceful degradation.
   cfc_init_use_psi5_ = pin->GetOrAddBoolean("cfc", "init_use_psi5_source", true);
+  // 2026-07-25 (item 29, DEVELOPMENT.md): default false -- byte-identical to
+  // the pre-existing Picard-iteration behavior unless explicitly enabled.
+  cfc_init_freeze_conserved_ = pin->GetOrAddBoolean("cfc", "init_freeze_conserved",
+                                                     false);
 }
 
 //----------------------------------------------------------------------------------------
@@ -426,6 +430,49 @@ void CFC::ClearTailFields() {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::RunXPsiSolvePass(Driver *pdriver)
+//! \brief Item 29 (DEVELOPMENT.md): one pass of "refresh cons from the fixed
+//! primitives + current metric, solve X^i, ghost-exchange, compute Adual^ij/
+//! Ahat^2, solve psi" -- extracted verbatim from InitializeMetric()'s own
+//! Picard-loop body so it can be called either repeatedly (the default,
+//! iterative path) or exactly once (<cfc> init_freeze_conserved=true).
+
+void CFC::RunXPsiSolvePass(Driver *pdriver) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+
+  // Refresh conserved variables from the fixed primitives + current metric
+  // (padm->adm.g_dd, as of the previous call's AssembleConformalMetric -- or the
+  // pgen's own raw guess, on the very first call this run ever makes).
+  pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+
+  InitRecvXFields();
+
+  // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve the
+  // packed (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
+  SolveVectorPotential(pdriver, 0);
+  RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
+  while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongPiEtaXTask(pdriver, 0);
+
+  ReconstructVectorPotential();
+  RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
+  while (RecvXTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongXTask(pdriver, 0);
+
+  ClearXFields();
+
+  // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this is what
+  // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for whatever comes
+  // next (the next Picard iteration's PrimToConInit, or -- one-shot mode -- the
+  // tail section's own "final refresh" PrimToConInit).
+  ComputeADual();
+  SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void CFC::InitializeMetric(Driver *pdriver)
 //! \brief Item 11 (DEVELOPMENT.md): see the public doc comment in cfc.hpp. Runs the
 //! X^i/psi fixed-point iteration (PrimToCons <-> vector-Poisson/conformal-factor
@@ -437,109 +484,127 @@ void CFC::ClearTailFields() {
 //! feed into), solves lapse/shift once (they don't feed back into X^i/psi's own
 //! equations) and does the final padm->u_adm ghost exchange, mirroring the tail of
 //! QueueCFCTasks() exactly.
+//!
+//! Item 29 (DEVELOPMENT.md): <cfc> init_freeze_conserved selects a second mode --
+//! RunXPsiSolvePass() called exactly once instead of iterated, see
+//! cfc_init_freeze_conserved_'s doc comment in cfc.hpp.
 
 void CFC::InitializeMetric(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
-  int nmb = pmy_pack->nmb_thispack;
 
-  DvceArray5D<Real> psi_old("cfc_init_psi_old", nmb, 1,
-                             delta_psi.extent_int(2), delta_psi.extent_int(3),
-                             delta_psi.extent_int(4));
+  if (cfc_init_freeze_conserved_) {
+    // Item 29 (DEVELOPMENT.md): one-shot mode -- Utilde/S-tilde_i are built
+    // exactly once (inside RunXPsiSolvePass, from the pgen's own initial metric
+    // guess) and held fixed; no outer Picard loop, no convergence check (there
+    // is nothing being iterated to convergence). Falls through into the same
+    // tail section the iterative path also uses, unchanged.
+    int nmb = pmy_pack->nmb_thispack;
+    DvceArray5D<Real> psi_before("cfc_init_psi_before", nmb, 1,
+                                  delta_psi.extent_int(2), delta_psi.extent_int(3),
+                                  delta_psi.extent_int(4));
+    Kokkos::deep_copy(psi_before, delta_psi);
 
-  bool converged = false;
-  for (int iter = 0; iter < cfc_init_iter_max_; ++iter) {
-    Kokkos::deep_copy(psi_old, delta_psi);
+    RunXPsiSolvePass(pdriver);
 
-    // Refresh conserved variables from the fixed primitives + current metric
-    // (padm->adm.g_dd, as of the previous iteration's AssembleConformalMetric, or
-    // the pgen's own raw guess on the very first iteration).
-    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
-
-    InitRecvXFields();
-
-    // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve the
-    // packed (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
-    SolveVectorPotential(pdriver, 0);
-    RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
-    while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
-    ProlongPiEtaXTask(pdriver, 0);
-
-    ReconstructVectorPotential();
-    RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
-    while (RecvXTask(pdriver, 0) != TaskStatus::complete) {}
-    ProlongXTask(pdriver, 0);
-
-    ClearXFields();
-
-    // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this is what
-    // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for the next
-    // iteration's PrimToConInit.
-    ComputeADual();
-    SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
-
-    // Under-relax the just-solved psi against the previous iteration's value
-    // (cfc_init_omega_ < 1) when the plain Picard step is unstable (found for a
-    // more compact/relativistic star than any previously tested here -- see
-    // cfc_init_omega_'s doc comment in cfc.hpp). SolveConformalFactor() already
-    // wrote the unrelaxed solve into delta_psi and used it to update
-    // padm->adm.g_dd/psi4 via AssembleConformalMetric -- blend delta_psi back down
-    // here and re-run AssembleConformalMetric so g_dd/psi4 reflect the relaxed
-    // value the next iteration's PrimToConInit actually sees. Both are interior-
-    // only (is..ie), matching AssembleConformalMetric's own pointwise, no-ghost-
-    // dependency implementation (cfc_reconstruct.cpp), so no ghost exchange is
-    // needed either way. omega=1.0 (the default) skips this entirely -- byte-
-    // identical to the original unrelaxed iteration.
-    if (cfc_init_omega_ != 1.0) {
-      Real omega = cfc_init_omega_;
-      auto &psi_relax = delta_psi;
-      auto &psi_old_relax = psi_old;
-      par_for("cfc_init_relax_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
-      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-        psi_relax(m,0,k,j,i) = (1.0 - omega)*psi_old_relax(m,0,k,j,i) +
-                                omega*psi_relax(m,0,k,j,i);
-      });
-      cfc::AssembleConformalMetric(pmy_pack, delta_psi);
-    }
-
-    // A difference of two same-convention values (both delta_psi, one from before
-    // this iteration's solve, one after), so it's unaffected by whether delta_psi
-    // stores psi-1 or psi itself.
-    Real dpsi = 0.0;
-    auto &psi_ = delta_psi;
-    auto &psi_old_ = psi_old;
-    Kokkos::parallel_reduce("cfc_init_dpsi",
-      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
-                                                            {nmb, ke+1, je+1, ie+1}),
-      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
-                    Real &local_max) {
-        local_max = Kokkos::fmax(local_max,
-                                  Kokkos::fabs(psi_(m,0,k,j,i) - psi_old_(m,0,k,j,i)));
-      }, Kokkos::Max<Real>(dpsi));
+    if (cfc_init_verbose_) {
+      Real dpsi = 0.0;
+      auto &psi_ = delta_psi;
+      auto &psi_before_ = psi_before;
+      Kokkos::parallel_reduce("cfc_init_dpsi_oneshot",
+        Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                              {nmb, ke+1, je+1, ie+1}),
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+                      Real &local_max) {
+          local_max = Kokkos::fmax(local_max,
+                            Kokkos::fabs(psi_(m,0,k,j,i) - psi_before_(m,0,k,j,i)));
+        }, Kokkos::Max<Real>(dpsi));
 #if MPI_PARALLEL_ENABLED
-    Real global_dpsi = 0.0;
-    MPI_Allreduce(&dpsi, &global_dpsi, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-    dpsi = global_dpsi;
+      Real global_dpsi = 0.0;
+      MPI_Allreduce(&dpsi, &global_dpsi, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+      dpsi = global_dpsi;
 #endif
-    if (cfc_init_verbose_ && global_variable::my_rank == 0) {
-      std::cout << "CFC::InitializeMetric iteration " << iter
-                << ": max|delta psi| = " << dpsi << std::endl;
+      if (global_variable::my_rank == 0) {
+        std::cout << "CFC::InitializeMetric: one-shot frozen-conserved pass complete"
+                  << " (<cfc> init_freeze_conserved=true, no outer iteration)."
+                  << " max|delta psi - initial guess| = " << dpsi << std::endl;
+      }
     }
-    if (dpsi < cfc_init_tol_) {
-      converged = true;
-      break;
-    }
-  }
+  } else {
+    int nmb = pmy_pack->nmb_thispack;
+    DvceArray5D<Real> psi_old("cfc_init_psi_old", nmb, 1,
+                               delta_psi.extent_int(2), delta_psi.extent_int(3),
+                               delta_psi.extent_int(4));
 
-  if (!converged && global_variable::my_rank == 0) {
-    std::cout << "### WARNING in CFC::InitializeMetric" << std::endl
-              << "X^i/psi fixed-point iteration did not converge after "
-              << cfc_init_iter_max_ << " iterations (<cfc>/init_iter_max)."
-              << " Proceeding with the current (non-converged) metric -- increase"
-              << " init_iter_max or loosen <cfc>/init_tol if this is unexpected."
-              << std::endl;
+    bool converged = false;
+    for (int iter = 0; iter < cfc_init_iter_max_; ++iter) {
+      Kokkos::deep_copy(psi_old, delta_psi);
+
+      RunXPsiSolvePass(pdriver);
+
+      // Under-relax the just-solved psi against the previous iteration's value
+      // (cfc_init_omega_ < 1) when the plain Picard step is unstable (found for a
+      // more compact/relativistic star than any previously tested here -- see
+      // cfc_init_omega_'s doc comment in cfc.hpp). SolveConformalFactor() already
+      // wrote the unrelaxed solve into delta_psi and used it to update
+      // padm->adm.g_dd/psi4 via AssembleConformalMetric -- blend delta_psi back
+      // down here and re-run AssembleConformalMetric so g_dd/psi4 reflect the
+      // relaxed value the next iteration's PrimToConInit actually sees. Both are
+      // interior-only (is..ie), matching AssembleConformalMetric's own pointwise,
+      // no-ghost-dependency implementation (cfc_reconstruct.cpp), so no ghost
+      // exchange is needed either way. omega=1.0 (the default) skips this
+      // entirely -- byte-identical to the original unrelaxed iteration.
+      if (cfc_init_omega_ != 1.0) {
+        Real omega = cfc_init_omega_;
+        auto &psi_relax = delta_psi;
+        auto &psi_old_relax = psi_old;
+        par_for("cfc_init_relax_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          psi_relax(m,0,k,j,i) = (1.0 - omega)*psi_old_relax(m,0,k,j,i) +
+                                  omega*psi_relax(m,0,k,j,i);
+        });
+        cfc::AssembleConformalMetric(pmy_pack, delta_psi);
+      }
+
+      // A difference of two same-convention values (both delta_psi, one from
+      // before this iteration's solve, one after), so it's unaffected by whether
+      // delta_psi stores psi-1 or psi itself.
+      Real dpsi = 0.0;
+      auto &psi_ = delta_psi;
+      auto &psi_old_ = psi_old;
+      Kokkos::parallel_reduce("cfc_init_dpsi",
+        Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                              {nmb, ke+1, je+1, ie+1}),
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+                      Real &local_max) {
+          local_max = Kokkos::fmax(local_max,
+                                    Kokkos::fabs(psi_(m,0,k,j,i) - psi_old_(m,0,k,j,i)));
+        }, Kokkos::Max<Real>(dpsi));
+#if MPI_PARALLEL_ENABLED
+      Real global_dpsi = 0.0;
+      MPI_Allreduce(&dpsi, &global_dpsi, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+      dpsi = global_dpsi;
+#endif
+      if (cfc_init_verbose_ && global_variable::my_rank == 0) {
+        std::cout << "CFC::InitializeMetric iteration " << iter
+                  << ": max|delta psi| = " << dpsi << std::endl;
+      }
+      if (dpsi < cfc_init_tol_) {
+        converged = true;
+        break;
+      }
+    }
+
+    if (!converged && global_variable::my_rank == 0) {
+      std::cout << "### WARNING in CFC::InitializeMetric" << std::endl
+                << "X^i/psi fixed-point iteration did not converge after "
+                << cfc_init_iter_max_ << " iterations (<cfc>/init_iter_max)."
+                << " Proceeding with the current (non-converged) metric -- increase"
+                << " init_iter_max or loosen <cfc>/init_tol if this is unexpected."
+                << std::endl;
+    }
   }
 
   // Final refresh: cons must reflect the fixed primitives against the FINAL

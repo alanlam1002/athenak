@@ -217,6 +217,23 @@ class CFC {
   // Utilde*psi^-1) formulation regardless of this setting.
   bool cfc_init_use_psi5_;
 
+  // 2026-07-25: <cfc> init_freeze_conserved (default false, see item 29,
+  // DEVELOPMENT.md). When true, InitializeMetric() calls RunXPsiSolvePass()
+  // exactly ONCE instead of iterating it in a Picard loop: Utilde/S-tilde_i
+  // (the weighted/densitized conserved matter source) are built once from the
+  // pgen's own initial metric guess and held fixed, rather than being rebuilt
+  // from fixed primitives against an evolving metric every outer iteration --
+  // "the same as doing one CFC step," with no outer convergence loop at all.
+  // Motivated by item 24's own finding that a single V-cycle seeded from the
+  // exact analytic solution is highly accurate for the migration test's
+  // compact star, unlike the ~80-iteration outer loop, which drifts to a
+  // wrong fixed point. The resulting metric's implied primitives may not
+  // exactly match the pgen's original ones -- an accepted tradeoff, the same
+  // one every per-stage CFC_SolvePsi call already lives with. Orthogonal to
+  // cfc_init_use_psi5_ above (RunXPsiSolvePass respects whatever that's set
+  // to either way).
+  bool cfc_init_freeze_conserved_;
+
   // Post-multigrid ghost exchange, one MeshBoundaryValuesCC + coarse shadow array per
   // field that cfc_reconstruct.cpp later finite-differences (mirrors
   // z4c::Z4c::pbval_u/coarse_u0 exactly; is_z4c=false throughout since CFC is not
@@ -303,6 +320,13 @@ class CFC {
   // Takes a real Driver* (not nullptr): the per-field multigrid solves' own
   // internal iteration caps use it to gracefully truncate the run on failure
   // (pdriver->nlim = ...), which would segfault on a null pointer.
+  //
+  // 2026-07-25 (item 29, DEVELOPMENT.md): <cfc> init_freeze_conserved (default
+  // false) selects a second mode -- instead of the Picard loop described above
+  // (fixed primitives, conserved state and X^i/psi re-solved every iteration
+  // against an evolving metric), call RunXPsiSolvePass() exactly ONCE, freezing
+  // Utilde/S-tilde_i at whatever the pgen's own initial metric guess implies.
+  // See cfc_init_freeze_conserved_'s doc comment (below) for the full rationale.
   void InitializeMetric(Driver *pdriver);
 
   // Task-graph entry points (TaskStatus(Driver*, int) is the signature
@@ -432,6 +456,16 @@ class CFC {
   // cfc::AssembleLapseShiftK). psi4/g_dd were already written by
   // SolveConformalFactor(), right after step 3.
   void AssembleADM();
+
+  // 2026-07-25 (item 29, DEVELOPMENT.md): one pass of "refresh cons from the
+  // fixed primitives + current metric, solve X^i, ghost-exchange, compute
+  // Adual^ij/Ahat^2, solve psi" -- extracted from InitializeMetric()'s own loop
+  // body (a pure refactor, no behavior change for the existing iterative path)
+  // so it can be called either repeatedly (Picard iteration, the default) or
+  // exactly once (<cfc> init_freeze_conserved=true, see
+  // cfc_init_freeze_conserved_'s doc comment above). Always uses stage=0,
+  // matching every other InitializeMetric()-internal call.
+  void RunXPsiSolvePass(Driver *pdriver);
 
   // Item 11 (DEVELOPMENT.md): InitializeMetric() runs its X^i/psi fixed-point loop
   // entirely outside the normal per-stage task graph (it can't reuse it -- a single

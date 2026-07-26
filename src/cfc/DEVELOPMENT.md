@@ -169,9 +169,12 @@ its Riemann solver and conserved-to-primitive conversion.
 ## same rank (item 33's own single-rank test) -- NOT yet safe for a real
 ## multi-rank production run whose load balancer moves blocks across ranks,
 ## until item 34 is fixed. (3) item 29 also gained a related primitive-
-## recovery bug fix, independent of AMR, which reopens item 30's own
-## still-unresolved `tlim=200` anomaly as a question again (see item 29's and
-## item 30's own updated text) -- not yet re-tested.
+## recovery bug fix, independent of AMR, which reopened item 30's own
+## still-unresolved `tlim=200` anomaly as a question -- RE-TESTED and
+## CONFIRMED (2026-07-26): the same `tlim=200` run with the fix shows clean,
+## physically sensible migrate-and-ring-down behavior throughout, with no
+## density collapse and no mass jump. Item 30 is now CLOSED (see item 29's
+## and item 30's own updated text for the full result).
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4552,19 +4555,23 @@ src/cfc/
       (would need an added diagnostic; the structural correctness of
       `ConToPrim` replacing `PrimToConInit` is clear from code review, and
       this run's clean, sane behavior is consistent with it working).
-      **Possible connection to item 30's still-open mystery**: item 30's
-      `tlim=200` migration-test run used `init_freeze_conserved=true` at
-      `t=0` and found an unexplained post-bounce density collapse / mass
-      jump, never root-caused. A `t=0` state with stale primitives and a
-      silently-altered conserved state (the bug just fixed) is a plausible
-      root cause for exactly that kind of anomaly appearing once dynamical
-      evolution begins from a corrupted initial state. **Not yet re-tested**
-      -- re-running item 30's `tlim=200` check with this fix (recommended,
-      not done as part of this item) would confirm or rule this out.
+      **Connection to item 30's mystery -- CONFIRMED (2026-07-26, re-tested):**
+      item 30's `tlim=200` migration-test run used `init_freeze_conserved=
+      true` at `t=0` and found an unexplained post-bounce density collapse /
+      mass jump, never root-caused. This bug (stale primitives + a silently-
+      altered `t=0` conserved state) IS the root cause -- see item 30's own
+      updated "Update" bullet for the full re-test result
+      (`cfc_migration_freezecons_tlim200_fixed/`, job 249531): with the fix,
+      the exact same `tlim=200` setup shows clean, physically sensible
+      "migrate and ring down" oscillation throughout, with baryon mass
+      conserved to `~7e-7` relative error the entire run -- no collapse, no
+      mass jump. Item 30's own anomaly is resolved.
 
 30. **`tlim=200` dynamical-evolution test of `init_freeze_conserved=true` on
     the migration test: excellent through the first bounce, but a separate,
-    unresolved issue appears afterward (2026-07-25/26).**
+    unresolved issue appears afterward (2026-07-25/26). RESOLVED 2026-07-26,
+    see this item's own "Re-test result" bullet below -- root cause was
+    item 29's primitive-recovery bug, now fixed.**
     - **Motivation**: item 29 only validated the one-shot mode's `t=0`
       metric-initialization accuracy (`nlim=1`). The user asked for a real
       dynamical run (`tlim=200`, `cfc_migration_freezecons_tlim200/`) to see
@@ -4654,16 +4661,36 @@ src/cfc/
       migration_freezecons_diagnostics.png` (mass/rho_c vs. time, full
       `t=0`-`200` history), `migration_freezecons_density_xy.mp4` (density
       animation).
-    - **Update (2026-07-26)**: item 29 gained a new bullet documenting a real
-      primitive-recovery bug in `InitializeMetric()`'s tail, specific to
-      `init_freeze_conserved=true` (the mode this run used) -- `w0` was never
-      updated post-solve and `u0` was silently corrupted relative to what
-      `psi`'s Newton solve actually assumed. This is a plausible root cause
-      for the anomaly described above (a corrupted `t=0` state feeding a long
-      dynamical evolution), reopening the "not attributed to item 29"
-      conclusion above as an open question again rather than settling it.
-      Re-running this same `tlim=200` check with the fix (see item 29's own
-      bullet) would confirm or rule this out -- not yet done.
+    - **Update (2026-07-26): RESOLVED.** item 29 gained a new bullet
+      documenting a real primitive-recovery bug in `InitializeMetric()`'s
+      tail, specific to `init_freeze_conserved=true` (the mode this run
+      used) -- `w0` was never updated post-solve and `u0` was silently
+      corrupted relative to what `psi`'s Newton solve actually assumed. This
+      reopened the "not attributed to item 29" conclusion above as a
+      question worth re-testing.
+    - **Re-test result (2026-07-26): CONFIRMED as the root cause.** Re-ran
+      this exact `tlim=200` setup (`cfc_migration_freezecons_tlim200_fixed/`,
+      same `parfile.par` as the original run -- `init_freeze_conserved=true`,
+      `mg_threshold=mg_poisson_threshold=3.0e-3`, static refinement -- job
+      249531, 16 ranks, completed cleanly to `t=200` on "Terminating on time
+      limit," zero `FATAL`/NaN messages anywhere in the log) with the
+      `ConToPrim` fix applied. Result: **the anomaly is gone.** `rho-max`
+      stays within `1.0`-`1.0067` of its `t=0` value for the ENTIRE run (was:
+      collapse to `~6e-5`, `~130x` below initial, by `t~0.55ms`) --
+      `plot_migration_diagnostics.py`'s own diagnostic plot
+      (`migration_freezecons_fixed_diagnostics.png`) shows a clean,
+      physically sensible oscillatory "migrate to the stable branch and ring
+      down" pattern for the full `t=0`-`~1ms` physical duration, matching the
+      paper's own expected qualitative behavior -- not the visually-vanished-
+      star catastrophe the buggy run showed. Baryon mass relative error
+      stays at `~6.8e-7` throughout, several orders of magnitude tighter than
+      before, with **no `~14%` jump** anywhere (was: `1.535->1.757` around
+      `t~102`). `alpha-min` stays at a physically sane `~0.274` minimum (was:
+      an extreme `~2.2e-3`). This confirms the primitive-recovery bug (item
+      29's own fix) was indeed the root cause of this item's entire anomaly
+      -- not the static-refined-region-not-tracking-expansion hypothesis
+      floated in the original "Conclusion" above, which turns out not to
+      have been needed as an explanation after all. Item 30 is now CLOSED.
 
 31. **Persistent scratch buffers for `u_plus_2s`/`u_alpha_psi6`
     (performance fix, 2026-07-25).**

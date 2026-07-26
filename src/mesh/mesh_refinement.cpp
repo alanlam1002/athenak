@@ -112,6 +112,15 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   if (pm->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pm->pmb_pack->pz4c->nz4c);
   }
+  // Only CFC needs padm->u_adm transferred across a regrid: z4c refreshes it
+  // from its own BSSN state (ConvertZ4cToADM, called inside
+  // Driver::InitBoundaryValuesAndPrimitives before any con2prim reads it) and
+  // stationary ADM refreshes it from SetADMVariables (Step 11 below, which runs
+  // before InitBoundaryValuesAndPrimitives) -- neither depends on whatever
+  // u_adm held pre-regrid, so transferring it for them would be pure overhead.
+  if ((pm->pmb_pack->padm != nullptr) && (pm->pmb_pack->pcfc != nullptr)) {
+    ncc_tosend += (pm->pmb_pack->padm->u_adm.extent_int(1));
+  }
   int nmb = std::max((pm->pmb_pack->nmb_thispack), (pm->nmb_maxperrank));
   // number of cells per MB, including ghost zones
   int ncells = (pm->mb_indcs.nx1 + 2*pm->mb_indcs.ng);
@@ -156,16 +165,13 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
     pmy_mesh->MarkMeshUpdated();
 
     MeshBlockPack *pmbp = pmy_mesh->pmb_pack;
-    pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh);
-
-    // CFC's own metric re-solve (item 33, DEVELOPMENT.md): must run after
-    // primitives are valid on the new mesh (above) and before any NewTimeStep
-    // priming below (GR timestep bounds read the lapse) -- mirrors
-    // Driver::Initialize()'s own t=0 ordering (InitBoundaryValuesAndPrimitives,
-    // then pcfc->InitializeMetric(), then the initial dt calc).
-    if (pmbp->pcfc != nullptr) {
-      pmbp->pcfc->ReinitializeMetricForAMR(pdriver);
-    }
+    // is_amr_regrid=true: lets CFC's own metric re-solve
+    // (CFC::ReinitializeMetricForAMR) run inline inside this call, mirroring
+    // z4c::Z4c::ConvertZ4cToADM's placement -- see Driver::
+    // InitBoundaryValuesAndPrimitives's own comment. Runs after primitives are
+    // valid on the new mesh and before any NewTimeStep priming below (GR
+    // timestep bounds read the lapse).
+    pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh, /*is_amr_regrid=*/true);
 
     if (pmbp->phydro != nullptr) {
       (void) pmbp->phydro->NewTimeStep(pdriver, pdriver->nexp_stages);
@@ -534,6 +540,19 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   radiation::Radiation* prad = pm->pmb_pack->prad;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   adm::ADM* padm = pm->pmb_pack->padm;
+  cfc::CFC* pcfc = pm->pmb_pack->pcfc;
+  // padm->u_adm's own transfer/interpolation (below) only matters for CFC: z4c
+  // refreshes it from its own BSSN state (ConvertZ4cToADM, called inside
+  // Driver::InitBoundaryValuesAndPrimitives before any con2prim reads it) and
+  // stationary ADM refreshes it from SetADMVariables (Step 11 below, which runs
+  // before InitBoundaryValuesAndPrimitives) -- neither depends on whatever
+  // u_adm held pre-regrid. CFC's own metric refresh (ReinitializeMetricForAMR)
+  // also runs from inside InitBoundaryValuesAndPrimitives now (mirroring
+  // ConvertZ4cToADM's placement), but its own first step (RunXPsiSolvePass)
+  // still reads padm->adm.g_dd/psi4 as an algebraic input/Newton seed before
+  // its own solve has refreshed them -- so CFC alone still needs this
+  // pre-regrid transfer to avoid feeding garbage into that read.
+  bool padm_needs_transfer = (padm != nullptr) && (pcfc != nullptr);
   // derefine (if needed)
   if (ndel > 0) {
     if (phydro != nullptr) {
@@ -548,6 +567,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (pz4c != nullptr) {
       DerefineCCSameRank(pz4c->u0, pz4c->coarse_u0);
+    }
+    if (padm_needs_transfer) {
+      DerefineCCSameRank(padm->u_adm, padm->coarse_u_adm);
     }
   }
 
@@ -566,7 +588,7 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   }
   if (pz4c != nullptr) {
     CopyCC(pz4c->u0);
-  } else if (padm != nullptr) {
+  } else if (padm_needs_transfer) {
     CopyCC(padm->u_adm);
   }
   // Step 7.
@@ -585,6 +607,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (pz4c != nullptr) {
       CopyForRefinementCC(pz4c->u0, pz4c->coarse_u0);
+    }
+    if (padm_needs_transfer) {
+      CopyForRefinementCC(padm->u_adm, padm->coarse_u_adm);
     }
   }
 
@@ -620,6 +645,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (pz4c != nullptr) {
       RefineCC(new_to_old, pz4c->u0, pz4c->coarse_u0, true);
+    }
+    if (padm_needs_transfer) {
+      RefineCC(new_to_old, padm->u_adm, padm->coarse_u_adm, true);
     }
   }
 

@@ -53,7 +53,13 @@ class Driver {
   void Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool rflag);
   void Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout);
   void Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout);
-  void InitBoundaryValuesAndPrimitives(Mesh *pm);
+  // is_amr_regrid: true only when called from MeshRefinement::
+  // AdaptiveMeshRefinement() after a regrid -- lets CFC's own metric refresh
+  // (ReinitializeMetricForAMR) run inline here, mirroring z4c's
+  // ConvertZ4cToADM, without also firing during t=0 setup (Driver::
+  // Initialize()'s own call, where CFC::InitializeMetric's different
+  // Picard-iteration algorithm is what's needed instead).
+  void InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid = false);
 
  private:
   Kokkos::Timer run_time_;      // generalized timer for cpu/gpu/etc

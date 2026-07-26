@@ -19,6 +19,7 @@
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "z4c/z4c.hpp"
+#include "coordinates/adm.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -150,6 +151,12 @@ void MeshRefinement::InitRecvAMR(int nleaf) {
   }
   if (pmy_mesh->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pmy_mesh->pmb_pack->pz4c->nz4c);
+  }
+  // Only CFC needs padm->u_adm transferred across a regrid -- see the same
+  // reasoning at mesh_refinement.cpp's identical gate.
+  if ((pmy_mesh->pmb_pack->padm != nullptr) &&
+      (pmy_mesh->pmb_pack->pcfc != nullptr)) {
+    ncc_tosend += (pmy_mesh->pmb_pack->padm->u_adm.extent_int(1));
   }
 
   // Step 2. (InitRecvAMR)
@@ -403,6 +410,12 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   if (pmy_mesh->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pmy_mesh->pmb_pack->pz4c->nz4c);
   }
+  // Only CFC needs padm->u_adm transferred across a regrid -- see the same
+  // reasoning at mesh_refinement.cpp's identical gate.
+  if ((pmy_mesh->pmb_pack->padm != nullptr) &&
+      (pmy_mesh->pmb_pack->pcfc != nullptr)) {
+    ncc_tosend += (pmy_mesh->pmb_pack->padm->u_adm.extent_int(1));
+  }
 
   // Step 2. (PackAndSendAMR)
   // loop over old MBs on this rank, initialize send buffer metadata
@@ -524,6 +537,10 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   mhd::MHD* pmhd = pmy_mesh->pmb_pack->pmhd;
   radiation::Radiation* prad = pmy_mesh->pmb_pack->prad;
   z4c::Z4c* pz4c = pmy_mesh->pmb_pack->pz4c;
+  adm::ADM* padm = pmy_mesh->pmb_pack->padm;
+  cfc::CFC* pcfc = pmy_mesh->pmb_pack->pcfc;
+  // Only CFC needs padm->u_adm transferred -- see mesh_refinement.cpp's gate.
+  bool padm_needs_transfer = (padm != nullptr) && (pcfc != nullptr);
 
   int ncc_sent = 0, nfc_sent = 0;
   if (phydro != nullptr) {
@@ -543,6 +560,10 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   if (pz4c != nullptr) {
     PackAMRBuffersCC(pz4c->u0, pz4c->coarse_u0, ncc_sent, nfc_sent);
     ncc_sent += pz4c->nz4c;
+  }
+  if (padm_needs_transfer) {
+    PackAMRBuffersCC(padm->u_adm, padm->coarse_u_adm, ncc_sent, nfc_sent);
+    ncc_sent += padm->u_adm.extent_int(1);
   }
 
   // Step 4. (PackAndSendAMR)
@@ -813,6 +834,10 @@ void MeshRefinement::ClearRecvAndUnpackAMR() {
   mhd::MHD* pmhd = pmy_mesh->pmb_pack->pmhd;
   radiation::Radiation* prad = pmy_mesh->pmb_pack->prad;
   z4c::Z4c* pz4c = pmy_mesh->pmb_pack->pz4c;
+  adm::ADM* padm = pmy_mesh->pmb_pack->padm;
+  cfc::CFC* pcfc = pmy_mesh->pmb_pack->pcfc;
+  // Only CFC needs padm->u_adm transferred -- see mesh_refinement.cpp's gate.
+  bool padm_needs_transfer = (padm != nullptr) && (pcfc != nullptr);
 
   int ncc_recv=0, nfc_recv=0;
 
@@ -833,6 +858,10 @@ void MeshRefinement::ClearRecvAndUnpackAMR() {
   if (pz4c != nullptr) {
     UnpackAMRBuffersCC(pz4c->u0, pz4c->coarse_u0, ncc_recv, nfc_recv);
     ncc_recv += pz4c->nz4c;
+  }
+  if (padm_needs_transfer) {
+    UnpackAMRBuffersCC(padm->u_adm, padm->coarse_u_adm, ncc_recv, nfc_recv);
+    ncc_recv += padm->u_adm.extent_int(1);
   }
 #endif
   return;

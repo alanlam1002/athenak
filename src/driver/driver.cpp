@@ -600,7 +600,7 @@ Real Driver::UpdateWallClock() {
 //! \brief Sets boundary conditions on conserved and initializes primitives.  Used both
 //! on initialization, and when new MBs created with AMR.
 
-void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
+void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
   // Note: with MPI, sends on ALL MBs must be complete before receives execute
 
   // Initialize Z4c
@@ -659,12 +659,19 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     (void) pmhd->RecvB_Shr(this, 0);
     (void) pmhd->ApplyPhysicalBCs(this, 0);
     (void) pmhd->Prolongate(this, 0);
+    cfc::CFC *pcfc = pm->pmb_pack->pcfc;
     if (pdyngr == nullptr) {
       (void) pmhd->ConToPrim(this, 0);
+    } else if (pz4c != nullptr) {
+      (void) pz4c->ConvertZ4cToADM(this, 0);
+      (void) pdyngr->ConToPrim(this, 0);
+    } else if ((pcfc != nullptr) && is_amr_regrid) {
+      // Mirrors ConvertZ4cToADM's placement above: re-solves the metric here,
+      // inline, instead of ConToPrim -- CFC's own regrid refresh handles its
+      // own interior/ghost con2prim split internally (see cfc.hpp's comment
+      // on ReinitializeMetricForAMR).
+      pcfc->ReinitializeMetricForAMR(this);
     } else {
-      if (pz4c != nullptr) {
-        (void) pz4c->ConvertZ4cToADM(this, 0);
-      }
       (void) pdyngr->ConToPrim(this, 0);
     }
   }

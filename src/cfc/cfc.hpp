@@ -224,28 +224,31 @@ class CFC {
   void InitializeMetric(Driver *pdriver);
 
   // Regrid counterpart to InitializeMetric(), called once per regrid event from
-  // MeshRefinement::AdaptiveMeshRefinement() after primitives are valid on the new
-  // mesh but before any NewTimeStep priming. Does NOT call InitializeMetric() --
-  // that would rebuild conserved variables from primitives (PrimToConInit),
-  // discarding the already-evolved, correctly remapped, mass-conserving pmhd->u0.
-  // Instead runs one plain CFC step holding conserved variables fixed and
-  // recovering primitives via ConToPrim, then (like InitializeMetric() above)
-  // finishes with Driver::InitBoundaryValuesAndPrimitives() to refresh hydro
-  // ghost cells against the now-final metric.
+  // inside Driver::InitBoundaryValuesAndPrimitives itself (gated on that
+  // function's is_amr_regrid flag), mirroring where z4c::Z4c::ConvertZ4cToADM
+  // sits relative to ConToPrim -- see that function's own comment. Does NOT
+  // call InitializeMetric() -- that would rebuild conserved variables from
+  // primitives (PrimToConInit), discarding the already-evolved, correctly
+  // remapped, mass-conserving pmhd->u0. Instead runs one plain CFC step
+  // holding conserved variables fixed, with its own interior-then-ghost
+  // con2prim split standing in for the driver-level ConToPrim call this
+  // replaces: an interior-only pass right after solving X^i/psi (all
+  // RescaleMatterSources needs), then a ghost-shell-only pass right after
+  // solving lapse/shift (once padm->u_adm's own ghost exchange, at that
+  // pass's own tail, has completed) -- so hydro's own ghost cells never read
+  // a stale/zero metric, without redundantly re-exchanging pmhd->u0's own
+  // ghosts a second time (already done earlier in the same enclosing driver
+  // call).
   //
   // Resets psi_seeded_/alpha_psi_seeded_ so the two nonlinear Newton solves
-  // re-seed from padm->adm.psi4/alpha (safe even though padm->u_adm shares the
-  // same cross-rank AMR-transfer gap noted below, since CFC's own re-solve
-  // unconditionally overwrites every u_adm field every call -- whatever it holds
-  // beforehand is only ever a best-effort initial guess, never doubled down on).
-  //
-  // CAUTION: AthenaK's generic AMR load-balancing MPI transfer (PackAndSendAMR/
-  // ClearRecvAndUnpackAMR, src/mesh/load_balance.cpp) has no entry for padm/pcfc,
-  // so a block moving to a different rank during a regrid never has its CFC/ADM
-  // field data transferred -- confirmed to produce real NaN. Safe only for
-  // same-rank regrids; not yet safe for multi-rank production runs with
-  // refinement=adaptive. Fixing this belongs to load_balance.cpp, shared by every
-  // physics module.
+  // re-seed from adm.psi4/alpha (safe even across a cross-rank regrid move, since
+  // CFC's own re-solve unconditionally overwrites every u_adm field every call --
+  // whatever it holds beforehand is only ever a best-effort initial guess, never
+  // doubled down on). padm->u_adm itself IS correctly transferred across a
+  // cross-rank regrid move: adm::ADM owns it directly (coordinates/adm.cpp) and
+  // it's wired into the generic AMR pipeline (src/mesh/mesh_refinement.cpp +
+  // load_balance.cpp) as its own independent physics-module block, the same way
+  // pz4c->u0 is.
   //
   // mesh_refinement.cpp also skips the generic padm->SetADMVariables(...) regrid
   // callback for CFC runs (pcfc == nullptr guard) -- that callback re-derives the

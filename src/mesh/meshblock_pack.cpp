@@ -235,6 +235,12 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   // from a "z4c"/"adm" block combined with "mhd") to already have been constructed
   // above.
   if (pin->DoesBlockExist("cfc")) {
+    if (pin->DoesBlockExist("z4c")) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "The <cfc> and <z4c> blocks are mutually exclusive -- CFC "
+          << "and Z4c are alternative spacetime evolution schemes." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     if (padm == nullptr || ptmunu == nullptr) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
           << std::endl << "The <cfc> block requires both a <z4c> or <adm> block "

@@ -55,6 +55,10 @@ class ADM {
   };
 
   DvceArray5D<Real> u_adm;                                // adm variables
+  // coarse shadow of u_adm, only sized under SMR/AMR -- lets u_adm itself be
+  // transferred by the generic AMR pipeline (mesh_refinement.cpp/load_balance.cpp)
+  // the same way phydro/pmhd/prad/pz4c's own evolved arrays are.
+  DvceArray5D<Real> coarse_u_adm;
   bool is_dynamic;                                        // is the metric time dependent?
 
   void (*SetADMVariables)(MeshBlockPack *pm);

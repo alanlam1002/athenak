@@ -28,6 +28,7 @@ char const * const ADM::ADM_names[ADM::nadm] = {
 // constructor: initializes data structures and parameters
 ADM::ADM(MeshBlockPack *ppack, ParameterInput *pin):
     u_adm("u_adm",1,1,1,1,1),
+    coarse_u_adm("coarse_u_adm",1,1,1,1,1),
     SetADMVariables(&ADM::SetADMVariablesToKerrSchild),
     pmy_pack(ppack) {
   is_dynamic = pin->GetOrAddBoolean("adm" , "dynamic", false);
@@ -52,6 +53,18 @@ ADM::ADM(MeshBlockPack *ppack, ParameterInput *pin):
   adm.psi4.InitWithShallowSlice(u_adm, I_ADM_PSI4);
   adm.g_dd.InitWithShallowSlice(u_adm, I_ADM_GXX, I_ADM_GZZ);
   adm.vK_dd.InitWithShallowSlice(u_adm, I_ADM_KXX, I_ADM_KZZ);
+
+  // coarse_u_adm: only needed for SMR/AMR regrid data transfer (load_balance.cpp's
+  // cross-rank MPI pack/unpack, mesh_refinement.cpp's same-rank derefine/refine) --
+  // sized from u_adm's own actual channel count (nadm, or nadm-4 when pz4c aliases
+  // alpha/beta_u out of it), matching hydro::Hydro::coarse_u0/z4c::Z4c::coarse_u0's
+  // identical multilevel guard and coarse-cell sizing convention.
+  if (pmy_pack->pmesh->multilevel) {
+    int nccells1 = indcs.cnx1 + 2*(indcs.ng);
+    int nccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
+    int nccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(coarse_u_adm, nmb, u_adm.extent_int(1), nccells3, nccells2, nccells1);
+  }
 }
 
 //----------------------------------------------------------------------------------------

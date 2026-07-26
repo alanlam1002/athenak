@@ -168,7 +168,8 @@ its Riemann solver and conserved-to-primitive conversion.
 ## therefore verified correct for CFC only when regrid events stay on the
 ## same rank (item 33's own single-rank test) -- NOT yet safe for a real
 ## multi-rank production run whose load balancer moves blocks across ranks,
-## until item 34 is fixed. (3) item 29 also gained a related primitive-
+## until item 34 is fixed. **(Item 34 is now fixed -- see item 37, same day.)**
+## (3) item 29 also gained a related primitive-
 ## recovery bug fix, independent of AMR, which reopened item 30's own
 ## still-unresolved `tlim=200` anomaly as a question -- RE-TESTED and
 ## CONFIRMED (2026-07-26): the same `tlim=200` run with the fix shows clean,
@@ -191,6 +192,31 @@ its Riemann solver and conserved-to-primitive conversion.
 ## Verified via a 16-rank/288-MeshBlock/5-level smoke test: no deadlock (the one
 ## real risk an earlier hand-rolled draft of this fix would have hit), no
 ## FATAL/NaN. See items 35-36 for full detail.
+##
+## Status update (2026-07-26, later still, #2): item 34's cross-rank AMR-transfer
+## gap is now CLOSED (item 37) -- final design: `adm::ADM` owns `u_adm`
+## directly (unchanged from before this session; an earlier same-day attempt
+## had `pcfc` own it instead with `adm::ADM` aliasing on, since superseded per
+## user direction for structural clarity), with a new `coarse_u_adm` member and
+## `padm` wired into the generic AMR pipeline (`mesh_refinement.cpp`/
+## `load_balance.cpp`) as its own independent physics-module block -- gated on
+## `pcfc != nullptr` (not just `padm != nullptr`), since z4c/stationary ADM
+## already refresh the metric before/without needing this transfer (verified by
+## reading `Driver::InitBoundaryValuesAndPrimitives` directly), so only CFC
+## needs it. Re-running the exact 8-rank scenario that produced item 34's
+## original confirmed `-nan` metric (job 249526) confirms the bug is gone: zero
+## ranks report any metric NaN, versus every rank going to `-nan` before. A
+## separate, narrower, non-fatal residual was found and documented: a
+## cross-rank-transferred new block's ghost cells briefly read as zero (never
+## NaN) during the *first* of two post-regrid `InitBoundaryValuesAndPrimitives`
+## calls, before CFC's own metric refresh has run. Item 38 (same day) closes
+## most of this by folding that refresh directly into
+## `InitBoundaryValuesAndPrimitives`, mirroring `z4c::Z4c::ConvertZ4cToADM`'s
+## placement -- confirmed via re-test to cut the residual substantially
+## (3584->896 `NANS_IN_CONS` reports/rank, 2->5 clean ranks of 8), though a
+## narrower, distinct residual remains (likely a separate, pre-existing gap in
+## `u_adm`'s own neighbor ghost exchange for a coarse-fine interface case, not
+## yet investigated). See items 37-38 for full detail.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -5007,18 +5033,21 @@ src/cfc/
       corrected design above already does exactly one CFC step per regrid,
       unconditionally, with no Picard loop at all.
 
-    Still open: whether `refinement=adaptive` is production-worthy for a
-    real (non-smoke-test) CFC physics run given item 34's cross-rank gap --
-    this item establishes that CFC's own regrid logic is correct for
-    same-rank regrid events, but a run whose load balancing moves blocks
-    across ranks (an ordinary, expected occurrence for any long-running
-    adaptive-AMR simulation, not a corner case) will silently hit item 34's
-    NaN until that separate gap is fixed.
+    Still open (at the time this item was written): whether `refinement=
+    adaptive` is production-worthy for a real (non-smoke-test) CFC physics
+    run given item 34's cross-rank gap -- this item establishes that CFC's
+    own regrid logic is correct for same-rank regrid events, but a run whose
+    load balancing moves blocks across ranks (an ordinary, expected
+    occurrence for any long-running adaptive-AMR simulation, not a corner
+    case) would silently hit item 34's NaN until that separate gap was
+    fixed. **That gap is now closed, see item 37 (same day).**
 
-34. **OPEN, pre-existing bug found while verifying item 33: AthenaK's generic
-    AMR load-balancing MPI transfer has no entry for `padm`/`pcfc` -- a block
-    moving to a different rank during a regrid never has its ADM/CFC field
-    data transferred at all (2026-07-26, not yet fixed).**
+34. **RESOLVED, see item 37: AthenaK's generic AMR load-balancing MPI
+    transfer has no entry for `padm`/`pcfc` -- a block moving to a different
+    rank during a regrid never has its ADM/CFC field data transferred at all
+    (found 2026-07-26; fixed the same day -- see item 37, which supersedes
+    this item's own "scope of a proper fix" bullet below with a different,
+    user-directed design).**
     - **How it was found**: item 33's original field-remap warm-start attempt
       (directly `DerefineCCSameRank`/`CopyCC`/`CopyForRefinementCC`/`RefineCC`
       -ing `u_x`/`delta_psi`/`delta_alpha_psi` across a regrid, mirroring
@@ -5086,15 +5115,20 @@ src/cfc/
       `ReinitializeMetricForAMR`'s own re-solve overwrites `psi4`/`alpha` (but
       not `g_dd`/`beta_u`, `vK_dd`/other unwritten fields) every regrid
       regardless.
+      **(Superseded -- see item 37: rather than adding `padm`-specific
+      blocks to the generic machinery as sketched here, `pcfc` was instead
+      given its own independent `u_adm` array, mirroring `pz4c->u0`, with
+      `adm::ADM` aliasing onto it -- so the actual fix touches all three of
+      the bullets above, just via a `pcfc` block instead of a `padm` one.)**
     - **How to apply**: static refinement (every current CFC test) is
       completely unaffected -- this only matters for `refinement=adaptive`
       once a regrid actually triggers a cross-rank block move, which will
       happen for any sufficiently long adaptive-AMR run (load balancing is
       the whole point of the mechanism). Item 33's own dynamic-AMR work is
       verified correct and safe for same-rank regrid events only (see item
-      33's own single-rank verification); do not consider `refinement=
-      adaptive` + CFC production-ready across multiple ranks until this item
-      is resolved.
+      33's own single-rank verification). **(Resolved by item 37 -- see that
+      item for verification that a cross-rank regrid no longer produces a
+      NaN metric.)**
 
 35. **`RunXPsiSolvePass`/`RunLapseShiftAssemblePass` simplified (their `bool`
     parameters removed, moved to call sites); full-module comment sweep
@@ -5132,8 +5166,10 @@ src/cfc/
       Kept: physics/equation references, sizing/indexing invariants that
       would silently break code if violated, sign/formula derivations, and
       the one genuinely load-bearing safety warning (item 34's
-      `load_balance.cpp` cross-rank AMR gap, still called out in
-      `ReinitializeMetricForAMR`'s own doc comment). Verified zero logic
+      `load_balance.cpp` cross-rank AMR gap, at the time still called out in
+      `ReinitializeMetricForAMR`'s own doc comment -- that CAUTION note was
+      since removed as part of item 37's fix, once the gap it warned about
+      was actually closed). Verified zero logic
       changes by diffing every file's non-comment tokens against the prior
       commit (`git diff` stripped of `//`-comments and whitespace) -- confirmed
       byte-identical except for the signature simplification above. Both
@@ -5223,10 +5259,269 @@ src/cfc/
       function verbatim), but this would be a worthwhile follow-up
       confirmation if the anomaly this fix targets is ever suspected of
       causing a visible symptom in a production run.
-    - **Scoping note**: for the regrid path specifically, this fix is
+    - **Scoping note**: for the regrid path specifically, this fix was
       necessary but not sufficient for a fully-correct multi-rank result --
-      item 34's cross-rank AMR-transfer gap means `padm->u_adm` itself can
+      item 34's cross-rank AMR-transfer gap meant `padm->u_adm` itself could
       still be wrong on a cross-rank regrid, independent of this fix. That
-      gap remains open (not attempted here); this fix still correctly closes
-      the hydro-ghost-staleness gap for same-rank regrids and for the t=0
-      `InitializeMetric()` path (which has no such cross-rank caveat).
+      gap is now closed by item 37 (same day); this fix still separately
+      closes the hydro-ghost-staleness gap for same-rank regrids and for the
+      t=0 `InitializeMetric()` path (which has no such cross-rank caveat).
+
+37. **Item 34's cross-rank AMR-transfer gap closed -- `adm::ADM` gained its
+    own `coarse_u_adm`, and `padm->u_adm` is now wired directly into the
+    generic AMR pipeline as its own independent physics-module block
+    (2026-07-26).**
+    - **Design history**: a first attempt at this fix (same day, since
+      superseded) had `cfc::CFC` own an independent `u_adm` array mirroring
+      `pz4c->u0`, with `adm::ADM` aliasing onto it via a `Kokkos::View`
+      assignment -- requiring `pcfc`'s construction to move ahead of
+      `padm`/`pz4c` in `MeshBlockPack::AddPhysics()`. The user asked to keep
+      `u_adm` under `padm` instead, for structural clarity: `adm::ADM` is
+      the single spacetime-agnostic container hydro/dyn_grmhd always read
+      through regardless of which module drives the metric, so having it
+      actually *own* the array (rather than alias `pcfc`'s) is more legible,
+      and avoids the construction-reorder machinery entirely. This item
+      describes the final, `padm`-owns-it design that replaced it.
+    - **What stayed unchanged throughout**: `AssembleConformalMetric`/
+      `AssembleLapseShiftK` (`cfc_reconstruct.cpp`) -- the only places CFC
+      writes the solved metric -- write exclusively through
+      `pmy_pack->padm->adm.{psi4,g_dd,vK_dd,alpha,beta_u}`, the
+      `AthenaTensor` shallow-slice views, never through `u_adm` raw indices
+      directly. That write path never changed in either design attempt; only
+      where the *backing* array lives, and how the generic AMR machinery
+      transfers it, changed.
+    - **`adm::ADM` gains `coarse_u_adm`** (`coordinates/adm.hpp`/`adm.cpp`),
+      mirroring `hydro::Hydro::coarse_u0`/`z4c::Z4c::coarse_u0`'s existing
+      declaration/allocation idiom exactly: a `multilevel`-gated
+      `Kokkos::realloc(coarse_u_adm, nmb, u_adm.extent_int(1), ...)`, using
+      the same coarse-cell (`cnx1`/`cnx2`/`cnx3`) sizing convention as those
+      two. Sized from `u_adm.extent_int(1)` (its own actual channel count --
+      `nadm`=17, or `nadm-4`=13 when `pz4c` aliases `alpha`/`beta_u` out of
+      it), not a hardcoded constant, so it stays correct in the z4c+ADM
+      combination too, not just CFC's own `pz4c==nullptr` case. `ADM::ADM()`
+      itself needed no other changes -- still the original two-branch
+      `pz4c == nullptr` / `else` structure, unchanged from before this
+      session's work.
+    - **Generic AMR pipeline wiring**: added an independent
+      `if (padm != nullptr) {...}` block, mirroring how `phydro`/`pmhd`/
+      `prad`/`pz4c` are each their own independent block (not attached to
+      any other module's conditional), at: `mesh_refinement.cpp`'s
+      constructor buffer pre-sizing; Steps 5 (`DerefineCCSameRank`), 7
+      (`CopyForRefinementCC`), and 9 (`RefineCC(..., true)` -- same
+      `HighOrderProlongCC` interpolation `pz4c->u0` gets, structurally the
+      right choice for metric-like data) of `RedistAndRefineMeshBlocks`.
+      Step 6's existing same-rank index-copy fallback chain
+      (`if (pz4c != nullptr) {...} else if (padm != nullptr) {...}`) needed
+      no change at all -- it already had a `padm` branch from before this
+      session. And in `load_balance.cpp`: `InitRecvAMR`'s and
+      `PackAndSendAMR`'s variable counting, `PackAndSendAMR`'s pack calls,
+      and `ClearRecvAndUnpackAMR`'s unpack calls -- all using
+      `padm->u_adm.extent_int(1)` for the variable count, matching
+      `coarse_u_adm`'s own sizing (see below) -- this code path is now
+      `pcfc`-gated (see the narrowing bullet below) so it never actually
+      runs in the 13-channel z4c+ADM configuration in practice, but there's
+      no reason to hardcode `17` in place of the already-correct runtime
+      lookup. `#include "coordinates/adm.hpp"` (previously missing entirely)
+      added to `load_balance.cpp`.
+    - **Narrowed to `pcfc != nullptr`, not left unconditional on
+      `padm != nullptr`** (a same-day follow-up correction, prompted by the
+      user asking whether this transfer is actually needed when z4c is
+      active). Read `Driver::InitBoundaryValuesAndPrimitives`
+      (`driver.cpp:603-687`) directly to check -- it contains, at lines
+      662-669:
+      ```cpp
+      if (pdyngr == nullptr) {
+        (void) pmhd->ConToPrim(this, 0);
+      } else {
+        if (pz4c != nullptr) {
+          (void) pz4c->ConvertZ4cToADM(this, 0);
+        }
+        (void) pdyngr->ConToPrim(this, 0);
+      }
+      ```
+      (This snippet shows the code as it read at the time this bullet was
+      written -- superseded by item 38, which restructures this same
+      dispatch further to also fold `CFC::ReinitializeMetricForAMR` in here;
+      see that item for the current form.) This function is called once by
+      `AdaptiveMeshRefinement()` right after every regrid, before any
+      per-stage task graph runs again. When `pz4c != nullptr`, it already
+      calls `ConvertZ4cToADM` itself,
+      immediately before `ConToPrim` -- so there is no window at all where a
+      stale/untransferred `padm->u_adm` could be read for a z4c run: the
+      metric is refreshed synchronously, inside this same function, using
+      `pz4c->u0` (which has its own, already-established AMR transfer,
+      confirmed via `Z4c::Z4cToADM`, `z4c_adm.cpp:201-236`, to be a purely
+      pointwise conversion covering the *full* ghost-inclusive array, no
+      stencil/derivative needing neighbor data). For bare stationary ADM
+      (`pz4c == nullptr && pcfc == nullptr`), `padm->SetADMVariables` already
+      ran inside `RedistAndRefineMeshBlocks`'s own Step 11 -- *before*
+      `InitBoundaryValuesAndPrimitives` is even called -- and that callback
+      is a pure function of grid coordinates (analytic/tabulated, e.g.
+      Kerr-Schild), independent of whatever `u_adm` held pre-regrid. **CFC is
+      the only configuration where this transfer is load-bearing**: it falls
+      into the same `pdyngr != nullptr` branch above (CFC also builds
+      `pdyngr`) but `pz4c == nullptr`, so nothing in
+      `InitBoundaryValuesAndPrimitives` refreshes the metric for it --
+      `CFC::ReinitializeMetricForAMR` (the function that does) is
+      deliberately called *after* `InitBoundaryValuesAndPrimitives` returns
+      (it needs primitives already valid on the new mesh first), so CFC's
+      one post-regrid `ConToPrim` call has no earlier refresh to fall back
+      on. Every `padm`-gated block above was accordingly narrowed from
+      `if (padm != nullptr)` to `if ((padm != nullptr) &&
+      (pcfc != nullptr))` -- mirroring Step 11's own complementary gate
+      (`(pz4c==nullptr) && (padm!=nullptr) && (pcfc==nullptr)`). This
+      supersedes the "side effect" this item originally claimed (that the
+      unconditional wiring would also incidentally fix the z4c+ADM/bare-ADM
+      configurations' own pre-existing gap) -- those configurations were
+      never actually broken in the first place, so there was no gap for the
+      unconditional version to have fixed; the transfer for them would have
+      been pure overhead with zero effect on correctness, since it's
+      unconditionally overwritten (z4c) or never read before being
+      overwritten (stationary) regardless.
+    - **`pcfc`'s own module-specific arrays stay deliberately unmapped**
+      (`u_x`, `u_beta`, `u_tilde`, `u_p_x`, `u_p_beta`, etc.), per item 33's
+      own design -- `ReinitializeMetricForAMR`'s full Poisson re-solve every
+      regrid is what stands in for that; only `padm->u_adm` needs to cross
+      correctly, since it's the one thing every other module and CFC's own
+      next solve pass read as a genuine algebraic input.
+    - **Verified**: rebuilt `build_cfc` cleanly (no warnings; touches
+      `adm.hpp`, a widely-included header, so triggers a broad rebuild) both
+      before and after the `pcfc`-gating narrowing above. Single-rank
+      re-run of the existing same-rank AMR smoke test
+      (`cfc_amr_dynamic_check_1rank`-style; unconditional version, fresh copy
+      `cfc_amr_dynamic_check_1rank_padmfix`, job 249676; `pcfc`-gated version,
+      fresh copy `cfc_amr_dynamic_check_1rank_gated`, job 249694): both
+      clean, no regression, identical diagnostic (`max|delta psi - initial
+      guess| = 9.844341e-02`). Re-run of the exact 8-rank/4-node scenario
+      that produced item 34's original confirmed NaN
+      (`cfc_amr_dynamic_check`-style; unconditional version, fresh copy
+      `cfc_amr_dynamic_check_padmfix`, job 249677; `pcfc`-gated version,
+      fresh copy `cfc_amr_dynamic_check_gated`, job 249695): both produce the
+      identical result -- confirmed bug gone (zero metric-NaN anywhere), and
+      the same narrower, non-fatal residual (zero, never NaN, ghost cells on
+      a cross-rank-transferred new block during the first of two post-regrid
+      `InitBoundaryValuesAndPrimitives` calls, self-healing by the second
+      call per item 36) reproduces identically across all three variants
+      (`pcfc`-owned, `padm`-owned unconditional, `padm`-owned `pcfc`-gated)
+      -- confirming both that it's a pipeline-ordering artifact independent
+      of ownership/gating design, and that narrowing the gate to
+      `pcfc != nullptr` is a true no-op for CFC's own path (byte-identical
+      diagnostics and NaN counts across all three verification rounds).
+    - **Not investigated further here**: whether the same ghost-cell
+      transient (a *different* concern from the `ConvertZ4cToADM`-ordering
+      question resolved above -- this one is about whether `pz4c->u0` itself
+      might have not-yet-exchanged ghosts the first time something reads it
+      after a regrid, the same category item 36 documents for hydro fields)
+      also affects z4c runs -- out of scope for a CFC-focused session with
+      no z4c+AMR test input on hand, flagged here since the underlying
+      pattern is generic, not CFC-specific.
+    - **This residual is substantially (not fully) closed by item 38** --
+      see that item for the fold-in fix that eliminates the pipeline-ordering
+      transient described above, and for the narrower, distinct residual it
+      exposed once that larger issue was out of the way.
+
+38. **`CFC::ReinitializeMetricForAMR` folded into `Driver::
+    InitBoundaryValuesAndPrimitives`, mirroring `z4c::Z4c::ConvertZ4cToADM`'s
+    placement -- closes most of item 37's residual transient (2026-07-26).**
+    - **User-proposed redesign**: item 37's residual (a cross-rank-
+      transferred new block's ghost cells reading a zero/stale metric during
+      the *first* of two post-regrid `InitBoundaryValuesAndPrimitives`
+      calls) exists because CFC's regrid refresh was called as a separate
+      step entirely *after* `InitBoundaryValuesAndPrimitives` returns --
+      unlike z4c's `ConvertZ4cToADM`, called *inside* that same function,
+      right before `ConToPrim`. The user proposed folding CFC's refresh into
+      the same slot, splitting its own con2prim need into an interior-only
+      pass (right after solving X^i/psi) and a ghost-only pass (right after
+      solving lapse/shift, once `padm->u_adm`'s own ghost exchange -- already
+      happening at that pass's own tail -- completes), removing
+      `ReinitializeMetricForAMR`'s own recursive call to
+      `InitBoundaryValuesAndPrimitives` entirely (previously needed to avoid:
+      calling the new fold-in location from *inside*
+      `InitBoundaryValuesAndPrimitives` while `ReinitializeMetricForAMR`
+      itself still called that same function at its tail would be
+      unconditional infinite recursion).
+    - **Verified against the actual code before implementing** (not assumed):
+      `RunXPsiSolvePass`'s only conserved-variable read
+      (`AssembleVectorSource(false)`, `cfc.cpp:1025`) and
+      `RunLapseShiftAssemblePass`'s only primitive read
+      (`RescaleMatterSources`, `cfc.cpp:1194`) are both confirmed
+      **interior-only** (`is..ie,js..je,ks..ke`), confirming an interior-only
+      con2prim pass between them is sufficient. `padm->u_adm`'s own ghost
+      exchange (`RestADMTask`/`SendADMTask`/`RecvADMTask`/`ProlongADMTask`
+      quartet) is confirmed the **last data-affecting step** of
+      `RunLapseShiftAssemblePass` (`ClearTailFields()` right after it only
+      tears down send/recv bookkeeping). The range-restricted con2prim
+      primitive needed for both passes **already existed and was already
+      public/virtual**: `DynGRMHD::ConToPrimBC(is,ie,js,je,ks,ke)`
+      (`dyn_grmhd.hpp:89`), already used today by `DynGRMHD::
+      ApplyPhysicalBCs` with restricted (thin-band) bounds -- so **no
+      changes were needed to `dyn_grmhd.hpp`/`.cpp` at all**; both the
+      interior-only call and a new 6-slab full-ghost-shell decomposition
+      (mirroring `ApplyPhysicalBCs`'s own boundary-strip pattern but with
+      full ghost width instead of a thin band) are implemented entirely
+      within `cfc.cpp`, reusing the existing primitive. One genuine gap
+      found and fixed as part of this: nothing let
+      `Driver::InitBoundaryValuesAndPrimitives(Mesh*)` distinguish being
+      called from `Driver::Initialize()` (t=0, where `CFC::InitializeMetric`'s
+      different Picard-iteration algorithm is needed instead) from being
+      called during a regrid -- fixed by adding a `bool is_amr_regrid =
+      false` parameter, defaulted `false` at the t=0 call site
+      (`driver.cpp:316`, unchanged) and passed `true` at the regrid call site
+      (`mesh_refinement.cpp`).
+    - **Implementation**: `driver.cpp`'s MHD/dyn_grmhd dispatch
+      (`driver.cpp:662-669` before this item) restructured to
+      `if (pz4c != nullptr) {...} else if ((pcfc != nullptr) &&
+      is_amr_regrid) { pcfc->ReinitializeMetricForAMR(this); } else {
+      pdyngr->ConToPrim(this, 0); }` -- the final `else` covers both
+      CFC-at-t=0 (`is_amr_regrid` false there) and any other
+      `pdyngr`-without-`pz4c`-without-`pcfc` case, identical behavior to
+      before for both. `mesh_refinement.cpp`'s separate
+      `pcfc->ReinitializeMetricForAMR(pdriver)` call (previously right after
+      its own `InitBoundaryValuesAndPrimitives(pmesh)` call) removed --
+      folded into that same call now, via `is_amr_regrid=true`.
+      `CFC::ReinitializeMetricForAMR` restructured: kept
+      `RunXPsiSolvePass`/`RunLapseShiftAssemblePass` unchanged; replaced the
+      old full-array mid-solve `pdyngr->ConToPrim(pdriver,0)` with
+      `pdyngr->ConToPrimBC(is,ie,js,je,ks,ke)` (interior-only); replaced the
+      old tail's `pdriver->InitBoundaryValuesAndPrimitives(...)` call with
+      the new 6-slab ghost-shell decomposition (6 `ConToPrimBC` calls with
+      full-ghost-width bounds -- verified by hand to sum to exactly
+      interior + full ghost shell, no gaps/double-counting, matching
+      `n1*n2*n3` for the test geometry used below).
+    - **Verified**: rebuilt cleanly (no warnings; touches `driver.hpp`, a
+      widely-included header). t=0 `InitializeMetric` convergence
+      (`cfc_amr_dynamic_check_1rank`/`cfc_amr_dynamic_check`-style, fresh
+      copies `..._1rank_foldin`/`..._foldin`, jobs 249696/249697) is
+      byte-identical to every prior run (`0.192087` -> `0`, confirming
+      `is_amr_regrid` correctly stays `false` there and this fold-in doesn't
+      touch t=0 at all). The regrid diagnostic
+      (`max|delta psi - initial guess|`) is also byte-identical to every
+      prior verification round on both tests (`9.844341e-02` 1-rank,
+      `5.261418e-02` 8-rank) -- confirms the con2prim-call restructuring
+      doesn't change CFC's solve result, only when/how primitives get
+      recomputed around it. The 8-rank cross-rank scenario's residual
+      `NANS_IN_CONS` count dropped from 3584/rank (6 ranks affected, item
+      37's baseline) to **896/rank (only 3 ranks affected)** -- clean ranks
+      went from 2-of-8 to 5-of-8. A real, substantial improvement, not a
+      regression.
+    - **Not fully eliminated -- a narrower, distinct residual remains**: the
+      remaining 896 errors per affected rank are all confined to a single
+      4-cell-wide ghost slab (one face) on the affected block, still
+      `detg=0`. Checked against the parfile's domain (`x2 in [0,25.6]`) --
+      the affected coordinates (`y~14.8`) are nowhere near a physical
+      boundary, ruling out a BC-application gap. This is very likely a
+      **separate, pre-existing gap in `padm->u_adm`'s own ghost-exchange
+      completeness** (the `RestADMTask`/`SendADMTask`/`RecvADMTask`/
+      `ProlongADMTask` quartet, untouched by this item) for a specific
+      neighbor-topology case -- plausibly a coarse-fine interface on one
+      face of a newly-refined child block, since this run's single regrid
+      event does create such children. **Not investigated further this
+      session** (explicit user decision: document and stop here) -- this
+      item's own fold-in is confirmed working exactly as designed and
+      verified; the remaining residual is a distinct bug in a different
+      mechanism (u_adm's neighbor ghost exchange itself, not the
+      pipeline-ordering issue this item targeted) and would need its own
+      separate investigation (start by checking whether the affected
+      block's j-high neighbor is on a different refinement level, and
+      whether `ProlongateCC`'s coarse-fine treatment of `u_adm` -- as
+      opposed to same-level `RecvAndUnpackCC` -- is where the gap lives).

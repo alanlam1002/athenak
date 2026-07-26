@@ -697,12 +697,46 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   });
 
   RunXPsiSolvePass(pdriver);
-  pmy_pack->pdyngr->ConToPrim(pdriver, 0);
+  // Interior-only: RescaleMatterSources (inside RunLapseShiftAssemblePass
+  // below) only reads w0 at these same interior indices, so ghost cells don't
+  // need primitives yet -- and the metric they'd be read against isn't final
+  // until that pass's own padm->u_adm ghost exchange completes anyway (see
+  // the ghost-only pass below).
+  pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
   RunLapseShiftAssemblePass(pdriver);
 
-  // See CFC::InitializeMetric's identical closing step: rebuilds hydro ghost
-  // cells and primitives everywhere against the now-final (post-regrid) metric.
-  pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
+  // Ghost-shell-only con2prim, now that padm->u_adm is fully final and fully
+  // ghost-exchanged (RunLapseShiftAssemblePass's own tail, just completed):
+  // recovers w0's ghost cells against the *correct* metric, closing the
+  // window where they'd otherwise read a zero/stale one (DEVELOPMENT.md item
+  // 37/38). Hydro's own u0/b0 ghosts don't need re-exchanging here -- that
+  // already happened once, earlier in the same enclosing
+  // Driver::InitBoundaryValuesAndPrimitives call this function is now called
+  // from (mirroring z4c::Z4c::ConvertZ4cToADM's placement) -- so unlike the
+  // old design, no second full InitBoundaryValuesAndPrimitives call is
+  // needed. 6-slab decomposition of the full ghost shell (mirrors
+  // DynGRMHD::ApplyPhysicalBCs's own boundary-strip pattern, but full ghost
+  // width instead of a thin band): x1-faces get full y/z extent (covering
+  // corners too); y-/z-faces only need the interior x-range (already covered
+  // by the x1-faces) to avoid redundant work at edges/corners.
+  {
+    auto *pm = pmy_pack->pmesh;
+    auto *pdyngr = pmy_pack->pdyngr;
+    int &ng = indcs.ng;
+    int n1 = indcs.nx1 + 2*ng;
+    int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
+    int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+    pdyngr->ConToPrimBC(0, is-1, 0, n2-1, 0, n3-1);
+    pdyngr->ConToPrimBC(ie+1, n1-1, 0, n2-1, 0, n3-1);
+    if (pm->multi_d) {
+      pdyngr->ConToPrimBC(is, ie, 0, js-1, 0, n3-1);
+      pdyngr->ConToPrimBC(is, ie, je+1, n2-1, 0, n3-1);
+    }
+    if (pm->three_d) {
+      pdyngr->ConToPrimBC(is, ie, js, je, 0, ks-1);
+      pdyngr->ConToPrimBC(is, ie, js, je, ke+1, n3-1);
+    }
+  }
 
   if (cfc_init_verbose_) {
     Real dpsi = 0.0;

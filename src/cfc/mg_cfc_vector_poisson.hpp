@@ -15,9 +15,9 @@
 //! reusing the generic templated Smooth/CalculateDefect/CalculateFASRHS helpers in
 //! Multigrid (unlike the conformal-factor/lapse solvers, this operator is linear, so
 //! no Newton-Gauss-Seidel override is needed). Packing P_i and eta into one driver
-//! (rather than two, as in an earlier version of this file) halves the number of
-//! V-cycle solves and multipole-moment MPI_Allreduce calls per Shibata pair, since
-//! both channels share the exact same boundary-condition configuration already.
+//! (rather than two) halves the number of V-cycle solves and multipole-moment
+//! MPI_Allreduce calls per Shibata pair, since both channels share the exact same
+//! boundary-condition configuration.
 //!
 //! cfc::CFC calls LoadPoissonSource/Solve/RetrieveSolution once per Shibata pair, with
 //! P_i's source packed at channels 0-2 and eta's source (Shibata eq. 3.11) packed at

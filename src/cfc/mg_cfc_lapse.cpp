@@ -22,37 +22,21 @@
 //! FAS-consistency reason documented in mg_cfc_conformal_factor.cpp (src_ is the FAS
 //! tau-correction accumulator; K(x) must stay pristine at every level).
 //!
-//! Round 16 fix: K(x) is precomputed ONCE, at the finest level, from psi/Ahat^2/
-//! Utilde+2*Stilde (LoadReactionCoefficient below), and only the resulting scalar
-//! K(x) is carried through coeff_/RestrictCoefficients() down to coarser levels --
-//! NOT its three raw ingredients restricted separately and recombined at each level.
-//! The earlier (pre-round-16) version stored psi and Ahat^2 as two more coeff_
-//! channels and called LapseReactionCoeff() (still below, now a load-time helper
-//! rather than a per-kernel-call one) fresh at every level, including coarse ones.
-//! That is inconsistent with FAS: unlike psi's own solver (mg_cfc_conformal_
-//! factor.cpp), where "psi" is the local unknown u+1 and is correctly carried
-//! through the standard FAS u_ restriction, here psi/Ahat^2 are genuinely fixed
-//! *coefficients* -- and restrict(f(a,b)) != f(restrict(a), restrict(b)) for the
-//! nonlinear psi^-2/psi^-8 combination K(x) uses. Restricting psi and Ahat^2
-//! independently then recombining them at each coarse level therefore gave every
-//! level below the finest a systematically wrong K(x), i.e. a coarse-grid operator
-//! inconsistent with the fine-grid equation -- exactly the kind of defect that
-//! produces the round-16-observed symptom (SolveIterative failing to reach its
-//! convergence threshold, with the stalled defect *growing* rather than shrinking
-//! at higher resolution, since deeper V-cycles exercise more, and more divergent,
-//! coarse levels). Restricting the already-combined K(x) directly is the standard,
+//! K(x) is precomputed ONCE, at the finest level, from psi/Ahat^2/Utilde+2*Stilde
+//! (LoadReactionCoefficient below), and only the resulting scalar K(x) is carried
+//! through coeff_/RestrictCoefficients() down to coarser levels -- not its three raw
+//! ingredients restricted separately and recombined at each level, which would be
+//! FAS-inconsistent (restrict(f(a,b)) != f(restrict(a), restrict(b)) for the
+//! nonlinear psi^-2/psi^-8 combination K(x) uses, unlike psi's own solver where
+//! "psi" is the local unknown u+1 and is correctly carried through the standard FAS
+//! u_ restriction). Restricting the already-combined K(x) directly is the standard,
 //! FAS-consistent treatment for a nonlinearly-derived reaction coefficient.
 //!
-//! Round 18 fix (found by the user reading this file directly): the round-16 fix
-//! above did not, by itself, resolve SolveIterative's non-convergence -- a second,
-//! independent bug remained. SmoothPack/CalculateDefectPack never read src_ at all,
-//! even though CalculateFASRHSPack (below) correctly accumulates the FAS
-//! tau-correction into it -- the exact same bug class as MGCFCConformalFactor's
-//! Bug 1 (round 15): the coarse-grid correction was computed and stored every
-//! V-cycle descent, then silently discarded, leaving every level below the finest
-//! relaxing its own homogeneous equation decoupled from the fine grid's actual
-//! defect. Fixed by adding src(m,0,k,j,i) into both formulas, mirroring
-//! MGCFCConformalFactor::SmoothPack/CalculateDefectPack's identical fix exactly.
+//! SmoothPack/CalculateDefectPack must also add src(m,0,k,j,i) (the FAS tau-
+//! correction CalculateFASRHSPack accumulates) into their own formulas -- omitting
+//! it silently discards the coarse-grid correction, leaving every level below the
+//! finest relaxing its own homogeneous equation decoupled from the fine grid's
+//! actual defect.
 
 #include <algorithm>
 #include <cmath>
@@ -86,7 +70,7 @@ Real LapseLap(const ViewType &u, int m, int k, int j, int i) {
          - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
 }
 
-// Item 12: octet-indexed counterpart of LapseLap above, mirroring
+// Octet-indexed counterpart of LapseLap above, mirroring
 // MGCFCConformalFactorDriver's OctConformalFactorLap.
 inline Real OctLapseLap(const MGOctet &oct, int k, int j, int i) {
   return 6.0*oct.U(0,k,j,i) - oct.U(0,k+1,j,i) - oct.U(0,k,j+1,i) - oct.U(0,k,j,i+1)
@@ -101,9 +85,9 @@ inline Real OctLapseLap(const MGOctet &oct, int k, int j, int i) {
 MGCFCLapse::MGCFCLapse(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
                        bool on_host)
     : Multigrid(pmd, pmbp, nghost, on_host) {
-  // Finding B (plan addendum #3): see MGCFCConformalFactor's ctor -- coeff_/ncoeff_
-  // are never allocated by the base Multigrid ctor, so we do it ourselves.
-  ncoeff_ = 1;  // channel 0 = K(x), precomputed at the finest level (round 16 fix)
+  // See MGCFCConformalFactor's ctor -- coeff_/ncoeff_ are never allocated by the
+  // base Multigrid ctor, so we do it ourselves.
+  ncoeff_ = 1;  // channel 0 = K(x), precomputed at the finest level
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -127,13 +111,11 @@ void MGCFCLapse::SmoothPack(int color) {
   auto brdx = block_rdx_.d_view;
   auto u = u_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
-  // FAS tau-correction accumulator (round 18 fix -- see this file's top-of-file
-  // comment): zero at the finest level, nonzero at every coarser level once
-  // CalculateFASRHSPack has run there. Must be added here, mirroring
-  // MGCFCConformalFactor::SmoothPack's identical fix (round 15, Bug 1) -- or the
-  // coarse-grid correction this array exists to carry is silently dropped and every
-  // level below the finest just relaxes its own homogeneous equation, decoupled
-  // from the fine grid's actual defect.
+  // FAS tau-correction accumulator (see this file's top-of-file comment): zero at
+  // the finest level, nonzero at every coarser level once CalculateFASRHSPack has
+  // run there. Must be added here or the coarse-grid correction this array exists
+  // to carry is silently dropped and every level below the finest just relaxes its
+  // own homogeneous equation, decoupled from the fine grid's actual defect.
   auto src = src_[lev].d_view;
   par_for("MGCFCLapse::SmoothPack", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
   KOKKOS_LAMBDA(const int m, const int k, const int j) {
@@ -142,7 +124,7 @@ void MGCFCLapse::SmoothPack(int color) {
     Real dx2 = dx * dx;
     const int c = (c0 + k + j) & 1;
     for (int i = is + c; i <= ie; i += 2) {
-      Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
+      Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
       Real lap = LapseLap(u, m, k, j, i);
       Real u_old = u(m,0,k,j,i);
       Real fval = lap + dx2*kx*(u_old + 1.0) - dx2*src(m,0,k,j,i);
@@ -166,8 +148,7 @@ void MGCFCLapse::CalculateDefectPack() {
   // Same FAS tau-correction as SmoothPack above -- must be included here too, or
   // RestrictPack's downstream Restrict(src_[coarser], def_[this level], ...) would
   // restrict a defect that ignores whatever correction this level itself already
-  // received, corrupting the correction chain for every level further down
-  // (round 18 fix, mirroring MGCFCConformalFactor::CalculateDefectPack, round 15).
+  // received, corrupting the correction chain for every level further down.
   auto src = src_[lev].d_view;
   par_for("MGCFCLapse::CalculateDefectPack", DevExeSpace(), 0, nmmb_-1,
           ks, ke, js, je, is, ie,
@@ -175,7 +156,7 @@ void MGCFCLapse::CalculateDefectPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
+    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
     Real lap = LapseLap(u, m, k, j, i);
     // def = (RHS(u) + src) - lap(u)*idx2, RHS(u) = -kx*(u+1)
     // (F(u) = lap(u) - dx^2*(RHS(u) + src)).
@@ -200,7 +181,7 @@ void MGCFCLapse::CalculateFASRHSPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time (round 16 fix)
+    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
     Real lap = LapseLap(u, m, k, j, i);
     // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + kx*(u+1).
     src(m,0,k,j,i) += lap*idx2 + kx*(u(m,0,k,j,i) + 1.0);
@@ -210,9 +191,9 @@ void MGCFCLapse::CalculateFASRHSPack() {
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 1 (K(x), precomputed at the finest level -- round 16
-//! fix, see this file's header comment); mg_robin boundary conditions by default
-//! (Gmunu eq. 78, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 1 (K(x), precomputed at the finest level -- see this
+//! file's header comment); mg_robin boundary conditions by default (Gmunu eq. 78,
+//! isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
@@ -221,23 +202,21 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
-  // Item 12: see MGCFCConformalFactorDriver's identical comment -- AMR-refined
-  // meshes need more smoothing per level than the base-class default of 1.
+  // See MGCFCConformalFactorDriver's identical comment -- AMR-refined meshes need
+  // more smoothing per level than the base-class default of 1.
   npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin
   // (local 1/r^n extrapolation, no multipole-moment integral) -- see
   // mg_cfc_conformal_factor.cpp's constructor comment for the full rationale,
-  // including why mg_multipole was tried first and found buggy here
-  // (CalculateCenterOfMass()/CalculateMultipoleCoefficients() integrate src_, which
-  // this solver never populates -- Utilde+2*Stilde/psi/Ahat^2 all live in coeff_ --
-  // so the multipole path divides by zero and poisons the outer ghost cells with
-  // NaN; DEVELOPMENT.md item 9, rounds 1-6) and why mg_zerofixed (the interim
-  // workaround) was only the leading-order truncation of the true falloff.
-  // mporder_/autompo_/AllocateMultipoleCoefficients() below are left in place,
-  // inert. <cfc> mg_outer_bc ("robin" [default] or "zerofixed") allows falling
-  // back to the old Dirichlet-zero behavior for direct A/B comparison.
+  // including why mg_multipole is buggy here (CalculateCenterOfMass()/
+  // CalculateMultipoleCoefficients() integrate src_, which this solver never
+  // populates -- Utilde+2*Stilde/psi/Ahat^2 all live in coeff_ -- so the multipole
+  // path divides by zero). mporder_/autompo_/AllocateMultipoleCoefficients() below
+  // are left in place, inert. <cfc> mg_outer_bc ("robin" [default] or "zerofixed")
+  // allows falling back to the old Dirichlet-zero behavior for direct A/B
+  // comparison.
   //
   // Faces where the *mesh* itself is reflecting still need BoundaryFlag::mg_zerograd,
   // not plain BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state;
@@ -297,26 +276,18 @@ MGCFCLapseDriver::~MGCFCLapseDriver() {
 //! \fn void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt)
 //! \brief run the V-cycle solve for delta_(alpha*psi). Assumes
 //! LoadReactionCoefficient() was already called for this stage.
-//!
-//! A relative-solution-change convergence criterion was tried here (see
-//! MGCFCConformalFactorDriver::Solve's identical doc comment for the full
-//! rationale/history, DEVELOPMENT.md item 20) -- no measurable improvement was
-//! found, so it's reverted to the base-class SolveMG() call below; the tried
-//! implementation is kept commented out immediately after.
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
-  // Item 12: one-time coefficient restriction through the octet hierarchy (a
-  // no-op when nreflevel_==0) -- must run after TransferCoeffToRoot has
-  // populated each octet level's own Coeff() from its real MeshBlock children,
-  // and before SetupMultigrid()/the V-cycle loop below begins reading Coeff() at
-  // every level.
+  // One-time coefficient restriction through the octet hierarchy (a no-op when
+  // nreflevel_==0) -- must run after TransferCoeffToRoot has populated each octet
+  // level's own Coeff() from its real MeshBlock children, and before
+  // SetupMultigrid()/the V-cycle loop below begins reading Coeff() at every level.
   RestrictCoeffOctets();
-  // 2026-07-21 fix: see MGCFCConformalFactorDriver::Solve's identical comment --
-  // must run after RestrictCoeffOctets(), not inside TransferCoeffToRoot() (moved
-  // out, see that function's updated doc comment below).
+  // Must run after RestrictCoeffOctets(), not inside TransferCoeffToRoot() (see
+  // that function's updated doc comment below).
   mgroot_->RestrictCoefficients();
 
   SetupMultigrid(dt, false);
@@ -328,82 +299,27 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   SolveMG(pdriver);
   Kokkos::fence();
 
-  // Reverted relative-change convergence loop (DEVELOPMENT.md item 20) -- kept for
-  // reference in case it's worth revisiting; not currently compiled.
-  // auto u_now = mglevels_->GetCurrentData();
-  // if (u_prev_.extent_int(0) != u_now.extent_int(0) ||
-  //     u_prev_.extent_int(2) != u_now.extent_int(2) ||
-  //     u_prev_.extent_int(3) != u_now.extent_int(3) ||
-  //     u_prev_.extent_int(4) != u_now.extent_int(4)) {
-  //   Kokkos::realloc(u_prev_, u_now.extent_int(0), u_now.extent_int(1),
-  //                   u_now.extent_int(2), u_now.extent_int(3), u_now.extent_int(4));
-  // }
-  // Kokkos::deep_copy(u_prev_, u_now);
-  //
-  // int n = 0;
-  // Real relchange;
-  // do {
-  //   SolveVCycle(pdriver, npresmooth_, npostsmooth_);
-  //   u_now = mglevels_->GetCurrentData();
-  //   auto u_prev = u_prev_;
-  //   relchange = 0.0;
-  //   Kokkos::parallel_reduce("mg_cfc_alpha_psi_relchange",
-  //     Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0},
-  //         {u_now.extent_int(0), u_now.extent_int(2), u_now.extent_int(3),
-  //          u_now.extent_int(4)}),
-  //     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
-  //                   Real &local_max) {
-  //       Real diff = Kokkos::fabs(u_now(m,0,k,j,i) - u_prev(m,0,k,j,i));
-  //       Real denom = Kokkos::fabs(u_prev(m,0,k,j,i)) + 1.0e-30;
-  //       local_max = Kokkos::fmax(local_max, diff/denom);
-  //     }, Kokkos::Max<Real>(relchange));
-  // #if MPI_PARALLEL_ENABLED
-  //   Real global_relchange = 0.0;
-  //   MPI_Allreduce(&relchange, &global_relchange, 1, MPI_ATHENA_REAL, MPI_MAX,
-  //                 MPI_COMM_WORLD);
-  //   relchange = global_relchange;
-  // #endif
-  //   Kokkos::deep_copy(u_prev_, u_now);
-  //   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
-  //     std::cout << "MG iteration " << n << ": relative change = " << relchange
-  //               << std::endl;
-  //   }
-  //   ++n;
-  //   if (n >= 40) {
-  //     if (global_variable::my_rank == 0) {
-  //       std::cout << "### FATAL ERROR in MGCFCLapseDriver::Solve" << std::endl
-  //                 << "Failed to converge after " << n
-  //                 << " iterations (relative change = " << relchange
-  //                 << ", threshold = " << eps_ << ")" << std::endl;
-  //     }
-  //     pdriver->nlim = pmy_mesh_->ncycle;
-  //     break;
-  //   }
-  // } while (relchange > eps_);
-  // Kokkos::fence();
-
-  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s convention
-  // (item 2): the caller (cfc::CFC::SolveLapse) calls RetrieveSolution() separately
-  // once this returns.
+  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s
+  // convention: the caller (cfc::CFC::SolveLapse) calls RetrieveSolution()
+  // separately once this returns.
   return;
 }
 
-// Round 16 fix: combines the old LoadMatterSource/LoadKnownFields pair into one
-// call that evaluates K(x) = LapseReactionCoeff(...) once per point, at the finest
-// level, and writes only that single value into coeff_ -- see this file's header
-// comment for why restricting K(x) directly (rather than restricting psi/Ahat^2/
-// Utilde+2*Stilde separately and recombining them nonlinearly at every coarser
-// level) is required for a FAS-consistent coarse-grid operator. u_plus_2s_tilde/
-// delta_psi/a_sq are assumed padded to the same depth ngh (mesh-NGHOST-deep CFC
-// fields, per cfc.cpp), not this driver's own (generally shallower) ngh_ --
-// Finding H. delta_psi stores psi - 1 (see cfc::CFC::delta_psi's doc comment,
-// cfc.hpp); the physical psi LapseReactionCoeff needs is reconstructed (+1.0).
+// Evaluates K(x) = LapseReactionCoeff(...) once per point, at the finest level, and
+// writes only that single value into coeff_ -- see this file's header comment for
+// why restricting K(x) directly (rather than restricting psi/Ahat^2/Utilde+2*Stilde
+// separately and recombining them nonlinearly at every coarser level) is required
+// for a FAS-consistent coarse-grid operator. u_plus_2s_tilde/delta_psi/a_sq are
+// assumed padded to the same depth ngh (mesh-NGHOST-deep CFC fields, per cfc.cpp),
+// not this driver's own (generally shallower) ngh_. delta_psi stores psi - 1 (see
+// cfc::CFC::delta_psi's doc comment, cfc.hpp); the physical psi LapseReactionCoeff
+// needs is reconstructed (+1.0).
 void MGCFCLapseDriver::LoadReactionCoefficient(
     const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
     const DvceArray5D<Real> &a_sq, int ngh) {
-  // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment (item 33,
-  // DEVELOPMENT.md) -- this function is called before Solve() (whose own
-  // PrepareForAMR() would otherwise keep coeff_'s size in sync), so force it here.
+  // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment -- this
+  // function is called before Solve() (whose own PrepareForAMR() would otherwise
+  // keep coeff_'s size in sync), so force it here.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
@@ -411,7 +327,7 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
   int is = 0, ie = indcs.nx1 + 2*lngh - 1;
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
-  const int off = ngh - lngh;  // Finding H
+  const int off = ngh - lngh;
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
   par_for("MGCFCLapseDriver::LoadReactionCoefficient", DevExeSpace(),
@@ -426,17 +342,12 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
 
 void MGCFCLapseDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
   // dst (alpha_psi) is mesh-NGHOST-deep, not this solver's own (generally
-  // shallower) ngh_ -- same bug/fix as MGCFCConformalFactorDriver::RetrieveSolution
-  // (src/cfc/mg_cfc_conformal_factor.cpp): passing GetGhostCells() here collapsed
-  // RetrieveResult's dst_off to 0 instead of (mesh NGHOST - ngh_), silently
-  // corrupting the outermost interior cells near every domain face. Matches
-  // gravity's and MGCFCVectorPoissonDriver's own (correct) RetrieveResult calls.
+  // shallower) ngh_ -- same reasoning as MGCFCConformalFactorDriver::
+  // RetrieveSolution. Matches gravity's and MGCFCVectorPoissonDriver's own
+  // RetrieveResult calls, which both pass the mesh's true NGHOST.
   mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void MGCFCLapseDriver::SeedInitialGuess(...)
 
 void MGCFCLapseDriver::SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh) {
   mglevels_->LoadFinestData(guess, 0, ngh);
@@ -445,10 +356,9 @@ void MGCFCLapseDriver::SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh)
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCLapseDriver::TransferCoeffToRoot()
-//! \brief Finding C: see MGCFCConformalFactorDriver::TransferCoeffToRoot for the full
+//! \brief see MGCFCConformalFactorDriver::TransferCoeffToRoot for the full
 //! rationale -- duplicated here (not shared) since each driver owns a distinct
-//! mgroot_/mglevels_ pair of a different concrete Multigrid subclass. Item 12 added
-//! the octet-parented branch (see the conformal-factor driver's identical addition).
+//! mgroot_/mglevels_ pair of a different concrete Multigrid subclass.
 
 void MGCFCLapseDriver::TransferCoeffToRoot() {
   const int nc = ncoeff_;
@@ -492,9 +402,9 @@ void MGCFCLapseDriver::TransferCoeffToRoot() {
         root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
       }
     } else {
-      // Item 12: block refined past the root level -- write into its parent
-      // octet's Coeff() instead (mirrors TransferFromBlocksToRoot's identical
-      // else-branch for Src()/U()).
+      // Block refined past the root level -- write into its parent octet's
+      // Coeff() instead (mirrors TransferFromBlocksToRoot's identical else-branch
+      // for Src()/U()).
       LogicalLocation oloc;
       oloc.lx1 = (loc[n].lx1 >> 1);
       oloc.lx2 = (loc[n].lx2 >> 1);
@@ -514,27 +424,23 @@ void MGCFCLapseDriver::TransferCoeffToRoot() {
   if (!mgc_root->OnHost()) {
     Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
-  // Item 12: see MGCFCConformalFactorDriver::TransferCoeffToRoot's identical
-  // comment -- mgroot_ can itself span multiple V-cycle levels, and only its
-  // finest one was ever populated above; every coarser root level's coeff_
-  // needs the same restriction mglevels_->RestrictCoefficients() already gives
-  // the per-block hierarchy.
-  //
-  // 2026-07-21 fix: mgc_root->RestrictCoefficients() used to be called right here
-  // -- moved to Solve(), after RestrictCoeffOctets(), since this function alone
-  // never populates a refined patch's finest-level root cell (that comes from
-  // RestrictCoeffOctets()'s octet-level-0-to-root step, which runs afterward).
-  // See MGCFCConformalFactorDriver::TransferCoeffToRoot's identical fix for the
-  // full rationale.
+  // See MGCFCConformalFactorDriver::TransferCoeffToRoot's identical comment --
+  // mgroot_ can itself span multiple V-cycle levels, and only its finest one was
+  // ever populated above; every coarser root level's coeff_ gets the same
+  // restriction mglevels_->RestrictCoefficients() already gives the per-block
+  // hierarchy (mgc_root->RestrictCoefficients(), called in Solve() after
+  // RestrictCoeffOctets(), since this function alone never populates a refined
+  // patch's finest-level root cell -- that comes from RestrictCoeffOctets()'s
+  // octet-level-0-to-root step).
   return;
 }
 
-// Item 12: octet-scale exact one-step Gauss-Seidel (Finding A -- this equation is
-// affine in u once psi/Ahat^2 are fixed, unlike the conformal factor's genuine
-// Newton iteration), exactly the same math as MGCFCLapse::SmoothPack (per-level)
-// above. K(x) is read directly from Coeff(0,...) (already fully evaluated by
-// LoadReactionCoefficient at load time, round 16 fix) -- LapseReactionCoeff itself
-// is never called here, same as the per-level Pack methods.
+// Octet-scale exact one-step Gauss-Seidel (this equation is affine in u once
+// psi/Ahat^2 are fixed, unlike the conformal factor's genuine Newton iteration),
+// exactly the same math as MGCFCLapse::SmoothPack (per-level) above. K(x) is read
+// directly from Coeff(0,...) (already fully evaluated by LoadReactionCoefficient
+// at load time) -- LapseReactionCoeff itself is never called here, same as the
+// per-level Pack methods.
 void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
   int ngh = mgroot_->GetGhostCells();
   Real root_dx = mgroot_->GetRootDx();

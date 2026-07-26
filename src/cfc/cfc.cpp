@@ -34,10 +34,7 @@ namespace {
 //----------------------------------------------------------------------------------------
 //! \fn void BuildShiftSourceImpl<NGHOST>(...)
 //! \brief Gmunu eq. 75's derivative term, 2*Adual^ij*D_j(alpha*psi^-6), added onto an
-//! already-built p_src (16*pi*alpha*psi^-6*S-tilde_i, the pointwise part -- see
-//! CFC::AssembleVectorSource). Templated on NGHOST purely because Dx<NGHOST> is;
-//! mirrors cfc_reconstruct.cpp's ComputeADualFromXImpl/ReconstructVectorFromPotentials-
-//! Impl shape (file-local template + switch(indcs.ng) dispatch).
+//! already-built p_src (16*pi*alpha*psi^-6*S-tilde_i -- see CFC::AssembleVectorSource).
 
 template <int NGHOST>
 void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
@@ -56,12 +53,9 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
   int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
 
   // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). ap6 is a persistent
-  // CFC member (see cfc.hpp) passed in by the caller, sized identically to this full
-  // array extent (not just the interior) so Dx<NGHOST> below has valid neighbor data
-  // at every interior point -- both fields are already ghost-exchanged by the time
-  // this runs (see CFC::QueueCFCTasks), so this pointwise pass is valid everywhere.
-  // delta_psi/delta_alpha_psi store psi-1/ alpha*psi-1 (see cfc.hpp), so the physical
-  // values are reconstructed with +1.0.
+  // CFC member, sized over the full array extent (not just the interior) so
+  // Dx<NGHOST> below has valid neighbor data at every interior point -- both fields
+  // are already ghost-exchanged by the time this runs (see CFC::QueueCFCTasks).
   par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -112,10 +106,8 @@ void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
 
 //----------------------------------------------------------------------------------------
 //! \fn CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin)
-//! \brief CFC constructor: allocates intermediate fields and the 6 multigrid solvers.
-//! pmbp->padm/pmbp->ptmunu are already guaranteed non-null by the caller
-//! (mesh/meshblock_pack.cpp only constructs a CFC when both exist -- see that file's
-//! <cfc> block comment), so no redundant check is repeated here.
+//! \brief allocates intermediate fields and the 4 multigrid solvers. pmbp->padm/
+//! pmbp->ptmunu are already guaranteed non-null by the caller (mesh/meshblock_pack.cpp).
 
 CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     pmy_pack(pmbp),
@@ -146,18 +138,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     coarse_u_pietabeta("cfc_coarse_u_pietabeta", 1, 1, 1, 1, 1),
     pbval_adm(nullptr),
     coarse_u_adm("cfc_coarse_u_adm", 1, 1, 1, 1, 1) {
-  // Sized with AMR headroom (matches hydro.cpp/z4c.cpp/adm.cpp's own
-  // std::max(nmb_thispack, nmb_maxperrank) convention) so that a dynamic-AMR
-  // regrid never needs to reallocate any of CFC's own arrays -- see
-  // DEVELOPMENT.md item 33 and CFC::ReinitializeMetricForAMR.
+  // Sized with AMR headroom (matches hydro.cpp/z4c.cpp/adm.cpp's
+  // std::max(nmb_thispack, nmb_maxperrank) convention) so a dynamic-AMR regrid
+  // never needs to reallocate any of CFC's own arrays.
   int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
-  // "Physical" CFC fields: every field that is either finite-differenced by
-  // cfc_reconstruct.cpp or ghost-exchanged (or both) is sized at mesh-NGHOST depth,
-  // matching gravity::Gravity::phi's own convention -- one sizing rule for all of
-  // them, not split by which multigrid solver happens to produce/consume them (plan
-  // addendum #4, Findings F/H).
+  // Every field either finite-differenced by cfc_reconstruct.cpp or ghost-exchanged
+  // (or both) is sized at mesh-NGHOST depth, matching gravity::Gravity::phi.
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*(indcs.ng)) : 1;
@@ -176,14 +164,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_p_x,    nmb, 4, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_p_beta, nmb, 4, ncells3, ncells2, ncells1);
 
-  // delta_psi = delta_alpha_psi = 0 (flat space, psi = alpha*psi = 1) is the correct
-  // initial value before the very first solve of a run has produced anything better
-  // -- both are placeholders anyway (item 10's one-shot seeding overwrites them from
-  // the problem generator's own ADM data on the first real SolveConformalFactor/
-  // SolveLapse call, before any consumer reads them), but zero-initializing here
-  // keeps the array in a physically-consistent state (delta=0 <-> psi=1) rather than
-  // Kokkos's default zero-init, which would silently mean psi=alpha_psi=0 if ever
-  // read before that first seeding.
+  // delta_psi = delta_alpha_psi = 0 (flat space) is the correct value before the
+  // first solve of a run -- both are overwritten by the one-shot seeding below on
+  // the first real SolveConformalFactor/SolveLapse call, but zero-init keeps the
+  // array physically consistent (delta=0 <-> psi=1) until then.
   Kokkos::deep_copy(delta_psi, 0.0);
   Kokkos::deep_copy(delta_alpha_psi, 0.0);
 
@@ -195,13 +179,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   p_beta.InitWithShallowSlice(u_p_beta, 0, 2);
 
   // u_p_src: pure LoadPoissonSource input, read pointwise once, never
-  // differentiated or ghost-exchanged -- genuinely sized at this solver's own
-  // (generally shallower) multigrid ghost width, not mesh-NGHOST depth (plan
-  // addendum #4, Finding H's contrast). Read directly here (not via
-  // GetGhostCells(), since no driver exists yet at this point in the constructor)
-  // using the same "cfc"/"mg_nghost" input parameter every mg_cfc_* driver
-  // constructor reads independently with the same default, so this is guaranteed
-  // consistent with whatever ngh_ they end up with.
+  // differentiated or ghost-exchanged -- sized at this solver's own (generally
+  // shallower) multigrid ghost width, not mesh-NGHOST depth. Read directly here
+  // (no driver exists yet in the constructor) using the same "cfc"/"mg_nghost"
+  // input every mg_cfc_* driver constructor reads independently with the same
+  // default, so this is guaranteed consistent with whatever ngh_ they end up with.
   int mg_nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
   mg_nghost_ = mg_nghost;
   int mncells1 = indcs.nx1 + 2*mg_nghost;
@@ -210,9 +192,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_p_src, nmb, 4, mncells3, mncells2, mncells1);
   p_src.InitWithShallowSlice(u_p_src, 0, 2);
 
-  // 4 multigrid solvers: one per distinct elliptic equation. pmgd_pietax/
-  // pmgd_pietabeta each solve the packed (P_i, eta) nvar_=4 system for their
-  // Shibata pair in one call (see mg_cfc_vector_poisson.hpp).
+  // 4 multigrid solvers: one per elliptic equation. pmgd_pietax/pmgd_pietabeta each
+  // solve the packed (P_i, eta) nvar_=4 system for their Shibata pair in one call.
   pmgd_pietax    = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
@@ -220,7 +201,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp later differentiates, mirroring
-  // z4c::Z4c::pbval_u/coarse_u0 exactly (is_z4c=false throughout -- see cfc.hpp).
+  // z4c::Z4c::pbval_u/coarse_u0 (is_z4c=false throughout -- see cfc.hpp).
   pbval_pietax = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_pietax->InitializeBuffers(4);
   pbval_x = new MeshBoundaryValuesCC(pmbp, pin, false);
@@ -232,11 +213,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pbval_pietabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_pietabeta->InitializeBuffers(4);
 
-  // Round 19 fix: ghost-exchange for padm->u_adm itself -- see pbval_adm's doc
-  // comment in cfc.hpp. adm::ADM::nadm channels (g_dd, vK_dd, psi4, alpha, beta_u):
+  // Ghost-exchange for padm->u_adm itself -- see pbval_adm's comment in cfc.hpp.
   // CFC never runs with z4c active, so u_adm always carries the full nadm channels
-  // (adm::ADM::ADM's constructor only shrinks it to nadm-4 and aliases alpha/beta_u
-  // into pz4c->u0 when pz4c != nullptr -- never true here).
+  // (adm::ADM::ADM's constructor only shrinks it and aliases alpha/beta_u into
+  // pz4c->u0 when pz4c != nullptr -- never true here).
   pbval_adm = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_adm->InitializeBuffers(adm::ADM::nadm);
 
@@ -254,42 +234,27 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::realloc(coarse_u_adm, nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
   }
 
-  // Item 11 (DEVELOPMENT.md): X^i/psi fixed-point-iteration controls, used by
-  // InitializeMetric() only.
+  // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
   cfc_init_iter_max_ = pin->GetOrAddInteger("cfc", "init_iter_max", 50);
   cfc_init_tol_ = pin->GetOrAddReal("cfc", "init_tol", 1.0e-10);
   cfc_init_verbose_ = pin->GetOrAddBoolean("cfc", "init_verbose", false);
   cfc_init_omega_ = pin->GetOrAddReal("cfc", "init_omega", 1.0);
-  // 2026-07-25: default true (see item 27/28, DEVELOPMENT.md) -- the psi^5
-  // formulation converges dramatically faster (2-3 outer iterations vs.
-  // 25-80+) and matches the default formulation's accuracy for every star
-  // tested EXCEPT the migration test's compact/unstable star (2M/R~0.5),
-  // which diverges to NaN under it. Any input known to be that compact
-  // (currently: cfc_tov_migration.athinput and its run-directory copies) MUST
-  // explicitly set init_use_psi5_source=false -- this default does not
-  // auto-detect or fall back, a bad guess here produces real NaN corruption,
-  // not a graceful degradation.
+  // Default true: the psi^5 formulation converges dramatically faster (2-3 outer
+  // iterations vs. 25-80+) and matches the default formulation's accuracy for
+  // every star tested except very compact/unstable ones, which diverge to NaN
+  // under it -- inputs known to be that compact must explicitly set this false;
+  // there is no auto-detection or graceful fallback.
   cfc_init_use_psi5_ = pin->GetOrAddBoolean("cfc", "init_use_psi5_source", true);
-  // 2026-07-25 (item 29, DEVELOPMENT.md): default false -- byte-identical to
-  // the pre-existing Picard-iteration behavior unless explicitly enabled.
   cfc_init_freeze_conserved_ = pin->GetOrAddBoolean("cfc", "init_freeze_conserved",
                                                      false);
-  // 2026-07-25 (user direction): the two modes above encode mutually
-  // incompatible assumptions about what's held fixed. init_freeze_conserved
-  // holds Utilde = psi^6*U (the WEIGHTED/densitized conserved source) fixed
-  // across RunXPsiSolvePass's single Newton solve -- exactly what the
-  // default (psi^-1) formulation's own Newton kernel already assumes
-  // (coeff_ channel 0 loaded once, held fixed for the whole solve).
-  // init_use_psi5_source instead holds U_raw (the RAW/undensitized quantity,
-  // i.e. implicitly the PRIMITIVES) fixed and lets Utilde=U_raw*psi^6 vary
-  // self-consistently as the Newton iterate itself changes -- the opposite
-  // assumption. Combining both would mean init_freeze_conserved's one-shot
-  // Utilde snapshot gets silently re-interpreted as "primitives fixed"
-  // inside the Newton solve, defeating its own purpose. Force
-  // init_use_psi5_source off whenever init_freeze_conserved is on (covers
-  // both an explicit init_use_psi5_source=true and its own default-true
-  // silently combining with a new init_freeze_conserved=true) -- warn so
-  // this isn't a silent behavior change from what the input literally says.
+  // The two modes above encode mutually incompatible assumptions about what's held
+  // fixed. init_freeze_conserved holds Utilde = psi^6*U (the densitized conserved
+  // source) fixed across RunXPsiSolvePass's single Newton solve; init_use_psi5_
+  // source instead holds U_raw (undensitized, i.e. implicitly the primitives)
+  // fixed and lets Utilde vary self-consistently with the Newton iterate -- the
+  // opposite assumption. Force init_use_psi5_source off whenever
+  // init_freeze_conserved is on (covers both an explicit true and its own
+  // default-true silently combining with it).
   if (cfc_init_freeze_conserved_ && cfc_init_use_psi5_) {
     if (global_variable::my_rank == 0) {
       std::cout << "### WARNING in CFC::CFC" << std::endl
@@ -322,17 +287,15 @@ CFC::~CFC() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::QueueCFCTasks()
-//! \brief queues CFC's tasks into the shared NumericalRelativity task graph. See
-//! cfc.hpp's doc comment for the full chain this builds.
+//! \brief queues CFC's tasks into the shared NumericalRelativity task graph.
 
 void CFC::QueueCFCTasks() {
   using namespace numrel;  // NOLINT(build/namespaces)
   NumericalRelativity *pnr = pmy_pack->pnr;
 
-  // Round 19 fix: post all 6 fields' non-blocking MPI receives up front, before any
-  // of this stage's Send/Recv rounds run -- mirrors z4c::Z4c_Recv (Task_Start).
-  // See InitRecvTask's doc comment in cfc.hpp for why this is required for
-  // correctness, not just an optimization.
+  // Post all 6 fields' non-blocking MPI receives up front, before any of this
+  // stage's Send/Recv rounds run -- mirrors z4c::Z4c_Recv (Task_Start). See
+  // InitRecvTask's comment in cfc.hpp for why this is required for correctness.
   pnr->QueueTask(&CFC::InitRecvTask, this, CFC_InitRecv, "CFC_InitRecv", Task_Start);
 
   pnr->QueueTask(&CFC::SolveVecXTask, this, CFC_BuildSrcX, "CFC_BuildSrcX",
@@ -405,11 +368,10 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
                  Task_Run, {CFC_ReconstructBeta});
 
-  // Round 19 fix: ghost-exchange padm->u_adm (see pbval_adm's doc comment in
-  // cfc.hpp) -- nothing else in this stage's task list depends on these completing,
-  // but the shared task-list machinery still awaits every queued task before the
-  // "stagen" list as a whole is considered done, so u_adm's ghosts are guaranteed
-  // valid by the time the next stage (or MHD_Newdt, this same stage) runs.
+  // Ghost-exchange padm->u_adm (see pbval_adm's comment in cfc.hpp) -- nothing else
+  // this stage depends on these completing, but the shared task-list machinery
+  // still awaits every queued task, so u_adm's ghosts are guaranteed valid by the
+  // time the next stage (or MHD_Newdt, this same stage) runs.
   pnr->QueueTask(&CFC::RestADMTask, this, CFC_RestADM, "CFC_RestADM",
                  Task_Run, {CFC_AssembleFinal});
   pnr->QueueTask(&CFC::SendADMTask, this, CFC_SendADM, "CFC_SendADM",
@@ -419,11 +381,10 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::ProlongADMTask, this, CFC_ProlongADM, "CFC_ProlongADM",
                  Task_Run, {CFC_RecvADM});
 
-  // Round 19 fix: wait for every outstanding send/receive posted this stage before
-  // the "stagen" list is considered done -- mirrors z4c::Z4c_ClearS/Z4c_ClearR
-  // (Task_End). Must run after every Task_Run task (guaranteed by the before_stagen/
-  // stagen/after_stagen phase separation in driver.cpp, not by an explicit
-  // dependency edge -- see InitRecvTask's doc comment in cfc.hpp).
+  // Wait for every outstanding send/receive posted this stage before "stagen" is
+  // considered done -- mirrors z4c::Z4c_ClearS/Z4c_ClearR (Task_End). Runs after
+  // every Task_Run task via the before_stagen/stagen/after_stagen phase separation
+  // in driver.cpp, not an explicit dependency edge.
   pnr->QueueTask(&CFC::ClearSendTask, this, CFC_ClearSend, "CFC_ClearSend", Task_End);
   pnr->QueueTask(&CFC::ClearRecvTask, this, CFC_ClearRecv, "CFC_ClearRecv",
                  Task_End, {CFC_ClearSend});
@@ -431,11 +392,9 @@ void CFC::QueueCFCTasks() {
 }
 
 //----------------------------------------------------------------------------------------
-// Item 11 (DEVELOPMENT.md): InitRecv/ClearSend/ClearRecv scoped to exactly the
-// fields InitializeMetric()'s two phases exercise -- see the doc comment on these
-// four declarations in cfc.hpp for why the all-6-field CFC_InitRecv/ClearSend/
-// ClearRecv tasks can't be reused here (would deadlock on the fields not sent that
-// iteration).
+// InitRecv/ClearSend/ClearRecv scoped to exactly the fields InitializeMetric()'s two
+// phases exercise -- see the comment on these four declarations in cfc.hpp for why the
+// all-6-field CFC_InitRecv/ClearSend/ClearRecv tasks can't be reused here.
 
 void CFC::InitRecvXFields() {
   pbval_pietax->InitRecv(4);
@@ -465,38 +424,24 @@ void CFC::ClearTailFields() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives)
-//! \brief Item 29 (DEVELOPMENT.md): one pass of "refresh cons from the fixed
-//! primitives + current metric, solve X^i, ghost-exchange, compute Adual^ij/
-//! Ahat^2, solve psi" -- extracted verbatim from InitializeMetric()'s own
-//! Picard-loop body so it can be called either repeatedly (the default,
-//! iterative path) or exactly once (<cfc> init_freeze_conserved=true).
-//!
-//! 2026-07-26 (item 33 correction, DEVELOPMENT.md): refresh_cons_from_primitives
-//! (default true) gates the leading PrimToConInit call -- pass false when the
-//! conserved state is already correct and must not be rebuilt from primitives
-//! (CFC::ReinitializeMetricForAMR, where pmhd->u0 already reflects the
-//! properly-regridded, mass-conserving evolved state).
+//! \fn void CFC::RunXPsiSolvePass(Driver *pdriver)
+//! \brief one pass of "solve X^i, ghost-exchange, compute Adual^ij/Ahat^2, solve
+//! psi" -- extracted from InitializeMetric()'s Picard-loop body so it can be called
+//! either repeatedly (the iterative default) or exactly once (<cfc>
+//! init_freeze_conserved=true). Does not itself refresh conserved variables from
+//! primitives -- callers do that (or don't) depending on which mode is active; see
+//! the call sites in InitializeMetric()/ReinitializeMetricForAMR.
 
-void CFC::RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives) {
+void CFC::RunXPsiSolvePass(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
 
-  // Refresh conserved variables from the fixed primitives + current metric
-  // (padm->adm.g_dd, as of the previous call's AssembleConformalMetric -- or the
-  // pgen's own raw guess, on the very first call this run ever makes). Skipped
-  // when the caller already has a correct, fixed conserved state (see doc
-  // comment above).
-  if (refresh_cons_from_primitives) {
-    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
-  }
-
   InitRecvXFields();
 
-  // Solve X^i: build S_i-tilde/U-tilde from the just-refreshed cons, solve the
-  // packed (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
+  // Solve X^i: build S_i-tilde/U-tilde from the current cons, solve the packed
+  // (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
   SolveVectorPotential(pdriver, 0);
   RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
   while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
@@ -509,30 +454,24 @@ void CFC::RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives) {
 
   ClearXFields();
 
-  // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this is what
-  // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for whatever comes
-  // next (the next Picard iteration's PrimToConInit, or -- one-shot/regrid mode --
-  // RunLapseShiftAssemblePass's own final primitive/conserved reconciliation).
+  // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this updates
+  // padm->adm.g_dd/psi4 (via AssembleConformalMetric) for whatever comes next.
   ComputeADual();
   SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::InitializeMetric(Driver *pdriver)
-//! \brief Item 11 (DEVELOPMENT.md): see the public doc comment in cfc.hpp. Runs the
-//! X^i/psi fixed-point iteration (PrimToCons <-> vector-Poisson/conformal-factor
-//! solve) by hand, entirely outside the normal per-stage task graph -- reusing that
-//! graph isn't possible here since a pass through "stagen" would also flux-update/
-//! RK-evolve the hydro state, which must not happen during this one-time
-//! initialization. Once X^i/psi converge (tracked via psi alone -- it's the one
-//! field both matter-coupling paths, direct U-tilde and indirect via Adual^ij/X^i,
-//! feed into), solves lapse/shift once (they don't feed back into X^i/psi's own
-//! equations) and does the final padm->u_adm ghost exchange, mirroring the tail of
-//! QueueCFCTasks() exactly.
+//! \brief runs the X^i/psi fixed-point iteration (PrimToCons <-> vector-Poisson/
+//! conformal-factor solve) by hand, entirely outside the normal per-stage task graph
+//! (a pass through "stagen" would also flux-update/RK-evolve the hydro state, which
+//! must not happen during this one-time initialization). Once X^i/psi converge
+//! (tracked via psi alone), solves lapse/shift once and does the final padm->u_adm
+//! ghost exchange, mirroring the tail of QueueCFCTasks().
 //!
-//! Item 29 (DEVELOPMENT.md): <cfc> init_freeze_conserved selects a second mode --
-//! RunXPsiSolvePass() called exactly once instead of iterated, see
-//! cfc_init_freeze_conserved_'s doc comment in cfc.hpp.
+//! <cfc> init_freeze_conserved selects a second mode -- RunXPsiSolvePass() called
+//! exactly once instead of iterated, see cfc_init_freeze_conserved_'s comment in
+//! cfc.hpp.
 
 void CFC::InitializeMetric(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -541,30 +480,17 @@ void CFC::InitializeMetric(Driver *pdriver) {
   int &ks = indcs.ks; int &ke = indcs.ke;
 
   if (cfc_init_freeze_conserved_) {
-    // Item 29 (DEVELOPMENT.md): one-shot mode -- Utilde/S-tilde_i are built
-    // exactly once (inside RunXPsiSolvePass, from the pgen's own initial metric
-    // guess) and held fixed; no outer Picard loop, no convergence check (there
-    // is nothing being iterated to convergence). Falls through into the same
-    // tail section the iterative path also uses, unchanged.
-    //
-    // 2026-07-25 bugfix: the informational dpsi print below must compare
-    // against the TRUE initial guess (psi4^0.25-1, the same formula
-    // SolveConformalFactor's own one-time psi_seeded_ block uses), NOT a
-    // deep_copy of delta_psi taken here -- delta_psi is still at its
-    // constructor-time value (zero) at this point in a fresh run, since
-    // psi_seeded_'s own seeding write into delta_psi happens INSIDE
-    // RunXPsiSolvePass (the first-ever SolveConformalFactor call), after
-    // this snapshot would otherwise have been taken. A deep_copy here would
-    // silently measure "the converged delta_psi's own magnitude vs. zero,"
-    // not "how far the one-shot solve moved psi from its starting guess" --
-    // recompute the same seed formula directly from adm.psi4 instead.
+    // One-shot mode: Utilde/S-tilde_i are built exactly once (inside
+    // RunXPsiSolvePass, from the conserved state the pgen's own initial metric
+    // guess already produced) and held fixed; no outer Picard loop, no
+    // convergence check. Falls through into the same tail section the iterative
+    // path also uses, unchanged.
     int nmb = pmy_pack->nmb_thispack;
-    // Allocation size must match delta_psi's own (AMR-headroom-sized) extent --
-    // NOT nmb_thispack -- or the deep_copy/pointwise ops below (which read/write
-    // both arrays at the same index) hit a Kokkos extent-mismatch abort the
-    // moment nmb_maxperrank > nmb_thispack (see DEVELOPMENT.md item 33). The
-    // par_for/MDRangePolicy loop bounds below still correctly use nmb
-    // (nmb_thispack) -- only the currently-resident blocks need touching.
+    // Allocation size must match delta_psi's own (AMR-headroom-sized) extent, not
+    // nmb_thispack, or the pointwise ops below (which read/write both arrays at
+    // the same index) hit a Kokkos extent-mismatch abort once
+    // nmb_maxperrank > nmb_thispack. The par_for/MDRangePolicy loop bounds below
+    // still correctly use nmb (nmb_thispack) -- only resident blocks need touching.
     DvceArray5D<Real> psi_before("cfc_init_psi_before", delta_psi.extent_int(0), 1,
                                   delta_psi.extent_int(2), delta_psi.extent_int(3),
                                   delta_psi.extent_int(4));
@@ -602,9 +528,8 @@ void CFC::InitializeMetric(Driver *pdriver) {
     }
   } else {
     int nmb = pmy_pack->nmb_thispack;
-    // See the identical comment on psi_before above (item 33, DEVELOPMENT.md):
-    // allocation size must match delta_psi's own AMR-headroom-sized extent, not
-    // nmb_thispack, for the deep_copy/relax ops below to have matching extents.
+    // See the identical comment on psi_before above: allocation size must match
+    // delta_psi's own AMR-headroom-sized extent, not nmb_thispack.
     DvceArray5D<Real> psi_old("cfc_init_psi_old", delta_psi.extent_int(0), 1,
                                delta_psi.extent_int(2), delta_psi.extent_int(3),
                                delta_psi.extent_int(4));
@@ -613,20 +538,16 @@ void CFC::InitializeMetric(Driver *pdriver) {
     for (int iter = 0; iter < cfc_init_iter_max_; ++iter) {
       Kokkos::deep_copy(psi_old, delta_psi);
 
+      pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
       RunXPsiSolvePass(pdriver);
 
       // Under-relax the just-solved psi against the previous iteration's value
-      // (cfc_init_omega_ < 1) when the plain Picard step is unstable (found for a
-      // more compact/relativistic star than any previously tested here -- see
-      // cfc_init_omega_'s doc comment in cfc.hpp). SolveConformalFactor() already
-      // wrote the unrelaxed solve into delta_psi and used it to update
-      // padm->adm.g_dd/psi4 via AssembleConformalMetric -- blend delta_psi back
-      // down here and re-run AssembleConformalMetric so g_dd/psi4 reflect the
-      // relaxed value the next iteration's PrimToConInit actually sees. Both are
-      // interior-only (is..ie), matching AssembleConformalMetric's own pointwise,
-      // no-ghost-dependency implementation (cfc_reconstruct.cpp), so no ghost
-      // exchange is needed either way. omega=1.0 (the default) skips this
-      // entirely -- byte-identical to the original unrelaxed iteration.
+      // (cfc_init_omega_ < 1) when the plain Picard step is unstable, then re-run
+      // AssembleConformalMetric so g_dd/psi4 reflect the relaxed value the next
+      // iteration's PrimToConInit sees. Both interior-only, matching
+      // AssembleConformalMetric's own no-ghost-dependency implementation.
+      // omega=1.0 (the default) skips this, byte-identical to the unrelaxed
+      // iteration.
       if (cfc_init_omega_ != 1.0) {
         Real omega = cfc_init_omega_;
         auto &psi_relax = delta_psi;
@@ -639,9 +560,6 @@ void CFC::InitializeMetric(Driver *pdriver) {
         cfc::AssembleConformalMetric(pmy_pack, delta_psi);
       }
 
-      // A difference of two same-convention values (both delta_psi, one from
-      // before this iteration's solve, one after), so it's unaffected by whether
-      // delta_psi stores psi-1 or psi itself.
       Real dpsi = 0.0;
       auto &psi_ = delta_psi;
       auto &psi_old_ = psi_old;
@@ -678,45 +596,33 @@ void CFC::InitializeMetric(Driver *pdriver) {
     }
   }
 
-  // Lapse/shift/final-assembly tail, shared with CFC::ReinitializeMetricForAMR
-  // (item 33, DEVELOPMENT.md) -- see RunLapseShiftAssemblePass's own doc
-  // comment for why this direction (PrimToConInit vs. ConToPrim) depends on
-  // which mode was just used.
-  RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/!cfc_init_freeze_conserved_);
+  // Lapse/shift/final-assembly tail, shared with CFC::ReinitializeMetricForAMR.
+  // Reconcile primitives vs. conserved variables in whichever direction matches
+  // what was just held fixed: freeze_conserved held Utilde fixed, so recover
+  // primitives via ConToPrim; the iterative loop held primitives fixed throughout,
+  // so rebuild conserved variables from them one last time via PrimToConInit.
+  if (cfc_init_freeze_conserved_) {
+    pmy_pack->pdyngr->ConToPrim(pdriver, 0);
+  } else {
+    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  }
+
+  RunLapseShiftAssemblePass(pdriver);
   return;
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed)
-//! \brief Item 29/33 correction (DEVELOPMENT.md): the tail of InitializeMetric() --
-//! final primitive/conserved reconciliation, then RescaleMatterSources/SolveLapse/
-//! SolveShift/AssembleADM -- extracted so it can be shared with
-//! CFC::ReinitializeMetricForAMR. primitives_are_fixed selects which quantity was
-//! held fixed during the solve that just completed: true (primitives fixed,
-//! iterative Picard mode) calls PrimToConInit to rebuild conserved variables from
-//! those fixed primitives against the final metric (today's original, correct
-//! behavior for that mode); false (conserved variables/Utilde fixed --
-//! init_freeze_conserved=true, or a regrid re-solve) calls ConToPrim instead, to
-//! recover primitives from the fixed conserved state against the final metric --
-//! mirroring the normal per-stage task graph's own MHD_C2P, which runs right after
-//! CFC_SolvePsi for exactly this reason. The original code called PrimToConInit
-//! unconditionally here regardless of mode: correct for the iterative branch, but
-//! a real bug for init_freeze_conserved=true, which both left primitives stale
-//! (never recovered) and silently overwrote the very conserved state that mode
-//! was supposed to hold fixed with a value inconsistent with what psi's own
-//! Newton solve actually assumed.
+//! \fn void CFC::RunLapseShiftAssemblePass(Driver *pdriver)
+//! \brief the tail of InitializeMetric()/ReinitializeMetricForAMR: Rescale
+//! MatterSources/SolveLapse/SolveShift/AssembleADM. Callers must reconcile
+//! primitives vs. conserved variables themselves before calling this -- see this
+//! method's comment in cfc.hpp.
 
-void CFC::RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed) {
+void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
-
-  if (primitives_are_fixed) {
-    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
-  } else {
-    pmy_pack->pdyngr->ConToPrim(pdriver, 0);
-  }
 
   // Lapse and shift don't feed back into X^i/psi's own equations, so they're
   // solved once here rather than iterated -- mirrors QueueCFCTasks()'s tail.
@@ -749,12 +655,13 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed) 
 }
 
 //----------------------------------------------------------------------------------------
-// See cfc.hpp's doc comment on this method for the full rationale (item 33,
-// DEVELOPMENT.md). Forces SolveConformalFactor's/SolveLapse's one-time psi/
-// alpha_psi seeding to fire again, re-seeding from padm->adm.psi4/adm.alpha
-// rather than reusing CFC's own (post-regrid, block-layout-mismatched)
-// delta_psi/delta_alpha_psi as a Newton starting point. Does NOT call
-// InitializeMetric() itself -- see that method's own doc comment for why.
+//! \fn void CFC::ReinitializeMetricForAMR(Driver *pdriver)
+//! \brief see this method's comment in cfc.hpp for the full rationale. Forces
+//! SolveConformalFactor's/SolveLapse's one-time psi/alpha_psi seeding to fire again,
+//! re-seeding from padm->adm.psi4/adm.alpha rather than reusing CFC's own (post-
+//! regrid, block-layout-mismatched) delta_psi/delta_alpha_psi as a Newton starting
+//! point. Does NOT call InitializeMetric() itself.
+
 void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -762,40 +669,13 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   int &ks = indcs.ks; int &ke = indcs.ke;
   int nmb = pmy_pack->nmb_thispack;
 
-  // 2026-07-26 (item 33, DEVELOPMENT.md): the field-remap warm-start design
-  // (DerefineCCSameRank/CopyCC/CopyForRefinementCC/RefineCC for delta_psi/
-  // delta_alpha_psi/u_x, mirroring z4c::Z4c::u0) was tried and REVERTED --
-  // AthenaK's generic AMR load-balancing MPI transfer (PackAndSendAMR/
-  // ClearRecvAndUnpackAMR, src/mesh/load_balance.cpp) hardcodes a fixed list
-  // of physics modules (hydro/mhd/radiation/z4c) with no entry for padm or
-  // pcfc -- any block moving to a different rank during a regrid never has
-  // its ADM/CFC field data transferred via MPI at all, so a remapped-but-
-  // never-actually-received array can silently contain uninitialized/garbage
-  // (or NaN) content, which a Newton/multigrid solve cannot self-correct away
-  // from (confirmed: a real, reproducible NaN appeared in exactly this
-  // scenario during testing). Fixing this properly would mean extending
-  // load_balance.cpp's own packing/unpacking (shared with every physics
-  // module, well beyond CFC's own scope) -- out of scope here. Falls back to
-  // resetting psi_seeded_/alpha_psi_seeded_ (addendum #4's original design):
-  // this reads padm->adm.psi4/adm.alpha instead of CFC's own u_x/delta_psi/
-  // delta_alpha_psi -- padm->u_adm carries the SAME cross-rank gap (only
-  // CopyCC, no Derefine/CopyForRefinement/Refine/MPI treatment at all), but
-  // is harmless there because CFC's own re-solve unconditionally overwrites
-  // every field in padm->u_adm every call anyway (AssembleConformalMetric/
-  // AssembleLapseShiftK/AssembleADM) -- so whatever padm->u_adm's own
-  // pre-solve content is, right or wrong, never gets used as anything but a
-  // (best-effort) initial guess for the Newton solve, not doubled down on as
-  // this pass's own persistent state the way CFC's own u_x/delta_psi would
-  // have been.
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
 
-  // Snapshot the TRUE initial guess (psi4^0.25-1, the same formula
+  // Snapshot the true initial guess (psi4^0.25-1, the same formula
   // SolveConformalFactor's own one-time psi_seeded_ block uses) directly from
-  // adm.psi4 -- NOT a deep_copy of delta_psi, which is still at whatever
-  // (possibly stale) value it held before this call and is not what the
-  // Newton solve will actually be seeded from (mirrors the identical bugfix
-  // already applied to InitializeMetric's own one-shot diagnostic, item 29).
+  // adm.psi4, not delta_psi (which is still at whatever stale value it held before
+  // this call and is not what the Newton solve will actually be seeded from).
   DvceArray5D<Real> psi_before("cfc_regrid_psi_before", delta_psi.extent_int(0), 1,
                                 delta_psi.extent_int(2), delta_psi.extent_int(3),
                                 delta_psi.extent_int(4));
@@ -806,8 +686,9 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25) - 1.0;
   });
 
-  RunXPsiSolvePass(pdriver, /*refresh_cons_from_primitives=*/false);
-  RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/false);
+  RunXPsiSolvePass(pdriver);
+  pmy_pack->pdyngr->ConToPrim(pdriver, 0);
+  RunLapseShiftAssemblePass(pdriver);
 
   if (cfc_init_verbose_) {
     Real dpsi = 0.0;
@@ -836,10 +717,9 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 }
 
 //----------------------------------------------------------------------------------------
-// Ghost-exchange task-graph entry points: one Rest/Send/Recv/Prolong quartet per
-// field, mirroring z4c::Z4c::RestrictU/SendU/RecvU/Prolongate's exact one-line shape
-// (RestrictCC/ProlongateCC are internal no-ops without SMR/AMR; is_z4c=false
-// throughout since CFC is not z4c).
+// Ghost-exchange task-graph entry points: one Rest/Send/Recv/Prolong quartet per field,
+// mirroring z4c::Z4c::RestrictU/SendU/RecvU/Prolongate (RestrictCC/ProlongateCC are
+// internal no-ops without SMR/AMR; is_z4c=false throughout since CFC is not z4c).
 
 TaskStatus CFC::RestPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
@@ -958,18 +838,15 @@ TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 
-// Round 19 fix: ghost-exchange padm->u_adm itself, once per stage, right after
-// AssembleFinalTask writes its interior (see pbval_adm's doc comment in cfc.hpp).
-// No CFCScalarBCs/CFCVectorBCs-style physical-BC pass here, unlike the Recv*Tasks
-// above: those helpers assume a single scalar or a uniform-parity 3-vector, but
-// u_adm mixes scalars (psi4, alpha), a vector (beta_u), and rank-2 SYM2 tensors
-// (g_dd, vK_dd) with per-component reflection parity (e.g. g_xy flips sign under
-// an x-reflection, g_xx doesn't) -- reusing either existing helper across all
-// adm::ADM::nadm channels would silently mishandle a reflecting physical boundary.
-// This round therefore only fixes inter-MeshBlock/periodic communication (the
-// round-19 bug), not physical-boundary ghost cells for u_adm specifically; the
-// latter is a separate, pre-existing gap (same class as the one cfc_bcs.cpp
-// already fixes for CFC's own fields) left for a future pass.
+// Ghost-exchange padm->u_adm itself, once per stage, right after AssembleFinalTask
+// writes its interior (see pbval_adm's comment in cfc.hpp). No CFCScalarBCs/
+// CFCVectorBCs-style physical-BC pass here, unlike the Recv*Tasks above: those
+// helpers assume a single scalar or a uniform-parity 3-vector, but u_adm mixes
+// scalars, a vector, and rank-2 SYM2 tensors with per-component reflection parity
+// -- reusing either helper across all adm::ADM::nadm channels would silently
+// mishandle a reflecting physical boundary. This round therefore only fixes
+// inter-MeshBlock/periodic communication, not physical-boundary ghost cells for
+// u_adm -- a separate, pre-existing gap left for a future pass.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
@@ -981,10 +858,9 @@ TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
   TaskStatus tstat = pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, coarse_u_adm);
-  // 1/r^n physical-boundary falloff BC for u_adm (adm_bcs.cpp) -- see that file's doc
-  // comment. Was previously entirely absent: ghost cells at a genuine physical domain
-  // edge were left frozen at their t=0 pgen value forever, since RecvAndUnpackCC is a
-  // no-op there (no neighbor block to exchange with).
+  // 1/r^n physical-boundary falloff BC for u_adm (adm_bcs.cpp): ghost cells at a
+  // genuine physical domain edge would otherwise stay frozen at their t=0 pgen
+  // value forever, since RecvAndUnpackCC is a no-op there (no neighbor block).
   if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
@@ -997,11 +873,10 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 
-// Round 19 fix: see the doc comment on these three declarations in cfc.hpp.
-// InitRecv/ClearSend/ClearRecv (bvals_tasks.cpp) all unconditionally
-// return TaskStatus::complete, so no incomplete-status propagation is needed --
-// matches z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape,
-// just looped over CFC's 6 MeshBoundaryValuesCC instances instead of one.
+// InitRecv/ClearSend/ClearRecv (bvals_tasks.cpp) all unconditionally return
+// TaskStatus::complete, so no incomplete-status propagation is needed -- matches
+// z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
+// over CFC's 6 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   pbval_pietax->InitRecv(4);
   pbval_x->InitRecv(3);
@@ -1031,90 +906,71 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage)
-//! \brief step 1: X^i's packed (P_i, eta) right-hand side, solved (not yet
-//! reconstructed into x_u -- needs u_p_x's own ghost exchange first, see
-//! CFC_ReconstructX). Runs after MHD_AddSrc, i.e. once this stage's hydro
-//! flux+source update has produced the conserved state AssembleVectorSource reads
-//! from.
+// step 1: X^i's packed (P_i, eta) right-hand side, solved (not yet reconstructed into
+// x_u -- needs u_p_x's own ghost exchange first, see CFC_ReconstructX). Runs after
+// MHD_AddSrc, once this stage's hydro flux+source update has produced the conserved
+// state AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   SolveVectorPotential(pdriver, stage);
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage)
-//! \brief CFC_ReconstructX: build x_u from u_p_x (packed P_i, eta) once its ghost
-//! exchange has completed.
+// CFC_ReconstructX: build x_u from u_p_x (packed P_i, eta) once its ghost exchange
+// has completed.
 
 TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage) {
   ReconstructVectorPotential();
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage)
-//! \brief step 2: Adual^ij/Ahat^2 from x_u, once x_u's own ghost exchange completes.
+// step 2: Adual^ij/Ahat^2 from x_u, once x_u's own ghost exchange completes.
 
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   ComputeADual();
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage)
-//! \brief step 3: psi (nonlinear), then the early psi4/g_dd write MHD_C2P depends on.
+// step 3: psi (nonlinear), then the early psi4/g_dd write MHD_C2P depends on.
 
 TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
   SolveConformalFactor(pdriver, stage);
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage)
-//! \brief step 4: rebuild S-tilde from the primitives MHD_C2P (this task's dependency)
-//! just recovered -- no con2prim call here, see RescaleMatterSources.
+// step 4: rebuild S-tilde from the primitives MHD_C2P (this task's dependency) just
+// recovered -- no con2prim call here, see RescaleMatterSources.
 
 TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
   RescaleMatterSources(pdriver, stage);
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage)
-//! \brief step 5: alpha*psi (nonlinear).
+// step 5: alpha*psi (nonlinear).
 
 TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
   SolveLapse(pdriver, stage);
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage)
-//! \brief step 6: beta^i's packed (P_i, eta) right-hand side, solved (not yet
-//! reconstructed -- needs u_p_beta's own ghost exchange first, see
-//! CFC_ReconstructBeta). Runs after psi/alpha_psi's own ghost exchange (both needed
-//! by the eq. 75 source term).
+// step 6: beta^i's packed (P_i, eta) right-hand side, solved (not yet reconstructed --
+// needs u_p_beta's own ghost exchange first, see CFC_ReconstructBeta). Runs after
+// psi/alpha_psi's own ghost exchange (both needed by the eq. 75 source term).
 
 TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
   SolveShift(pdriver, stage);
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage)
-//! \brief CFC_ReconstructBeta: build beta_u from u_p_beta (packed P_i, eta) once its
-//! ghost exchange has completed.
+// CFC_ReconstructBeta: build beta_u from u_p_beta (packed P_i, eta) once its ghost
+// exchange has completed.
 
 TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
   ReconstructShift();
   return TaskStatus::complete;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage)
-//! \brief final step: vK_dd/alpha/beta_u -> padm->u_adm.
+// final step: vK_dd/alpha/beta_u -> padm->u_adm.
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   AssembleADM();
@@ -1125,8 +981,7 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //! \fn void CFC::AssembleVectorSource(bool for_shift)
 //! \brief Gmunu eq. 72 (for_shift=false) / eq. 75 (for_shift=true) right-hand sides,
 //! plus Shibata eq. 3.11's eta source (packed at channel 3 of u_p_src), built from
-//! the same S_i either way. See plan addendum #4's "Matter-source algebra" section
-//! for the full per-step derivation.
+//! the same S_i either way.
 
 void CFC::AssembleVectorSource(bool for_shift) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -1140,24 +995,19 @@ void CFC::AssembleVectorSource(bool for_shift) {
   auto s_tilde_d_ = s_tilde_d;
   auto p_src_ = p_src;
   auto &u_p_src_ = u_p_src;
-  // p_src_/u_p_src_ are allocated at this solver's own (shallower) mg_nghost_ depth,
-  // not mesh-NGHOST depth like everything else this function touches (cfc.hpp's
-  // u_p_src comment) -- every write to them below needs the loop's mesh-indexed
-  // (k,j,i) translated into their own index space first. eta's source is channel 3
-  // of u_p_src_ (packed alongside p_src_'s channels 0-2), written via u_p_src_
-  // directly since eta has no dedicated AthenaTensor view.
+  // p_src_/u_p_src_ are allocated at this solver's own (shallower) mg_nghost_
+  // depth, not mesh-NGHOST depth like everything else this function touches --
+  // every write below needs the loop's mesh-indexed (k,j,i) translated into their
+  // own index space first. eta's source is channel 3 of u_p_src_.
   int mg_nghost = mg_nghost_;
 
   if (!for_shift) {
     // Step 1 (Gmunu eq. 72): U/S_i built directly from the evolved conserved state
-    // (pmy_pack->pmhd->u0), mirroring dyn_grmhd.cpp's DynGRMHD::SetTmunu lines
-    // 472/474 exactly -- no primitives needed for these two. cons is already
-    // densitized by sqrt(detg) (AthenaK's standard GRMHD convention), and
+    // (pmy_pack->pmhd->u0), mirroring dyn_grmhd.cpp's DynGRMHD::SetTmunu -- no
+    // primitives needed. cons is already densitized by sqrt(detg), and
     // psi^6 == sqrt(detg) exactly for the conformally-flat ansatz (g_dd =
-    // psi^4*delta_ij, always, everywhere -- AssembleConformalMetric's only
-    // writer) -- so U-tilde = psi^6*U = psi^6*cons/sqrt(detg) collapses to cons
-    // itself, and likewise for S-tilde_i: no detg/psi^6 computation needed here
-    // at all, it would just multiply and divide by the same value.
+    // psi^4*delta_ij, always) -- so U-tilde = psi^6*U collapses to cons itself
+    // (and likewise S-tilde_i), with no detg/psi^6 computation needed here.
     auto &cons = pmy_pack->pmhd->u0;
     auto &u_tilde_ = u_tilde;
     auto &u_raw_ = u_raw;
@@ -1166,11 +1016,10 @@ void CFC::AssembleVectorSource(bool for_shift) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
       u_tilde_(m,0,k,j,i) = cons(m,IEN,k,j,i) + cons(m,IDN,k,j,i);
 
-      // U_raw = Utilde/sqrt(detg): the exact un-densitized ADM energy density,
-      // using the SAME g_dd that PrimToCon(Init) used to build cons this
-      // iteration -- feeds the alternate psi^5 Newton formulation (2026-07-25,
-      // InitializeMetric()-only, see mg_cfc_conformal_factor.cpp). Cheap, so
-      // computed unconditionally rather than gated on whether it'll be used.
+      // U_raw = Utilde/sqrt(detg): the undensitized ADM energy density, using the
+      // same g_dd that built cons -- feeds the alternate psi^5 Newton formulation
+      // (InitializeMetric()-only, see mg_cfc_conformal_factor.cpp). Cheap, so
+      // computed unconditionally.
       Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
       Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
       Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
@@ -1198,9 +1047,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
   } else {
     // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
     // using this stage's newly-solved psi/alpha_psi and the s_tilde_d step 1 already
-    // built (not rebuilt here -- see cfc.hpp's s_tilde_d comment).
-    // delta_psi/delta_alpha_psi store psi-1/alpha*psi-1 (see cfc.hpp); reconstruct
-    // the physical values with +1.0 before using them in this formula.
+    // built.
     auto &delta_psi_ = delta_psi;
     auto &delta_alpha_psi_ = delta_alpha_psi;
     par_for("cfc_assemble_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
@@ -1242,7 +1089,6 @@ void CFC::AssembleVectorSource(bool for_shift) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::SolveVectorPotential(Driver *pdriver, int stage)
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/false);
@@ -1253,16 +1099,10 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   return;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::ReconstructVectorPotential()
-
 void CFC::ReconstructVectorPotential() {
   cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, u_p_x, x_u, 3);
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::ComputeADual()
 
 void CFC::ComputeADual() {
   cfc::ComputeADualFromX(pmy_pack, x_u, a_dd);
@@ -1276,8 +1116,7 @@ void CFC::ComputeADual() {
   auto &a_sq_ = a_sq;
   par_for("cfc_ahat_sq", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    // Ahat^2 = f_ik f_jl Adual^kl Adual^ij = sum_{a,b} (Adual^ab)^2 (flat metric,
-    // Cartesian): full double sum over the symmetric tensor's 9 (a,b) pairs.
+    // Ahat^2 = f_ik f_jl Adual^kl Adual^ij = sum_{a,b} (Adual^ab)^2 (flat metric).
     Real sq = 0.0;
     for (int a = 0; a < 3; ++a) {
       for (int b = 0; b < 3; ++b) {
@@ -1290,17 +1129,11 @@ void CFC::ComputeADual() {
   return;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::SolveConformalFactor(Driver *pdriver, int stage)
-
 void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
-  // Item 10 (DEVELOPMENT.md): on the very first call ever, seed the V-cycle's
-  // initial guess from the problem generator's own ADM data (padm->adm.psi4,
-  // already populated by pgen/restart by the time this runs -- CFC's constructor
-  // runs before pgen, see psi_seeded_'s doc comment in cfc.hpp) instead of leaving
-  // the multigrid's own finest-level solution at its cold Kokkos-zero start.
+  // On the very first call ever, seed the V-cycle's initial guess from the problem
+  // generator's own ADM data (padm->adm.psi4) instead of a cold Kokkos-zero start.
   if (!psi_seeded_) {
     psi_seeded_ = true;
     int &is = indcs.is; int &ie = indcs.ie;
@@ -1320,9 +1153,6 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   pmgd_psi->LoadMatterSource(use_psi5_source ? u_raw : u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
-  // delta_psi member stores psi - 1, exactly the deviation RetrieveSolution() hands
-  // back verbatim (see cfc.hpp) -- no +1 offset pass needed (an earlier version of
-  // this code stored the physical psi here and added 1 back after every solve).
   pmgd_psi->RetrieveSolution(delta_psi);
 
   cfc::AssembleConformalMetric(pmy_pack, delta_psi);
@@ -1332,12 +1162,12 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
 //----------------------------------------------------------------------------------------
 //! \fn void CFC::RescaleMatterSources(Driver *pdriver, int stage)
 //! \brief step 4: rebuild S-tilde (trace of S_ij) from the fresh primitives MHD_C2P
-//! just recovered. Mirrors dyn_grmhd.cpp's DynGRMHD::SetTmunu's S_dd formula (lines
-//! 472-481) exactly, including the magnetic-field terms, then contracts to the trace
-//! via adm::Trace -- NOT the pure-fluid closed form (rho*h*W^2*v^2+3*P) alone, which
-//! would silently drop the magnetic contribution for any magnetized run (plan
-//! addendum #4, Finding E). No con2prim call here: this task depends on MHD_C2P, so
-//! pmy_pack->pmhd->w0 is already fresh against the g_dd SolveConformalFactor() wrote.
+//! just recovered. Mirrors dyn_grmhd.cpp's DynGRMHD::SetTmunu's S_dd formula
+//! exactly, including the magnetic-field terms (NOT the pure-fluid closed form
+//! rho*h*W^2*v^2+3*P alone, which would silently drop magnetic contributions for
+//! any magnetized run), then contracts to the trace via adm::Trace. No con2prim
+//! call here: this task depends on MHD_C2P, so pmy_pack->pmhd->w0 is already fresh
+//! against the g_dd SolveConformalFactor() wrote.
 
 void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -1394,16 +1224,12 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
                                S_dd[0][0], S_dd[0][1], S_dd[0][2],
                                S_dd[1][1], S_dd[1][2], S_dd[2][2]);
 
-    // psi^6 == sqrt(detg) exactly for the conformally-flat ansatz (g_dd =
-    // psi^4*delta_ij) -- reuse sqrtdetg already computed above instead of
-    // re-deriving the same value from psi.
+    // psi^6 == sqrt(detg) for the conformally-flat ansatz -- reuse sqrtdetg
+    // already computed above instead of re-deriving it from psi.
     s_tilde_(m,0,k,j,i) = sqrtdetg*trace_S;
   });
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::SolveLapse(Driver *pdriver, int stage)
 
 void CFC::SolveLapse(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -1412,10 +1238,6 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   int ncells2 = u_tilde.extent_int(3);
   int ncells3 = u_tilde.extent_int(2);
 
-  // u_tilde + 2*s_tilde: persistent member (see cfc.hpp), fully overwritten below
-  // before LoadReactionCoefficient reads it -- sized identically to u_tilde/s_tilde
-  // (mesh-NGHOST depth) so LoadReactionCoefficient's ngh=indcs.ng call below is valid
-  // over the same full extent it ultimately reads.
   auto &u_tilde_ = u_tilde;
   auto &s_tilde_ = s_tilde;
   auto &u_plus_2s_ = u_plus_2s;
@@ -1425,14 +1247,10 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     u_plus_2s_(m,0,k,j,i) = u_tilde_(m,0,k,j,i) + 2.0*s_tilde_(m,0,k,j,i);
   });
 
-  // Item 10 (DEVELOPMENT.md): same one-shot warm-start idea as SolveConformalFactor
-  // above, for alpha*psi. Uses padm->adm.alpha (still the pgen's/restart's raw
-  // value at this point -- AssembleLapseShiftK, the task that overwrites it, runs
-  // much later this same stage) times psi (this stage's own just-converged value
-  // from SolveConformalFactor above, a better multiplier than re-deriving a guess
-  // from padm->adm.psi4, which AssembleConformalMetric already overwrote earlier
-  // this stage). delta_psi stores psi-1 (see cfc.hpp), so +1.0 reconstructs the
-  // physical psi needed for this multiply.
+  // Same one-shot warm-start idea as SolveConformalFactor above, for alpha*psi.
+  // Uses padm->adm.alpha (still the pgen's/restart's raw value here --
+  // AssembleLapseShiftK runs later this stage) times this stage's own
+  // just-converged psi.
   if (!alpha_psi_seeded_) {
     alpha_psi_seeded_ = true;
     int &is = indcs.is; int &ie = indcs.ie;
@@ -1450,16 +1268,9 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 
   pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, a_sq, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);
-  // delta_alpha_psi member stores alpha*psi - 1, exactly the deviation
-  // RetrieveSolution() hands back verbatim (see cfc.hpp) -- no +1 offset pass needed
-  // (an earlier version of this code stored the physical alpha*psi here and added 1
-  // back after every solve).
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::SolveShift(Driver *pdriver, int stage)
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/true);
@@ -1470,16 +1281,10 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
   return;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::ReconstructShift()
-
 void CFC::ReconstructShift() {
   cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3);
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void CFC::AssembleADM()
 
 void CFC::AssembleADM() {
   cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, a_dd, beta_u);

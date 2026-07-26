@@ -71,23 +71,18 @@ class MGCFCLapseDriver : public MultigridDriver {
 
     // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 once, at the
     // finest level, from the three known fixed fields it depends on, and store only
-    // that single value in coeff_ (channel 0, ncoeff_ = 1). Round 16 fix: an earlier
-    // version stored Utilde+2*Stilde/psi/Ahat^2 as three separate coeff_ channels and
-    // recomputed K(x) fresh at every V-cycle level (including coarse ones) from
-    // independently-restricted copies of each -- inconsistent with FAS, since
-    // restrict(f(a,b)) != f(restrict(a), restrict(b)) for this nonlinear combination;
-    // psi and Ahat^2 are genuinely fixed *coefficients* here (unlike psi's own solver,
-    // where psi is the local unknown u+1, correctly carried through the standard FAS
-    // u_ restriction instead). Precomputing K(x) once and restricting it directly
-    // (via the ordinary RestrictCoefficients()) is the FAS-consistent treatment; see
-    // this file's header comment (mg_cfc_lapse.cpp) for the full derivation. NOT
-    // stored in src_ via Multigrid::LoadSource(): src_ is exactly what the generic
-    // V-cycle machinery restricts *and* adds FAS tau-corrections into, which would
-    // corrupt K(x) (Finding B, plan addendum #3). u_plus_2s_tilde/delta_psi/a_sq are
-    // all assumed padded to the same depth ngh -- the mesh's own NGHOST, not this
-    // driver's shallower ngh_ (plan addendum #4, Finding H). delta_psi is psi - 1
-    // (see cfc::CFC::delta_psi's doc comment, cfc.hpp) -- the physical psi that K(x)
-    // actually needs is reconstructed internally (+1.0).
+    // that single value in coeff_ (channel 0, ncoeff_ = 1) -- restricting the
+    // already-combined K(x) directly through the V-cycle hierarchy, rather than
+    // restricting Utilde+2*Stilde/psi/Ahat^2 separately and recombining at each
+    // coarser level, is required for FAS consistency (restrict(f(a,b)) !=
+    // f(restrict(a), restrict(b)) for this nonlinear combination) -- see this file's
+    // header comment (mg_cfc_lapse.cpp) for the full derivation. Not stored in src_
+    // via Multigrid::LoadSource(): src_ is what the generic V-cycle machinery
+    // restricts and adds FAS tau-corrections into, which would corrupt K(x).
+    // u_plus_2s_tilde/delta_psi/a_sq are all padded to the same depth ngh -- the
+    // mesh's own NGHOST, not this driver's shallower ngh_. delta_psi is psi - 1 (see
+    // cfc::CFC::delta_psi's doc comment, cfc.hpp) -- the physical psi that K(x)
+    // needs is reconstructed internally (+1.0).
     void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
                                  const DvceArray5D<Real> &delta_psi,
                                  const DvceArray5D<Real> &a_sq, int ngh);
@@ -107,17 +102,11 @@ class MGCFCLapseDriver : public MultigridDriver {
     friend class MGCFCLapse;
 
   private:
-    // Finding C (plan addendum #3): mgroot_ never receives coeff_ data via the
-    // generic TransferFromBlocksToRoot (src_/u_ only) -- duplicates the relevant
-    // slice of that logic locally rather than touching src/multigrid/. See
-    // MGCFCConformalFactorDriver::TransferCoeffToRoot for the full rationale.
+    // mgroot_ never receives coeff_ data via the generic TransferFromBlocksToRoot
+    // (src_/u_ only) -- duplicates the relevant slice of that logic locally rather
+    // than touching src/multigrid/. See MGCFCConformalFactorDriver::
+    // TransferCoeffToRoot for the full rationale.
     void TransferCoeffToRoot();
-
-    // Relative-change convergence check (DEVELOPMENT.md item 20) -- tried, found
-    // no measurable improvement over the base class's defect-norm SolveMG(), and
-    // reverted (see Solve()'s doc comment in the .cpp for the still-present,
-    // commented-out implementation). u_prev_ is unused while that's reverted.
-    // DvceArray5D<Real> u_prev_;
 };
 
 #endif  // CFC_MG_CFC_LAPSE_HPP_

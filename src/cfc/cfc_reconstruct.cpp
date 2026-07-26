@@ -19,11 +19,9 @@ namespace cfc {
 
 namespace {
 
-//----------------------------------------------------------------------------------------
-//! \fn void ComputeADualFromXImpl<NGHOST>(...)
-//! \brief Gmunu eq. 76: Adual^ij = D^i X^j + D^j X^i - (2/3) D_k X^k f^ij. Since
-//! addition is commutative, symmetrizing the two raw derivative terms gives the same
-//! result regardless of which index of dX[][] is "component" vs. "direction".
+// Gmunu eq. 76: Adual^ij = D^i X^j + D^j X^i - (2/3) D_k X^k f^ij. Symmetrizing the two
+// raw derivative terms gives the same result regardless of which index of dX[][] is
+// "component" vs. "direction".
 
 template <int NGHOST>
 void ComputeADualFromXImpl(MeshBlockPack *pmbp,
@@ -55,13 +53,9 @@ void ComputeADualFromXImpl(MeshBlockPack *pmbp,
   });
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void ReconstructVectorFromPotentialsImpl<NGHOST>(...)
-//! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k).
-//! eta is a plain DvceArray5D<Real> whose eta_chan'th channel holds the scalar
-//! potential (typically channel 3 of the same packed array p_i's own backing storage
-//! is a view of), so it's locally shallow-sliced into a rank-0 AthenaTensor to reuse
-//! the generic Dx<NGHOST> scalar overload.
+// Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k). eta's
+// eta_chan'th channel is shallow-sliced into a rank-0 AthenaTensor to reuse the
+// generic Dx<NGHOST> scalar overload.
 
 template <int NGHOST>
 void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
@@ -103,9 +97,6 @@ void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
 
 }  // namespace
 
-//----------------------------------------------------------------------------------------
-//! \fn void ComputeADualFromX(...)
-
 void ComputeADualFromX(MeshBlockPack *pmbp,
                         const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
                         AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd) {
@@ -116,9 +107,6 @@ void ComputeADualFromX(MeshBlockPack *pmbp,
     case 4: ComputeADualFromXImpl<4>(pmbp, x_u, a_dd); break;
   }
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void ReconstructVectorFromPotentials(...)
 
 void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
@@ -133,9 +121,6 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
     case 4: ReconstructVectorFromPotentialsImpl<4>(pmbp, p_i, eta, v_u, eta_chan); break;
   }
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void AssembleConformalMetric(...)
 
 void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi) {
   auto &indcs = pmbp->pmesh->mb_indcs;
@@ -158,9 +143,6 @@ void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta
     }
   });
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void AssembleLapseShiftK(...)
 
 void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                           const DvceArray5D<Real> &delta_alpha_psi,

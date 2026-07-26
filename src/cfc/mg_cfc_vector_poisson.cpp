@@ -169,40 +169,25 @@ void MGCFCVectorPoisson::CalculateFASRHSPack() {
 //! \brief constructs the root + meshblock-level Multigrid hierarchies with nvar_ = 4
 //! (P_i packed at channels 0-2, eta packed at channel 3 -- see mg_cfc_vector_poisson.
 //! hpp's file-level comment). P_i/eta's true outer boundary (X^i -> 0 / beta^i -> 0
-//! as r -> infinity, Gmunu eq. 79/80) is an *asymptotic* falloff (~1/r, like a
-//! Newtonian vector potential sourced by a compact S_i-tilde distribution), not an
-//! exact zero at any finite radius -- BoundaryFlag::mg_multipole (default here, via
-//! <cfc> mg_poisson_outer_bc) captures that falloff (with real angular structure up
-//! to mg_poisson_mporder); the previous default, mg_zerofixed (still available via
-//! mg_poisson_outer_bc=zerofixed), was only ever the leading-order (monopole-zero)
-//! truncation of it -- see mg_cfc_conformal_factor.cpp's constructor comment and
-//! DEVELOPMENT.md item 9 for why this same tradeoff mattered enough to fix (via
-//! Robin, there) for psi/alpha_psi. Multipole is safe here in a way it never was for
-//! psi/alpha_psi: P_i/eta's source is a real, unmodified src_ (LoadPoissonSource's
-//! fac=1.0, loaded via the generic Multigrid::LoadSource -- no coeff_ involved, no
-//! custom Newton relaxation), so ScaleMultipoleCoefficients()'s normalization (the
-//! generic Green's-function constant for any -Delta u = src equation) applies with
-//! zero re-derivation. autompo_ is deliberately left false (fixed origin (0,0,0), the
-//! base constructor's own default) rather than exposed as an input: every current
-//! CFC test problem's star sits at the coordinate origin, and skipping
-//! CalculateCenterOfMass() avoids a second channel-0-only function this pass would
-//! otherwise also need to generalize (see multigrid_driver.cpp's per-channel
-//! CalculateMultipoleCoefficients()/ScaleMultipoleCoefficients()/SyncMultipoleToDevice()
-//! and both ghost-fill sites -- gravity's own nvar_=1 usage is unaffected, confirmed
-//! by construction: every new per-channel loop reduces to its original single
-//! iteration there; nvar_=4 is exactly at kMaxMultipoleChannels, confirmed safe via
-//! AllocateMultipoleCoefficients()'s guard).
+//! as r -> infinity, Gmunu eq. 79/80) is an asymptotic ~1/r falloff, not an exact
+//! zero at any finite radius -- BoundaryFlag::mg_multipole (default, via <cfc>
+//! mg_poisson_outer_bc) captures that falloff with real angular structure up to
+//! mg_poisson_mporder; mg_zerofixed (still available via mg_poisson_outer_bc=
+//! zerofixed) is only the leading-order (monopole-zero) truncation of it. Multipole
+//! is safe here in a way it isn't for psi/alpha_psi (see mg_cfc_conformal_factor.cpp's
+//! constructor comment): P_i/eta's source is a real, unmodified src_ (LoadPoissonSource's
+//! fac=1.0, via the generic Multigrid::LoadSource -- no coeff_, no custom Newton
+//! relaxation), so ScaleMultipoleCoefficients()'s normalization (the generic
+//! Green's-function constant for any -Delta u = src equation) applies with zero
+//! re-derivation. autompo_ is deliberately left false (fixed origin (0,0,0)): every
+//! current CFC test problem's star sits at the coordinate origin, so
+//! CalculateCenterOfMass() is skipped.
 //!
-//! Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain like a
-//! single-star test) still need BoundaryFlag::mg_zerograd, not plain
-//! BoundaryFlag::reflect: mg_mesh_bcs_ is multigrid-internal state read only by
-//! MultigridDriver's own boundary code (PhysicalBoundary, MGRootBoundary), and
-//! MGRootBoundary's device path (multigrid_driver.cpp) has no case at all for plain
-//! BoundaryFlag::reflect -- passing it falls through every branch there silently,
-//! leaving that ghost cell untouched (confirmed: this was tried first and left the
-//! root grid's ghost cells at stale zero, seeding a NaN cascade through the Newton
-//! solve within the first V-cycle). mg_zerograd's ghost = interior formula is
-//! exactly the even mirror a symmetry plane needs.
+//! Faces where the *mesh* itself is reflecting still need BoundaryFlag::mg_zerograd,
+//! not plain BoundaryFlag::reflect: MGRootBoundary's device path has no case for
+//! plain BoundaryFlag::reflect, leaving that ghost cell untouched (stale zero,
+//! seeding a NaN cascade through the Newton solve). mg_zerograd's ghost = interior
+//! formula is the even mirror a symmetry plane needs.
 
 MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
                                                    ParameterInput *pin)
@@ -241,17 +226,10 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
   }
   omega_ = pin->GetOrAddReal("cfc", "mg_omega", 1.15);
   // Deliberately NOT "cfc/mg_threshold" -- that key is shared with the nonlinear
-  // psi/alpha_psi solvers (mg_cfc_conformal_factor.cpp/mg_cfc_lapse.cpp), which
-  // item 22 (DEVELOPMENT.md) intentionally loosened to 3e-3 for their own AMR
-  // convergence robustness. This driver's X^i/beta^i are a genuinely different,
-  // linear equation whose own natural magnitude can be small enough that the
-  // same absolute defect threshold leaves it badly under-converged (confirmed:
-  // BU8 rotating-star test, this solver was silently doing 0 V-cycles per call
-  // once the initial defect fell under 3e-3, producing an Ahat^2/psi that
-  // disagreed with the initial data's own psi by several percent and an
-  // angular momentum off by 33% -- see DEVELOPMENT.md). A dedicated key
-  // (mirroring the existing mg_poisson_outer_bc/mg_poisson_mporder precedent)
-  // keeps that fix local to this driver.
+  // psi/alpha_psi solvers, which use a looser value for their own AMR convergence
+  // robustness. This driver's X^i/beta^i are a genuinely different, linear equation
+  // whose own natural magnitude can be small enough that the same absolute defect
+  // threshold leaves it badly under-converged. A dedicated key keeps that separate.
   eps_ = pin->GetOrAddReal("cfc", "mg_poisson_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
@@ -295,27 +273,23 @@ void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
 }
 
 void MGCFCVectorPoissonDriver::LoadPoissonSource(const DvceArray5D<Real> &p_src) {
-  // Item 33 (DEVELOPMENT.md): called before Solve() (whose own PrepareForAMR()
-  // would otherwise keep mglevels_'s nmmb_/src_ sizing in sync with the current
-  // block count) -- Multigrid::LoadSource() loops over its own (possibly stale,
-  // pre-regrid) nmmb_, so without this call the newly-created blocks after a
-  // regrid would silently keep a zero source instead of the freshly-loaded one
-  // (an incomplete-initialization correctness gap, not a crash -- LoadSource's
-  // own internal nmmb_/src_ sizing stays self-consistent either way -- but still
-  // wrong physics for those blocks until the next call). Idempotent/cheap when
-  // nothing changed, matching the identical fix in the two nonlinear solvers.
+  // Called before Solve() (whose own PrepareForAMR() would otherwise keep
+  // mglevels_'s nmmb_/src_ sizing in sync with the current block count) --
+  // Multigrid::LoadSource() loops over its own (possibly stale, pre-regrid) nmmb_,
+  // so without this call newly-created blocks after a regrid would silently keep a
+  // zero source until the next call. Idempotent/cheap when nothing changed.
   mglevels_->ReallocateForAMR();
   mglevels_->LoadSource(p_src, 0, mglevels_->GetGhostCells(), -1.0);
   return;
 }
 
 void MGCFCVectorPoissonDriver::RetrieveSolution(DvceArray5D<Real> &p_dst) {
-  // p_dst (cfc::CFC::u_p_x/u_p_beta) is sized at mesh-NGHOST depth, not this solver's
-  // own (generally shallower) ngh_ -- Multigrid::RetrieveResult's ngh argument is the
-  // depth p_dst itself is padded to, not the multigrid's, so it must be the mesh's
-  // ng here (see plan addendum #4, Finding F). RetrieveResult only ever fills the
-  // inner min(ngh_, ng) ring regardless; the outer ring is left for cfc::CFC's own
-  // post-retrieve MeshBoundaryValuesCC exchange to fill from neighboring blocks.
+  // p_dst (cfc::CFC::u_p_x/u_p_beta) is sized at mesh-NGHOST depth, not this
+  // solver's own (generally shallower) ngh_ -- Multigrid::RetrieveResult's ngh
+  // argument is the depth p_dst itself is padded to, so it must be the mesh's ng
+  // here. RetrieveResult only fills the inner min(ngh_, ng) ring regardless; the
+  // outer ring is left for cfc::CFC's own post-retrieve MeshBoundaryValuesCC
+  // exchange to fill from neighboring blocks.
   mglevels_->RetrieveResult(p_dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }

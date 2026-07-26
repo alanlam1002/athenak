@@ -9,27 +9,22 @@
 //! \brief defines MGCFCConformalFactor[Driver], solving Gmunu (2021) eq. 73 for the
 //! conformal factor psi:
 //!   Delta psi = -2 pi Ũ psi^-1 - (1/8) Ahat^2 psi^-7,
-//! where Ahat^2 = f_ik f_jl Adual^kl Adual^ij is precomputed once per outer iteration
-//! from Adual^ij (does not depend on psi) and Ũ = psi^6 U is the (once-per-outer-
-//! -iteration-rescaled) matter energy density.
+//! where Ahat^2 = f_ik f_jl Adual^kl Adual^ij (precomputed, doesn't depend on psi) and
+//! Ũ = psi^6 U is the matter energy density.
 //!
-//! Unlike gravity's Poisson equation or the CFC vector-potential equations, this
-//! operator is nonlinear in the unknown (self-coupled through psi^-7): the generic
-//! constant-diagonal Smooth<StencilOp> template in Multigrid assumes a linear operator
-//! and cannot be reused here. SmoothPack/CalculateDefectPack/CalculateFASRHSPack are
-//! therefore overridden with hand-written Newton-Gauss-Seidel point relaxation
-//! (Gmunu sec. 2.7.2, eq. 94): u_new = u_old - L(u_old, f)/(dL/du)|_{u=u_old}.
+//! Nonlinear in the unknown (self-coupled through psi^-7), unlike gravity's Poisson
+//! equation or the CFC vector-potential equations -- Multigrid's generic constant-
+//! diagonal Smooth<StencilOp> template assumes a linear operator and can't be reused.
+//! SmoothPack/CalculateDefectPack/CalculateFASRHSPack are hand-written Newton-Gauss-
+//! Seidel point relaxation instead (Gmunu sec. 2.7.2, eq. 94).
 //!
-//! As in the reference implementations, the solve is done for the deviation
-//! delta_psi = psi - 1 (so that the isolated-system boundary condition maps onto the
-//! existing 1/r multipole falloff BC), not psi directly.
+//! Solves for the deviation delta_psi = psi - 1 (so the isolated-system BC maps onto
+//! the existing 1/r multipole falloff), not psi directly.
 //!
-//! Reuses the (otherwise-unused-by-gravity) Multigrid::coeff_/ncoeff_ scaffolding to
-//! carry both Ũ and the precomputed Ahat^2 field alongside the solution (ncoeff_=2):
-//! neither can live in the generic src_/LoadSource() path, because src_ is exactly
-//! what the V-cycle's FAS machinery restricts *and* corrects at coarser levels, which
-//! would corrupt these fields' physical values where RHS(u) needs them pristine (see
-//! mg_cfc_conformal_factor.cpp's file-level comment for the full derivation).
+//! Reuses Multigrid::coeff_/ncoeff_ (otherwise unused by gravity) to carry Ũ and Ahat^2
+//! alongside the solution (ncoeff_=2): neither can live in src_, since src_ is what the
+//! V-cycle's FAS machinery restricts and corrects at coarser levels, which would
+//! corrupt these fields where RHS(u) needs them pristine.
 
 // C++ headers
 #include <string>
@@ -56,28 +51,19 @@ class MGCFCConformalFactor : public Multigrid {
   void CalculateDefectPack() final;
   void CalculateFASRHSPack() final;
 
-  // Public accessor so MGCFCConformalFactorDriver::TransferCoeffToRoot() (see .cpp)
-  // can reach into an arbitrary level's coeff_ storage directly. Needed because
-  // coeff_/ncoeff_ are protected members declared on the *base* Multigrid class:
-  // a friend of this (derived) class is not automatically a friend of Multigrid,
-  // so MultigridDriver-derived callers can't reach coeff_ via friendship the way
-  // MGCFCConformalFactor itself can. Kept as a plain public one-liner (same shape
-  // as Multigrid's own GetCurrentData_h()-style accessors) rather than adding a
-  // new friend declaration or touching src/multigrid/ itself.
+  // Public accessor so MGCFCConformalFactorDriver::TransferCoeffToRoot() (a
+  // MultigridDriver-derived caller, not a friend of the base Multigrid class) can
+  // reach into an arbitrary level's coeff_ storage directly.
   DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
 
  private:
-  // 2026-07-25: the U-matter source term admits two algebraically-identical but
-  // numerically-different formulations (see ConformalFactorRHS's doc comment in
-  // the .cpp) -- "Utilde*psi^-1" (the default, matter source frozen from a
-  // previous outer-loop iterate) or "U_raw*psi^5" (fully self-consistent within
-  // one Newton solve, used only by CFC::InitializeMetric() when opted in). Per
-  // user direction, these are compiled as two separate template instantiations
-  // (UsePsi5 = false/true), not a runtime branch inside the per-point loop --
-  // SmoothPack/CalculateDefectPack/CalculateFASRHSPack (public overrides above)
-  // read MGCFCConformalFactorDriver::use_psi5_source_ ONCE and dispatch into
-  // whichever *Impl<UsePsi5> instantiation applies; the loop itself never
-  // re-checks the flag. See mg_cfc_conformal_factor.cpp for the bodies.
+  // Two algebraically-identical but numerically-different matter-source
+  // formulations (see ConformalFactorRHS's doc comment in the .cpp): "Utilde*psi^-1"
+  // (default) or "U_raw*psi^5" (used only by CFC::InitializeMetric() when opted
+  // in). Compiled as two separate template instantiations rather than a runtime
+  // branch inside the per-point loop -- SmoothPack/CalculateDefectPack/
+  // CalculateFASRHSPack read MGCFCConformalFactorDriver::use_psi5_source_ once and
+  // dispatch into the matching *Impl<UsePsi5>.
   template <bool UsePsi5> void SmoothPackImpl(int color);
   template <bool UsePsi5> void CalculateDefectPackImpl();
   template <bool UsePsi5> void CalculateFASRHSPackImpl();
@@ -95,70 +81,53 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
 
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // load Ũ (matter energy density source, raw/unscaled -- the 2*pi factor is
-    // applied inside the Newton kernel itself, mg_cfc_conformal_factor.cpp). Stored
-    // in coeff_ (channel 0), NOT via Multigrid::LoadSource()/src_ -- see this file's
-    // top docstring and the .cpp's file-level comment for why. ngh is the depth
-    // u_tilde itself is padded to (mirrors Multigrid::LoadSource/LoadCoefficients'
-    // own ngh parameter, multigrid.cpp:289/327) -- callers pass the mesh's own
-    // NGHOST here, NOT this driver's (generally shallower) ngh_, since u_tilde is
-    // also differentiated/ghost-exchanged elsewhere and must be sized accordingly
-    // (plan addendum #4, Finding H).
+    // Load Ũ (matter energy density source, raw/unscaled -- the 2*pi factor is
+    // applied inside the Newton kernel). Stored in coeff_ (channel 0), not via
+    // Multigrid::LoadSource()/src_ -- see this file's docstring for why. ngh is
+    // the depth u_tilde is padded to (the mesh's own NGHOST, not this driver's
+    // shallower ngh_, since u_tilde is also differentiated/ghost-exchanged
+    // elsewhere).
     void LoadMatterSource(const DvceArray5D<Real> &u_tilde, int ngh);
 
-    // load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromX), stored
-    // in coeff_ channel 1 (ncoeff_ = 2 total). Multigrid::LoadCoefficients() can't be
-    // reused for either load (it copies all ncoeff_ channels in one shot, no
-    // per-channel offset) -- both loaders do their own single-channel par_for via
-    // the CoeffAtLevel() accessor, but mirror LoadCoefficients' offset-aware ngh
-    // handling (Finding H, same reasoning as LoadMatterSource above).
+    // Load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromX),
+    // stored in coeff_ channel 1 (ncoeff_ = 2 total). Can't reuse Multigrid::
+    // LoadCoefficients() (copies all ncoeff_ channels at once, no per-channel
+    // offset) -- does its own single-channel par_for via CoeffAtLevel(), mirroring
+    // LoadCoefficients' offset-aware ngh handling.
     void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq, int ngh);
 
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
 
-    // 2026-07-25: selects the U-matter source formulation (see the private
-    // template dispatch note on MGCFCConformalFactor above, and
-    // ConformalFactorRHS's doc comment in the .cpp): false (default) = existing
-    // "Utilde*psi^-1" per-stage behavior, true = "U_raw*psi^5" self-consistent
-    // formulation used only by CFC::InitializeMetric() when <cfc>
-    // init_use_psi5_source is set. Must be called (cfc::CFC::SolveConformalFactor
-    // already does) before LoadMatterSource()/Solve() each call, since coeff_
-    // channel 0's physical meaning (Utilde vs U_raw) depends on which formulation
-    // was requested.
+    // Selects the matter-source formulation (see MGCFCConformalFactor's private
+    // section and ConformalFactorRHS's doc comment in the .cpp): false (default) =
+    // "Utilde*psi^-1"; true = "U_raw*psi^5", used only by CFC::InitializeMetric()
+    // when <cfc> init_use_psi5_source is set. Must be called before
+    // LoadMatterSource()/Solve() each time, since coeff_ channel 0's physical
+    // meaning depends on which formulation was requested.
     void SetUsePsi5Source(bool flag) { use_psi5_source_ = flag; }
 
-    // seed the finest level's own solution array (the V-cycle's initial guess) from
-    // an externally-supplied delta_psi field, instead of leaving it at whatever it
-    // already held (a cold Kokkos-zero-initialized guess, on the very first call
-    // this driver's Solve() ever makes). Thin wrapper around Multigrid::
-    // LoadFinestData (mirrors gravity::MGGravityDriver::Solve()'s own
-    // mglevels_->LoadFinestData call) -- ngh is guess's own padding depth, same
-    // convention as LoadMatterSource/LoadNonlinearCoefficient above.
+    // Seed the finest level's own solution array (the V-cycle's initial guess)
+    // from an externally-supplied delta_psi field, instead of a cold Kokkos-zero
+    // start. Thin wrapper around Multigrid::LoadFinestData; ngh is the guess's own
+    // padding depth, same convention as LoadMatterSource/LoadNonlinearCoefficient
+    // above.
     void SeedInitialGuess(const DvceArray5D<Real> &guess, int ngh);
 
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;
     void CalculateFASRHSOctet(MGOctet &oct, int rlev) final;
 
-    // 2026-07-25: template-dispatched Octet-level counterparts of
-    // SmoothPackImpl/CalculateDefectPackImpl/CalculateFASRHSPackImpl above --
-    // same UsePsi5 compile-time split, see MGCFCConformalFactor's private
-    // section for the rationale. SmoothOctet/etc. (public overrides above) read
-    // use_psi5_source_ directly (no static_cast needed here, unlike the
-    // per-level dispatchers) and instantiate the matching *Impl.
+    // Template-dispatched Octet-level counterparts of SmoothPackImpl/
+    // CalculateDefectPackImpl/CalculateFASRHSPackImpl above -- same UsePsi5
+    // compile-time split.
     template <bool UsePsi5> void SmoothOctetImpl(MGOctet &oct, int rlev, int color);
     template <bool UsePsi5> void CalculateDefectOctetImpl(MGOctet &oct, int rlev);
     template <bool UsePsi5> void CalculateFASRHSOctetImpl(MGOctet &oct, int rlev);
 
-    // 2026-07-24: damps the FAS coarse-grid correction (u - uold) applied during
-    // prolongation, separate from mg_omega_psi_'s per-point Newton damping below.
-    // Added to test whether an inaccurate coarse-grid correction explained why
-    // psi's outer Picard loop converges to the wrong answer for a compact
-    // migration-test star -- empirically ruled out (see DEVELOPMENT.md item 24):
-    // damping left the wrong answer unchanged (same ratio to analytic), only
-    // slowed/destabilized convergence. Kept as a generically useful, zero-risk-
-    // when-unused knob, not because it fixed the problem it was built to test.
+    // Damps the FAS coarse-grid correction (u - uold) applied during prolongation,
+    // separate from mg_omega_psi_'s per-point Newton damping below. Kept as a
+    // generic, zero-risk-when-unused knob.
     Real CorrectionOmega() const override { return mg_correction_omega_; }
 
     friend class MGCFCConformalFactor;
@@ -169,107 +138,68 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
     Real mg_omega_psi_, psi_floor_;
 
-    // 2026-07-25: selects the U-matter source formulation, see SetUsePsi5Source()
-    // above. Constructed false (byte-identical to pre-2026-07-25 behavior); the
-    // per-stage CFC_SolvePsi task always calls SetUsePsi5Source(false)
-    // explicitly. Only cfc::CFC::InitializeMetric() ever sets this true -- and
-    // does so BY DEFAULT since 2026-07-25 (<cfc> init_use_psi5_source now
-    // defaults true, see item 27/28, DEVELOPMENT.md), except for inputs that
-    // explicitly opt out (known-compact/unstable stars, e.g. the migration
-    // test, which diverges to NaN under this formulation).
+    // Selects the matter-source formulation, see SetUsePsi5Source() above.
+    // Constructed false; the per-stage CFC_SolvePsi task always calls
+    // SetUsePsi5Source(false) explicitly. Only CFC::InitializeMetric() sets this
+    // true (by default, via <cfc> init_use_psi5_source), except for inputs known
+    // to be too compact/unstable for it (diverges to NaN there).
     bool use_psi5_source_ = false;
 
-    // Damping factor for the coarse-grid correction (see CorrectionOmega() above
-    // and MultigridDriver::CorrectionOmega()'s doc comment in multigrid.hpp).
-    // Default 1.0 (undamped, byte-identical to pre-2026-07-24 behavior) via
-    // <cfc> mg_correction_omega.
+    // Damping factor for the coarse-grid correction (see CorrectionOmega() above).
+    // Default 1.0 (undamped) via <cfc> mg_correction_omega.
     Real mg_correction_omega_;
 
-    // Relative-change convergence check (DEVELOPMENT.md item 20) -- tried, found
-    // no measurable improvement over the base class's defect-norm SolveMG(), and
-    // reverted (see Solve()'s doc comment in the .cpp for the still-present,
-    // commented-out implementation). u_prev_ is unused while that's reverted.
-    // DvceArray5D<Real> u_prev_;
-
-    // MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp) aggregates
-    // every rank's coarsest per-block cell into the distributed root grid (mgroot_)
-    // via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer runs
-    // for any multi-meshblock mesh (not just AMR), so mgroot_ needs its own coeff_
-    // (Ũ, Ahat^2) populated the same way before the V-cycle can reach the root level.
-    // Deliberately NOT a change to src/multigrid/: duplicates the relevant slice of
-    // TransferFromBlocksToRoot's logic locally, restricted to the non-refined
-    // (octet-free) case, since AMR+CFC is guarded against in Solve() (see .cpp).
+    // MultigridDriver::TransferFromBlocksToRoot aggregates every rank's coarsest
+    // per-block cell into the distributed root grid via MPI_Allgatherv, but only
+    // for src_/u_ -- never coeff_. Runs for any multi-meshblock mesh (not just
+    // AMR), so mgroot_ needs its own coeff_ (Ũ, Ahat^2) populated the same way
+    // before the V-cycle can reach the root level. Duplicates the relevant slice
+    // of that logic locally (restricted to the non-refined case, since AMR+CFC is
+    // guarded against in Solve()) rather than changing src/multigrid/.
     void TransferCoeffToRoot();
 
-    // Temporary diagnostic (2026-07-20, plan addendum): reports this rank's
-    // worst-converged (max |defect|) cell, split by whether it belongs to a
-    // root-level or a refined MeshBlock, to help root-cause the AMR
-    // refinement-boundary residual-floor issue (DEVELOPMENT.md item 12). Gated
-    // on mg_debug_defect_by_level_ (default false, <cfc> mg_debug_defect_by_level
-    // input) -- meant to be deleted once the root-cause question is answered, not
-    // kept as a permanent feature (see DEVELOPMENT.md's new item for this).
+    // Debug-only: gated on mg_debug_defect_by_level_ (<cfc> mg_debug_defect_by_level,
+    // default false). Reports this rank's worst-converged (max |defect|) cell,
+    // split by whether it belongs to a root-level or refined MeshBlock.
     bool mg_debug_defect_by_level_;
     void DebugReportDefectByLevel();
 
-    // Shared worst-cell-finder used by both DebugReportDefectByLevel and
-    // DebugAnalyticResidualTest below -- recomputes def_ at the finest level,
-    // prints this rank's worst |defect| cell split by root/refined (label
-    // prepended to both printed lines), and hands back the worst REFINED cell's
-    // (m,k,j,i,gid) so callers that need it (e.g. the stencil dump) don't have to
-    // redo the search. ref_gid is left at -1 if this rank owns no refined blocks.
+    // Shared worst-cell finder for DebugReportDefectByLevel/
+    // DebugAnalyticResidualTest: recomputes def_ at the finest level, prints this
+    // rank's worst |defect| cell split root/refined, and hands back the worst
+    // REFINED cell's (m,k,j,i,gid) (left at -1 if this rank owns no refined
+    // blocks).
     void DebugReportWorstDefect(const std::string &label, int &ref_m, int &ref_k,
                                 int &ref_j, int &ref_i, int &ref_gid);
 
-    // Temporary diagnostic (2026-07-21): companion to DebugReportWorstDefect --
-    // reports the worst |u - analytic| (actual solution-value error, not the
-    // equation's residual), split root/refined, same classification pattern.
-    // Used by DebugAnalyticResidualTest to show how far a single V-cycle moves
-    // the solution from the exact analytic answer.
+    // Debug-only companion to DebugReportWorstDefect: reports the worst
+    // |u - analytic| (solution-value error, not residual), split root/refined.
     void DebugReportWorstSolutionError(const std::string &label);
 
-    // Temporary diagnostic (2026-07-21): seeds delta_psi at every cell -- including
-    // every ghost cell, at the refinement boundary too -- from the exact analytic
-    // isotropic TOV solution (same tov::TOVStar/PolytropeEOS machinery dyngr_tov.cpp
-    // itself uses), measures the discrete residual with no smoother involved at all,
-    // then replaces just the ghost cells with one real ghost-communication round
-    // (the same FillCoarseBoundary/.../ProlongateFCBoundary sequence the V-cycle's
-    // finest level uses) and measures again. Distinguishes "the ghost-fill machinery
-    // itself introduces a large error at the coarse-fine interface" from "the Newton
-    // relaxation is the problem" -- see DEVELOPMENT.md's entry for this addendum.
-    // 2026-07-21 (user request): also runs exactly one real V-cycle afterward
-    // (needs pdriver, forwarded from Solve()) and reports both the defect and the
-    // actual solution-value error against analytic truth once more, to show how
-    // much a single relaxation sweep moves the solution.
-    // Gated on mg_debug_analytic_residual_test_ (default false); PolytropeEOS-only;
-    // to be deleted alongside the rest of this investigation's diagnostics.
+    // Debug-only, gated on mg_debug_analytic_residual_test_ (<cfc>
+    // mg_debug_analytic_residual_test, default false; PolytropeEOS-only). Seeds
+    // delta_psi from the exact analytic isotropic TOV solution everywhere
+    // (including ghosts), measures the discrete residual with no smoother, then
+    // re-measures after one real ghost-comm round and one real V-cycle -- isolates
+    // whether ghost-fill or Newton relaxation introduces error at a coarse-fine
+    // interface.
     bool mg_debug_analytic_residual_test_;
     ParameterInput *pin_;
     void DebugAnalyticResidualTest(Driver *pdriver);
 
-    // Temporary diagnostic (2026-07-21): confirmation instrumentation for the
-    // "stale coarse_buf_ slot at the high-child transverse edge" hypothesis --
-    // see the .cpp doc comment for the full index trace. Called from
-    // DebugAnalyticResidualTest, not separately gated.
+    // Debug-only: dumps the coarse_buf_ slot at a coarse-fine +x1 interface.
+    // Called from DebugAnalyticResidualTest.
     void DebugDumpCoarseBuf();
 
-    // Temporary diagnostic (2026-07-21): reports the worst |defect| restricted to
-    // just the layer of fine cells immediately adjacent to a coarse-fine +x1
-    // interface (same block-selection logic as DebugDumpCoarseBuf), at a FIXED
-    // physical location independent of wherever the domain-wide worst cell
-    // happens to be. Unlike DebugReportWorstDefect, this isn't contaminated by
-    // the star's own density-profile features moving the global worst cell to a
-    // different location at different resolutions -- see the .cpp doc comment.
-    // Called twice from DebugAnalyticResidualTest (before and after the real
-    // ghost-comm round), not separately gated.
+    // Debug-only: reports the worst |defect| restricted to fine cells adjacent to
+    // a coarse-fine +x1 interface, at a fixed physical location (unlike
+    // DebugReportWorstDefect's domain-wide search). Called from
+    // DebugAnalyticResidualTest.
     void DebugDumpInterfaceDefect(const std::string &label);
 
-    // Temporary diagnostic (2026-07-21): confirmation instrumentation for the
-    // hypothesis that MultigridDriver::RestrictCoeffOctets() never restricts an
-    // octet-level-0's Coeff() down into mgroot_'s own corresponding root-level cell
-    // (unlike the generic, per-V-cycle RestrictOctets(), which has an explicit
-    // "octets to root grid" branch for u_/src_). Called from Solve(), gated on
-    // mg_debug_analytic_residual_test_ (same flag as the rest of this investigation's
-    // diagnostics -- see the .cpp doc comment for the full trace).
+    // Debug-only: checks whether MultigridDriver::RestrictCoeffOctets() restricts
+    // an octet-level-0's Coeff() down into mgroot_'s corresponding root-level
+    // cell. Called from Solve(), gated on mg_debug_analytic_residual_test_.
     void DebugDumpRootCoeffUnderOctet();
 };
 

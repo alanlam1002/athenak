@@ -6,53 +6,39 @@
 //! \file mg_cfc_conformal_factor.cpp
 //! \brief implementation of MGCFCConformalFactor[Driver]
 //!
-//! Sign/scaling convention, derived once here rather than re-derived at every call
-//! site: Multigrid::Smooth's stencil.Apply computes lap(u) = 6*u_c - sum(6 nbrs),
-//! and the generic linear solve converges when lap(u)/dx^2 = src, i.e.
-//! real_Laplacian(u) = -src (confirmed against gravity: LoadSource(u0, IDN, ng,
-//! -four_pi_G_) gives src=-4*pi*G*rho, converging to Delta(phi) = -src = 4*pi*G*rho,
-//! the standard Poisson equation). Eq. 73 (Gmunu 2021) is
+//! Sign/scaling convention: Multigrid::Smooth's stencil.Apply computes
+//! lap(u) = 6*u_c - sum(6 nbrs), and the generic linear solve converges when
+//! lap(u)/dx^2 = src, i.e. real_Laplacian(u) = -src (confirmed against gravity:
+//! LoadSource(u0, IDN, ng, -four_pi_G_) gives src=-4*pi*G*rho, converging to
+//! Delta(phi) = 4*pi*G*rho). Eq. 73 (Gmunu 2021) is
 //!   Delta psi = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7,
-//! with psi = u+1 (u = delta_psi), so Delta(u) = Delta(psi). Substituting into the
-//! AthenaK convention above (real_Laplacian(u) = -lap(u)/dx^2):
-//!   -lap(u)/dx^2 = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7
+//! with psi = u+1 (u = delta_psi). Substituting into the AthenaK convention above:
 //!   lap(u) = dx^2 * [2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7] =: dx^2*RHS(u)
 //! i.e. F(u) := lap(u) - dx^2*RHS(u) = 0 is the discrete equation solved per point.
 //!
-//! Utilde and Ahat^2 are both fixed, externally-supplied fields (never depend on this
-//! equation's own unknown u) -- but they are loaded into coeff_ (channel 0 = Utilde,
-//! channel 1 = Ahat^2, ncoeff_=2), NOT into src_ via LoadSource. This is a deliberate,
-//! non-obvious choice: RHS(u) reads Utilde every time it's evaluated (including at
-//! every coarser V-cycle level), but src_ is exactly the array that
-//! MultigridDriver's generic (non-virtual) V-cycle machinery restricts *and* adds FAS
-//! tau-corrections into (via RestrictSourcePack + this file's CalculateFASRHSPack) --
-//! if Utilde lived in src_, those FAS corrections would silently corrupt the physical
-//! Utilde field that RHS(u) needs at coarser levels. Since this equation has no
-//! separate additive "given" term at all (F(u)=0 is fully homogeneous in u), src_'s
-//! entire role here is the FAS correction accumulator gravity's pattern already
-//! establishes (starts at zero -- Kokkos::realloc zero-initializes -- and is only
-//! ever touched by the generic machinery and by this file's CalculateFASRHSPack).
+//! Utilde and Ahat^2 are fixed, externally-supplied fields (never depend on this
+//! equation's own unknown u), but are loaded into coeff_ (channel 0 = Utilde,
+//! channel 1 = Ahat^2, ncoeff_=2), not into src_ via LoadSource: src_ is exactly the
+//! array MultigridDriver's generic V-cycle machinery restricts and adds FAS tau-
+//! corrections into, which would corrupt Utilde/Ahat^2 if they lived there. Since
+//! this equation has no separate additive "given" term (F(u)=0 is homogeneous in u),
+//! src_'s entire role here is the FAS correction accumulator (starts at zero, only
+//! touched by the generic machinery and this file's CalculateFASRHSPack).
 //!
 //! Multigrid::LoadCoefficients() copies coeff channels 0..ncoeff_-1 in one shot (no
-//! per-channel "ns" offset the way LoadSource has), so it can't be called twice (once
-//! per physical field) without the second call clobbering the first. LoadMatterSource/
-//! LoadNonlinearCoefficient below therefore each do their own tiny single-channel
-//! par_for via the CoeffAtLevel() accessor instead of calling LoadCoefficients.
+//! per-channel offset), so it can't be called twice without the second call
+//! clobbering the first -- LoadMatterSource/LoadNonlinearCoefficient below each do
+//! their own single-channel par_for via the CoeffAtLevel() accessor instead.
 //!
-//! 2026-07-25: coeff_ channel 0 can instead hold U_raw = Utilde/sqrt(detg) (the raw,
-//! undensitized ADM energy density), in which case the equation's U-term is written
-//! as U_raw*psi^5 rather than Utilde*psi^-1 -- algebraically identical (Utilde ==
-//! psi^6*U_raw by definition), but numerically different whenever the psi that built
-//! Utilde (a stale outer-loop iterate, frozen for the whole nonlinear solve) differs
-//! from the live Newton iterate multiplying psi^-1. This alternate formulation is
-//! used only by cfc::CFC::InitializeMetric() (<cfc> init_use_psi5_source, default
-//! true since 2026-07-25 -- see DEVELOPMENT.md item 27/28: much faster convergence,
-//! same accuracy, for every star tested EXCEPT the migration test's compact/
-//! unstable star, which MUST explicitly set this false or InitializeMetric()
-//! diverges to NaN). See ConformalFactorRHS's own doc comment below for the
-//! full derivation -- selected via a compile-time template parameter (UsePsi5), not
-//! a runtime flag inside the per-point loop, per the two formulations' separate
-//! compiled code paths.
+//! coeff_ channel 0 can instead hold U_raw = Utilde/sqrt(detg) (raw, undensitized
+//! energy density), in which case the U-term is written as U_raw*psi^5 rather than
+//! Utilde*psi^-1 -- algebraically identical (Utilde == psi^6*U_raw), but numerically
+//! different whenever the psi that built Utilde (a stale outer-loop iterate) differs
+//! from the live Newton iterate. Used only by cfc::CFC::InitializeMetric() (<cfc>
+//! init_use_psi5_source): faster convergence for most stars, but diverges to NaN for
+//! very compact/unstable ones, which must opt out. See ConformalFactorRHS below for
+//! the full derivation -- selected via a compile-time template parameter, not a
+//! runtime flag, so each formulation gets its own separately-compiled code path.
 
 #include <algorithm>
 #include <cmath>
@@ -77,34 +63,19 @@ namespace {
 // SmoothPack/CalculateDefectPack/CalculateFASRHSPack (and their Octet
 // counterparts) so all six can never drift out of sync with each other.
 //
-// Two algebraically-identical formulations of the U-matter term are supported,
-// selected at COMPILE time via the UsePsi5 template parameter (2026-07-25, per
-// user direction -- see DEVELOPMENT.md's entry for the full derivation and
-// rationale; briefly:
+// Two algebraically-identical formulations of the U-matter term, selected at
+// compile time via the UsePsi5 template parameter (if constexpr, C++17, so the
+// per-point hot loop never re-checks a flag):
 //   UsePsi5 = false (default, every per-stage CFC_SolvePsi call): u_matter is
-//     Utilde = psi^6*U, built once per outer/per-stage iteration from the
-//     CURRENT conserved state and held FIXED for the whole nonlinear solve.
-//     RHS's U-term is Utilde*psi^-1, i.e. Utilde is frozen at whatever psi
-//     built it (call it psi_prev), while the psi^-1 factor tracks the LIVE
-//     Newton iterate -- so effectively psi_prev^6*U*psi_current^-1, not the
-//     true equation's U*psi_current^5, whenever psi_prev != psi_current.
-//   UsePsi5 = true (CFC::InitializeMetric() only, <cfc> init_use_psi5_source,
-//     DEFAULT since 2026-07-25 -- opt out per-input if needed, see item 27/28):
-//     u_matter is U_raw = Utilde/sqrt(detg) (the raw,
-//     undensitized ADM energy density -- see cfc.cpp's AssembleVectorSource).
-//     RHS's U-term is U_raw*psi^5, using the SAME live Newton iterate for the
-//     entire psi^5 power, not split across a frozen psi_prev^6 and a live
-//     psi_current^-1. Since Utilde IS psi^6*U by definition, Utilde*psi^-1 and
-//     U_raw*psi^5 are the exact same physical quantity ONLY when psi_prev ==
-//     psi_current (i.e. at self-consistency) -- mid-solve, or across an outer
-//     Picard loop's iterations for a compact star where psi changes a lot per
-//     iteration, they diverge. UsePsi5=true removes that staleness entirely,
-//     folding the full nonlinear U-dependence into one self-consistent Newton
-//     solve, in an attempt to fix the compact-star wrong-psi convergence
-//     documented in DEVELOPMENT.md item 24.
-// Compiled as two fully separate instantiations (if constexpr, C++17) rather
-// than a runtime branch, so the per-point hot loop never re-checks a flag --
-// see mg_cfc_conformal_factor.hpp's *Impl<bool UsePsi5> declarations.
+//     Utilde = psi^6*U, held fixed for the whole nonlinear solve. RHS's U-term
+//     is Utilde*psi^-1 -- effectively psi_prev^6*U*psi_current^-1, not the true
+//     equation's U*psi_current^5, whenever the psi that built Utilde
+//     (psi_prev) differs from the live Newton iterate.
+//   UsePsi5 = true (CFC::InitializeMetric() only, <cfc> init_use_psi5_source):
+//     u_matter is U_raw = Utilde/sqrt(detg) (raw, undensitized energy density --
+//     see cfc.cpp's AssembleVectorSource). RHS's U-term is U_raw*psi^5, using
+//     the same live Newton iterate for the entire power, removing the
+//     psi_prev/psi_current staleness above entirely.
 template <bool UsePsi5>
 KOKKOS_INLINE_FUNCTION
 void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real *rhs, Real *drhs_du) {
@@ -133,9 +104,9 @@ Real ConformalFactorLap(const ViewType &u, int m, int k, int j, int i) {
          - u(m,0,k-1,j,i) - u(m,0,k,j-1,i) - u(m,0,k,j,i-1);
 }
 
-// Item 12: octet-indexed counterpart of ConformalFactorLap above (oct.U(0,k,j,i)
-// instead of u(m,0,k,j,i)) -- same 7-point stencil, mechanically identical in
-// shape to gravity::OctLaplacian / MGCFCVectorPoissonDriver's own OctLaplacian.
+// Octet-indexed counterpart of ConformalFactorLap above (oct.U(0,k,j,i) instead of
+// u(m,0,k,j,i)) -- same 7-point stencil, mechanically identical in shape to
+// gravity::OctLaplacian / MGCFCVectorPoissonDriver's own OctLaplacian.
 inline Real OctConformalFactorLap(const MGOctet &oct, int k, int j, int i) {
   return 6.0*oct.U(0,k,j,i) - oct.U(0,k+1,j,i) - oct.U(0,k,j+1,i) - oct.U(0,k,j,i+1)
          - oct.U(0,k-1,j,i) - oct.U(0,k,j-1,i) - oct.U(0,k,j,i-1);
@@ -149,9 +120,9 @@ inline Real OctConformalFactorLap(const MGOctet &oct, int k, int j, int i) {
 MGCFCConformalFactor::MGCFCConformalFactor(MultigridDriver *pmd, MeshBlockPack *pmbp,
                                            int nghost, bool on_host)
     : Multigrid(pmd, pmbp, nghost, on_host) {
-  // Finding B (plan addendum #3): the base Multigrid ctor allocates u_/src_/def_/
-  // uold_ per level but never coeff_/matrix_, and never sets ncoeff_ from the
-  // driver -- both are the responsibility of the first real user of coeff_, i.e. us.
+  // The base Multigrid ctor allocates u_/src_/def_/uold_ per level but never
+  // coeff_/matrix_, and never sets ncoeff_ from the driver -- both are the
+  // responsibility of the first real user of coeff_, i.e. us.
   ncoeff_ = 2;  // channel 0 = Utilde, channel 1 = Ahat^2
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
@@ -292,56 +263,43 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
-  // Item 12: AMR-refined meshes need more smoothing per level to fully converge
-  // than a uniform-resolution mesh does with the base-class default of 1 (matches
-  // binary_gravity.athinput's own top-of-file advice: "more smoothing (npresmooth/
-  // npostsmooth = 2 or 3), or refinement = none" -- a known, pre-existing
-  // characteristic of this multigrid implementation at refinement boundaries, not
-  // specific to CFC). Left at the base default (1) unless overridden.
+  // AMR-refined meshes need more smoothing per level to fully converge than a
+  // uniform-resolution mesh does with the base-class default of 1 -- a known,
+  // pre-existing characteristic of this multigrid implementation at refinement
+  // boundaries, not specific to CFC.
   npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
   mg_omega_psi_ = pin->GetOrAddReal("cfc", "mg_omega_psi", 1.0);
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.05);
-  // 2026-07-24: damps the FAS coarse-grid correction itself (see CorrectionOmega()
-  // in mg_cfc_conformal_factor.hpp) -- distinct from mg_omega_psi_ above, which
-  // damps each point's own Newton step, not the correction prolongated in from a
-  // coarser level. Default 1.0 = undamped, no behavior change unless set.
+  // Damps the FAS coarse-grid correction itself (see CorrectionOmega() in
+  // mg_cfc_conformal_factor.hpp) -- distinct from mg_omega_psi_ above, which damps
+  // each point's own Newton step, not the correction prolongated in from a coarser
+  // level. Default 1.0 = undamped.
   mg_correction_omega_ = pin->GetOrAddReal("cfc", "mg_correction_omega", 1.0);
-  // Temporary diagnostic (2026-07-20, plan addendum) -- see DebugReportDefectByLevel's
-  // doc comment below. Default false, zero cost/behavior change when left off.
+  // Debug-only, see DebugReportDefectByLevel's comment in the header. Default
+  // false, zero cost when left off.
   mg_debug_defect_by_level_ = pin->GetOrAddBoolean("cfc", "mg_debug_defect_by_level",
                                                     false);
-  // Temporary diagnostic (2026-07-21) -- see DebugAnalyticResidualTest's doc
-  // comment. Default false, zero cost/behavior change when left off. pin_ is
-  // stashed only so this diagnostic can (re)construct the analytic TOV solution
-  // on demand; nothing else in this class needs to keep pin around.
+  // Debug-only, see DebugAnalyticResidualTest's comment in the header. Default
+  // false, zero cost when left off. pin_ is stashed only so this diagnostic can
+  // (re)construct the analytic TOV solution on demand.
   mg_debug_analytic_residual_test_ = pin->GetOrAddBoolean(
       "cfc", "mg_debug_analytic_residual_test", false);
   pin_ = pin;
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin:
   // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a purely local
-  // extrapolation that enforces Gmunu eq. 77's isolated 1/r^n falloff (n=1,
+  // extrapolation enforcing Gmunu eq. 77's isolated 1/r^n falloff (n=1,
   // mg_robin_order's default) for any leading coefficient, without ever needing to
   // know that coefficient -- no matter integral, no MPI reduction, no dependence on
-  // src_/coeff_ at all. This replaces the earlier BoundaryFlag::mg_zerofixed
-  // (Dirichlet delta_psi=0) workaround, which was only the leading-order
-  // (monopole-zero) truncation of the true falloff -- see DEVELOPMENT.md item 9
-  // rounds 6-7 and the newer Robin BC entry for the full history. Multipole
-  // boundaries (mg_multipole) were tried before mg_zerofixed and found buggy:
-  // CalculateCenterOfMass()/CalculateMultipoleCoefficients() (multigrid_driver.cpp)
-  // integrate mglevels_->src_ as "the density," which is exactly what gravity puts
-  // there -- but this solver's own Utilde/Ahat^2 live in coeff_, not src_ (see this
-  // file's top-of-file comment), by design (so V-cycle FAS tau-corrections into
-  // src_ can't corrupt them). src_ is therefore always zero when Solve() calls
-  // these, so CalculateCenterOfMass's im = 1.0/totals[0] divides by zero, poisoning
-  // mpo_/mpcoeff_ with NaN/inf -- root cause of the boundary NaN documented in
-  // DEVELOPMENT.md item 9 (rounds 1-5). mg_robin sidesteps this bug class entirely
-  // rather than fixing it (no moments computed at all); mporder_/autompo_/
-  // AllocateMultipoleCoefficients() below are left in place, inert, so real
-  // multipole support (a strictly higher-order boundary condition, useful for
-  // shrinking the domain at fixed accuracy per Gmunu sec. 2.6.2) can still be
-  // revisited later without redoing this input parsing.
+  // src_/coeff_. mg_multipole is not used here: CalculateCenterOfMass()/
+  // CalculateMultipoleCoefficients() (multigrid_driver.cpp) integrate
+  // mglevels_->src_ as "the density," but this solver's own Utilde/Ahat^2 live in
+  // coeff_, not src_ (see this file's top-of-file comment) -- src_ is always zero
+  // here, so CalculateCenterOfMass's 1.0/totals[0] divides by zero. mg_robin
+  // sidesteps this bug class entirely (no moments computed at all); mporder_/
+  // autompo_/AllocateMultipoleCoefficients() below are left in place, inert, so
+  // real multipole support can be revisited later without redoing this parsing.
   //
   // <cfc> mg_outer_bc ("robin" [default] or "zerofixed") lets a run fall back to
   // the old Dirichlet-zero behavior for direct A/B comparison without a rebuild.
@@ -406,36 +364,22 @@ MGCFCConformalFactorDriver::~MGCFCConformalFactorDriver() {
 //! \fn void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt)
 //! \brief run the FAS V-cycle solve for delta_psi. Assumes LoadMatterSource()/
 //! LoadNonlinearCoefficient() were already called for this stage.
-//!
-//! A relative-solution-change convergence criterion (max_i |u_i-u_old_i|/|u_old_i|,
-//! bypassing SolveMG/SolveIterative via direct SolveVCycle calls) was tried here in
-//! place of the base class's defect-norm check, motivated by delta_psi's ~M/r
-//! falloff (Gmunu eq. 77) -- see DEVELOPMENT.md item 20. No measurable improvement
-//! was found in practice, so it's reverted to the base-class SolveMG() call below;
-//! the tried implementation is kept commented out immediately after, in case it's
-//! worth revisiting (e.g. with a different norm/threshold) rather than re-deriving
-//! it from scratch.
 
 void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
-  // Item 12: one-time coefficient restriction through the octet hierarchy (a
-  // no-op when nreflevel_==0) -- must run after TransferCoeffToRoot has
-  // populated each octet level's own Coeff() from its real MeshBlock children,
-  // and before SetupMultigrid()/the V-cycle loop below begins reading Coeff() at
-  // every level.
+  // One-time coefficient restriction through the octet hierarchy (a no-op when
+  // nreflevel_==0) -- must run after TransferCoeffToRoot has populated each octet
+  // level's own Coeff() from its real MeshBlock children, and before
+  // SetupMultigrid()/the V-cycle loop below begins reading Coeff() at every level.
   RestrictCoeffOctets();
-  // 2026-07-21 fix: must run after RestrictCoeffOctets(), not inside
-  // TransferCoeffToRoot() (see that function's updated doc comment) -- otherwise
-  // mgroot_'s coarser internal levels get restricted from a finest level that's
-  // still missing the octet-0-to-root contribution RestrictCoeffOctets() just
-  // added, under any refined patch.
+  // Must run after RestrictCoeffOctets(), not inside TransferCoeffToRoot() --
+  // otherwise mgroot_'s coarser internal levels get restricted from a finest level
+  // that's still missing the octet-0-to-root contribution RestrictCoeffOctets()
+  // just added, under any refined patch.
   mgroot_->RestrictCoefficients();
 
-  // Temporary diagnostic (2026-07-21) -- see DebugDumpRootCoeffUnderOctet's doc
-  // comment. Runs right after coeff_ is finalized (before any smoothing), so it
-  // reports the actual state RestrictCoeffOctets() left behind.
   if (mg_debug_analytic_residual_test_) {
     DebugDumpRootCoeffUnderOctet();
   }
@@ -444,20 +388,9 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
   // No mg_multipole face is ever set (see the constructor's boundary-flag comment),
   // so CalculateCenterOfMass()/CalculateMultipoleCoefficients() would be pure dead
-  // work here -- and worse, CalculateCenterOfMass's 1.0/totals[0] divides by an
-  // always-zero src_ for this solver regardless of whether the result is used,
-  // producing an inf/NaN internally every call. Skipped entirely rather than left in
-  // as unused-but-still-computed.
-
-  // Temporary diagnostic (2026-07-21) -- runs BEFORE SolveMG. Its first several
-  // measurements involve no smoother at all; its final phase (2026-07-21, user
-  // request) runs exactly one real V-cycle from the analytically-seeded state to
-  // see how a single relaxation sweep moves the solution, then returns -- the
-  // "real" SolveMG below re-seeds nothing and proceeds normally from whatever
-  // state that one V-cycle left behind (a slightly warmer-than-cold start for
-  // this stage's real solve, harmless since SolveMG iterates to convergence
-  // regardless of its starting point). See DebugAnalyticResidualTest's doc
-  // comment (mg_cfc_conformal_factor.hpp) for the full sequence.
+  // work -- and worse, CalculateCenterOfMass's 1.0/totals[0] divides by an
+  // always-zero src_ for this solver, producing inf/NaN internally. Skipped
+  // entirely.
   if (mg_debug_analytic_residual_test_) {
     DebugAnalyticResidualTest(pdriver);
   }
@@ -465,95 +398,30 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   SolveMG(pdriver);
   Kokkos::fence();
 
-  // Temporary diagnostic (2026-07-20, plan addendum) -- see DebugReportDefectByLevel's
-  // doc comment. Runs regardless of whether SolveMG converged or hit its cap: this is
-  // a post-mortem report on wherever the V-cycle actually landed, not a convergence
-  // criterion itself.
   if (mg_debug_defect_by_level_) {
     DebugReportDefectByLevel();
   }
 
-  // Reverted relative-change convergence loop (DEVELOPMENT.md item 20) -- kept for
-  // reference in case it's worth revisiting; not currently compiled.
-  // auto u_now = mglevels_->GetCurrentData();
-  // if (u_prev_.extent_int(0) != u_now.extent_int(0) ||
-  //     u_prev_.extent_int(2) != u_now.extent_int(2) ||
-  //     u_prev_.extent_int(3) != u_now.extent_int(3) ||
-  //     u_prev_.extent_int(4) != u_now.extent_int(4)) {
-  //   Kokkos::realloc(u_prev_, u_now.extent_int(0), u_now.extent_int(1),
-  //                   u_now.extent_int(2), u_now.extent_int(3), u_now.extent_int(4));
-  // }
-  // Kokkos::deep_copy(u_prev_, u_now);
-  //
-  // int n = 0;
-  // Real relchange;
-  // do {
-  //   SolveVCycle(pdriver, npresmooth_, npostsmooth_);
-  //   u_now = mglevels_->GetCurrentData();
-  //   auto u_prev = u_prev_;
-  //   relchange = 0.0;
-  //   Kokkos::parallel_reduce("mg_cfc_psi_relchange",
-  //     Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0},
-  //         {u_now.extent_int(0), u_now.extent_int(2), u_now.extent_int(3),
-  //          u_now.extent_int(4)}),
-  //     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
-  //                   Real &local_max) {
-  //       Real diff = Kokkos::fabs(u_now(m,0,k,j,i) - u_prev(m,0,k,j,i));
-  //       Real denom = Kokkos::fabs(u_prev(m,0,k,j,i)) + 1.0e-30;
-  //       local_max = Kokkos::fmax(local_max, diff/denom);
-  //     }, Kokkos::Max<Real>(relchange));
-  // #if MPI_PARALLEL_ENABLED
-  //   Real global_relchange = 0.0;
-  //   MPI_Allreduce(&relchange, &global_relchange, 1, MPI_ATHENA_REAL, MPI_MAX,
-  //                 MPI_COMM_WORLD);
-  //   relchange = global_relchange;
-  // #endif
-  //   Kokkos::deep_copy(u_prev_, u_now);
-  //   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
-  //     std::cout << "MG iteration " << n << ": relative change = " << relchange
-  //               << std::endl;
-  //   }
-  //   ++n;
-  //   if (n >= 40) {
-  //     if (global_variable::my_rank == 0) {
-  //       std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver::Solve"
-  //                 << std::endl << "Failed to converge after " << n
-  //                 << " iterations (relative change = " << relchange
-  //                 << ", threshold = " << eps_ << ")" << std::endl;
-  //     }
-  //     pdriver->nlim = pmy_mesh_->ncycle;
-  //     break;
-  //   }
-  // } while (relchange > eps_);
-  // Kokkos::fence();
-
-  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s convention
-  // (item 2): the caller (cfc::CFC::SolveConformalFactor) calls RetrieveSolution()
-  // separately once this returns.
+  // No self-retrieve here, matching MGCFCVectorPoissonDriver::Solve()'s
+  // convention: the caller (cfc::CFC::SolveConformalFactor) calls
+  // RetrieveSolution() separately once this returns.
   return;
 }
 
-// Both loaders assume u_tilde/a_sq are sized with ngh_-deep (multigrid-width, not
-// mesh-NGHOST-deep) ghost padding -- matching item 2's choice for p_src/eta_src.
-// Neither field is ever finite-differenced (only read pointwise inside the Newton
-// kernels above and in the lapse equation's K(x)), so there's no reason to pay for
-// mesh-NGHOST-deep ghost exchange on them; cfc.cpp (item 4) should size u_tilde/
-// a_sq accordingly. This is why a single Multigrid::LoadCoefficients(coeff, ngh)
-// call can't be reused here anyway (Finding B) -- writing our own zero-offset
-// per-channel copy costs nothing extra beyond what LoadCoefficients would do.
+// u_tilde/a_sq are sized at mesh-NGHOST depth (they're read pointwise here at
+// arbitrary offset ngh, not assumed to match this driver's own shallower ngh_).
 
 void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_tilde,
                                                    int ngh) {
-  // Item 33 (DEVELOPMENT.md): this function's par_for loop bound below uses
-  // pmy_pack_->nmb_thispack directly (the CURRENT block count) rather than
-  // mglevels_'s own cached nmmb_ -- correct only if coeff_'s "m" dimension is
-  // already sized to match. Under dynamic AMR, cfc.cpp calls LoadMatterSource()
-  // BEFORE Solve() (whose own PrepareForAMR() is what normally keeps coeff_'s
-  // size in sync via ReallocateForAMR()) -- without this call, the very first
-  // LoadMatterSource() after a regrid writes into coeff_'s stale (pre-regrid)
-  // size, an out-of-bounds Kokkos::View access. ReallocateForAMR() is idempotent
-  // (a cheap early-return no-op whenever nmmb_ already matches nmb_thispack), so
-  // calling it here is safe regardless of whether Solve() already ran this cycle.
+  // par_for's loop bound below uses pmy_pack_->nmb_thispack directly (the current
+  // block count) rather than mglevels_'s own cached nmmb_ -- correct only if
+  // coeff_'s "m" dimension is already sized to match. Under dynamic AMR, cfc.cpp
+  // calls LoadMatterSource() before Solve() (whose own PrepareForAMR() normally
+  // keeps coeff_'s size in sync via ReallocateForAMR()) -- without this call, the
+  // first LoadMatterSource() after a regrid would write out of bounds into
+  // coeff_'s stale (pre-regrid) size. ReallocateForAMR() is an idempotent
+  // early-return no-op when nmmb_ already matches nmb_thispack, so calling it here
+  // is safe regardless of whether Solve() already ran this cycle.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
@@ -562,8 +430,8 @@ void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_til
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
   // u_tilde is padded to depth ngh, not this driver's own (generally shallower)
-  // lngh -- mirror Multigrid::LoadCoefficients' offset-aware indexing (Finding H)
-  // rather than assuming the two depths match.
+  // lngh -- mirror Multigrid::LoadCoefficients' offset-aware indexing rather than
+  // assuming the two depths match.
   const int off = ngh - lngh;
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
@@ -576,7 +444,7 @@ void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_til
 
 void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
     const DvceArray5D<Real> &a_sq, int ngh) {
-  // See LoadMatterSource's identical comment above (item 33, DEVELOPMENT.md).
+  // See LoadMatterSource's identical comment above.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
   int lngh = mglevels_->GetGhostCells();
@@ -584,7 +452,7 @@ void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
   int is = 0, ie = indcs.nx1 + 2*lngh - 1;
   int js = 0, je = indcs.nx2 + 2*lngh - 1;
   int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
-  const int off = ngh - lngh;  // see LoadMatterSource above (Finding H)
+  const int off = ngh - lngh;  // see LoadMatterSource above
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
   par_for("MGCFCConformalFactorDriver::LoadNonlinearCoefficient", DevExeSpace(),
@@ -595,20 +463,14 @@ void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
 }
 
 void MGCFCConformalFactorDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
-  // dst (psi) is mesh-NGHOST-deep, not this solver's own (generally shallower) ngh_
-  // -- passing GetGhostCells() here made RetrieveResult's dst_off = ngh - ngh_
-  // collapse to 0 instead of (mesh NGHOST - ngh_), silently copying the solved
-  // interior 3 cells too low (for NGHOST=4, ngh_=1) and leaving the outermost
-  // interior cells near every domain face never written at all (stuck at their
-  // pre-solve 1.0 default, becoming 2.0 after the +1 pass below). Matches gravity's
-  // and MGCFCVectorPoissonDriver's own (correct) RetrieveResult calls, which both
-  // pass the mesh's true NGHOST.
+  // dst (psi) is mesh-NGHOST-deep, not this solver's own (generally shallower)
+  // ngh_ -- passing GetGhostCells() here would make RetrieveResult's
+  // dst_off = ngh - ngh_ collapse to 0 instead of (mesh NGHOST - ngh_), silently
+  // mis-offsetting the copy. Matches gravity's and MGCFCVectorPoissonDriver's own
+  // RetrieveResult calls, which both pass the mesh's true NGHOST.
   mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
   return;
 }
-
-//----------------------------------------------------------------------------------------
-//! \fn void MGCFCConformalFactorDriver::SeedInitialGuess(...)
 
 void MGCFCConformalFactorDriver::SeedInitialGuess(const DvceArray5D<Real> &guess,
                                                    int ngh) {
@@ -618,17 +480,14 @@ void MGCFCConformalFactorDriver::SeedInitialGuess(const DvceArray5D<Real> &guess
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::TransferCoeffToRoot()
-//! \brief Finding C: MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp)
-//! aggregates every rank's coarsest per-block cell into the distributed root grid
-//! (mgroot_) via MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer
-//! runs for any multi-meshblock mesh (not AMR-specific), so mgroot_ needs its own
-//! Utilde/Ahat^2 populated the same way before the V-cycle can reach the root level.
-//! Deliberately duplicates the relevant logic here rather than touching
-//! src/multigrid/ -- see plan addendum #3, Finding C. Item 12 extended this with the
-//! octet-parented branch TransferFromBlocksToRoot itself already has (blocks refined
-//! past the root level write into their parent octet's Coeff() instead of the root
-//! grid) -- the nreflevel_==0 guard that used to make this branch unreachable is
-//! gone now that Solve() supports AMR.
+//! \brief MultigridDriver::TransferFromBlocksToRoot (multigrid_driver.cpp) aggregates
+//! every rank's coarsest per-block cell into the distributed root grid (mgroot_) via
+//! MPI_Allgatherv, but only for src_/u_ -- never coeff_. That transfer runs for any
+//! multi-meshblock mesh (not AMR-specific), so mgroot_ needs its own Utilde/Ahat^2
+//! populated the same way before the V-cycle can reach the root level. Duplicates the
+//! relevant logic here rather than touching src/multigrid/, including the
+//! octet-parented branch TransferFromBlocksToRoot itself has (blocks refined past the
+//! root level write into their parent octet's Coeff() instead of the root grid).
 
 void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   const int nc = ncoeff_;
@@ -672,9 +531,9 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
         root_coeff_h(0, v, k+ngh, j+ngh, i+ngh) = coeffbuf.h_view(v, n);
       }
     } else {
-      // Item 12: block refined past the root level -- write into its parent
-      // octet's Coeff() instead (mirrors TransferFromBlocksToRoot's identical
-      // else-branch for Src()/U()).
+      // Block refined past the root level -- write into its parent octet's
+      // Coeff() instead (mirrors TransferFromBlocksToRoot's identical else-branch
+      // for Src()/U()).
       LogicalLocation oloc;
       oloc.lx1 = (loc[n].lx1 >> 1);
       oloc.lx2 = (loc[n].lx2 >> 1);
@@ -694,60 +553,32 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   if (!mgc_root->OnHost()) {
     Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
-  // Item 12 (found while debugging the AMR smoke test, not AMR-specific): the
-  // above only ever populates mgroot_'s OWN finest internal level (nrootlevel_-1
-  // -- the root grid can itself span multiple V-cycle levels, e.g. 4x4x4 -> 2x2x2
-  // -> 1x1x1, whenever there are enough root-level blocks/octets). Every coarser
-  // root level's coeff_ was left at its post-construction default (0) -- the
-  // Newton kernel there would then solve against a wrong (all-zero K(x)-ingredient)
-  // equation, corrupting the FAS coarse-grid correction fed back up and stalling
-  // convergence. mglevels_->RestrictCoefficients() (called by Solve() just before
-  // this function) only restricts the *per-block* hierarchy; mgroot_ needs the
-  // identical treatment applied to itself.
-  //
-  // 2026-07-21 fix: mgc_root->RestrictCoefficients() used to be called right here
-  // -- but for a refined mesh, this function only ever populates the finest-level
-  // root cell(s) that are *at* root level directly; cells under a refined patch
-  // are left untouched here (they're written into the octet hierarchy instead, in
-  // the else-branch above) and only get their finest-level root value from
-  // RestrictCoeffOctets()'s "octet level 0 -> root" step, which runs *after* this
-  // function returns (see Solve()). Restricting here was therefore always one
-  // step too early for any refined patch's root cell -- moved to Solve(), right
-  // after RestrictCoeffOctets(), so the finest root level is fully populated
-  // (both root-level-direct AND refined-patch-via-octet cells) before it gets
-  // propagated down through mgroot_'s own coarser internal levels.
+  // The above only populates mgroot_'s own finest internal level (the root grid
+  // can itself span multiple V-cycle levels, e.g. 4x4x4 -> 2x2x2 -> 1x1x1). Every
+  // coarser root level's coeff_ still needs restricting from this one --
+  // mglevels_->RestrictCoefficients() (called by Solve() just before this
+  // function) only restricts the per-block hierarchy, not mgroot_ itself.
+  // mgc_root->RestrictCoefficients() (Solve(), right after RestrictCoeffOctets())
+  // does that, once the finest root level is fully populated here (both
+  // root-level-direct and refined-patch-via-octet cells).
   return;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugReportDefectByLevel()
-//! \brief Temporary diagnostic (2026-07-20, plan addendum): reports this rank's
-//! worst |defect| cell at the finest per-block level, split by whether it belongs
-//! to a root-level (unrefined) or a refined MeshBlock -- meant to show whether the
-//! AMR refinement-boundary residual-floor issue (DEVELOPMENT.md item 12) is
-//! localized right at the coarse/fine interface (supports a real, still-unspotted
-//! bug) or spread through the refined patch regardless of distance from the
-//! boundary (supports the leading nonlinear-FAS-sensitivity explanation). Reports
-//! only THIS rank's local worst cell in each category -- no MPI_Allreduce -- since
-//! this is a one-shot diagnostic, not a convergence criterion, and the whole point
-//! is to see which physical region the worst cell sits in, not a single global
-//! number. A category is skipped (no line printed) if this rank owns no
-//! MeshBlocks of that kind. To be deleted once the root-cause question this
-//! exists to answer is settled (see DEVELOPMENT.md's entry for this addendum).
+//! \brief Debug-only: reports this rank's worst |defect| cell at the finest
+//! per-block level, split by whether it belongs to a root-level (unrefined) or a
+//! refined MeshBlock. No MPI_Allreduce (one-shot diagnostic, not a convergence
+//! criterion) -- a category is skipped if this rank owns no MeshBlocks of that
+//! kind.
 
 void MGCFCConformalFactorDriver::DebugReportDefectByLevel() {
   int ref_m, ref_k, ref_j, ref_i, ref_gid;
   DebugReportWorstDefect("", ref_m, ref_k, ref_j, ref_i, ref_gid);
 
   if (ref_gid >= 0) {
-    // Follow-up (2026-07-20, same addendum): dump the actual stencil inputs at
-    // the worst refined-block cell -- its own U/Coeff and its 6 face-neighbor U
-    // values -- so a numeric inconsistency (e.g. a neighbor U that doesn't match
-    // what the coarse block should be feeding in) can be spotted directly,
-    // rather than inferred from further source reading. Uses the same
-    // GetCurrentData()/CoeffAtLevel() accessors DebugReportWorstDefect already
-    // relies on; also temporary, to be deleted alongside the rest of this
-    // diagnostic once the root cause is settled.
+    // Dump the stencil inputs at the worst refined-block cell -- its own
+    // U/Coeff and its 6 face-neighbor U values.
     auto u_d = mglevels_->GetCurrentData();
     auto u_h = Kokkos::create_mirror_view(u_d);
     Kokkos::deep_copy(u_h, u_d);
@@ -774,9 +605,8 @@ void MGCFCConformalFactorDriver::DebugReportDefectByLevel() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugReportWorstDefect(...)
-//! \brief Shared worst-cell-finder factored out of DebugReportDefectByLevel so
-//! DebugAnalyticResidualTest (below) can reuse it without duplicating the
-//! root/refined classification loop. See mg_cfc_conformal_factor.hpp's doc comment.
+//! \brief Debug-only: shared worst-cell finder used by DebugReportDefectByLevel and
+//! DebugAnalyticResidualTest.
 
 void MGCFCConformalFactorDriver::DebugReportWorstDefect(const std::string &label,
                                                          int &ref_m, int &ref_k,
@@ -848,12 +678,11 @@ void MGCFCConformalFactorDriver::DebugReportWorstDefect(const std::string &label
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugAnalyticResidualTest()
-//! \brief Temporary diagnostic (2026-07-21) -- see mg_cfc_conformal_factor.hpp's doc
-//! comment for the full rationale. Seeds delta_psi = psi_analytic - 1 at every cell
-//! of the finest per-block level, including every ghost cell (evaluated at that
-//! ghost cell's own physical position, not communicated from anywhere), measures the
-//! residual with CalculateDefectPack (no smoother involved at all), then overwrites
-//! just the ghost cells with one real ghost-communication round and measures again.
+//! \brief Debug-only, see mg_cfc_conformal_factor.hpp's doc comment. Seeds
+//! delta_psi = psi_analytic - 1 at every cell of the finest per-block level,
+//! including every ghost cell (evaluated at that cell's own physical position),
+//! measures the residual with no smoother involved, then overwrites just the
+//! ghost cells with one real ghost-communication round and measures again.
 
 void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
   tov::PolytropeEOS eos(pin_);
@@ -904,11 +733,10 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
   DebugDumpInterfaceDefect("BEFORE ghost-comm: ");
 
   // One real ghost-communication round, bypassing the smoother entirely -- mirrors
-  // SetMGTaskListToFiner's flag==2 "final boundary exchange" block (multigrid_tasks.
-  // cpp) exactly, called directly instead of through the task-list machinery since
-  // this is a one-shot diagnostic, not part of a real V-cycle. ClearSend/ClearRecv at
-  // the end leave MPI state clean for the real SolveMG() call that follows this in
-  // Solve().
+  // SetMGTaskListToFiner's flag==2 "final boundary exchange" block
+  // (multigrid_tasks.cpp), called directly since this is a one-shot diagnostic, not
+  // part of a real V-cycle. ClearSend/ClearRecv leave MPI state clean for the real
+  // SolveMG() call that follows this in Solve().
   pmg = mglevels_;
   FillCoarseBoundary(nullptr, 0);
   StartReceive(nullptr, 0);
@@ -917,9 +745,6 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
   PhysicalBoundary(nullptr, 0);
   ProlongateFCBoundary(nullptr, 0);
 
-  // Confirmation instrumentation (2026-07-21): before touching MPI state, dump
-  // coarse_buf_'s raw content for the specific transverse edge the diagnosis
-  // above flags as suspect (see DebugDumpCoarseBuf's own doc comment).
   DebugDumpCoarseBuf();
 
   ClearSend(nullptr, 0);
@@ -930,12 +755,9 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
   DebugDumpInterfaceDefect("AFTER ghost-comm: ");
   DebugReportWorstSolutionError("analytic test, AFTER ghost-comm (no smoother yet): ");
 
-  // 2026-07-21 (user request): run exactly ONE V-cycle (normal npresmooth_/
-  // npostsmooth_ smoothing counts, same as the real SolveMG loop would use per
-  // iteration) starting from the analytically-seeded state above, then compare
-  // both the defect and the actual solution VALUE against the analytic truth --
-  // shows how much a single relaxation sweep moves the solution away from (or
-  // toward) the exact answer, distinct from the defect-only measurements above.
+  // Run exactly one V-cycle from the analytically-seeded state above, then compare
+  // both the defect and the solution value against the analytic truth -- shows how
+  // much a single relaxation sweep moves the solution.
   SolveVCycle(pdriver, npresmooth_, npostsmooth_);
   Kokkos::fence();
   DebugReportWorstDefect("analytic test, AFTER one V-cycle (smoother applied): ",
@@ -946,16 +768,9 @@ void MGCFCConformalFactorDriver::DebugAnalyticResidualTest(Driver *pdriver) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugReportWorstSolutionError(...)
-//! \brief Temporary diagnostic (2026-07-21): companion to DebugReportWorstDefect --
-//! instead of the discrete residual, reports the worst |delta_psi - analytic| (the
-//! actual SOLUTION value error, not the equation's residual), split by root vs.
-//! refined MeshBlock, same classification/physical-position pattern as
-//! DebugReportWorstDefect. Used to see directly how far a single V-cycle iteration
-//! moves the solution away from the exact analytic answer, which the defect alone
-//! doesn't show (a large defect doesn't necessarily mean a large solution error, and
-//! vice versa, for a single relaxation step). Reconstructs its own tov::TOVStar/
-//! PolytropeEOS each call (cheap, one-shot diagnostic -- matches DebugDumpCoarseBuf's
-//! own precedent of not caching it across calls).
+//! \brief Debug-only companion to DebugReportWorstDefect: reports the worst
+//! |delta_psi - analytic| (the solution value error, not the equation's residual),
+//! split root/refined, same classification pattern.
 
 void MGCFCConformalFactorDriver::DebugReportWorstSolutionError(
     const std::string &label) {
@@ -1032,23 +847,12 @@ void MGCFCConformalFactorDriver::DebugReportWorstSolutionError(
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugDumpCoarseBuf()
-//! \brief Temporary diagnostic (2026-07-21): confirmation instrumentation for the
-//! hypothesis that ProlongateFCMG's coarse-face transverse gradient (multigrid_bvals.
-//! cpp) reads a STALE, self-restricted coarse_buf_ slot instead of the true coarse-
-//! neighbor value, specifically for "high" children (fc_childy_/fc_childz_ == 1) at
-//! the far transverse edge of their received window. Index trace: for a +x1 coarse
-//! face neighbor, ComputePerLevelIndices' compute_recv icoar block gives the received
-//! transverse (j) window as [ngh_l-1, ngh_l+half-1] for a high child (f1==1) -- NOT
-//! including ngh_l+half. But ProlongateFCMG's sjp clamp (`sj < ngh_l+half ? sj+1 :
-//! sj`) reads exactly cbuf(...,ngh_l+half,...) at the last loop iteration (sj =
-//! ngh_l+half-1) regardless of child parity. That slot was last written by
-//! FillCoarseMG's own face-restriction of THIS block's own data (used when this block
-//! supplies a same/finer neighbor), never overwritten by the coarse neighbor's real
-//! data for a high child. This function dumps cbuf's full transverse row at the
-//! coarse-facing index for every high-child block with a real coarser +x1 neighbor,
-//! alongside what FillCoarseMG's own self-restriction formula would give at each
-//! slot, so the "stale self-value" claim can be checked by eye rather than asserted.
-//! To be deleted alongside the rest of this investigation's diagnostics.
+//! \brief Debug-only: investigates whether ProlongateFCMG's coarse-face transverse
+//! gradient (multigrid_bvals.cpp) reads a stale, self-restricted coarse_buf_ slot
+//! instead of the true coarse-neighbor value at a block's far transverse edge.
+//! Dumps cbuf's full transverse row at the coarse-facing index for every
+//! high-child block with a real coarser +x1 neighbor, alongside what
+//! FillCoarseMG's own self-restriction formula would give at each slot.
 
 void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
   auto *pbval = mglevels_->pbval;
@@ -1078,16 +882,11 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
     int child_x = static_cast<int>(loc[gid].lx1) & 1;
     int child_y = static_cast<int>(loc[gid].lx2) & 1;
     int child_z = static_cast<int>(loc[gid].lx3) & 1;
-    // Follow-up (2026-07-21, after the clamp-bound fix): the fix left low
-    // children (child_y==0 && child_z==0) untouched, and the REAL iterated solve's
-    // worst defect is STILL pinned at a low child (gid=1/gid=4), unchanged by the
-    // fix -- so check low children's ghost fill too, not just high ones, to see
-    // if a separate bug is hiding there.
 
     // A fine block's single coarser neighbor is registered at slot
-    // NeighborIndex(n,0,0,myfx2,myfx3) -- using THIS block's own child parity as
-    // the subface index -- not (0,0) (meshblock.cpp::SetNeighbors, "neighbor at
-    // coarser level" branches). Corrected after the first dump run found nothing.
+    // NeighborIndex(n,0,0,myfx2,myfx3) -- using this block's own child parity as
+    // the subface index, not (0,0) (meshblock.cpp::SetNeighbors, "neighbor at
+    // coarser level" branches).
     int n = NeighborIndex(1, 0, 0, child_y, child_z);
     if (n < 0 || n >= nnghbr) continue;
     if (nghbr_h.h_view(m, n).gid < 0) continue;
@@ -1105,12 +904,9 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
     std::cout << std::endl;
 
     // Self-restriction comparison: FillCoarseMG's own face-average formula (this
-    // block's OWN u, not the neighbor's), evaluated at the same (sk, sj, si) slots
+    // block's own u, not the neighbor's), evaluated at the same (sk, sj, si) slots
     // it would have written before RecvAndUnpackMG ran. Only defined for sj in
-    // [ngh_l, ngh_l+half-1] (FillCoarseMG's own valid ci=ngh_l+half range) -- the
-    // hypothesis is that cbuf[sj=ngh_l+half-1]'s neighbor read (sjp) at ngh_l+half
-    // does NOT correspond to any valid self-restriction slot at all (out of range),
-    // so this loop only covers the slots FillCoarseMG could have written, for context.
+    // [ngh_l, ngh_l+half-1] (FillCoarseMG's own valid range).
     std::cout << "CFC debug [rank " << global_variable::my_rank << "]: self-restrict "
               << "gid=" << gid << " (this block's own +x1 face average) fi="
               << (ngh_l + ncells_l - 1) << ":";
@@ -1128,16 +924,11 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
     }
     std::cout << std::endl;
 
-    // Direct ghost-vs-analytic comparison (2026-07-21, same confirmation pass):
-    // u_h was mirrored from GetCurrentData() at the TOP of this function, which
-    // runs AFTER ProlongateFCBoundary already filled the +x1 ghost cells -- so
-    // u_h(m,0,fk,fj,fig) below is the ACTUAL post-prolongation ghost value. Compare
-    // it, per fine cell, against the true analytic psi-1 at that cell's own
-    // physical position (same tov_star evaluator the seeding loop used). If the
-    // error is concentrated at fj=ngh_l+ncells_l-2, ngh_l+ncells_l-1 (the last pair,
-    // fed by the suspect sjp=ngh_l+half read) while the other 6 fine cells (fed by
-    // the confirmed-valid sj=0..half-1 window) are accurate, that pins the fault on
-    // that one read, regardless of what cbuf[sj=ngh_l+half] actually contains.
+    // Direct ghost-vs-analytic comparison: u_h was mirrored from GetCurrentData()
+    // after ProlongateFCBoundary already filled the +x1 ghost cells, so
+    // u_h(m,0,fk,fj,fig) below is the actual post-prolongation ghost value.
+    // Compare it, per fine cell, against the true analytic psi-1 at that cell's
+    // own physical position.
     int fig = ngh_l + ncells_l;
     tov::PolytropeEOS eos2(pin_);
     tov::TOVStar tov_star2 = tov::TOVStar::ConstructTOV(pin_, eos2, false);
@@ -1165,12 +956,8 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
     }
     std::cout << std::endl;
 
-    // Follow-up (2026-07-21, after the ProlongateFCMG fix): this child may ALSO
-    // border a coarser neighbor in +x2 (it's a corner child of the refined patch,
-    // touching the unrefined region in more than one direction) -- check that
-    // ghost fill too, since the new worst-defect location after the fix moved to
-    // (x1,x2,x3)=(6.2,6.2,0.2)-like points, suggesting the OTHER interface, not a
-    // regression in this one.
+    // A corner child of the refined patch may also border a coarser neighbor in
+    // +x2 -- check that ghost fill too.
     int n2 = NeighborIndex(0, 1, 0, child_x, child_z);
     if (n2 >= 0 && n2 < nnghbr && nghbr_h.h_view(m, n2).gid >= 0 &&
         nghbr_h.h_view(m, n2).lev < mblev_h.h_view(m)) {
@@ -1199,21 +986,14 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string&)
-//! \brief Temporary diagnostic (2026-07-21): DebugReportWorstDefect's "worst cell in
-//! the whole refined patch" is contaminated by the star's own density-profile
-//! features (kinks/steep falloff near the stellar surface) -- confirmed by a 2x-
-//! resolution rerun where the reported worst-REFINED-cell location moved to a
-//! different physical point and its *pre-ghost-comm* (pure analytic, no communication
-//! at all) value went *up* instead of shrinking ~4x, the opposite of ordinary O(dx^2)
-//! truncation scaling. That means comparing "worst cell" defects across resolutions
-//! can't isolate the ghost-comm/prolongation-specific error at all -- it's tracking a
-//! moving target. This function instead reports the worst |defect| restricted to just
-//! the single layer of fine cells immediately adjacent to a coarse-fine +x1 interface
-//! (same block-selection logic as DebugDumpCoarseBuf: a refined block with a real,
-//! actually-coarser +x1 neighbor), at the same fixed relative location every time,
-//! independent of wherever the star's density profile happens to peak. Called twice
-//! from DebugAnalyticResidualTest with different labels (before/after the real
-//! ghost-comm round) so the same physical cells' defect can be compared directly.
+//! \brief Debug-only: DebugReportWorstDefect's "worst cell in the whole refined
+//! patch" is contaminated by the star's own density-profile features moving the
+//! worst-cell location between runs, so this instead reports the worst |defect|
+//! restricted to the single layer of fine cells immediately adjacent to a
+//! coarse-fine +x1 interface (same block-selection logic as DebugDumpCoarseBuf), at
+//! a fixed relative location every time. Called twice from
+//! DebugAnalyticResidualTest (before/after the real ghost-comm round) so the same
+//! physical cells' defect can be compared directly.
 
 void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string &label) {
   mglevels_->CalculateDefectPack();
@@ -1250,11 +1030,9 @@ void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string &lab
     for (int fk = ngh_l; fk <= ngh_l + ncells_l - 1; ++fk) {
       for (int fj = ngh_l; fj <= ngh_l + ncells_l - 1; ++fj) {
         Real val = Kokkos::fabs(def_h(m, 0, fk, fj, fi));
-        // RMS over the interface layer (below) is a resolution-fair metric a plain
-        // max isn't: max-of-N-samples grows with N purely from extreme-value
-        // statistics even if every sample were drawn from the same distribution,
-        // and doubling resolution quadruples the number of transverse cells (N) in
-        // this layer -- confirmed as a real confound this pass (see doc comment).
+        // RMS over the interface layer is a resolution-fair metric a plain max
+        // isn't: max-of-N-samples grows with N from extreme-value statistics
+        // alone, and doubling resolution quadruples the transverse cell count.
         sumsq += val*val;
         ++count;
         if (val > ifmax) {
@@ -1276,25 +1054,13 @@ void MGCFCConformalFactorDriver::DebugDumpInterfaceDefect(const std::string &lab
 
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet()
-//! \brief Temporary diagnostic (2026-07-21): confirmation instrumentation for the
-//! hypothesis that MultigridDriver::RestrictCoeffOctets() (multigrid_driver.cpp) never
-//! pushes an octet-level-0's Coeff() down into mgroot_'s own corresponding root-level
-//! cell. The generic, per-V-cycle-sweep MultigridDriver::RestrictOctets() has two
-//! branches -- "fine octet to coarser octet" (lev>=1) and an else branch, "octets to
-//! root grid" (lev<1), which explicitly writes root_src_h/root_u_h from
-//! CalculateDefectOctet/RestrictOne. RestrictCoeffOctets() only mirrors the first
-//! branch (its loop is "for l = nreflevel_-1; l >= 1; --l"); it has no equivalent of
-//! the else branch. At nreflevel_==1 (this investigation's test geometry) that loop
-//! condition (0 >= 1) is never true, so RestrictCoeffOctets() is a complete no-op, and
-//! the root-level cell(s) under any refined patch are left at coeff_'s post-
-//! construction default (0.0) for the entire solve -- TransferCoeffToRoot() only
-//! writes into root_coeff_h for blocks *at* root level, and into the octet's own
-//! Coeff() for refined blocks, never both. This dumps, for every level-0 octet,
+//! \brief Debug-only: checks whether MultigridDriver::RestrictCoeffOctets() actually
+//! pushes an octet-level-0's Coeff() down into mgroot_'s own corresponding
+//! root-level cell (unlike the generic RestrictOctets(), which has an explicit
+//! "octets to root grid" branch for Src()/U(), RestrictCoeffOctets() only mirrors
+//! the "fine octet to coarser octet" branch). Dumps, for every level-0 octet,
 //! mgroot_'s actual Coeff() at the corresponding root cell alongside
-//! RestrictOneCoeff's volume-averaged expectation computed from that same octet's own
-//! (independently confirmed-correct, via TransferCoeffToRoot) Coeff() values, so the
-//! "root cell stuck at zero" claim can be checked by eye rather than asserted. To be
-//! deleted alongside the rest of this investigation's diagnostics.
+//! RestrictOneCoeff's volume-averaged expectation from that octet's own Coeff().
 
 void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet() {
   if (nreflevel_ <= 0) return;
@@ -1324,13 +1090,10 @@ void MGCFCConformalFactorDriver::DebugDumpRootCoeffUnderOctet() {
   return;
 }
 
-// Item 12: octet-scale Newton-Gauss-Seidel smoothing, exactly the same math as
+// Octet-scale Newton-Gauss-Seidel smoothing, exactly the same math as
 // MGCFCConformalFactor::SmoothPack (per-level) above -- ConformalFactorRHS is
-// reused verbatim (a pure scalar function, no view dependency); only the
-// Laplacian stencil and the u/src/coeff access pattern change (oct.U/Src/Coeff
-// instead of u_[lev]/src_[lev]/coeff_[lev] views). mg_omega_psi_/psi_floor_ are
-// this driver's own members, no static_cast needed (unlike SmoothPack, which is
-// a Multigrid, not MultigridDriver, method).
+// reused verbatim; only the Laplacian stencil and the u/src/coeff access pattern
+// change (oct.U/Src/Coeff instead of u_[lev]/src_[lev]/coeff_[lev] views).
 void MGCFCConformalFactorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
   if (use_psi5_source_) { SmoothOctetImpl<true>(oct, rlev, color); }
   else { SmoothOctetImpl<false>(oct, rlev, color); }

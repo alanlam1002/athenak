@@ -175,6 +175,22 @@ its Riemann solver and conserved-to-primitive conversion.
 ## physically sensible migrate-and-ring-down behavior throughout, with no
 ## density collapse and no mass jump. Item 30 is now CLOSED (see item 29's
 ## and item 30's own updated text for the full result).
+##
+## Status update (2026-07-26, later still): item 35 simplified `RunXPsiSolvePass`/
+## `RunLapseShiftAssemblePass`'s signatures (the `bool` parameters items 29/33
+## added are now decided at each call site instead) and swept every comment in
+## `src/cfc/` down to concise, non-obvious-WHY-only notes -- no logic change,
+## verified via non-comment-token diffing, committed `9f3ae81a`. Item 36 then
+## found and fixed a real, independent bug the user spotted by inspection: after
+## `InitializeMetric()`/`ReinitializeMetricForAMR` reconcile primitives vs.
+## conserved variables (whichever direction that solve's mode requires), the
+## OTHER quantity's hydro ghost cells were left stale (or, for `ConToPrim`,
+## computed against a not-yet-final metric) with nothing refreshing them before
+## the next step reads them -- fixed by re-running `Driver::
+## InitBoundaryValuesAndPrimitives()` once more at the end of each function.
+## Verified via a 16-rank/288-MeshBlock/5-level smoke test: no deadlock (the one
+## real risk an earlier hand-rolled draft of this fix would have hit), no
+## FATAL/NaN. See items 35-36 for full detail.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4543,6 +4559,11 @@ src/cfc/
       `false` (`init_freeze_conserved=true`, and now also used by item 33's
       regrid re-solve) calls `ConToPrim` instead. `InitializeMetric()` now
       calls `RunLapseShiftAssemblePass(pdriver, !cfc_init_freeze_conserved_)`.
+      (This signature was simplified shortly after -- see item 35 -- the
+      `bool` parameter was removed and each caller now calls `PrimToConInit`/
+      `ConToPrim` itself before invoking the now-parameterless
+      `RunLapseShiftAssemblePass`/`RunXPsiSolvePass`; the reconciliation
+      logic described here is unchanged, only its packaging.)
       **Verified**: rebuilt cleanly; reran a `nlim=1`, `init_freeze_
       conserved=true` t=0 check (`cfc_migration_freezecons_check_v2/`, job
       249528) -- no FATAL, no NaN, one-shot pass reports `max|delta psi -
@@ -4917,7 +4938,7 @@ src/cfc/
       `PrimToConInit` bug (see item 29's own bullet; both fixes share one
       refactor since they're the same underlying issue -- "which quantity was
       held fixed during this solve, and how to reconcile primitives/conserved
-      afterward"). `ReinitializeMetricForAMR` now reads:
+      afterward"). `ReinitializeMetricForAMR` at the time read:
       ```cpp
       void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
         psi_seeded_ = false;
@@ -4926,6 +4947,11 @@ src/cfc/
         RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/false);
       }
       ```
+      (Superseded by item 35's signature simplification -- the two `bool`
+      parameters were removed, with `ConToPrim`/the reseed logic called
+      directly at this site instead -- and by item 36, which appends a final
+      `pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);` call. See
+      those items for the current, accurate form of this function.)
       No Picard loop, no `PrimToConInit` anywhere in this path -- `pmhd->u0`
       is read as-is, and primitives are recovered via `ConToPrim` afterward,
       exactly matching a normal per-stage `QueueCFCTasks()` step plus its own
@@ -5069,3 +5095,138 @@ src/cfc/
       33's own single-rank verification); do not consider `refinement=
       adaptive` + CFC production-ready across multiple ranks until this item
       is resolved.
+
+35. **`RunXPsiSolvePass`/`RunLapseShiftAssemblePass` simplified (their `bool`
+    parameters removed, moved to call sites); full-module comment sweep
+    (2026-07-26). Committed `9f3ae81a`.**
+    - **Signature simplification**: both methods (introduced by items 29/33
+      above to share the primitives-vs-conserved reconciliation logic between
+      `InitializeMetric()`'s two modes and `ReinitializeMetricForAMR`) lost
+      their `bool refresh_cons_from_primitives`/`bool primitives_are_fixed`
+      parameters. The decision each parameter used to encode -- whether to
+      call `PrimToConInit` before `RunXPsiSolvePass`, and whether to call
+      `PrimToConInit` or `ConToPrim` before `RunLapseShiftAssemblePass` -- is
+      now made explicitly at each of the three call sites instead (the
+      iterative Picard loop, the `init_freeze_conserved` one-shot branch, and
+      `ReinitializeMetricForAMR`), rather than threaded through as an argument
+      to the shared helper. Verified functionally equivalent by tracing all
+      three call sites against the original branch semantics: no logic change,
+      pure refactor. (Items 29/33's own text above, including their inline
+      code blocks showing the old signatures, were annotated to point here
+      rather than silently rewritten -- see the parenthetical notes added to
+      each.)
+    - **Comment sweep**: every file in `src/cfc/` (`cfc.{hpp,cpp}`,
+      `cfc_reconstruct.{hpp,cpp}`, `mg_cfc_conformal_factor.{hpp,cpp}`,
+      `mg_cfc_lapse.{hpp,cpp}`, `mg_cfc_vector_poisson.{hpp,cpp}`) had its
+      comments condensed to concise, non-obvious-WHY-only notes -- net
+      -879 lines (1716 removed, 837 added as condensed replacements) across
+      the module. Removed: dated investigation narrative ("2026-07-21",
+      "Round 16 fix", "Finding C", "Item 12", "plan addendum #4" -- that
+      history lives in git log/this file's own numbered items already, not
+      redundantly in source comments), ~130 lines of dead fully-commented-out
+      code (a reverted relative-change convergence experiment, duplicated in
+      both nonlinear solvers -- see item 20's own note that this was tried
+      and reverted), restated-signature `\fn` lines, and verbose blow-by-blow
+      debugging narrative in the temporary diagnostic functions (`Debug*` in
+      `mg_cfc_conformal_factor.cpp`, trimmed to just what each one does).
+      Kept: physics/equation references, sizing/indexing invariants that
+      would silently break code if violated, sign/formula derivations, and
+      the one genuinely load-bearing safety warning (item 34's
+      `load_balance.cpp` cross-rank AMR gap, still called out in
+      `ReinitializeMetricForAMR`'s own doc comment). Verified zero logic
+      changes by diffing every file's non-comment tokens against the prior
+      commit (`git diff` stripped of `//`-comments and whitespace) -- confirmed
+      byte-identical except for the signature simplification above. Both
+      `build_cfc`/`build_cfc_xns` rebuilt cleanly.
+    - **This file (`DEVELOPMENT.md`) is explicitly out of scope for that
+      sweep** -- it's a deliberate running journal of this module's
+      development history, a different kind of document from source
+      comments, not something the comment-cleanup convention applies to.
+
+36. **Hydro ghost cells left stale after CFC metric (re)initialization --
+    fixed (2026-07-26).**
+    - **Motivation**: the user asked whether hydro variables get ghost-
+      exchanged after CFC's metric initialization, and correctly predicted a
+      real bug. `RunLapseShiftAssemblePass`'s two callers each reconcile
+      hydro state right before calling it (see items 29/33/35): the default
+      (Picard) mode calls `PrimToConInit(is, ie, js, je, ks, ke)` --
+      **interior-only** (confirmed via `dyn_grmhd.cpp`: a thin wrapper around
+      `eos.PrimToCons` with whatever range is passed) -- so `pmhd->u0`'s
+      ghost cells are simply never refreshed after CFC's solve.
+      `init_freeze_conserved`/regrid mode calls `ConToPrim(pdriver, 0)` --
+      full array **including ghosts** (confirmed via `dyn_grmhd.cpp`) -- but
+      this runs *before* `RunLapseShiftAssemblePass`'s own tail finishes
+      ghost-exchanging `padm->u_adm` (`pbval_adm`'s `Rest/Send/Recv/Prolong`
+      sequence, the last thing that function does), so it computes
+      primitives in ghost cells using metric-ghost values that are stale
+      relative to the solve that just converged. Neither `Driver::
+      Initialize()` nor `MeshRefinement::AdaptiveMeshRefinement` re-invokes
+      any hydro Send/Recv/ConToPrim between CFC's call returning and the next
+      step (main loop / `NewTimeStep` priming) -- confirmed via direct reads
+      of both.
+    - **Why this is scoped to init/regrid, not the per-stage path**: the
+      normal per-stage task graph has the same "one-stage-lag" shape
+      (`MHD_C2P` depends on `{MHD_Prolong}`/optionally `{CFC_SolvePsi}`, not
+      on the later `CFC_ProlongADM`) -- but that's an accepted, designed
+      tradeoff during ongoing evolution (last stage's ghost metric is a
+      reasonable fallback, refreshed by *this* stage's own `CFC_ProlongADM`
+      before next use). At t=0/regrid there is no such valid prior state to
+      fall back on (t=0: the pgen's raw guess; regrid: a possibly wrong
+      pre-regrid block layout), so only `InitializeMetric()`/
+      `ReinitializeMetricForAMR` needed this fix.
+    - **Fix**: both functions now call
+      `pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);`
+      immediately after their own `RunLapseShiftAssemblePass(pdriver);` call
+      -- the exact same function AthenaK already calls once *before* CFC's
+      solve (`Driver::Initialize()`/`MeshRefinement::AdaptiveMeshRefinement`,
+      both call it right before invoking CFC) to establish a consistent
+      hydro state, reused here to re-establish it against the now-final
+      metric. Confirmed safe to call a second time: it does not call
+      `padm->SetADMVariables` (that lives in a different function,
+      `MeshRefinement::RedistAndRefineMeshBlocks`, which runs *before*
+      `InitBoundaryValuesAndPrimitives` is even invoked during a regrid, so
+      it's unreachable from here) -- important, since item 33 deliberately
+      gates that callback off for CFC runs (it would discard CFC's dynamical
+      metric evolution otherwise). Placed in each of the two top-level
+      functions rather than inside the shared `RunLapseShiftAssemblePass`
+      itself, per user direction: keeps that helper's responsibility scoped
+      to the metric-solve tail only (matching its existing name/doc comment),
+      and both callers already handle their own separate post-processing
+      individually (e.g. each has its own `cfc_init_verbose_` diagnostic
+      print) rather than pushing everything into the shared tail.
+    - **A rejected first draft**: hand-assembling the equivalent
+      `MHD::InitRecv`/`RestrictU`/`SendU`/`RecvU`/`ApplyPhysicalBCs`/
+      `Prolongate`/`ConToPrim`/`ClearSend`/`ClearRecv` sequence directly
+      (mirroring dyn_grmhd's own per-stage task graph) was designed first,
+      then caught by a design review before implementation: calling
+      `InitRecv`/`ClearSend`/`ClearRecv` with `stage=0` would **deadlock** in
+      a multi-rank run -- those three unconditionally post/wait on
+      flux-buffer MPI requests whenever `stage>=0`, with no matching send
+      ever issued outside a real RK sub-stage (`Driver::
+      InitBoundaryValuesAndPrimitives` itself uses `stage=-1` specifically to
+      suppress this). Reusing `InitBoundaryValuesAndPrimitives` wholesale
+      sidesteps the whole bug class rather than re-deriving its own correct
+      `stage` handling by hand.
+    - **Verified**: rebuilt `build_cfc`/`build_cfc_xns` cleanly. Ran a
+      16-rank, 288-MeshBlock, 5-AMR-level smoke test
+      (`cfc_migration_freezecons_check_v3/`, job 249562, reusing the
+      established `init_freeze_conserved=true` migration-test check --
+      exercises exactly the `ConToPrim` path this fix targets): no hang/
+      deadlock (completed in ~13s wall-clock, matching prior runs of this
+      same check), no FATAL/NaN, `InitializeMetric`'s own diagnostic print
+      unaffected (`max|delta psi - initial guess| = 0.000492109`, consistent
+      with prior runs). This clears the one real risk the design review
+      flagged. A direct before/after diff of a MeshBlock-boundary-adjacent
+      `w0`/`u0` value (to demonstrate the actual ghost-cell content change,
+      not just "no crash") was not done -- the mechanism is understood from
+      code reading and the fix is low-risk (reuses an already-proven
+      function verbatim), but this would be a worthwhile follow-up
+      confirmation if the anomaly this fix targets is ever suspected of
+      causing a visible symptom in a production run.
+    - **Scoping note**: for the regrid path specifically, this fix is
+      necessary but not sufficient for a fully-correct multi-rank result --
+      item 34's cross-rank AMR-transfer gap means `padm->u_adm` itself can
+      still be wrong on a cross-rank regrid, independent of this fix. That
+      gap remains open (not attempted here); this fix still correctly closes
+      the hydro-ghost-staleness gap for same-rank regrids and for the t=0
+      `InitializeMetric()` path (which has no such cross-rank caveat).

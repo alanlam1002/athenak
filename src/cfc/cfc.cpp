@@ -608,6 +608,16 @@ void CFC::InitializeMetric(Driver *pdriver) {
   }
 
   RunLapseShiftAssemblePass(pdriver);
+
+  // Re-exchange hydro ghost cells and rebuild primitives everywhere (interior +
+  // ghost) against the now-final metric: PrimToConInit/ConToPrim above only
+  // touch whichever of {u0, w0} was reconciled, and (for u0) only the interior,
+  // so the other quantity's ghost cells -- or, for ConToPrim's ghost-inclusive
+  // recompute, the metric ghosts it read -- are stale until padm->u_adm's own
+  // ghost exchange (inside RunLapseShiftAssemblePass) completes. Reuses the same
+  // function already run once before this solve (Driver::Initialize()), safe to
+  // call again: confirmed to not touch padm->SetADMVariables.
+  pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
   return;
 }
 
@@ -689,6 +699,10 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   RunXPsiSolvePass(pdriver);
   pmy_pack->pdyngr->ConToPrim(pdriver, 0);
   RunLapseShiftAssemblePass(pdriver);
+
+  // See CFC::InitializeMetric's identical closing step: rebuilds hydro ghost
+  // cells and primitives everywhere against the now-final (post-regrid) metric.
+  pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
 
   if (cfc_init_verbose_) {
     Real dpsi = 0.0;

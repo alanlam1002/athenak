@@ -213,6 +213,14 @@ class CFC {
   //
   // <cfc> init_freeze_conserved (default false) selects a one-shot mode instead --
   // see cfc_init_freeze_conserved_'s comment above.
+  //
+  // Finishes by re-running Driver::InitBoundaryValuesAndPrimitives() (the same
+  // call already run once before this solve): PrimToConInit/ConToPrim above only
+  // reconcile one of {pmhd->u0, pmhd->w0} (and, for PrimToConInit, only the
+  // interior), so the other quantity's ghost cells -- or the metric ghosts
+  // ConToPrim read, stale until RunLapseShiftAssemblePass's own padm->u_adm
+  // exchange completes -- would otherwise stay inconsistent with the just-solved
+  // metric until the next real hydro ghost exchange.
   void InitializeMetric(Driver *pdriver);
 
   // Regrid counterpart to InitializeMetric(), called once per regrid event from
@@ -221,8 +229,9 @@ class CFC {
   // that would rebuild conserved variables from primitives (PrimToConInit),
   // discarding the already-evolved, correctly remapped, mass-conserving pmhd->u0.
   // Instead runs one plain CFC step holding conserved variables fixed and
-  // recovering primitives via ConToPrim at the end (RunLapseShiftAssemblePass's
-  // ConToPrim path).
+  // recovering primitives via ConToPrim, then (like InitializeMetric() above)
+  // finishes with Driver::InitBoundaryValuesAndPrimitives() to refresh hydro
+  // ghost cells against the now-final metric.
   //
   // Resets psi_seeded_/alpha_psi_seeded_ so the two nonlinear Newton solves
   // re-seed from padm->adm.psi4/alpha (safe even though padm->u_adm shares the

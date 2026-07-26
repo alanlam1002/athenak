@@ -31,6 +31,7 @@ add_executable(
         coordinates/coordinates.cpp
         coordinates/excision.cpp
 
+        diffusion/ambipolar.cpp
         diffusion/conduction.cpp
         diffusion/resistivity.cpp
         diffusion/viscosity.cpp
@@ -113,7 +114,6 @@ add_executable(
 
         pgen/pgen.cpp
         pgen/tests/advection.cpp
-        pgen/tests/collapse.cpp
         pgen/tests/cpaw.cpp
         pgen/tests/cshock.cpp
         pgen/tests/diffusion.cpp
@@ -129,6 +129,9 @@ add_executable(
         pgen/tests/rad_linear_wave.cpp
         pgen/tests/z4c_boosted_puncture.cpp
         pgen/tests/z4c_linear_wave.cpp
+
+        pgen/unit_tests/eos_compose.cpp
+        pgen/unit_tests/gauss_legendre.cpp
 
         radiation/radiation.cpp
         radiation/radiation_fluxes.cpp
@@ -165,7 +168,8 @@ add_executable(
         utils/spherical_surface.cpp
 
         z4c/compact_object_tracker.cpp
-        z4c/horizon_dump.cpp
+        z4c/fastflow.cpp
+	    z4c/horizon_dump.cpp
         z4c/tmunu.cpp
         z4c/z4c.cpp
         z4c/z4c_adm.cpp

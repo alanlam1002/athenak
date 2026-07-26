@@ -25,12 +25,12 @@
 
 SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp):
     GeodesicGrid(nlev,true,false),
-    pmy_pack(ppack),
     radius(rad),
     interp_coord("interp_coord",1,1),
+    interp_vals("interp_vals",1,1),
+    pmy_pack(ppack),
     interp_indcs("interp_indcs",1,1),
-    interp_wghts("interp_wghts",1,1,1),
-    interp_vals("interp_vals",1,1) {
+    interp_wghts("interp_wghts",1,1,1) {
   // detect a bitant (reflect at x3min=0) mesh: points with z<0 then physically lie outside
   // the domain and must be looked up via their z-reflected (in-domain) counterpart
   bitant_ = (pmy_pack->pmesh->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::reflect) &&

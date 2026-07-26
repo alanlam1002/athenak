@@ -353,23 +353,40 @@ class CFC {
   // has produced valid primitives on the new mesh but before any NewTimeStep
   // priming -- mirroring Driver::Initialize()'s own t=0 ordering.
   //
-  // CFC's own member arrays (delta_psi, u_x, u_p_x, etc.) are NOT remapped
-  // across a regrid the way padm->u_adm/pz4c->u0 are (RedistAndRefineMeshBlocks
-  // never references pcfc at all) -- they simply retain stale content at their
-  // old block indices once the block layout changes. This is harmless for the
-  // LINEAR X^i/beta^i (P_i/eta) solves: a multigrid V-cycle for a well-posed
-  // linear elliptic PDE with mg_zerofixed BCs converges to the same unique
-  // solution regardless of the initial guess -- a stale guess only costs a few
-  // extra V-cycles, not correctness. It is NOT harmless for the two NONLINEAR
-  // Newton solves (psi, alpha*psi): a Newton iteration seeded from a stale
-  // initial guess for a completely different block layout risks overshooting
-  // into psi<=0 (only caught by psi_floor_ as a last resort, not a substitute
-  // for a sane starting point). Resetting psi_seeded_/alpha_psi_seeded_ back to
-  // false forces InitializeMetric() to re-seed cleanly from adm.psi4/adm.alpha,
-  // which -- unlike CFC's own arrays -- IS properly CopyCC/CopyForRefinementCC/
-  // RefineCC'd across a regrid (the "else if (padm != nullptr)" branch in
-  // RedistAndRefineMeshBlocks, which fires for CFC runs since CFC never
-  // constructs pz4c).
+  // 2026-07-26 correction (item 33, DEVELOPMENT.md): does NOT call
+  // InitializeMetric() (the original design did, resetting psi_seeded_/
+  // alpha_psi_seeded_ first) -- every path through InitializeMetric() rebuilds
+  // conserved variables from primitives at least once (PrimToConInit), which
+  // is wrong here: pmhd->u0 already holds genuinely evolved, mass-conserving
+  // data, correctly remapped onto the new block layout by the standard
+  // hydro/mhd AMR machinery. Rebuilding it from primitives would silently
+  // discard that. Instead, runs exactly ONE plain CFC step -- the same
+  // sequence a normal per-stage evolution step already runs, holding
+  // conserved variables fixed throughout and recovering primitives via
+  // ConToPrim only at the end (RunLapseShiftAssemblePass's
+  // primitives_are_fixed=false branch) -- see RunXPsiSolvePass's and
+  // RunLapseShiftAssemblePass's own doc comments for the full mechanism.
+  //
+  // Warm start: resets psi_seeded_/alpha_psi_seeded_ so the two nonlinear
+  // Newton solves re-seed cleanly from padm->adm.psi4/adm.alpha (addendum #4's
+  // original design). A field-remap alternative (DerefineCCSameRank/CopyCC/
+  // CopyForRefinementCC/RefineCC directly on delta_psi/delta_alpha_psi/u_x,
+  // mirroring z4c::Z4c::u0/coarse_u0) was tried and reverted: AthenaK's
+  // generic AMR load-balancing MPI transfer (PackAndSendAMR/
+  // ClearRecvAndUnpackAMR, src/mesh/load_balance.cpp) hardcodes a fixed list
+  // of physics modules with no entry for padm or pcfc, so a block moving to a
+  // different rank during a regrid never has its CFC field data transferred
+  // at all -- a real, reproducible NaN resulted (a Newton/multigrid solve
+  // cannot self-correct away from an uninitialized/garbage starting value).
+  // Fixing that gap belongs to load_balance.cpp, shared by every physics
+  // module -- out of scope here. Re-seeding from padm->adm.psi4/adm.alpha
+  // instead is safe despite padm->u_adm carrying the exact same cross-rank
+  // gap (only CopyCC, no Derefine/CopyForRefinement/Refine/MPI treatment at
+  // all): CFC's own re-solve unconditionally overwrites every field in
+  // padm->u_adm every call anyway (AssembleConformalMetric/
+  // AssembleLapseShiftK/AssembleADM), so whatever it holds beforehand is only
+  // ever used as a best-effort Newton starting point, never doubled down on
+  // as this pass's own persistent state.
   //
   // Note: mesh_refinement.cpp also narrows Step 11's existing
   // "padm->SetADMVariables(...)" call to skip CFC runs (pcfc == nullptr guard),
@@ -516,7 +533,36 @@ class CFC {
   // exactly once (<cfc> init_freeze_conserved=true, see
   // cfc_init_freeze_conserved_'s doc comment above). Always uses stage=0,
   // matching every other InitializeMetric()-internal call.
-  void RunXPsiSolvePass(Driver *pdriver);
+  //
+  // 2026-07-26 (item 33 correction, DEVELOPMENT.md): refresh_cons_from_
+  // primitives (default true, preserving both existing call sites in
+  // InitializeMetric() unchanged) gates the leading PrimToConInit call --
+  // pass false when the conserved state is already correct and must NOT be
+  // rebuilt from primitives (e.g. CFC::ReinitializeMetricForAMR, where
+  // pmhd->u0 already reflects the properly-regridded, mass-conserving
+  // evolved state).
+  void RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives = true);
+
+  // 2026-07-26 (item 29/33 correction, DEVELOPMENT.md): the tail of
+  // InitializeMetric() (final primitive/conserved reconciliation, then
+  // RescaleMatterSources/SolveLapse/SolveShift/AssembleADM), extracted so it
+  // can be shared between InitializeMetric() and CFC::ReinitializeMetricForAMR.
+  // primitives_are_fixed selects WHICH quantity was held fixed during the
+  // solve that just completed, and hence which direction to reconcile
+  // primitives vs. conserved variables before RescaleMatterSources reads them:
+  // true -> primitives were fixed throughout (iterative Picard mode) ->
+  // PrimToConInit (rebuild conserved from those fixed primitives against the
+  // final metric, today's existing behavior). false -> conserved variables
+  // (Utilde) were fixed throughout (<cfc> init_freeze_conserved=true, or a
+  // regrid re-solve) -> ConToPrim instead (recover primitives from the fixed
+  // conserved state against the final metric -- mirrors the normal per-stage
+  // task graph's own MHD_C2P, which runs right after CFC_SolvePsi for exactly
+  // this reason). Item 29's original code called PrimToConInit
+  // unconditionally here regardless of mode -- a real bug for
+  // init_freeze_conserved=true, since it silently both left primitives stale
+  // AND overwrote the very conserved state that mode was supposed to hold
+  // fixed, with a value inconsistent with what psi's own Newton solve assumed.
+  void RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed);
 
   // Item 11 (DEVELOPMENT.md): InitializeMetric() runs its X^i/psi fixed-point loop
   // entirely outside the normal per-stage task graph (it can't reuse it -- a single

@@ -465,14 +465,20 @@ void CFC::ClearTailFields() {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void CFC::RunXPsiSolvePass(Driver *pdriver)
+//! \fn void CFC::RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives)
 //! \brief Item 29 (DEVELOPMENT.md): one pass of "refresh cons from the fixed
 //! primitives + current metric, solve X^i, ghost-exchange, compute Adual^ij/
 //! Ahat^2, solve psi" -- extracted verbatim from InitializeMetric()'s own
 //! Picard-loop body so it can be called either repeatedly (the default,
 //! iterative path) or exactly once (<cfc> init_freeze_conserved=true).
+//!
+//! 2026-07-26 (item 33 correction, DEVELOPMENT.md): refresh_cons_from_primitives
+//! (default true) gates the leading PrimToConInit call -- pass false when the
+//! conserved state is already correct and must not be rebuilt from primitives
+//! (CFC::ReinitializeMetricForAMR, where pmhd->u0 already reflects the
+//! properly-regridded, mass-conserving evolved state).
 
-void CFC::RunXPsiSolvePass(Driver *pdriver) {
+void CFC::RunXPsiSolvePass(Driver *pdriver, bool refresh_cons_from_primitives) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
@@ -480,8 +486,12 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
 
   // Refresh conserved variables from the fixed primitives + current metric
   // (padm->adm.g_dd, as of the previous call's AssembleConformalMetric -- or the
-  // pgen's own raw guess, on the very first call this run ever makes).
-  pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  // pgen's own raw guess, on the very first call this run ever makes). Skipped
+  // when the caller already has a correct, fixed conserved state (see doc
+  // comment above).
+  if (refresh_cons_from_primitives) {
+    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  }
 
   InitRecvXFields();
 
@@ -501,8 +511,8 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
 
   // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this is what
   // updates padm->adm.g_dd/psi4 (via AssembleConformalMetric) for whatever comes
-  // next (the next Picard iteration's PrimToConInit, or -- one-shot mode -- the
-  // tail section's own "final refresh" PrimToConInit).
+  // next (the next Picard iteration's PrimToConInit, or -- one-shot/regrid mode --
+  // RunLapseShiftAssemblePass's own final primitive/conserved reconciliation).
   ComputeADual();
   SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
 }
@@ -668,10 +678,45 @@ void CFC::InitializeMetric(Driver *pdriver) {
     }
   }
 
-  // Final refresh: cons must reflect the fixed primitives against the FINAL
-  // (converged, or best-effort) metric before RescaleMatterSources/anything else
-  // reads pmy_pack->pmhd->u0.
-  pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  // Lapse/shift/final-assembly tail, shared with CFC::ReinitializeMetricForAMR
+  // (item 33, DEVELOPMENT.md) -- see RunLapseShiftAssemblePass's own doc
+  // comment for why this direction (PrimToConInit vs. ConToPrim) depends on
+  // which mode was just used.
+  RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/!cfc_init_freeze_conserved_);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed)
+//! \brief Item 29/33 correction (DEVELOPMENT.md): the tail of InitializeMetric() --
+//! final primitive/conserved reconciliation, then RescaleMatterSources/SolveLapse/
+//! SolveShift/AssembleADM -- extracted so it can be shared with
+//! CFC::ReinitializeMetricForAMR. primitives_are_fixed selects which quantity was
+//! held fixed during the solve that just completed: true (primitives fixed,
+//! iterative Picard mode) calls PrimToConInit to rebuild conserved variables from
+//! those fixed primitives against the final metric (today's original, correct
+//! behavior for that mode); false (conserved variables/Utilde fixed --
+//! init_freeze_conserved=true, or a regrid re-solve) calls ConToPrim instead, to
+//! recover primitives from the fixed conserved state against the final metric --
+//! mirroring the normal per-stage task graph's own MHD_C2P, which runs right after
+//! CFC_SolvePsi for exactly this reason. The original code called PrimToConInit
+//! unconditionally here regardless of mode: correct for the iterative branch, but
+//! a real bug for init_freeze_conserved=true, which both left primitives stale
+//! (never recovered) and silently overwrote the very conserved state that mode
+//! was supposed to hold fixed with a value inconsistent with what psi's own
+//! Newton solve actually assumed.
+
+void CFC::RunLapseShiftAssemblePass(Driver *pdriver, bool primitives_are_fixed) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+
+  if (primitives_are_fixed) {
+    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  } else {
+    pmy_pack->pdyngr->ConToPrim(pdriver, 0);
+  }
 
   // Lapse and shift don't feed back into X^i/psi's own equations, so they're
   // solved once here rather than iterated -- mirrors QueueCFCTasks()'s tail.
@@ -705,14 +750,89 @@ void CFC::InitializeMetric(Driver *pdriver) {
 
 //----------------------------------------------------------------------------------------
 // See cfc.hpp's doc comment on this method for the full rationale (item 33,
-// DEVELOPMENT.md). Forces InitializeMetric()'s one-time psi/alpha_psi seeding to
-// fire again, re-seeding from the just-remapped adm.psi4/adm.alpha rather than
-// reusing CFC's own (post-regrid, block-layout-mismatched) delta_psi/
-// delta_alpha_psi as a Newton starting point.
+// DEVELOPMENT.md). Forces SolveConformalFactor's/SolveLapse's one-time psi/
+// alpha_psi seeding to fire again, re-seeding from padm->adm.psi4/adm.alpha
+// rather than reusing CFC's own (post-regrid, block-layout-mismatched)
+// delta_psi/delta_alpha_psi as a Newton starting point. Does NOT call
+// InitializeMetric() itself -- see that method's own doc comment for why.
 void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+
+  // 2026-07-26 (item 33, DEVELOPMENT.md): the field-remap warm-start design
+  // (DerefineCCSameRank/CopyCC/CopyForRefinementCC/RefineCC for delta_psi/
+  // delta_alpha_psi/u_x, mirroring z4c::Z4c::u0) was tried and REVERTED --
+  // AthenaK's generic AMR load-balancing MPI transfer (PackAndSendAMR/
+  // ClearRecvAndUnpackAMR, src/mesh/load_balance.cpp) hardcodes a fixed list
+  // of physics modules (hydro/mhd/radiation/z4c) with no entry for padm or
+  // pcfc -- any block moving to a different rank during a regrid never has
+  // its ADM/CFC field data transferred via MPI at all, so a remapped-but-
+  // never-actually-received array can silently contain uninitialized/garbage
+  // (or NaN) content, which a Newton/multigrid solve cannot self-correct away
+  // from (confirmed: a real, reproducible NaN appeared in exactly this
+  // scenario during testing). Fixing this properly would mean extending
+  // load_balance.cpp's own packing/unpacking (shared with every physics
+  // module, well beyond CFC's own scope) -- out of scope here. Falls back to
+  // resetting psi_seeded_/alpha_psi_seeded_ (addendum #4's original design):
+  // this reads padm->adm.psi4/adm.alpha instead of CFC's own u_x/delta_psi/
+  // delta_alpha_psi -- padm->u_adm carries the SAME cross-rank gap (only
+  // CopyCC, no Derefine/CopyForRefinement/Refine/MPI treatment at all), but
+  // is harmless there because CFC's own re-solve unconditionally overwrites
+  // every field in padm->u_adm every call anyway (AssembleConformalMetric/
+  // AssembleLapseShiftK/AssembleADM) -- so whatever padm->u_adm's own
+  // pre-solve content is, right or wrong, never gets used as anything but a
+  // (best-effort) initial guess for the Newton solve, not doubled down on as
+  // this pass's own persistent state the way CFC's own u_x/delta_psi would
+  // have been.
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
-  InitializeMetric(pdriver);
+
+  // Snapshot the TRUE initial guess (psi4^0.25-1, the same formula
+  // SolveConformalFactor's own one-time psi_seeded_ block uses) directly from
+  // adm.psi4 -- NOT a deep_copy of delta_psi, which is still at whatever
+  // (possibly stale) value it held before this call and is not what the
+  // Newton solve will actually be seeded from (mirrors the identical bugfix
+  // already applied to InitializeMetric's own one-shot diagnostic, item 29).
+  DvceArray5D<Real> psi_before("cfc_regrid_psi_before", delta_psi.extent_int(0), 1,
+                                delta_psi.extent_int(2), delta_psi.extent_int(3),
+                                delta_psi.extent_int(4));
+  auto &adm_ = pmy_pack->padm->adm;
+  auto &psi_before_seed = psi_before;
+  par_for("cfc_regrid_psi_before_seed", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25) - 1.0;
+  });
+
+  RunXPsiSolvePass(pdriver, /*refresh_cons_from_primitives=*/false);
+  RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/false);
+
+  if (cfc_init_verbose_) {
+    Real dpsi = 0.0;
+    auto &psi_ = delta_psi;
+    auto &psi_before_ = psi_before;
+    Kokkos::parallel_reduce("cfc_regrid_dpsi",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                            {nmb, ke+1, je+1, ie+1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+                    Real &local_max) {
+        local_max = Kokkos::fmax(local_max,
+                          Kokkos::fabs(psi_(m,0,k,j,i) - psi_before_(m,0,k,j,i)));
+      }, Kokkos::Max<Real>(dpsi));
+#if MPI_PARALLEL_ENABLED
+    Real global_dpsi = 0.0;
+    MPI_Allreduce(&dpsi, &global_dpsi, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    dpsi = global_dpsi;
+#endif
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC::ReinitializeMetricForAMR: post-regrid single-pass"
+                << " re-solve complete (conserved variables held fixed,"
+                << " primitives recovered via ConToPrim)."
+                << " max|delta psi - initial guess| = " << dpsi << std::endl;
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------

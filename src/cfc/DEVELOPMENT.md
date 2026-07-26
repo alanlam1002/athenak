@@ -152,6 +152,26 @@ its Riemann solver and conserved-to-primitive conversion.
 ## `LoadReactionCoefficient`, found while verifying the above) is also fixed.
 ## `refinement=adaptive` is now a supported (if not yet performance-tuned)
 ## configuration for CFC -- see item 33 for the full design and verification.
+##
+## Status update (2026-07-26, same day, final): two corrections to the above.
+## (1) item 33's own design was itself corrected the same day: the regrid
+## re-solve must NOT rebuild conserved variables from primitives (a real
+## mass-conservation bug in the original `ReinitializeMetricForAMR`, caught
+## by user review before this ever shipped to a real physics run) -- fixed by
+## holding conserved variables fixed and doing exactly one plain CFC step,
+## recovering primitives via `ConToPrim` afterward. (2) that same fix (and
+## item 33's own field-remap warm-start attempt, since reverted) surfaced item
+## 34: a separate, pre-existing gap in AthenaK's generic AMR load-balancing
+## MPI transfer (`padm`/`pcfc` are missing from `load_balance.cpp`'s packed-
+## variable list), which silently corrupts the metric for any block that
+## moves to a different MPI rank during a regrid. `refinement=adaptive` is
+## therefore verified correct for CFC only when regrid events stay on the
+## same rank (item 33's own single-rank test) -- NOT yet safe for a real
+## multi-rank production run whose load balancer moves blocks across ranks,
+## until item 34 is fixed. (3) item 29 also gained a related primitive-
+## recovery bug fix, independent of AMR, which reopens item 30's own
+## still-unresolved `tlim=200` anomaly as a question again (see item 29's and
+## item 30's own updated text) -- not yet re-tested.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -4490,6 +4510,57 @@ src/cfc/
       psi` itself. Purely a diagnostic-print fix -- no change to `Run
       XPsiSolvePass`, `SolveConformalFactor`, or any actual solve logic, so
       the already-recorded accuracy numbers above are unaffected.
+    - **Primitive-recovery bug fix (2026-07-26, found by user while reviewing
+      item 33's regrid design, but present here independently of AMR)**:
+      `InitializeMetric()`'s tail always called `pdyngr->PrimToConInit(...)`
+      ("final refresh") before `RescaleMatterSources`/`SolveLapse` read
+      `pmhd->w0`/`u0` -- correct for the iterative Picard branch (primitives
+      ARE the fixed quantity there, so re-deriving `u0` from them against the
+      final metric is right), but backwards for `init_freeze_conserved=true`:
+      that mode's entire premise is holding CONSERVED variables (`Utilde`)
+      fixed through the Newton solve, so the physically correct step
+      afterward is to recover PRIMITIVES from that fixed conserved state via
+      `ConToPrim` (con2prim) -- not rebuild `u0` again from stale primitives.
+      The old code silently (a) never updated `w0` at all, staying at
+      whatever the pgen set (or whatever it last was), and (b) *overwrote*
+      `u0` -- the very quantity this mode is supposed to hold fixed -- with a
+      value inconsistent with what `psi`'s own Newton solve actually assumed,
+      using those stale primitives against the new metric.
+      `RescaleMatterSources`/`SolveLapse` then ran against this corrupted,
+      internally-inconsistent triple. Confirmed the normal per-stage task
+      graph already gets this right: `dyn_grmhd.cpp`'s `MHD_C2P` task
+      (`ConToPrim`, a plain virtual method on the `DynGRMHD` base class) runs
+      *after* `CFC_SolvePsi` and *before* `CFC_RescaleSrc` every stage,
+      providing exactly this reconciliation -- `InitializeMetric()`'s own
+      hand-rolled sequence, which deliberately bypasses that task graph, had
+      no equivalent call.
+      **Fix**: extracted the tail into a new method,
+      `CFC::RunLapseShiftAssemblePass(Driver*, bool primitives_are_fixed)` --
+      `true` (iterative branch) keeps the existing `PrimToConInit` call;
+      `false` (`init_freeze_conserved=true`, and now also used by item 33's
+      regrid re-solve) calls `ConToPrim` instead. `InitializeMetric()` now
+      calls `RunLapseShiftAssemblePass(pdriver, !cfc_init_freeze_conserved_)`.
+      **Verified**: rebuilt cleanly; reran a `nlim=1`, `init_freeze_
+      conserved=true` t=0 check (`cfc_migration_freezecons_check_v2/`, job
+      249528) -- no FATAL, no NaN, one-shot pass reports `max|delta psi -
+      initial guess| = 0.000492109` (small, physically reasonable for this
+      compact star), and `.mhd.hst`'s baryon mass at `t=0` (`1.534989`)
+      matches the TOV solver's own printed `Baryon mass: 1.53499` to 6
+      significant figures, with no discontinuity into the first evolved
+      cycle -- consistent with the fix, though a direct "did `w0` actually
+      change relative to the pgen's raw primitives" comparison was not done
+      (would need an added diagnostic; the structural correctness of
+      `ConToPrim` replacing `PrimToConInit` is clear from code review, and
+      this run's clean, sane behavior is consistent with it working).
+      **Possible connection to item 30's still-open mystery**: item 30's
+      `tlim=200` migration-test run used `init_freeze_conserved=true` at
+      `t=0` and found an unexplained post-bounce density collapse / mass
+      jump, never root-caused. A `t=0` state with stale primitives and a
+      silently-altered conserved state (the bug just fixed) is a plausible
+      root cause for exactly that kind of anomaly appearing once dynamical
+      evolution begins from a corrupted initial state. **Not yet re-tested**
+      -- re-running item 30's `tlim=200` check with this fix (recommended,
+      not done as part of this item) would confirm or rule this out.
 
 30. **`tlim=200` dynamical-evolution test of `init_freeze_conserved=true` on
     the migration test: excellent through the first bounce, but a separate,
@@ -4583,6 +4654,16 @@ src/cfc/
       migration_freezecons_diagnostics.png` (mass/rho_c vs. time, full
       `t=0`-`200` history), `migration_freezecons_density_xy.mp4` (density
       animation).
+    - **Update (2026-07-26)**: item 29 gained a new bullet documenting a real
+      primitive-recovery bug in `InitializeMetric()`'s tail, specific to
+      `init_freeze_conserved=true` (the mode this run used) -- `w0` was never
+      updated post-solve and `u0` was silently corrupted relative to what
+      `psi`'s Newton solve actually assumed. This is a plausible root cause
+      for the anomaly described above (a corrupted `t=0` state feeding a long
+      dynamical evolution), reopening the "not attributed to item 29"
+      conclusion above as an open question again rather than settling it.
+      Re-running this same `tlim=200` check with the fix (see item 29's own
+      bullet) would confirm or rule this out -- not yet done.
 
 31. **Persistent scratch buffers for `u_plus_2s`/`u_alpha_psi6`
     (performance fix, 2026-07-25).**
@@ -4674,23 +4755,29 @@ src/cfc/
       `u_p_src`) AMR headroom in one shot, since they all key off this single
       local variable.
     - New public method `CFC::ReinitializeMetricForAMR(Driver *pdriver)`
-      (`cfc.hpp`/`cfc.cpp`): resets the one-time `psi_seeded_`/
-      `alpha_psi_seeded_` flags to `false`, then calls `InitializeMetric(
+      (`cfc.hpp`/`cfc.cpp`): originally reset the one-time `psi_seeded_`/
+      `alpha_psi_seeded_` flags to `false`, then called `InitializeMetric(
       pdriver)` verbatim (same Picard loop / `init_freeze_conserved` one-shot
-      mode, whichever `<cfc>` already selects). Resetting the seed flags is
-      the crux of the design: CFC's linear `X^i`/`beta^i` (`P_i`/`eta`) solves
-      don't care about their initial guess for correctness (a multigrid
-      V-cycle for a well-posed linear elliptic PDE with `mg_zerofixed` BCs
-      converges to the same unique solution regardless of starting point --
-      a stale guess only costs a few extra V-cycles), but the two NONLINEAR
-      Newton solves (`psi`, `alpha*psi`) genuinely do -- a bad starting point
-      risks Newton overshoot into `psi<=0` (`psi_floor_` is a last-resort
-      catch, not a substitute for a sane start). Forcing the reseed makes
+      mode, whichever `<cfc>` already selects). **This was corrected shortly
+      after (same day) -- see the "mass-conservation correction" bullet
+      below; `ReinitializeMetricForAMR` no longer calls `InitializeMetric()`
+      at all.** Resetting the seed flags (still done, in the corrected
+      design) is the crux of the warm-start half of this design: CFC's
+      linear `X^i`/`beta^i` (`P_i`/`eta`) solves don't care about their
+      initial guess for correctness (a multigrid V-cycle for a well-posed
+      linear elliptic PDE with `mg_zerofixed` BCs converges to the same
+      unique solution regardless of starting point -- a stale guess only
+      costs a few extra V-cycles), but the two NONLINEAR Newton solves
+      (`psi`, `alpha*psi`) genuinely do -- a bad starting point risks Newton
+      overshoot into `psi<=0` (`psi_floor_` is a last-resort catch, not a
+      substitute for a sane start). Forcing the reseed makes
       `SolveConformalFactor`/`SolveLapse` re-seed from `adm.psi4`/`adm.alpha`,
       which -- unlike CFC's own `delta_psi`/`delta_alpha_psi` -- IS properly
-      `CopyCC`'d across a regrid (confirmed: `RedistAndRefineMeshBlocks`'s
-      `else if (padm != nullptr) { CopyCC(padm->u_adm); }` branch at Step 6
-      fires for every CFC run, since CFC never constructs `pz4c`).
+      `CopyCC`'d across a regrid for blocks staying on the same rank
+      (confirmed: `RedistAndRefineMeshBlocks`'s `else if (padm != nullptr) {
+      CopyCC(padm->u_adm); }` branch at Step 6 fires for every CFC run, since
+      CFC never constructs `pz4c`) -- see item 34 for a real limitation of
+      this found later (cross-rank moves).
     - `src/mesh/mesh_refinement.cpp`: `MeshRefinement::AdaptiveMeshRefinement`
       calls `pmbp->pcfc->ReinitializeMetricForAMR(pdriver)` right after
       `pdriver->InitBoundaryValuesAndPrimitives(pmy_mesh)` and before any
@@ -4779,14 +4866,179 @@ src/cfc/
     coarse resolution -- already present in the very first pre-fix test run,
     unrelated to AMR, and non-fatal by design.
 
-    **Known limitation, not addressed by this item**: `ReinitializeMetricForAMR`
-    reruns `InitializeMetric`'s full default iterative Picard loop (up to
-    `cfc_init_iter_max_` iterations) on every regrid event -- correct, but
-    potentially a real cost for a run that regrids often. A cheaper, regrid-
-    specific mode (e.g. always using the one-shot `init_freeze_conserved`-style
-    pass for regrids regardless of what's configured for t=0) is a plausible
-    future refinement, not attempted here (correctness first). Also still
-    open: whether `refinement=adaptive` is production-worthy for a real
-    (non-smoke-test) CFC physics run -- this item only establishes that the
-    mechanism itself works correctly, not that any specific science case
-    should switch to it.
+    **Mass-conservation correction (2026-07-26, same day, found by user
+    review): `ReinitializeMetricForAMR` must NOT rebuild conserved variables
+    from primitives.** The original design above called `InitializeMetric()`
+    verbatim, which -- via `RunXPsiSolvePass`'s leading `PrimToConInit` call
+    and the tail's own "final refresh" `PrimToConInit` -- rebuilds `pmhd->u0`
+    from primitives at least twice. That's correct at true t=0 (primitives
+    are the only data the pgen provides), but wrong at a regrid: `pmhd->u0`
+    already holds genuinely evolved, mass-conserving conserved data, correctly
+    remapped onto the new block layout by the standard hydro/mhd AMR machinery
+    (`DerefineCCSameRank`/`CopyCC`/`CopyForRefinementCC`/`RefineCC`, already
+    wired for `phydro`/`pmhd`). Rebuilding it from primitives would silently
+    discard that -- the user's direction: hold conserved variables fixed, and
+    do exactly one ordinary CFC step (the same sequence a normal per-stage
+    evolution step already runs, which reads `pmhd->u0` directly and never
+    touches `PrimToConInit`) to produce a self-consistent metric for the new
+    mesh.
+    - **Design**: `CFC::RunXPsiSolvePass` gained `bool refresh_cons_from_
+      primitives = true` (skip its own leading `PrimToConInit` when false).
+      `InitializeMetric()`'s tail was extracted into a new method,
+      `CFC::RunLapseShiftAssemblePass(Driver*, bool primitives_are_fixed)` --
+      the SAME method also created to fix item 29's `ConToPrim`-vs-
+      `PrimToConInit` bug (see item 29's own bullet; both fixes share one
+      refactor since they're the same underlying issue -- "which quantity was
+      held fixed during this solve, and how to reconcile primitives/conserved
+      afterward"). `ReinitializeMetricForAMR` now reads:
+      ```cpp
+      void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
+        psi_seeded_ = false;
+        alpha_psi_seeded_ = false;
+        RunXPsiSolvePass(pdriver, /*refresh_cons_from_primitives=*/false);
+        RunLapseShiftAssemblePass(pdriver, /*primitives_are_fixed=*/false);
+      }
+      ```
+      No Picard loop, no `PrimToConInit` anywhere in this path -- `pmhd->u0`
+      is read as-is, and primitives are recovered via `ConToPrim` afterward,
+      exactly matching a normal per-stage `QueueCFCTasks()` step plus its own
+      `MHD_C2P`. A `cfc_init_verbose_`-gated diagnostic print reports
+      `max|delta psi - initial guess|` (the reseed formula recomputed
+      directly from `adm.psi4`, same as `psi_seeded_`'s own block, per item
+      29's diagnostic-print-bugfix precedent), since `InitializeMetric`'s own
+      iteration print no longer fires for this path.
+    - **A field-remap warm-start alternative was tried and reverted.** The
+      original plan (per the user's own suggestion) was to ALSO directly
+      `DerefineCCSameRank`/`CopyCC`/`CopyForRefinementCC`/`RefineCC` CFC's own
+      `u_x`/`delta_psi`/`delta_alpha_psi` across a regrid, mirroring
+      `z4c::Z4c::u0`/`coarse_u0`, instead of relying solely on the
+      `psi_seeded_`/`alpha_psi_seeded_` reseed-from-`adm.psi4` mechanism.
+      Implemented and smoke-tested -- this is what surfaced item 34's
+      discovery (a real, reproducible NaN, root-caused to a SEPARATE,
+      pre-existing gap in AthenaK's generic AMR load-balancing MPI transfer,
+      unrelated to anything in this item's own design). Reverted entirely
+      (mesh_refinement.cpp has zero net diff from before this addendum) in
+      favor of the simpler `psi_seeded_`/`alpha_psi_seeded_` reseed, which
+      -- despite depending on `padm->u_adm`, which carries the exact same
+      cross-rank gap -- is safe in practice because CFC's own re-solve
+      unconditionally overwrites every field in `padm->u_adm` every call
+      anyway (`AssembleConformalMetric`/`AssembleLapseShiftK`/`AssembleADM`),
+      so whatever it holds beforehand, right or wrong, is only ever used as a
+      best-effort Newton starting point -- never doubled down on as this
+      pass's own persistent state the way directly remapping CFC's own
+      arrays would have been. See item 34 for the full writeup of the
+      cross-rank gap itself.
+    - **Verification**: rebuilt cleanly. The original multi-rank smoke test
+      (`cfc_amr_dynamic_check/`, 8 ranks, 1 MeshBlock/rank) hit item 34's
+      cross-rank NaN on its SECOND regrid event (the first, refine-only,
+      happened to keep all children on the same rank and was clean; the
+      second involved derefinement and cross-rank load-balancing moves). To
+      verify this item's OWN logic in isolation from that separate bug, a
+      single-MPI-rank variant (`cfc_amr_dynamic_check_1rank/`, `-N 1
+      --ntasks-per-node=1`, same parfile) was run instead -- with only one
+      rank, every regrid event is trivially "same-rank," sidestepping item
+      34's gap entirely. Result: clean throughout `nlim=4`, baryon mass
+      continuous across the (single) regrid event to 6 significant figures
+      (`0.191417392843` -> `0.191459448143`, the small shift reflecting the
+      star's own dynamics, not a discontinuity), `ReinitializeMetricForAMR`'s
+      diagnostic print reports a sane `max|delta psi - initial guess| =
+      4.055271e-02`, and the run terminates cleanly on the cycle limit with
+      no FATAL/NaN anywhere. This confirms the mass-conservation redesign
+      itself (no `PrimToConInit`, single CFC step, `ConToPrim` recovery) is
+      correct; item 34's cross-rank gap is a genuinely separate, pre-existing
+      problem, not something this item's own logic introduced or can fix.
+    - **Known limitation (superseded)**: an earlier draft of this item noted
+      "`ReinitializeMetricForAMR` reruns `InitializeMetric`'s full Picard
+      loop on every regrid" as a performance concern with a suggested future
+      fix (a cheaper, always-one-shot regrid mode). This is now moot: the
+      corrected design above already does exactly one CFC step per regrid,
+      unconditionally, with no Picard loop at all.
+
+    Still open: whether `refinement=adaptive` is production-worthy for a
+    real (non-smoke-test) CFC physics run given item 34's cross-rank gap --
+    this item establishes that CFC's own regrid logic is correct for
+    same-rank regrid events, but a run whose load balancing moves blocks
+    across ranks (an ordinary, expected occurrence for any long-running
+    adaptive-AMR simulation, not a corner case) will silently hit item 34's
+    NaN until that separate gap is fixed.
+
+34. **OPEN, pre-existing bug found while verifying item 33: AthenaK's generic
+    AMR load-balancing MPI transfer has no entry for `padm`/`pcfc` -- a block
+    moving to a different rank during a regrid never has its ADM/CFC field
+    data transferred at all (2026-07-26, not yet fixed).**
+    - **How it was found**: item 33's original field-remap warm-start attempt
+      (directly `DerefineCCSameRank`/`CopyCC`/`CopyForRefinementCC`/`RefineCC`
+      -ing `u_x`/`delta_psi`/`delta_alpha_psi` across a regrid, mirroring
+      `z4c::Z4c::u0`) crashed with a real, reproducible `-nan` baryon mass on
+      the SECOND regrid event of the `cfc_amr_dynamic_check` smoke test (8
+      ranks, 1 MeshBlock/rank) -- the first regrid (refine-only, all children
+      stayed on the same rank) was clean; the second (involving derefinement
+      and load-balancing-driven cross-rank moves) was not. Reverting the
+      field-remap code did NOT fix the NaN (confirmed empirically, job
+      249526) -- proving the root cause is independent of that code and
+      pre-existing.
+    - **Root cause**: `src/mesh/load_balance.cpp`'s `MeshRefinement::
+      PackAndSendAMR`/`ClearRecvAndUnpackAMR` -- the generic MPI pack/send/
+      unpack mechanism used whenever a regrid moves a MeshBlock to a
+      different rank -- compute how many cell-centered variables to transfer
+      (`ncc_tosend`/equivalent on the unpack side) by explicitly summing
+      `phydro->nhydro+nscalars`, `pmhd->nmhd+nscalars`, `prad->prgeo->
+      nangles`, `pz4c->nz4c`. **Neither `padm` nor `pcfc` appears anywhere in
+      this list.** Confirmed by reading both the pack side (`load_balance.
+      cpp:390-405`) and the unpack side (`ClearRecvAndUnpackAMR`, same file --
+      only `phydro`/`pmhd`/`prad`/`pz4c` unpacked). This means: for ANY
+      `pz4c==nullptr, padm!=nullptr` run (i.e. every CFC run), a block that
+      moves to a different rank during a regrid has its `padm->u_adm`
+      (`psi4`/`g_dd`/`alpha`/`beta_u`/`vK_dd`) -- and, if wired in the future,
+      any CFC-owned field -- left at whatever uninitialized/stale memory
+      happens to occupy that array slot on the receiving rank, since the
+      actual data is never sent. A Newton/multigrid solve cannot self-correct
+      away from a NaN or wildly-out-of-range starting value (floating-point
+      arithmetic doesn't "forget" NaN through further computation), so this
+      silently poisons the solve rather than just slowing convergence the
+      way a merely-stale-but-finite guess would.
+    - **Why this has never been noticed before**: this MPI transfer path only
+      ever runs when `RedistAndRefineMeshBlocks` moves a block across ranks
+      during a regrid. Every CFC test before item 33 used `refinement=
+      static` (regrid never happens at all). `padm->u_adm`'s own gap
+      (same-rank-only `CopyCC`, confirmed in `mesh_refinement.cpp`'s Step 6 --
+      no `Derefine`/`CopyForRefinement`/`Refine` treatment for `padm->u_adm`
+      at all, unlike `pz4c->u0`) is even more exposed than CFC's own fields:
+      it's missing BOTH the cross-rank MPI path AND the same-rank
+      derefine/refine-prolongation treatment that `pz4c->u0` gets. It hasn't
+      caused visible problems in dynGRMHD-without-CFC contexts either,
+      presumably because those configurations use `padm->SetADMVariables` to
+      fully re-derive the metric from an analytic/tabulated formula on every
+      regrid (Step 11, `mesh_refinement.cpp`) -- completely overwriting
+      whatever `CopyCC` (or the lack of any cross-rank transfer) left behind,
+      making the gap harmless THERE. For CFC specifically, that same Step-11
+      callback is now deliberately skipped (item 33's own `pcfc == nullptr`
+      gate), and CFC's `ReinitializeMetricForAMR` only re-seeds `psi`/
+      `alpha*psi`'s Newton starting point from `adm.psi4`/`adm.alpha` -- it
+      does not touch `g_dd`/`beta_u` at all before the next per-stage
+      `MHD_C2P`/flux calculation might read them, so a garbage cross-rank
+      value CAN leak through to places item 33's own re-solve doesn't
+      overwrite.
+    - **Scope of a proper fix (not attempted here)**: extending
+      `load_balance.cpp`'s packing/unpacking to include `padm->u_adm` (and,
+      if ever wired, CFC's own fields) -- this is core, shared AMR
+      infrastructure used by every physics module, not something scoped to
+      `src/cfc/`. A minimal fix would need: (1) add `padm`'s own variable
+      count to `ncc_tosend`/the unpack side's equivalent counter, (2) pack/
+      unpack `padm->u_adm` alongside `phydro`/`pmhd`/`prad`/`pz4c` in both
+      functions, (3) decide whether `padm->u_adm` also needs the same-rank
+      `Derefine`/`CopyForRefinement`/`Refine` treatment `pz4c->u0` gets
+      (currently missing entirely, Step 6 only does `CopyCC`) -- for CFC runs
+      specifically this may be lower priority than the MPI fix, given
+      `ReinitializeMetricForAMR`'s own re-solve overwrites `psi4`/`alpha` (but
+      not `g_dd`/`beta_u`, `vK_dd`/other unwritten fields) every regrid
+      regardless.
+    - **How to apply**: static refinement (every current CFC test) is
+      completely unaffected -- this only matters for `refinement=adaptive`
+      once a regrid actually triggers a cross-rank block move, which will
+      happen for any sufficiently long adaptive-AMR run (load balancing is
+      the whole point of the mechanism). Item 33's own dynamic-AMR work is
+      verified correct and safe for same-rank regrid events only (see item
+      33's own single-rank verification); do not consider `refinement=
+      adaptive` + CFC production-ready across multiple ranks until this item
+      is resolved.

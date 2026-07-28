@@ -788,6 +788,7 @@ TaskStatus CFC::RecvPiEtaXTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_pietax->FillCoarseInBndryCC(u_p_x, coarse_u_pietax);
     pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, false);
   }
   return TaskStatus::complete;
@@ -811,6 +812,7 @@ TaskStatus CFC::RecvXTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_x->FillCoarseInBndryCC(u_x, coarse_u_x);
     pbval_x->ProlongateCC(u_x, coarse_u_x, false);
   }
   return TaskStatus::complete;
@@ -834,6 +836,7 @@ TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_psi->FillCoarseInBndryCC(delta_psi, coarse_psi);
     pbval_psi->ProlongateCC(delta_psi, coarse_psi, false);
   }
   return TaskStatus::complete;
@@ -857,6 +860,7 @@ TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_alpha_psi->FillCoarseInBndryCC(delta_alpha_psi, coarse_alpha_psi);
     pbval_alpha_psi->ProlongateCC(delta_alpha_psi, coarse_alpha_psi, false);
   }
   return TaskStatus::complete;
@@ -881,6 +885,7 @@ TaskStatus CFC::RecvPiEtaBetaTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_pietabeta->FillCoarseInBndryCC(u_p_beta, coarse_u_pietabeta);
     pbval_pietabeta->ProlongateCC(u_p_beta, coarse_u_pietabeta, false);
   }
   return TaskStatus::complete;
@@ -916,6 +921,7 @@ TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    pbval_adm->FillCoarseInBndryCC(pmy_pack->padm->u_adm, coarse_u_adm);
     pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
   }
   return TaskStatus::complete;

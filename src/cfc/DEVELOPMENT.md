@@ -218,6 +218,45 @@ its Riemann solver and conserved-to-primitive conversion.
 ## `u_adm`'s own neighbor ghost exchange for a coarse-fine interface case, not
 ## yet investigated). See items 37-38 for full detail.
 
+## Status update (2026-07-27, later still, #3): item 38's residual
+## investigated much further, across three sessions. One real, scoped fix
+## applied and kept (item 39a, `FillCoarseInBndryCC`). The residual's TRUE
+## root cause is confirmed directly (item 39b) -- `MeshBlock::SetNeighbors`'s
+## octant-parity guard for coarser edge/corner neighbors -- but fixing it
+## (removing the guard) trades one non-fatal residual for a genuine
+## `dest`-slot collision (item 39d, root-caused directly). Two candidate
+## local fixes were designed and empirically tested (item 39e): one fixes
+## 39d but regresses item 38; the other fixes both but introduces a NEW,
+## worse collision elsewhere. This proves the bug is NOT fixable with a
+## per-relationship guard/condition in `SetNeighbors` -- AthenaK's edge/
+## corner neighbor-slot scheme has genuinely insufficient capacity for
+## irregular AMR topology (more than 2 distinct contributors can need a
+## single diagonal-direction slot). A real fix needs a structural change
+## (extended slot capacity, or a global post-registration reconciliation
+## pass) -- see item 39e for the two options. A follow-up attempt (item 39f,
+## same session) found the CONFIRMED, empirically-derived rule distinguishing
+## needed from spurious registrations (`recip == nullptr`, i.e. register only
+## when the target's own direct diagonal query finds nothing) -- this fixed
+## 39d's original case and preserved item 38's fix, but exposed a second,
+## distinct collision (two independent finer blocks landing on the same
+## slot), and a deterministic tie-break for THAT collision still left an
+## unidentified 1408-NaN regression on the 1-rank test, likely a formula bug
+## in the non-empirically-validated edge/corner sites. 39c (cross-rank MPI
+## abort) is confirmed a SEPARATE, still-unexplained bug under every variant
+## tried, not the same mechanism as 39d. The guard-removal fix is NOT
+## applied -- reverted, left for a future session.
+##
+## Status update (2026-07-28, later): a minimal, CFC-independent reproducer
+## for this whole bug now exists (item 39g) -- plain hydro, no CFC/GR at
+## all, `inputs/tests/lwave_hydro_diag_collision.athinput` -- with BOTH the
+## structural (`nghbr`-registration) and physics-level (actual corrupted
+## field values, channel-by-channel) evidence checked into the repo. Useful
+## for whoever picks up the structural fix next, and for reporting upstream
+## to AthenaK maintainers if desired, since this is generic mesh code, not
+## anything CFC-specific. See item 39 for the full investigation; 39f has
+## the confirmed registration rule and the precise remaining gap; 39g has
+## the reproducer and the real corrupted-field numbers.
+
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
 the shared `NumericalRelativity` task graph — see the task-graph design-decision
@@ -5525,3 +5564,383 @@ src/cfc/
       block's j-high neighbor is on a different refinement level, and
       whether `ProlongateCC`'s coarse-fine treatment of `u_adm` -- as
       opposed to same-level `RecvAndUnpackCC` -- is where the gap lives).
+
+39. **(2026-07-27, updated 2026-07-28) Item 38's residual: root cause
+    confirmed, fix identified, but not yet safe to apply.** A deep,
+    multi-session-length investigation (extensive runtime instrumentation --
+    targeted `printf` probes bracketing every stage of the ghost-exchange
+    pipeline, added and then fully removed each round -- not static reading
+    alone) into item 38's residual (896/rank `NANS_IN_CONS`, 3 of 8 ranks,
+    `detg=0`, confined to one ghost slab per affected block). **Current
+    read, superseding the original framing below**: this is not "one fix
+    blocked by two separate pre-existing bugs" -- 39d is a direct structural
+    consequence of the fix itself (not pre-existing), and the actual
+    registration rule that separates needed from spurious cases is now
+    confirmed (39f: `recip == nullptr`), just not yet fully, correctly
+    implemented (a residual formula bug in 3 of 4 diagonal sites, still
+    unlocated). 39c (the MPI abort) remains a genuinely separate, unrelated,
+    still-unexplained bug. See 39f/39g for the current state and a minimal,
+    CFC-independent reproducer with confirmed physics-level evidence.
+
+    - **39a. Real, scoped fix applied and kept**: CFC's six ghost-exchanged
+      fields (`u_p_x`, `u_x`, `delta_psi`, `delta_alpha_psi`, `u_p_beta`,
+      `padm->u_adm`) all use `is_z4c=false` (like Hydro/MHD), which means
+      `ProlongateCC`'s stencil needs a `FillCoarseInBndryCC` call
+      immediately beforehand to correctly populate the coarse scratch
+      array's transverse padding at same-level-neighbor-adjacent corners --
+      Hydro/MHD both call it (`hydro_tasks.cpp:378`, `mhd_tasks.cpp:527-528`),
+      z4c doesn't need to (its `is_z4c=true` path fills the same role via an
+      extra same-level payload baked into the send/recv step itself,
+      `z4c_tasks.cpp:273`'s call is explicitly commented out for this
+      reason). CFC was missing this call entirely on all six fields --
+      added at all six `Prolong*Task` call sites in `cfc.cpp`, mirroring
+      Hydro/MHD's exact placement. This is real, correct, and independent
+      of everything below -- it fixes a same-level corner-padding gap, not
+      item 38's residual (confirmed: it did not change the residual's
+      count or locations when tested alone).
+
+    - **39b. Item 38's residual root cause, confirmed directly**: the
+      residual is exactly the `MeshBlock::SetNeighbors` octant-parity guard
+      first suspected back in items 34-37, now confirmed via direct runtime
+      tracing rather than inference. For every EDGE (2 of 3 offsets
+      nonzero) and CORNER (all 3 nonzero) neighbor direction,
+      `SetNeighbors` (`meshblock.cpp`, four sites: x1x2/x3x1/x2x3 edges and
+      corners) only registers a **coarser** neighbor into the shared
+      `nghbr` array when the local block's own octant parity is the
+      "exterior" one for that diagonal -- an "interior octant" block's
+      coarser diagonal neighbor is left at `gid=-1`, and every downstream
+      consumer (`PackAndSendCC`/`RecvAndUnpackCC`/`ProlongateCC`, gated on
+      `gid>=0`) silently no-ops, leaving that ghost region permanently at
+      its zero-initialized value. Traced on the exact 8-rank scenario that
+      produces the residual: the affected block (local index `m=1` on rank
+      1, global id reassigned post-regrid to `gid=2`, refinement level 2 --
+      *not* an original unrefined root block, gid numbering is fully
+      reassigned across the whole tree after every regrid, do not assume
+      gid identity survives a regrid) has its failing ghost region (`k=14,
+      j=14`, both hi-side ghosts for `ng=4`) at the `(ox2=+1,ox3=+1)`
+      diagonal. `FindNeighbor` correctly finds the true neighbor there
+      (`gid=9`, level 1 -- genuinely coarser than `gid=2`'s level 2) and
+      computes the correct target slot (`NeighborIndex(0,1,1,0,0)=46`), but
+      the guard's condition (`nt->lloc_.level >= lloc.level ||
+      (myox2==ox2 && myox3==ox3)`) evaluates false (`1>=2` is false;
+      `gid=2`'s own octant parity `myox3=-1` doesn't match the needed
+      `ox3=+1`) -- confirmed by printing the guard's own inputs and boolean
+      result directly at the write site, and confirming no
+      `nghbr.h_view(m,46)` write ever executes for this block. The doc
+      comment's claim (`meshblock.cpp:136-137`) that interior-octant
+      edge/corner neighbors are "redundant" with face neighbors and
+      therefore skippable is false for this case: a face neighbor's own
+      ghost fill only extends `ng` cells toward the shared *interior* seam,
+      never reaching the block's *opposite* exterior ghost region a true
+      diagonal neighbor is needed for.
+
+      The fix (verified correct, matches the unconditional structure every
+      FACE direction already uses, no octant-parity gate at all): delete
+      the `if (...) {...}` wrapper at all four edge/corner sites in
+      `SetNeighbors` and dedent the 4-line assignment body inside each, plus
+      fix the false "redundant" doc comment. Confirmed via `bvals.cpp`/
+      `buffs_cc.cpp` reading that no companion change is needed anywhere
+      else -- index-range computation (`InitSendIndices`/`InitRecvIndices`)
+      and buffer sizing (`BuildRankPackedVarMetadata`) are already
+      unconditional across all 56 neighbor slots regardless of whether a
+      slot is populated; only the registration gate itself is the bug.
+
+    - **39c. Applying 39b's fix causes an MPI `internal_Waitall` abort on
+      the 8-rank cross-rank scenario** (job aborts in ~6s, never completes a
+      single cycle -- `Abort(17) ... Fatal error in internal_Waitall`,
+      ranks 4-7). Not yet root-caused to the same rigor as 39b. Leading
+      hypothesis (from static reading of `bvals.cpp`'s
+      `BuildRankPackedVarMetadata`, not yet confirmed by direct tracing):
+      `nghbr` tables are built completely independently per rank with *no*
+      cross-rank consistency check before the one-shot header handshake
+      (`bvals.cpp:264-286`) -- if rank A's and rank B's independent tree
+      searches disagree even slightly about a newly-registered edge/corner
+      neighbor pair's level classification (same vs. coarser vs. finer,
+      which determines message size via `isame`/`icoar`/`ifine` index
+      ranges), the resulting message-size mismatch would produce exactly
+      this failure mode, and would plausibly only affect the subset of rank
+      pairs where such a mismatch actually occurs (matching that only 4 of
+      8 ranks abort, not all 8).
+
+    - **39d. Applying 39b's fix ALSO causes a distinct, silent data-
+      corruption bug on the 1-rank scenario** (never crashes; 1152 NEW
+      `NANS_IN_CONS` reports appear where the test was previously always
+      clean). **Root-caused directly** (2026-07-27, follow-up session):
+      this is **not** a pack/unpack arithmetic bug and **not** a
+      pre-existing bug independent of 39b -- it is a direct structural
+      consequence of 39b's `dest`-slot computation, exposed only once the
+      guard is removed.
+
+      Symptom, confirmed by synchronized send-side/recv-side instrumentation
+      (dumping every channel of `padm->u_adm`, `nvar=17` with z4c active,
+      at both the `PackAndSendCC` write and the matching `RecvAndUnpackCC`
+      read for one specific neighbor pair): block `m=11`'s same-level
+      x2x3-edge neighbor `gid=9` (slot 42) packs a uniform, conformally-flat
+      value (`1.06099595`) into every metric channel, but block 11 receives
+      that correct value in only *some* channels (`PSI4`=v12, `ALPHA`=v13)
+      while others (`GXX`=v0, `KXX`=v6) read back `1.12117774` -- a value
+      `gid=9` never sent at all -- and still others (`GYY`=v3, `GZZ`=v5)
+      read back zero.
+
+      Root cause: a **second, unrelated sender is writing into the same
+      receive slot.** `nghbr` topology dump (added to `SetNeighbors` itself,
+      host-side, trivial to reproduce) shows a *third* block, `gid=6`
+      (level 2, i.e. one level finer than block 11), registers block 11 as
+      its own coarser x2x3-edge neighbor at its own slot `n=44` -- exactly
+      the registration 39b's guard removal newly enables (`gid=6`'s own
+      octant position, `myfx1=0, myfx2=1, myfx3=1`, was the "interior"
+      octant the old guard used to reject). The `dest` field this
+      registration computes, `NeighborIndex(0,-m,-l,myfx1,0)` with
+      `myfx1=0`, evaluates to **42** -- landing on the *exact same slot*
+      block 11 already legitimately uses for its unrelated same-level
+      neighbor `gid=9`. Verified two ways: (1) hand-computed from the
+      `NeighborIndex` formula directly (`nghbr_index.hpp`) -- `gid=6`'s own
+      slot 44 decodes to offset `(m,l)=(-1,+1)`, so its `dest` is
+      `NeighborIndex(0,+1,-1,0,0) = 42`, matching the runtime dump exactly;
+      (2) the topology dump shows block 11 has **no** entry anywhere in
+      slots 40-47 for `gid=6` via its *own* (unconditional, unaffected by
+      39b) finer-neighbor registration branch -- meaning this relationship
+      only exists because `gid=6` computed it unilaterally, with no
+      cross-check against what block 11 already has claimed for that slot.
+      `PackAndSendCC` then genuinely has two independent senders
+      (`gid=9`'s same-level write and `gid=6`'s coarser-branch write, the
+      latter using `ca`/`coarse_u_adm` data and a smaller box) both
+      targeting `rbuf[42]` on block 11, racing/overwriting each other
+      per-channel -- exactly reproducing the observed per-channel pattern
+      (channels `gid=6`'s smaller box happens to overwrite come out wrong;
+      channels it doesn't touch survive with `gid=9`'s correct value).
+
+      **39c is NOT the same mechanism as 39d** -- ruled out empirically
+      this session (see 39e below): a fix that fully resolves 39d and
+      preserves item 38's fix still leaves 39c's MPI abort completely
+      unaffected. 39c needs independent root-causing; the two are
+      superficially similar (both appear once 39b's fix is applied) but
+      are demonstrably different bugs.
+
+    - **39e. Two candidate fixes designed and empirically tested this
+      session (2026-07-27, later still) against three simultaneous
+      requirements: fix 39d, don't regress item 38's original fix, don't
+      introduce new corruption. Neither fully succeeds -- the results
+      themselves prove the slot-collision problem is more fundamental than
+      a local guard/condition can solve.** Both replace the coarser-neighbor
+      branch's registration condition with a check computed via
+      `ptree->FindNeighbor` from the *target* block's own logical location
+      (fully local -- the block tree is globally replicated per rank, no
+      MPI needed, so this works identically for same-rank and cross-rank
+      pairs).
+
+      - **Attempt 1, strict reciprocity**: only register if the target's
+        own reciprocal search, enumerated the same way its *existing*
+        unconditional finer-neighbor branch already would, actually
+        recovers this exact block as one of its children. Result: **fixes
+        39d completely** (1-rank test: 1152 -> 0 `NANS_IN_CONS`) but
+        **reintroduces item 38's original residual in full** (8-rank test:
+        back to 896/rank on 3 ranks). This proves item 38's originally-
+        needed registration is *itself* non-reciprocal by this same
+        criterion -- it is structurally the same kind of "finer block
+        reached at an angle" relationship as the one causing 39d's
+        collision, not a distinguishable "genuine diagonal" case. Reciprocity
+        cannot separate "spurious" from "needed" because both are the same
+        shape of relationship.
+
+      - **Attempt 2, narrower collision-only skip**: register
+        unconditionally (restoring 39b's coverage) *except* skip when the
+        target already has a **different, competing same-level neighbor**
+        at the reciprocal direction (the precise, narrow condition that
+        actually caused 39d's corruption). Result: **fixes 39d** (1-rank,
+        first sub-test: 0 `NANS_IN_CONS`) **and preserves item 38's fix**
+        (8-rank: 0/rank, all 8 ranks clean) -- but a second, independent
+        1-rank run with this fix produced **1448 NEW `NANS_IN_CONS`**,
+        worse than 39d's original 1152. This means the collision space is
+        bigger than "one degenerate registration vs. one same-level
+        neighbor": **two or more independently-computed, non-reciprocal
+        "finer block reached at an angle" relationships (like `gid=6`'s)
+        can alias onto the same target slot with *neither* side being a
+        same-level neighbor**, and this narrower check has no way to detect
+        that case at all.
+
+      **Conclusion**: this is not fixable with a per-relationship
+      guard/condition in `SetNeighbors`, however it's phrased. The root
+      issue is that AthenaK's edge/corner `NeighborIndex` scheme provides
+      only 2 slots per diagonal direction (meant for "same-level, OR up to
+      2 finer children split along the free axis"), but irregular AMR
+      topology can genuinely produce *more than 2* distinct, simultaneously-
+      needed contributors to a single coarser block's diagonal ghost region
+      (a same-level neighbor filling most of it, plus one or more
+      differently-positioned finer blocks reached indirectly through a
+      face-neighbor's own refinement, filling the true corner-of-corner
+      cells the same-level neighbor's own `ng`-wide box doesn't reach). No
+      local, per-block check can safely arbitrate between multiple
+      legitimate claimants on the same slot number. A real fix needs one of:
+      (a) **extend slot capacity** -- give edge/corner directions enough
+      slots to represent every genuinely-distinct contributor (a structural
+      change to `nghbr_index.hpp`'s layout, `MeshBoundaryBuffer` allocation,
+      and every place that assumes the fixed 56-slot/4-per-edge-direction
+      layout); or (b) **global reconciliation pass** -- after every block's
+      local registration is built, detect any slot with more than one
+      legitimate claimant and explicitly resolve it (e.g. split the ghost
+      region's index range between claimants by actual physical footprint,
+      rather than letting both write the same flat buffer offset). Both are
+      substantially bigger than the 4-guard-removal originally scoped for
+      39b -- this needs dedicated design work, not a quick follow-up.
+
+    - **39f. A fourth attempt (2026-07-28, follow-up session), aimed
+      directly at implementing 39e's structural fix, found the precise rule
+      distinguishing item 38's needed case from 39d's spurious one --
+      confirmed empirically, not guessed -- but a full, robust
+      implementation is still not achieved.** Reapplied 39b, instrumented
+      every coarser-branch registration (all 4 sites: x1x2/x3x1/x2x3 edges,
+      corners) to print, for each candidate, whether the *target* block's
+      own direct diagonal query at the reciprocal direction resolves to
+      `NULL` (nothing found), a same-level `LEAF`, or a `FINER` node.
+      Re-ran the exact 8-rank scenario that originally produced item 38's
+      residual and captured this data directly (not inferred) for the first
+      time this session -- see `/sakura/ptmp/tlam/athenak_run/
+      cfc_item38_topology_8rank`. Result: **every genuinely-needed
+      registration had `recip=NULL`; every case matching 39d's known-
+      redundant shape had `recip=LEAF`** (target already has an unrelated
+      same-level neighbor there) **or `recip=FINER`** (target's own
+      existing, unconditional finer-neighbor code already discovers and
+      registers this exact relationship, making the coarser-branch
+      registration purely duplicative). This gives a clean, confirmed rule:
+      `do_register = (recip == nullptr)`.
+
+      Implementing *just* this rule (all 4 sites) fixed 39d's exact original
+      collision (confirmed directly: block 11's slot 43, where `gid=6`
+      previously landed, dumped cleanly as unregistered) and preserved item
+      38's fix (0/rank on the 8-rank test). But the 1-rank test regressed to
+      **1344 new `NANS_IN_CONS`** -- worse than 39d's original 1152, at a
+      *different* location than block 11 (confirmed: block 11's own slot 42
+      dump was clean). Root cause identified from the SAME 8-rank topology
+      dump: **two different finer blocks, reached via a target's two
+      different face-neighbors, can independently compute `recip=NULL`
+      simultaneously and land on the identical `dest` slot** -- confirmed a
+      live instance in the captured data (`b_gid=1` and `b_gid=3`, both
+      registering `target_gid=8`'s x3x1-edge slot with `recip=NULL`). Unlike
+      the same-level case, these two candidates are **not** redundant with
+      each other (two distinct, non-overlapping physical blocks cannot
+      cover the same territory) -- dropping either loses real coverage.
+
+      Added a deterministic tie-break (lower gid wins the natural slot, the
+      higher gid's registration is dropped -- a real, narrower, honestly
+      worse-than-ideal but non-corrupting compromise, pending the actual
+      extra-slot-capacity work from 39e) to all 4 sites, with the geometric
+      formulas for the "sibling candidate via the target's other
+      face/edge-neighbor" derived and implemented per site. This did **not**
+      resolve the 1-rank regression (1408 `NANS_IN_CONS`, same order of
+      magnitude, after the tie-break) -- and the block-11 dump confirmed the
+      corruption is **not** the original gid=6 case or the diagnosed P-vs-P'
+      case at that location; it comes from an as-yet-unidentified third
+      source, likely a sign/axis error in the x1x2-edge, x3x1-edge, or
+      corner tie-break formulas (only the x2x3-edge formulas were directly
+      empirically validated against the confirmed `gid=6` example -- the
+      other 3 sites' formulas were derived by analogy and never independently
+      checked against a known-good case). Reverted after this second
+      regression rather than guess further; `meshblock.cpp` is clean,
+      matches `HEAD`.
+
+    - **39g. A minimal, CFC-independent test problem illustrating the bug
+      mechanism directly.** `inputs/tests/lwave_hydro_diag_collision.athinput`
+      -- plain Newtonian hydro (`linear_wave` pgen), no CFC/GR/elliptic
+      solve at all, confirming this is generic AthenaK mesh code, not
+      anything CFC-specific. Requires a build configured with
+      `-DPROBLEM=built_in_pgens` (not the TOV-locked `build_cfc`) -- a new
+      `build_generic` directory was created for this and any future
+      non-CFC-locked test runs (mirrors the `build_generic` convention
+      noted from the `proj/g-mode` branch's PR #748 work, recreated here
+      since it didn't exist in this checkout).
+
+      Uses `<refined_region1>` (parsed in `src/mesh/build_tree.cpp:80-133`,
+      independent of any AMR criterion -- gives a fully deterministic tree,
+      no adaptive-criterion guessing) to refine exactly one root block of a
+      4x4x4 root grid one level finer. Confirmed directly via temporary
+      `SetNeighbors` instrumentation (same style as 39b/39f's diagnostics,
+      removed after use -- not a permanent code change) that this produces
+      the exact bug mechanism: block `C` (root block `(1,1,1)`) has a
+      genuine same-level x2x3-edge diagonal neighbor (slot 40, gid 1) via
+      its own direct query; separately, 4 different children of the
+      refined block (gids 7/8/9/10, reached via x1x2-edge, x3x1-edge,
+      x2x3-edge, and corner directions respectively) each independently
+      compute a coarser-neighbor registration targeting `C`, and **all 4
+      are currently guard-blocked** (`guard_pass=0` for every one, dumped
+      directly) -- this is item 38's original under-registration bug,
+      concretely exhibited. The x2x3-edge case (gid 7) was confirmed to
+      compute `dest` landing on slot 40 -- the exact slot `C`'s legitimate
+      same-level neighbor (gid 1) already occupies -- confirming that
+      removing the guard (39b) reproduces 39d's collision at this same,
+      minimal, reproducible location.
+
+      **Follow-up (2026-07-28, later): the physics-level symptom, with real
+      numbers.** Added a temporary per-cell field probe (env-var-gated
+      `printf` in `PackAndSendCC`/`RecvAndUnpackCC`, same technique as
+      every other probe this investigation used, removed after) targeting
+      `Hydro::u0` at `C`'s slot-40 ghost cell `(m=14, n=40, k=0, j=0, i=6)`,
+      all 5 conserved-variable channels (`IDN=0, IM1=1, IM2=2, IM3=3,
+      IEN=4`, `src/athena.hpp:65`). Ran the identical input twice, `HEAD`
+      vs. 39b's guard-removal fix reapplied, same cell, same cycle (0):
+
+      | channel | `HEAD` (correct) | 39b applied (corrupted) |
+      |---|---|---|
+      | IDN | 9.99043e-01 | 9.99121e-01 |
+      | IM1 | 5.51961e-04 | 5.06893e-04 |
+      | IM2 | 5.51961e-04 | **8.98682e-01** (~1630x larger) |
+      | IM3 | 5.51961e-04 | 5.51961e-04 (frozen at `HEAD`'s own value) |
+      | IEN | 8.98565e-01 | 8.98565e-01 |
+
+      This is the exact channel-scrambling signature found throughout this
+      whole investigation's original CFC work (`gid=6`/`gid=9`): some
+      channels drift by a small, plausible-looking amount (IDN, IM1 --
+      consistent with two legitimately-different physical sources blending
+      via undefined write order), one channel takes on a wildly wrong
+      value that looks like it belongs to a *different* channel entirely
+      (IM2 landing near IEN's own magnitude), and one channel reads back
+      exactly its `HEAD`-run value, i.e. never touched by this cycle's
+      unpack at all. Confirmed via a parallel `PackAndSendCC` probe that
+      `gid=7` (the colliding block) is genuinely sending real, different
+      data at this cycle -- so this is a live collision artifact, not
+      noise. This closes the gap flagged when 39g was first built:
+      `inputs/tests/lwave_hydro_diag_collision.athinput` now has
+      documented, reproducible evidence of the bug's effect on the actual
+      physical solution, not just on `nghbr` bookkeeping.
+
+      The probe instrumentation itself was temporary and has been removed
+      (`git diff` of `bvals_cc.cpp`/`meshblock.cpp` is clean, matches
+      `HEAD`) -- re-add it the same way (search this repo's history/this
+      doc for the exact `printf` lines) if reproducing these numbers
+      directly rather than trusting the table above. Re-verify the specific
+      gid numbers (14, 40, 7, cell `(0,0,6)`) with a fresh topology dump
+      before trusting them blindly if the input file, AthenaK version, or
+      build configuration changes -- they depend on Z-order block
+      numbering.
+
+    - **Current state**: only 39a (`FillCoarseInBndryCC`) is applied and
+      committed-ready. 39b's fix (the `SetNeighbors` guard removal, in any
+      of the now 4 variants tried across two sessions) is *not* applied --
+      `git diff` of `src/mesh/meshblock.cpp` is clean (matches `HEAD`). All
+      SLURM job outputs proving each attempt's result are preserved under
+      `/sakura/ptmp/tlam/athenak_run/cfc_recipfix*`, `cfc_item38_topology_
+      8rank`, `cfc_recipnull_*`, `cfc_tiebreak_*` for reference. **Next
+      session's highest-value next step**: the `recip==nullptr` rule (39f)
+      is confirmed correct and should be kept as the foundation -- do NOT
+      revisit 39e's reciprocity/collision-only variants, that space is
+      closed. What remains is (1) find and fix the bug in the x1x2/x3x1/
+      corner tie-break formulas (compare each site's derivation line-by-line
+      against the x2x3-edge one that's confirmed correct, or instrument each
+      site's own `sib_gid` computation the same way block 11 was dumped, on
+      whichever block is producing the 1408-NaN residual -- not yet
+      identified which site/location it is), and (2) once the tie-break is
+      fully correct, still implement the actual extra-slot-capacity fallback
+      (39e's design) rather than the "drop the loser" compromise, since the
+      tie-break as implemented trades corruption for a real, silent
+      coverage gap on the dropped candidate -- better than NaNs, but still
+      not a complete fix. 39c remains completely unexplained and
+      independent (confirmed again this session: it still aborts under
+      every 39b variant tried, including 39f); needs its own root-causing
+      from scratch. This is a real, generic AthenaK mesh-connectivity bug
+      (not CFC-specific), so it is also latent for z4c's own puncture/BNS
+      AMR tests once fixed and applied, per item 38's earlier z4c-exposure
+      analysis. **A minimal, CFC-independent reproducer with both structural
+      and physics-level evidence now exists (item 39g,
+      `inputs/tests/lwave_hydro_diag_collision.athinput` +
+      `build_generic`)** -- use it directly to verify the eventual structural
+      fix, rather than reconstructing CFC's own TOV-star scenario each time.

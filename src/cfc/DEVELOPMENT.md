@@ -256,6 +256,16 @@ its Riemann solver and conserved-to-primitive conversion.
 ## anything CFC-specific. See item 39 for the full investigation; 39f has
 ## the confirmed registration rule and the precise remaining gap; 39g has
 ## the reproducer and the real corrupted-field numbers.
+##
+## Status update (2026-07-28, later still): upstream PR #748 ("Fix
+## Refinement at Boundary for Z4c/MHD/Hydro/Radiation") cherry-picked onto
+## this branch and checked against item 39 -- confirmed, both by static
+## analysis of its diff and by an empirical rerun of the 39g reproducer
+## post-patch, that it is a real but ORTHOGONAL fix (physical-boundary BC
+## ordering relative to prolongation) that does not touch and does not fix
+## item 39's `nghbr` `dest`-slot collision. See item 40 for the full
+## writeup; item 39's own open problem (the tie-break formula bug) is
+## unchanged by this.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -5944,3 +5954,108 @@ src/cfc/
       `inputs/tests/lwave_hydro_diag_collision.athinput` +
       `build_generic`)** -- use it directly to verify the eventual structural
       fix, rather than reconstructing CFC's own TOV-star scenario each time.
+
+40. **(2026-07-28) Cherry-picked upstream (unmerged) PR
+    [IAS-Astrophysics/athenak#748](https://github.com/IAS-Astrophysics/athenak/pull/748)
+    ("Fix Refinement at Boundary for Z4c/MHD/Hydro/Radiation") -- confirmed,
+    both by static analysis and by empirical rerun, that it is orthogonal to
+    item 39 and does not fix it.** This PR was already cherry-picked onto a
+    *different* repo/branch (`~/athenak`'s `proj/g-mode`, commit `e2a16544`,
+    unrelated project) in an earlier session; this is the first time it's
+    applied to `athenak_cfc`.
+
+    **What the PR actually fixes**: physical boundary conditions were
+    applied to a refined block's fine array *before* coarse-to-fine
+    prolongation ran, so when an AMR fine/coarse junction coincided with a
+    *physical* domain boundary, the fine ghost zone feeding prolongation's
+    interpolation stencil was stale/unfilled, corrupting C2P there. Fix:
+    new `HydroBCsCoarse`/`BFieldBCsCoarse`/`RadiationBCsCoarse`/
+    `Z4cBCsCoarse` helpers apply BCs to the coarse array first, then
+    prolongate, then BC the fine array -- reordered consistently across
+    `Driver::InitBoundaryValuesAndPrimitives` (`driver.cpp`), the four
+    physics modules' own task lists (`{hydro,mhd,radiation,z4c}_tasks.cpp`),
+    and `dyn_grmhd.cpp`'s GR-MHD task queue.
+
+    **Why it can't fix item 39, confirmed two ways**:
+    - *Static*: the PR's diff (16 files) never touches
+      `src/mesh/meshblock.cpp`, `nghbr_index.hpp`, `SetNeighbors`,
+      `NeighborIndex`, or `FindNeighbor` -- the exact machinery item 39's
+      `dest`-slot collision lives in. Item 39's own reproducer
+      (`inputs/tests/lwave_hydro_diag_collision.athinput`, item 39g) uses
+      `periodic` BCs on all 6 faces -- there is no physical boundary
+      anywhere in that setup for this PR's fix to even engage.
+    - *Empirical*: reran `lwave_hydro_diag_collision.athinput` via
+      `build_generic` (rebuilt with this PR applied) with the same
+      temporary `CFC_DEBUG_NGHBR`-gated `SetNeighbors` dump used in 39f/39g
+      (added, used, then fully reverted -- `git diff` of `meshblock.cpp` is
+      clean). Result, byte-for-byte identical to the pre-PR topology: block
+      `C` (gid 14) still has its genuine same-level neighbor at slot 40
+      (`b_gid=14 slot40 gid=1 lev=2 dest=46`), and `gid=7`'s x2x3-edge
+      candidate still computes `guard_pass=0 inghbr=46 idest=40` -- the
+      identical collision destination documented in 39g. The PR is a no-op
+      for this bug, exactly as the static analysis predicted.
+
+    **Applying it**: `git apply --3way` against this diff; 9 of 12 touched
+    files applied cleanly, 3 conflicted with CFC's own prior work in the
+    same files and were resolved by hand:
+    - `src/bvals/bvals.hpp`: the PR's new `*BCsCoarse` declarations and the
+      `Z4cBCs()` signature change (drops the now-redundant `coarse_u0`
+      param, confirmed by checking `z4c_bcs.cpp`/`z4c_tasks.cpp`'s own
+      already-cleanly-patched call site) simply coexist with CFC's existing
+      `CFCScalarBCs`/`CFCVectorBCs`/`ADMBCs` declarations -- concatenated,
+      no semantic conflict.
+    - `src/driver/driver.cpp`: `Driver::InitBoundaryValuesAndPrimitives`'s
+      Z4c/Hydro/Radiation blocks all had the PR's fix (`Prolongate` then
+      `ApplyPhysicalBCs`) applied cleanly by `git apply`; only the MHD block
+      conflicted, because CFC's own `cfc::CFC *pcfc = pm->pmb_pack->pcfc;`
+      line sits immediately after this exact pair. Confirmed against
+      pristine `HEAD` (`git show HEAD:...`) that MHD's block had the *same*
+      buggy BC-then-Prolongate order the other three blocks did pre-patch
+      -- resolved by applying the identical reordering to MHD too, then
+      keeping the `pcfc` line unchanged immediately after.
+    - `src/dyn_grmhd/dyn_grmhd.cpp`: the PR renames `MHD_C2P`'s required
+      task dependency from `MHD_Prolong` to `MHD_BCS` (so C2P now correctly
+      waits for the fine-array BC step, not just prolongation) in both the
+      z4c-active and z4c-absent branches of `QueueDynGRMHDTasks`. CFC's own
+      optional-dependency insertion (`CFC_SolvePsi` alongside `Z4c_Excise`)
+      is orthogonal to which *required* dependency C2P waits on -- kept
+      unchanged, just re-attached to the PR's corrected required-dep list.
+
+    **Regressions checked, all clean**:
+    - The PR's own new regression inputs (`tst/inputs/lwave_{mhd,z4c}_bc.athinput`,
+      outflow BCs + AMR, exactly the scenario this PR targets), run directly
+      via `build_generic`: MHD -- `eos_fail=0` across all 145 logged cycles
+      (run stopped early on an internal wall-clock default since no `-t` was
+      passed; sim time reached 0.68 of tlim=1.0, plenty of cycles to
+      exercise the boundary); Z4c -- L-infinity error `2.36e-14` (vs. the
+      `~1e-9` no-fix reference noted in the PR, tolerance `1e-12`) --
+      matches the `~/athenak` cherry-pick's own result almost exactly.
+    - CFC's own dynamic-AMR smoke test (`cfc_amr_dynamic_check_1rank_setneighbors`'s
+      parfile -- octant-symmetric TOV, reflect BCs at the domain corner,
+      `min_max`-triggered adaptive AMR), run via `build_cfc`: completed
+      cleanly to `nlim=4` cycles, `ReinitializeMetricForAMR` fired
+      post-regrid as expected, block count grew 8->15, no NaN/crash. This is
+      the one case in this repo where CFC's own regrid hook and the PR's
+      reordering are both genuinely active at once -- no interaction issue.
+    - CFC's non-AMR TOV smoke input (`inputs/dyn_grmhd/cfc_tov.athinput`)
+      segfaulted on `build_cfc` with this PR applied. **Confirmed
+      pre-existing, unrelated to this cherry-pick**: built a throwaway
+      pristine-`HEAD` baseline (`build_cfc_baseline`, since deleted) via
+      `git stash`, reran the identical input -- byte-for-byte identical
+      output (same repeated `MultigridDriver::SolveIterative "Failed to
+      converge"` messages, same segfault at the same point after
+      `Terminating on wall clock limit`, only wall-clock timing numbers
+      differ). This matches the long history of "Failed to converge"
+      churn already documented earlier in this file (items 15-29 area) --
+      not something this PR introduced or need fix.
+
+    **Current state**: applied and verified, staged for commit alongside
+    this writeup. `git diff` of `src/mesh/meshblock.cpp` and
+    `src/bvals/bvals_cc.cpp` are clean (all verification instrumentation
+    reverted). Both `build_cfc` and `build_generic` rebuilt successfully
+    with this PR applied. **Conclusion for future readers**: this PR is
+    worth having on this branch (matters whenever a refined block borders a
+    physical boundary -- relevant to future CFC AMR/BNS work), but it is
+    *not* progress on item 39/40's own open problem (the tie-break formula
+    bug in 3 of 4 diagonal sites, item 39f/39g's "Current state" bullet) --
+    that remains exactly as open as before this cherry-pick.

@@ -216,11 +216,17 @@ class MeshBoundaryValues {
   // (default): operate on u0's own channel(s) starting at 0, unchanged behavior.
   // chan0>0: operate starting at channel chan0 instead -- used when u0 is a packed
   // multi-field array (e.g. P_i at channels 0-2, eta at channel 3 of the same array).
-  static void CFCScalarBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0,
-                           int chan0 = 0);
-  static void CFCVectorBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int order = 0,
-                           int chan0 = 0);
+  // nvar selects a lone scalar (1), a lone vector (3), or a vector packed with a
+  // trailing scalar (4, e.g. P_i/eta) -- see cfc_bcs.cpp's file doc comment.
+  static void CFCBCs(MeshBlockPack *pp, DvceArray5D<Real> u0, int nvar,
+                     int order = 0, int chan0 = 0);
+  // Coarse-array counterpart -- must be called before ProlongateCC so the
+  // prolongation stencil reads valid data in coarse ghost zones that sit at a
+  // physical boundary (mirrors Z4cBCsCoarse above).
+  static void CFCBCsCoarse(MeshBlockPack *pp, DvceArray5D<Real> coarse_u0, int nvar,
+                           int order = 0, int chan0 = 0);
   static void ADMBCs(MeshBlockPack *pp, DvceArray5D<Real> u0);
+  static void ADMBCsCoarse(MeshBlockPack *pp, DvceArray5D<Real> coarse_u0);
 
  protected:
   // must use pointer to MBPack and not parent physics module since parent can be one of

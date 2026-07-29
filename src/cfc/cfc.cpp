@@ -136,8 +136,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     coarse_psi("cfc_coarse_psi", 1, 1, 1, 1, 1),
     coarse_alpha_psi("cfc_coarse_alpha_psi", 1, 1, 1, 1, 1),
     coarse_u_pietabeta("cfc_coarse_u_pietabeta", 1, 1, 1, 1, 1),
-    pbval_adm(nullptr),
-    coarse_u_adm("cfc_coarse_u_adm", 1, 1, 1, 1, 1) {
+    pbval_adm(nullptr) {
   // Sized with AMR headroom (matches hydro.cpp/z4c.cpp/adm.cpp's
   // std::max(nmb_thispack, nmb_maxperrank) convention) so a dynamic-AMR regrid
   // never needs to reallocate any of CFC's own arrays.
@@ -231,7 +230,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::realloc(coarse_psi,         nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_alpha_psi,   nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_u_pietabeta, nmb, 4, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_u_adm, nmb, adm::ADM::nadm, nccells3, nccells2, nccells1);
+    // u_adm's own coarse shadow is padm->coarse_u_adm (adm.cpp:57-67) -- no
+    // separate CFC-owned copy; see cfc.hpp's pbval_adm comment.
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -309,9 +309,11 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendPiEtaX});
   pnr->QueueTask(&CFC::ProlongPiEtaXTask, this, CFC_ProlongPiEtaX, "CFC_ProlongPiEtaX",
                  Task_Run, {CFC_RecvPiEtaX});
+  pnr->QueueTask(&CFC::BCSPiEtaXTask, this, CFC_BCSPiEtaX, "CFC_BCSPiEtaX",
+                 Task_Run, {CFC_ProlongPiEtaX});
 
   pnr->QueueTask(&CFC::ReconstructXTask, this, CFC_ReconstructX, "CFC_ReconstructX",
-                 Task_Run, {CFC_ProlongPiEtaX});
+                 Task_Run, {CFC_BCSPiEtaX});
 
   pnr->QueueTask(&CFC::RestXTask, this, CFC_RestX, "CFC_RestX",
                  Task_Run, {CFC_ReconstructX});
@@ -321,9 +323,11 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendX});
   pnr->QueueTask(&CFC::ProlongXTask, this, CFC_ProlongX, "CFC_ProlongX",
                  Task_Run, {CFC_RecvX});
+  pnr->QueueTask(&CFC::BCSXTask, this, CFC_BCSX, "CFC_BCSX",
+                 Task_Run, {CFC_ProlongX});
 
   pnr->QueueTask(&CFC::ComputeADualTask, this, CFC_ComputeADual, "CFC_ComputeADual",
-                 Task_Run, {CFC_ProlongX});
+                 Task_Run, {CFC_BCSX});
 
   pnr->QueueTask(&CFC::SolvePsiTask, this, CFC_SolvePsi, "CFC_SolvePsi",
                  Task_Run, {CFC_ComputeADual});
@@ -340,6 +344,8 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendPsi});
   pnr->QueueTask(&CFC::ProlongPsiTask, this, CFC_ProlongPsi, "CFC_ProlongPsi",
                  Task_Run, {CFC_RecvPsi});
+  pnr->QueueTask(&CFC::BCSPsiTask, this, CFC_BCSPsi, "CFC_BCSPsi",
+                 Task_Run, {CFC_ProlongPsi});
 
   pnr->QueueTask(&CFC::RestAlphaPsiTask, this, CFC_RestAlphaPsi, "CFC_RestAlphaPsi",
                  Task_Run, {CFC_SolveLapse});
@@ -349,9 +355,11 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendAlphaPsi});
   pnr->QueueTask(&CFC::ProlongAlphaPsiTask, this, CFC_ProlongAlphaPsi,
                  "CFC_ProlongAlphaPsi", Task_Run, {CFC_RecvAlphaPsi});
+  pnr->QueueTask(&CFC::BCSAlphaPsiTask, this, CFC_BCSAlphaPsi, "CFC_BCSAlphaPsi",
+                 Task_Run, {CFC_ProlongAlphaPsi});
 
   pnr->QueueTask(&CFC::SolveShiftTask, this, CFC_BuildSrcBeta, "CFC_BuildSrcBeta",
-                 Task_Run, {CFC_ProlongPsi, CFC_ProlongAlphaPsi});
+                 Task_Run, {CFC_BCSPsi, CFC_BCSAlphaPsi});
 
   pnr->QueueTask(&CFC::RestPiEtaBetaTask, this, CFC_RestPiEtaBeta, "CFC_RestPiEtaBeta",
                  Task_Run, {CFC_BuildSrcBeta});
@@ -361,9 +369,11 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendPiEtaBeta});
   pnr->QueueTask(&CFC::ProlongPiEtaBetaTask, this, CFC_ProlongPiEtaBeta,
                  "CFC_ProlongPiEtaBeta", Task_Run, {CFC_RecvPiEtaBeta});
+  pnr->QueueTask(&CFC::BCSPiEtaBetaTask, this, CFC_BCSPiEtaBeta, "CFC_BCSPiEtaBeta",
+                 Task_Run, {CFC_ProlongPiEtaBeta});
 
   pnr->QueueTask(&CFC::ReconstructBetaTask, this, CFC_ReconstructBeta,
-                 "CFC_ReconstructBeta", Task_Run, {CFC_ProlongPiEtaBeta});
+                 "CFC_ReconstructBeta", Task_Run, {CFC_BCSPiEtaBeta});
 
   pnr->QueueTask(&CFC::AssembleFinalTask, this, CFC_AssembleFinal, "CFC_AssembleFinal",
                  Task_Run, {CFC_ReconstructBeta});
@@ -380,6 +390,8 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_SendADM});
   pnr->QueueTask(&CFC::ProlongADMTask, this, CFC_ProlongADM, "CFC_ProlongADM",
                  Task_Run, {CFC_RecvADM});
+  pnr->QueueTask(&CFC::BCSADMTask, this, CFC_BCSADM, "CFC_BCSADM",
+                 Task_Run, {CFC_ProlongADM});
 
   // Wait for every outstanding send/receive posted this stage before "stagen" is
   // considered done -- mirrors z4c::Z4c_ClearS/Z4c_ClearR (Task_End). Runs after
@@ -446,11 +458,13 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
   RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
   while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongPiEtaXTask(pdriver, 0);
+  BCSPiEtaXTask(pdriver, 0);
 
   ReconstructVectorPotential();
   RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
   while (RecvXTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongXTask(pdriver, 0);
+  BCSXTask(pdriver, 0);
 
   ClearXFields();
 
@@ -646,12 +660,15 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   while (RecvPsiTask(pdriver, 0) != TaskStatus::complete) {}
   while (RecvAlphaPsiTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongPsiTask(pdriver, 0);
+  BCSPsiTask(pdriver, 0);
   ProlongAlphaPsiTask(pdriver, 0);
+  BCSAlphaPsiTask(pdriver, 0);
 
   SolveShift(pdriver, 0);
   RestPiEtaBetaTask(pdriver, 0);  SendPiEtaBetaTask(pdriver, 0);
   while (RecvPiEtaBetaTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongPiEtaBetaTask(pdriver, 0);
+  BCSPiEtaBetaTask(pdriver, 0);
 
   ReconstructShift();
   AssembleADM();
@@ -659,6 +676,7 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
   while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongADMTask(pdriver, 0);
+  BCSADMTask(pdriver, 0);
 
   ClearTailFields();
   return;
@@ -779,17 +797,28 @@ TaskStatus CFC::SendPiEtaXTask(Driver *pdriver, int stage) {
   return pbval_pietax->PackAndSendCC(u_p_x, coarse_u_pietax);
 }
 TaskStatus CFC::RecvPiEtaXTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_pietax->RecvAndUnpackCC(u_p_x, coarse_u_pietax);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_x, 1);
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, u_p_x, 1, 3);
-  }
-  return tstat;
+  return pbval_pietax->RecvAndUnpackCC(u_p_x, coarse_u_pietax);
 }
 TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    // Step 1: apply physical BCs to the coarse array so the prolongation stencil
+    // reads valid data in coarse ghost zones at a physical boundary.
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietax, 4, 1);
+    }
     pbval_pietax->FillCoarseInBndryCC(u_p_x, coarse_u_pietax);
     pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, false);
+  }
+  return TaskStatus::complete;
+}
+//! \fn TaskStatus CFC::BCSPiEtaXTask
+//! \brief Apply physical BCs to u_p_x's fine array. Runs after ProlongPiEtaXTask
+//! (task-graph dependency {CFC_ProlongPiEtaX}) so corner ghost zones between a
+//! coarse neighbor and a physical boundary read valid, already-prolongated data
+//! (mirrors z4c::Z4c::ApplyPhysicalBCs).
+TaskStatus CFC::BCSPiEtaXTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCBCs(pmy_pack, u_p_x, 4, 1);
   }
   return TaskStatus::complete;
 }
@@ -804,16 +833,21 @@ TaskStatus CFC::SendXTask(Driver *pdriver, int stage) {
   return pbval_x->PackAndSendCC(u_x, coarse_u_x);
 }
 TaskStatus CFC::RecvXTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_x);
-  }
-  return tstat;
+  return pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
 }
 TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_x, 3, 1);
+    }
     pbval_x->FillCoarseInBndryCC(u_x, coarse_u_x);
     pbval_x->ProlongateCC(u_x, coarse_u_x, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::BCSXTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCBCs(pmy_pack, u_x, 3, 1);
   }
   return TaskStatus::complete;
 }
@@ -828,16 +862,21 @@ TaskStatus CFC::SendPsiTask(Driver *pdriver, int stage) {
   return pbval_psi->PackAndSendCC(delta_psi, coarse_psi);
 }
 TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_psi->RecvAndUnpackCC(delta_psi, coarse_psi);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, delta_psi);
-  }
-  return tstat;
+  return pbval_psi->RecvAndUnpackCC(delta_psi, coarse_psi);
 }
 TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_psi, 1, 1);
+    }
     pbval_psi->FillCoarseInBndryCC(delta_psi, coarse_psi);
     pbval_psi->ProlongateCC(delta_psi, coarse_psi, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCBCs(pmy_pack, delta_psi, 1, 1);
   }
   return TaskStatus::complete;
 }
@@ -852,16 +891,21 @@ TaskStatus CFC::SendAlphaPsiTask(Driver *pdriver, int stage) {
   return pbval_alpha_psi->PackAndSendCC(delta_alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_alpha_psi->RecvAndUnpackCC(delta_alpha_psi, coarse_alpha_psi);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, delta_alpha_psi);
-  }
-  return tstat;
+  return pbval_alpha_psi->RecvAndUnpackCC(delta_alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_alpha_psi, 1, 1);
+    }
     pbval_alpha_psi->FillCoarseInBndryCC(delta_alpha_psi, coarse_alpha_psi);
     pbval_alpha_psi->ProlongateCC(delta_alpha_psi, coarse_alpha_psi, false);
+  }
+  return TaskStatus::complete;
+}
+TaskStatus CFC::BCSAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCBCs(pmy_pack, delta_alpha_psi, 1, 1);
   }
   return TaskStatus::complete;
 }
@@ -876,53 +920,64 @@ TaskStatus CFC::SendPiEtaBetaTask(Driver *pdriver, int stage) {
   return pbval_pietabeta->PackAndSendCC(u_p_beta, coarse_u_pietabeta);
 }
 TaskStatus CFC::RecvPiEtaBetaTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_pietabeta->RecvAndUnpackCC(u_p_beta, coarse_u_pietabeta);
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCVectorBCs(pmy_pack, u_p_beta, 1);
-    MeshBoundaryValues::CFCScalarBCs(pmy_pack, u_p_beta, 1, 3);
-  }
-  return tstat;
+  return pbval_pietabeta->RecvAndUnpackCC(u_p_beta, coarse_u_pietabeta);
 }
 TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietabeta, 4, 1);
+    }
     pbval_pietabeta->FillCoarseInBndryCC(u_p_beta, coarse_u_pietabeta);
     pbval_pietabeta->ProlongateCC(u_p_beta, coarse_u_pietabeta, false);
   }
   return TaskStatus::complete;
 }
+TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::CFCBCs(pmy_pack, u_p_beta, 4, 1);
+  }
+  return TaskStatus::complete;
+}
 
 // Ghost-exchange padm->u_adm itself, once per stage, right after AssembleFinalTask
-// writes its interior (see pbval_adm's comment in cfc.hpp). No CFCScalarBCs/
-// CFCVectorBCs-style physical-BC pass here, unlike the Recv*Tasks above: those
-// helpers assume a single scalar or a uniform-parity 3-vector, but u_adm mixes
-// scalars, a vector, and rank-2 SYM2 tensors with per-component reflection parity
-// -- reusing either helper across all adm::ADM::nadm channels would silently
-// mishandle a reflecting physical boundary. This round therefore only fixes
-// inter-MeshBlock/periodic communication, not physical-boundary ghost cells for
-// u_adm -- a separate, pre-existing gap left for a future pass.
+// writes its interior (see pbval_adm's comment in cfc.hpp). Physical-boundary BCs
+// (ADMBCs/ADMBCsCoarse, adm_bcs.cpp) are applied by ProlongADMTask/BCSADMTask below,
+// in the same Restrict->Send->Recv->Prolong->ApplyPhysicalBCs order every other CFC
+// field and z4c::Z4c use.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
+    pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
+                                      false);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
-  return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, coarse_u_adm);
+  return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
-  TaskStatus tstat = pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, coarse_u_adm);
-  // 1/r^n physical-boundary falloff BC for u_adm (adm_bcs.cpp): ghost cells at a
-  // genuine physical domain edge would otherwise stay frozen at their t=0 pgen
-  // value forever, since RecvAndUnpackCC is a no-op there (no neighbor block).
-  if (tstat == TaskStatus::complete && !(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
-  }
-  return tstat;
+  return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_adm->FillCoarseInBndryCC(pmy_pack->padm->u_adm, coarse_u_adm);
-    pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, coarse_u_adm, false);
+    // Step 1: apply physical BCs to the coarse array so the prolongation stencil
+    // reads valid data in coarse ghost zones at a physical boundary.
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      MeshBoundaryValues::ADMBCsCoarse(pmy_pack, pmy_pack->padm->coarse_u_adm);
+    }
+    pbval_adm->FillCoarseInBndryCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
+    pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm, false);
+  }
+  return TaskStatus::complete;
+}
+//! \fn TaskStatus CFC::BCSADMTask
+//! \brief Apply physical BCs to padm->u_adm's fine array (1/r^n falloff,
+//! adm_bcs.cpp): ghost cells at a genuine physical domain edge would otherwise stay
+//! frozen at their t=0 pgen value forever, since RecvAndUnpackCC is a no-op there
+//! (no neighbor block). Runs after ProlongADMTask so corner ghost zones between a
+//! coarse neighbor and a physical boundary read valid, already-prolongated data.
+TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
   return TaskStatus::complete;
 }

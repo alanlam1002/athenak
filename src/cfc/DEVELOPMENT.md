@@ -2881,7 +2881,12 @@ src/cfc/
       beyond roundoff indicates a bug in the merge, not an expected side effect.
 19. **Merge `CFCScalarBCs`/`CFCVectorBCs` (`bvals/physics/cfc_bcs.cpp`) into one
     shared implementation; fix `vacuum` to use the `order>0` Robin falloff, matching
-    `user`, instead of a hard zero.** Done. User observation: the two functions
+    `user`, instead of a hard zero.** Done at the time (both functions kept as
+    separate public wrappers around one shared `CFCBCsImpl`). **Superseded by item
+    41**, which merges the two public wrappers themselves into a single `CFCBCs`/
+    `CFCBCsCoarse` entry point -- `CFCScalarBCs`/`CFCVectorBCs` no longer exist as
+    of item 41; every reference to them below (and in item 14/40) describes the
+    state at the time it was written, not current code. User observation: the two functions
     were structurally near-identical (same 6-face zero-gradient/falloff logic, same
     `CellCenterX`/`r_i`/`r_g` setup) apart from whether a per-channel loop existed at
     all and `reflect`'s parity flip (`CFCScalarBCs`: never; `CFCVectorBCs`: only the
@@ -6003,7 +6008,12 @@ src/cfc/
       param, confirmed by checking `z4c_bcs.cpp`/`z4c_tasks.cpp`'s own
       already-cleanly-patched call site) simply coexist with CFC's existing
       `CFCScalarBCs`/`CFCVectorBCs`/`ADMBCs` declarations -- concatenated,
-      no semantic conflict.
+      no semantic conflict. (This PR does not add `*BCsCoarse`/reordering
+      support for CFC's own fields, only Hydro/MHD/Radiation/Z4c -- item 41
+      closes that gap with a hand-rolled parallel implementation, and along
+      the way replaces `CFCScalarBCs`/`CFCVectorBCs` with a single merged
+      `CFCBCs`/`CFCBCsCoarse`, so this bullet's function names are stale as
+      of item 41.)
     - `src/driver/driver.cpp`: `Driver::InitBoundaryValuesAndPrimitives`'s
       Z4c/Hydro/Radiation blocks all had the PR's fix (`Prolongate` then
       `ApplyPhysicalBCs`) applied cleanly by `git apply`; only the MHD block
@@ -6059,3 +6069,134 @@ src/cfc/
     *not* progress on item 39/40's own open problem (the tie-break formula
     bug in 3 of 4 diagonal sites, item 39f/39g's "Current state" bullet) --
     that remains exactly as open as before this cherry-pick.
+
+41. **(2026-07-29) Reorder CFC's own ghost-exchange pipeline to match z4c's
+    `RestrictU -> SendU -> RecvU -> Prolongate -> ApplyPhysicalBCs`; add
+    `*BCsCoarse` helpers; merge `CFCScalarBCs`/`CFCVectorBCs` into one
+    `CFCBCs`/`CFCBCsCoarse`; fix `delta_psi`/`delta_alpha_psi`/`u_x`'s
+    physical-boundary falloff order.** Done, closes the gap item 40 flagged:
+    upstream PR #748 reordered physical BCs relative to prolongation for
+    Hydro/MHD/Radiation/Z4c, but never touched CFC's own 6
+    `MeshBoundaryValuesCC` fields (`u_p_x`, `u_x`, `delta_psi`,
+    `delta_alpha_psi`, `u_p_beta`, `padm->u_adm`) -- all 6 still applied
+    physical BCs *inside* `Recv*Task`, i.e. *before* `Prolong*Task` ran, the
+    same bug class PR #748 fixed for the other 4 modules. User asked for CFC
+    to mirror z4c's task order exactly.
+    - **Task reorder** (`src/tasklist/numerical_relativity.hpp`,
+      `src/cfc/cfc.hpp`, `src/cfc/cfc.cpp`): added 6 new graph-visible tasks,
+      `CFC_BCSPiEtaX`/`CFC_BCSX`/`CFC_BCSPsi`/`CFC_BCSAlphaPsi`/
+      `CFC_BCSPiEtaBeta`/`CFC_BCSADM`, each depending on that field's own
+      `CFC_Prolong*` (mirroring `z4c_tasks.cpp`'s `Z4c_BCS` depending on
+      `{Z4c_Prolong}`) -- not folded into the tail of `Prolong*Task`, per
+      user's explicit choice. Each field's `Recv*Task` lost its inline
+      `if (tstat==complete && !periodic) { CFC*BCs(...); }` block (the
+      `tstat` check is now redundant regardless, since the task-graph
+      dependency chain `BCS* -> Prolong* -> Recv*` already guarantees `Recv`
+      completed by the time `BCS` runs); the removed call moved verbatim
+      into the new `BCS*Task`, gated only on `!strictly_periodic`. Four
+      downstream task dependencies that used to point at `CFC_Prolong*`
+      (`CFC_ReconstructX`, `CFC_ComputeADual`, `CFC_BuildSrcBeta`,
+      `CFC_ReconstructBeta`) were rewired to point at the new `CFC_BCS*`
+      instead, since they must now wait for BC'd-*and*-prolongated data, not
+      just prolongated data -- a deliberate, intended behavior change (the
+      converged value of `x_u`/`Adual^ij`/`beta_u` at a fine/coarse boundary
+      near a physical edge can shift slightly, more correct under AMR).
+      `padm->u_adm`'s stale doc comment (previously claiming no physical-BC
+      pass existed for it at all, already contradicted by the code 20 lines
+      below calling `ADMBCs`) was corrected in the same pass. The two manual
+      (non-task-graph) call sequences, `RunXPsiSolvePass`/
+      `RunLapseShiftAssemblePass` (used by `InitializeMetric`/
+      `ReinitializeMetricForAMR`), got a `BCS*Task(pdriver, 0)` call inserted
+      right after each corresponding `Prolong*Task` call, in the same order.
+    - **Coarse-array BC pass** (`src/bvals/bvals.hpp`,
+      `src/bvals/physics/cfc_bcs.cpp`, `src/bvals/physics/adm_bcs.cpp`):
+      z4c's own `Prolongate` task applies physical BCs to the *coarse* array
+      first (`Z4cBCsCoarse`) so the prolongation stencil doesn't read
+      stale/never-written coarse ghost data at a physical boundary -- CFC
+      had no equivalent for any of its 6 fields. Added
+      `CFCScalarBCsCoarse`/`CFCVectorBCsCoarse` (later merged into
+      `CFCBCsCoarse`, see below) and `ADMBCsCoarse`, following the existing
+      `HydroBCsCoarse`/`BFieldBCsCoarse`/`RadiationBCsCoarse`/`Z4cBCsCoarse`
+      naming precedent, called inside each field's `Prolong*Task` right
+      before the existing `FillCoarseInBndryCC`/`ProlongateCC` pair (kept
+      unchanged -- unlike z4c, which skips `FillCoarseInBndryCC` entirely
+      since its same-level-neighbor coarse data arrives via a dedicated MPI
+      buffer CFC's own `MeshBoundaryValuesCC` objects don't use).
+      **Non-obvious correctness point**: `CFCScalarBCs`/`CFCVectorBCs`/
+      `ADMBCs`'s `order>0` falloff branch computes a real physical radius via
+      `CellCenterX(idx, indcs.nx1, x1min, x1max)` -- hardcoded to the *fine*
+      cell count. A coarse-array call needs `indcs.cnx1/cnx2/cnx3` and
+      `indcs.cis/cie/cjs/cje/cks/cke` instead, or the computed radius is
+      wrong by the refinement factor (the coarse array covers the same
+      `[x1min,x1max]` extent with half as many cells) -- confirmed by
+      reading `CellCenterX`'s signature (`cell_locations.hpp:36-39`: second
+      argument is the total interior cell count the extent is divided into).
+      Both `cfc_bcs.cpp`'s `CFCBCsImpl` and `adm_bcs.cpp`'s (new)
+      `ADMBCsImpl` were widened to take `is/ie/js/je/ks/ke/nx1/nx2/nx3/
+      n1/n2/n3` as explicit parameters (mirroring z4c_bcs.cpp's
+      `BCHelper<order>`, which didn't need this since it's coordinate-free),
+      with thin fine/coarse public wrappers computing the right index/extent
+      set. Confirmed via direct reads of `bvals/prolongation.cpp` that
+      `FillCoarseInBndryCC`/`ProlongateCC` never touch physical-boundary
+      ghost cells themselves (both gated on an actual neighbor `gid>=0`), so
+      the new coarse-BC calls are neither redundant nor mistimed.
+    - **Merge `CFCScalarBCs`/`CFCVectorBCs` into `CFCBCs`(`nvar`)**
+      (`src/bvals/bvals.hpp`, `src/bvals/physics/cfc_bcs.cpp`,
+      `src/cfc/cfc.cpp`) -- user's follow-up request, superseding item 19's
+      earlier (still-two-function) merge. `u_p_x`/`u_p_beta` pack a 3-channel
+      vector (`P_i`) and a trailing scalar (`eta`, channel 3) into one array,
+      so every call site touching them called both functions back-to-back
+      with the same `order` (once per part). Key insight enabling a true
+      single call, not just a rename: the reflect-parity flip condition,
+      `bool flip = (nvar==3) && (n==axis)` (`axis` = 0/1/2 per face), widens
+      cleanly to `(nvar>=3) && (n==axis)` -- since `axis` is always 0/1/2,
+      local channel index `n==3` (the packed `eta` channel) can never match
+      it, so it falls through to "never flip" automatically, without a
+      separate "how many leading channels are vector" argument. `nvar` alone
+      (1 for a lone scalar, 3 for a lone vector, 4 for vector+packed-scalar)
+      is therefore sufficient. `CFCScalarBCs`/`CFCVectorBCs`/
+      `CFCScalarBCsCoarse`/`CFCVectorBCsCoarse` (4 functions) were replaced
+      by `CFCBCs`/`CFCBCsCoarse` (2 functions, `nvar` as a required leading
+      parameter); every call site updated, collapsing 2 calls into 1 at the
+      `u_p_x`/`u_p_beta` sites.
+    - **`order` consistency fix, also user-requested**: `delta_psi`/
+      `delta_alpha_psi` (and, in a follow-up, `u_x`) previously called with
+      the implicit default `order=0` (plain zero-gradient copy) at their
+      outer (diode) physical boundary, while `P_i`/`eta` used `order=1`
+      (`1/r^1` falloff). Since `psi`/`alpha_psi`'s ghost values are also
+      outputs of an isolated-system elliptic solve (same category the file's
+      own doc comment already calls out for the `order>0` treatment), and
+      `X^i` is likewise a vector-Poisson-solve output, `order=0` for these
+      was an inconsistency, not an intentional distinction -- all 3 fields
+      (`u_p_x`, `u_x`, `delta_psi`/`delta_alpha_psi`, `u_p_beta`) now
+      consistently pass `order=1`.
+    - **Verified**: rebuilt `build_cfc` cleanly after each of the 3 passes
+      above. Reran the existing octant-symmetric TOV dynamic-AMR smoke test
+      (`cfc_amr_dynamic_check`-style parfile, reflect/diode BCs, `min_max`-
+      triggered adaptive AMR) at both 1-rank and 8-rank, fresh each time
+      (restart files cleared to force a real regrid rather than resuming
+      past `nlim`): no crashes, NaNs, or `Kokkos_ENABLE_DEBUG_BOUNDS_CHECK`
+      assertions in any of the 3 rebuild/rerun cycles. The 1-rank
+      `max|delta psi - initial guess|` diagnostic
+      (`CFC::ReinitializeMetricForAMR`) stayed bit-for-bit `9.844341e-02`
+      and the 8-rank equivalent stayed `5.261418e-02` across all 3 passes --
+      the reorder and the `CFCBCs` merge are confirmed behavior-preserving
+      as designed, and the `order=0->1` fix did not detectably shift this
+      particular coarse smoke test (plausible: its outer diode boundary
+      sits far enough from the star that `psi`/`alpha_psi`/`X^i` are already
+      near-zero there regardless of falloff order -- not evidence the fix is
+      inert, just that this test doesn't probe it strongly). The 8-rank
+      test's item 39 residual (the unrelated `SetNeighbors`/`nghbr` tie-break
+      bug, `gid=14`'s corner slots 52-55 staying `UNREGISTERED` per the
+      `FIELD-PROBE-FINAL` diagnostic) persisted unchanged across all 3
+      passes, as expected -- this item is entirely orthogonal to item 39's
+      open problem, exactly as item 40's PR #748 was for the 4 modules it
+      touched.
+    - **Not yet done**: no test was run with a genuine reflecting-*and*-
+      diode corner where an AMR refinement boundary also meets the physical
+      edge in a way that would visibly exercise the new coarse-BC pass's
+      actual numerical content (the smoke tests above confirm no regression,
+      not that the new coarse-BC step changes anything measurable in this
+      particular topology) -- a dedicated test isolating that corner case,
+      similar in spirit to item 40's own verification, would be the natural
+      next check if this becomes load-bearing for future work.

@@ -187,9 +187,14 @@ class CFC {
   // at inter-MeshBlock boundaries in any multi-MeshBlock run. One combined round
   // for the whole u_adm array (g_dd, vK_dd, psi4, alpha, beta_u -- CFC never runs
   // with z4c active, so no channel aliases into a z4c-owned array), run once per
-  // stage right after CFC_AssembleFinal.
+  // stage right after CFC_AssembleFinal. Unlike the coarse_* buffers above, this
+  // reuses padm->coarse_u_adm directly (same nmb/nccells sizing, adm.cpp:57-67)
+  // rather than keeping a second, redundant CFC-owned copy -- padm->coarse_u_adm
+  // is already the buffer the generic AMR regrid pipeline (mesh_refinement.cpp/
+  // load_balance.cpp) expects, and RestADMTask fully refreshes it via RestrictCC
+  // at the start of every stage, so there's no staleness risk from the two use
+  // sites (per-stage ghost exchange vs. regrid transfer) sharing one array.
   MeshBoundaryValuesCC *pbval_adm;
-  DvceArray5D<Real> coarse_u_adm;
 
   // Queues this module's tasks into the shared NumericalRelativity task graph
   // (mirrors dyngr::DynGRMHD::QueueDynGRMHDTasks()/z4c::Z4c::QueueZ4cTasks()).
@@ -275,27 +280,33 @@ class CFC {
   TaskStatus SendPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus RecvPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus ProlongPiEtaXTask(Driver *pdriver, int stage);
+  TaskStatus BCSPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus RestXTask(Driver *pdriver, int stage);
   TaskStatus SendXTask(Driver *pdriver, int stage);
   TaskStatus RecvXTask(Driver *pdriver, int stage);
   TaskStatus ProlongXTask(Driver *pdriver, int stage);
+  TaskStatus BCSXTask(Driver *pdriver, int stage);
   TaskStatus RestPsiTask(Driver *pdriver, int stage);
   TaskStatus SendPsiTask(Driver *pdriver, int stage);
   TaskStatus RecvPsiTask(Driver *pdriver, int stage);
   TaskStatus ProlongPsiTask(Driver *pdriver, int stage);
+  TaskStatus BCSPsiTask(Driver *pdriver, int stage);
   TaskStatus RestAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus SendAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus RecvAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus ProlongAlphaPsiTask(Driver *pdriver, int stage);
+  TaskStatus BCSAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus RestPiEtaBetaTask(Driver *pdriver, int stage);
   TaskStatus SendPiEtaBetaTask(Driver *pdriver, int stage);
   TaskStatus RecvPiEtaBetaTask(Driver *pdriver, int stage);
   TaskStatus ProlongPiEtaBetaTask(Driver *pdriver, int stage);
+  TaskStatus BCSPiEtaBetaTask(Driver *pdriver, int stage);
   // Ghost-exchanges padm->u_adm after AssembleFinalTask -- see pbval_adm's comment.
   TaskStatus RestADMTask(Driver *pdriver, int stage);
   TaskStatus SendADMTask(Driver *pdriver, int stage);
   TaskStatus RecvADMTask(Driver *pdriver, int stage);
   TaskStatus ProlongADMTask(Driver *pdriver, int stage);
+  TaskStatus BCSADMTask(Driver *pdriver, int stage);
 
   // Post all fields' non-blocking MPI receives up front (Task_Start) and wait on
   // outstanding sends/receives at the very end (Task_End) -- mirrors

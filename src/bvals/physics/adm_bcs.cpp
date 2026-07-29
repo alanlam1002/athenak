@@ -34,6 +34,15 @@
 //! two indices is aligned with the reflected axis (e.g. g_xy is odd under an x1
 //! reflection, g_xx/g_yy/g_zz are even); a vector component (beta_u) flips iff its own
 //! index is; scalars (alpha, psi4) never flip.
+//!
+//! ADMBCsImpl takes the active-zone index bounds (is/ie/js/je/ks/ke), the interior
+//! cell counts (nx1/nx2/nx3), and the total per-axis extents (n1/n2/n3) as explicit
+//! parameters so the same implementation is shared between the fine array (ADMBCs)
+//! and the coarse array (ADMBCsCoarse, called before ProlongateCC so the prolongation
+//! stencil reads valid coarse ghost data at a physical boundary, mirroring
+//! Z4cBCsCoarse). Since the 1/r^order falloff needs the true physical cell-center
+//! position via CellCenterX, nx1/nx2/nx3 must be the coarse interior counts for a
+//! coarse-array call, or the computed radius would be wrong by the refinement factor.
 
 #include <cmath>
 
@@ -83,27 +92,24 @@ bool ChannelFlipsAtAxis(const ADMChannelInfo &c, int axis) {
   return (c.row == axis) != (c.col == axis);           // tensor: flips iff exactly one
 }
 
-}  // namespace
-
 //----------------------------------------------------------------------------------------
-//! \fn void MeshBoundaryValues::ADMBCs()
-//! \brief Apply physical BCs to pmbp->padm->u_adm -- see file doc comment above.
+//! \fn void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie,
+//!                      int js, int je, int ks, int ke, int nx1, int nx2, int nx3,
+//!                      int n1, int n2, int n3)
+//! \brief shared implementation behind ADMBCs (fine) and ADMBCsCoarse. is/ie/js/je/
+//! ks/ke/nx1/nx2/nx3/n1/n2/n3 select fine vs. coarse array index bounds/extents.
 
-void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
+void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int js,
+                int je, int ks, int ke, int nx1, int nx2, int nx3, int n1, int n2,
+                int n3) {
   auto &pm = ppack->pmesh;
   auto &indcs = ppack->pmesh->mb_indcs;
   auto &size = ppack->pmb->mb_size;
   int &ng = indcs.ng;
   auto &mb_bcs = ppack->pmb->mb_bcs;
 
-  int n1 = indcs.nx1 + 2*ng;
-  int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
-  int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
   int nvar = u0.extent_int(1);
   int nmb = ppack->nmb_thispack;
-  int is = indcs.is, ie = indcs.ie;
-  int js = indcs.js, je = indcs.je;
-  int ks = indcs.ks, ke = indcs.ke;
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
     par_for("adm_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1), 0, (n2-1),
@@ -111,9 +117,9 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
       ADMChannelInfo c = GetADMChannelInfo(v);
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
-      Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+      Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
       Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x1)) {
         case BoundaryFlag::reflect: {
@@ -127,11 +133,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
-          Real x1_i = CellCenterX(is-is, indcs.nx1, x1min, x1max);
+          Real x1_i = CellCenterX(is-is, nx1, x1min, x1max);
           Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
           Real f_i = u0(m,v,k,j,is) - c.flat;
           for (int i=0; i<ng; ++i) {
-            Real x1_g = CellCenterX(is-i-1-is, indcs.nx1, x1min, x1max);
+            Real x1_g = CellCenterX(is-i-1-is, nx1, x1min, x1max);
             Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,j,is-i-1) = c.flat + f_i*ratio;
@@ -153,11 +159,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
-          Real x1_i = CellCenterX(ie-is, indcs.nx1, x1min, x1max);
+          Real x1_i = CellCenterX(ie-is, nx1, x1min, x1max);
           Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
           Real f_i = u0(m,v,k,j,ie) - c.flat;
           for (int i=0; i<ng; ++i) {
-            Real x1_g = CellCenterX(ie+i+1-is, indcs.nx1, x1min, x1max);
+            Real x1_g = CellCenterX(ie+i+1-is, nx1, x1min, x1max);
             Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,j,ie+i+1) = c.flat + f_i*ratio;
@@ -175,10 +181,10 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
     KOKKOS_LAMBDA(int m, int v, int k, int i) {
       ADMChannelInfo c = GetADMChannelInfo(v);
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
-      Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+      Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
       Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
       Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
-      Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+      Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x2)) {
         case BoundaryFlag::reflect: {
@@ -192,11 +198,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
-          Real x2_i = CellCenterX(js-js, indcs.nx2, x2min, x2max);
+          Real x2_i = CellCenterX(js-js, nx2, x2min, x2max);
           Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
           Real f_i = u0(m,v,k,js,i) - c.flat;
           for (int j=0; j<ng; ++j) {
-            Real x2_g = CellCenterX(js-j-1-js, indcs.nx2, x2min, x2max);
+            Real x2_g = CellCenterX(js-j-1-js, nx2, x2min, x2max);
             Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,js-j-1,i) = c.flat + f_i*ratio;
@@ -218,11 +224,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
         case BoundaryFlag::outflow: case BoundaryFlag::diode:
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
-          Real x2_i = CellCenterX(je-js, indcs.nx2, x2min, x2max);
+          Real x2_i = CellCenterX(je-js, nx2, x2min, x2max);
           Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
           Real f_i = u0(m,v,k,je,i) - c.flat;
           for (int j=0; j<ng; ++j) {
-            Real x2_g = CellCenterX(je+j+1-js, indcs.nx2, x2min, x2max);
+            Real x2_g = CellCenterX(je+j+1-js, nx2, x2min, x2max);
             Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,je+j+1,i) = c.flat + f_i*ratio;
@@ -240,9 +246,9 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
   KOKKOS_LAMBDA(int m, int v, int j, int i) {
     ADMChannelInfo c = GetADMChannelInfo(v);
     Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
     Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
     Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
 
     switch (mb_bcs.d_view(m,BoundaryFace::inner_x3)) {
@@ -257,11 +263,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
       case BoundaryFlag::user: {
-        Real x3_i = CellCenterX(ks-ks, indcs.nx3, x3min, x3max);
+        Real x3_i = CellCenterX(ks-ks, nx3, x3min, x3max);
         Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
         Real f_i = u0(m,v,ks,j,i) - c.flat;
         for (int k=0; k<ng; ++k) {
-          Real x3_g = CellCenterX(ks-k-1-ks, indcs.nx3, x3min, x3max);
+          Real x3_g = CellCenterX(ks-k-1-ks, nx3, x3min, x3max);
           Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
           Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
           u0(m,v,ks-k-1,j,i) = c.flat + f_i*ratio;
@@ -283,11 +289,11 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
       case BoundaryFlag::outflow: case BoundaryFlag::diode:
       case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
       case BoundaryFlag::user: {
-        Real x3_i = CellCenterX(ke-ks, indcs.nx3, x3min, x3max);
+        Real x3_i = CellCenterX(ke-ks, nx3, x3min, x3max);
         Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
         Real f_i = u0(m,v,ke,j,i) - c.flat;
         for (int k=0; k<ng; ++k) {
-          Real x3_g = CellCenterX(ke+k+1-ks, indcs.nx3, x3min, x3max);
+          Real x3_g = CellCenterX(ke+k+1-ks, nx3, x3min, x3max);
           Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
           Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
           u0(m,v,ke+k+1,j,i) = c.flat + f_i*ratio;
@@ -299,4 +305,37 @@ void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
   });
 
   return;
+}
+
+}  // namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn void MeshBoundaryValues::ADMBCs()
+//! \brief Apply physical BCs to pmbp->padm->u_adm (fine array) -- see file doc comment.
+
+void MeshBoundaryValues::ADMBCs(MeshBlockPack *ppack, DvceArray5D<Real> u0) {
+  auto &indcs = ppack->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int n1 = indcs.nx1 + 2*ng;
+  int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
+  int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+  ADMBCsImpl(ppack, u0, indcs.is, indcs.ie, indcs.js, indcs.je, indcs.ks, indcs.ke,
+             indcs.nx1, indcs.nx2, indcs.nx3, n1, n2, n3);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MeshBoundaryValues::ADMBCsCoarse()
+//! \brief Coarse-array counterpart of ADMBCs -- must run before ProlongateCC so the
+//! prolongation stencil reads valid coarse ghost data at a physical boundary
+//! (mirrors Z4cBCsCoarse). Operates on padm->coarse_u_adm.
+
+void MeshBoundaryValues::ADMBCsCoarse(MeshBlockPack *ppack,
+                                      DvceArray5D<Real> coarse_u0) {
+  auto &indcs = ppack->pmesh->mb_indcs;
+  int &ng = indcs.ng;
+  int cn1 = indcs.cnx1 + 2*ng;
+  int cn2 = (indcs.cnx2 > 1) ? (indcs.cnx2 + 2*ng) : 1;
+  int cn3 = (indcs.cnx3 > 1) ? (indcs.cnx3 + 2*ng) : 1;
+  ADMBCsImpl(ppack, coarse_u0, indcs.cis, indcs.cie, indcs.cjs, indcs.cje, indcs.cks,
+             indcs.cke, indcs.cnx1, indcs.cnx2, indcs.cnx3, cn1, cn2, cn3);
 }

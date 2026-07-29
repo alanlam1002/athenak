@@ -75,7 +75,7 @@ ScalarField::ScalarField(MeshBlockPack *ppack, ParameterInput *pin) :
   // no special same-level-buffer requirement; is_z4c=true is only needed for the higher-
   // order refinement-boundary smoothness Z4c's own 25-variable metric state relies on.
   Kokkos::Profiling::pushRegion("ScalarField buffers");
-  pbval_u = new MeshBoundaryValuesCC(ppack, pin, false);
+  pbval_u = new MeshBoundaryValuesCC(ppack, pin, true);
   pbval_u->InitializeBuffers(nscalarfield);
   Kokkos::Profiling::popRegion();
 }

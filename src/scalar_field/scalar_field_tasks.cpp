@@ -205,7 +205,7 @@ TaskStatus ScalarField::RecvU(Driver *pdrive, int stage) {
 
 TaskStatus ScalarField::RestrictU(Driver *pdrive, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u0, coarse_u0, false);
+    pmy_pack->pmesh->pmr->RestrictCC(u0, coarse_u0, true);
   }
   return TaskStatus::complete;
 }
@@ -216,7 +216,7 @@ TaskStatus ScalarField::RestrictU(Driver *pdrive, int stage) {
 
 TaskStatus ScalarField::Prolongate(Driver *pdrive, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pbval_u->ProlongateCC(u0, coarse_u0, false);
+    pbval_u->ProlongateCC(u0, coarse_u0, true);
   }
   return TaskStatus::complete;
 }

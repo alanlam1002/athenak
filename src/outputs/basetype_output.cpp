@@ -26,6 +26,7 @@
 #include "coordinates/adm.hpp"
 #include "z4c/tmunu.hpp"
 #include "z4c/z4c.hpp"
+#include "scalar_field/scalar_field.hpp"
 #include "srcterms/srcterms.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "gravity/gravity.hpp"
@@ -162,14 +163,21 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
        << out_params.block_name << "' but no Tmunu object has been constructed."
        << std::endl << "Input file is likely missing a <adm> block" << std::endl;
   }
-  if ((ivar>=151) && (ivar<153) && (pm->pmb_pack->ppart == nullptr)) {
+  if ((ivar>=151) && (ivar<154) && (pm->pmb_pack->pscalarfield == nullptr)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+       << "Output of ScalarField variable requested in <output> block '"
+       << out_params.block_name << "' but ScalarField object not constructed."
+       << std::endl << "Input file is likely missing corresponding block" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  if ((ivar>=155) && (ivar<157) && (pm->pmb_pack->ppart == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of particles requested in <output> block '"
        << out_params.block_name << "' but particle object not constructed."
        << std::endl << "Input file is likely missing corresponding block" << std::endl;
     exit(EXIT_FAILURE);
   }
-  if (ivar==153 && (pm->pmb_pack->pgrav == nullptr)) {
+  if (ivar==154 && (pm->pmb_pack->pgrav == nullptr)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
        << "Output of gravity potential requested in <output> block '"
        << out_params.block_name << "' but gravity object not constructed."
@@ -661,6 +669,15 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
       if (variable.compare("z4c") == 0 ||
           variable.compare(z4c::Z4c::Z4c_names[v]) == 0) {
         outvars.emplace_back(z4c::Z4c::Z4c_names[v], v, &(pm->pmb_pack->pz4c->u0));
+      }
+    }
+
+    // scalar-field variables
+    for (int v = 0; v < scalarfield::ScalarField::nscalarfield; ++v) {
+      if (variable.compare("scalarfield") == 0 ||
+          variable.compare(scalarfield::ScalarField::ScalarField_names[v]) == 0) {
+        outvars.emplace_back(scalarfield::ScalarField::ScalarField_names[v], v,
+                              &(pm->pmb_pack->pscalarfield->u0));
       }
     }
 

@@ -1,0 +1,135 @@
+# Scalarized-neutron-star (RNS-ST) test: MPA1 EOS, J=0 (non-rotating),
+# omega_c(=paper's B)=153, mphi=0.1 (mass2=mphi^2=0.01).
+# ID file: MPA1_J0.00_Mb1.800_B1.53E+02_mphi1.00E-01_rhoc9.356E+14_sphim1.714.dat
+# Domain/resolution/gauge modeled on the already-validated
+# /sakura/ptmp/tlam/athenak_run/test_stt/tov_z4c_mpi_withscalar.athinput
+# (Phase 3/4 scalar-tensor MPI regression test).
+
+<comment>
+problem  = Scalarized NS (RNS-ST/MPA1), Z4c-evolved
+
+<job>
+basename = rns_st_mpa1
+
+<mesh>
+nghost = 4       # Number of ghost cells
+nx1    = 64      # number of cells in x1-direction
+x1min  = 0.0
+x1max  = 102.4
+ix1_bc = reflect
+ox1_bc = diode
+
+nx2    = 64
+x2min  = 0.0
+x2max  = 102.4
+ix2_bc = reflect
+ox2_bc = diode
+
+nx3    = 64
+x3min  = 0.0
+x3max  = 102.4
+ix3_bc = reflect
+ox3_bc = diode
+
+<meshblock>
+nx1  = 32
+nx2  = 32
+nx3  = 32
+
+<time>
+evolution  = dynamic
+integrator = rk3
+cfl_number = 0.4
+nlim       = 30
+tlim       = 10000
+ndiag      = 1
+
+<coord>
+general_rel = true
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal          # placeholder (unused, required by parser)
+gamma       = 2.0            # placeholder (unused, required by parser)
+
+dyn_eos     = piecewise_poly # PrimitiveSolver EOSPolicy -- must match the RNS-ST ID's EOS
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 1.0e-13
+tfloor      = 1.0e-12
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+# Piecewise-polytrope EOS parameters (MPA1, 7 pieces), derived from
+# /sakura/ptmp/tlam/EOS_2D/MPA1_v2.d (code units c=G=Msun=1) via AthenaK's
+# PrimitiveSolver::PiecewisePolytrope MKS-density convention. gamma_thermal (NOT
+# pwp_gamma_thermal -- that key is silently unused by the parser) set to the
+# constructor default 5/3 since MPA1 is a cold EOS with no thermal-Gamma info.
+gamma_thermal        = 1.6666667
+
+pwp_poly_rmd         = 9.535901985506534e+16
+
+pwp_density_pieces_0 = 0.0
+pwp_density_pieces_1 = 2.440541089317499e+10
+pwp_density_pieces_2 = 3.783891775178311e+14
+pwp_density_pieces_3 = 2.628016536127510e+15
+pwp_density_pieces_4 = 1.678206164471678e+17
+pwp_density_pieces_5 = 5.012283124088193e+17
+pwp_density_pieces_6 = 1.000082402167331e+18
+
+pwp_gamma_pieces_0   = 1.584249973
+pwp_gamma_pieces_1   = 1.287330031
+pwp_gamma_pieces_2   = 0.6222299933
+pwp_gamma_pieces_3   = 1.356920004
+pwp_gamma_pieces_4   = 3.446000099
+pwp_gamma_pieces_5   = 3.572000027
+pwp_gamma_pieces_6   = 2.887000084
+
+<z4c>
+# 1+log lapse
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+
+# Gamma-driver shift
+shift_eta       = 0.3
+shift_advect    = 1.0
+
+# Kreiss-Oliger dissipation
+diss            = 0.5
+chi_div_floor   = 1e-05
+
+# Constraint damping (Z4c)
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+id_file     = /sakura/ptmp/tlam/initial/rns_new/MPA1_J0.00_Mb1.800_B1.53E+02_mphi1.00E-01_rhoc9.356E+14_sphim1.714.dat
+user_hist   = true
+
+<scalarfield>
+omega_c   = 153.0    # "B" in the filename / paper's notation
+beta0     = 1.0      # hardcoded throughout this module -- not independently free
+mass2     = 0.01     # mphi=0.1 -> mass2 = mphi^2
+sphi0     = 0.0
+diss      = 0.5
+
+<output1>
+file_type   = hst
+dt          = 0.00001
+data_format = %20.15e
+
+<output2>
+file_type   = tab
+variable    = z4c
+dt          = 0.00001
+slice_x2    = 0.5
+slice_x3    = 0.5
+ghost_zones = false
+data_format = %.16e

@@ -195,6 +195,10 @@ class MeshBoundaryValues {
   static void Z4cBCs(MeshBlockPack *pp, DualArray2D<Real> uin, DvceArray5D<Real> u0);
   static void Z4cBCsCoarse(MeshBlockPack *pp, DualArray2D<Real> uin,
                            DvceArray5D<Real> coarse_u0);
+  static void ScalarFieldBCs(MeshBlockPack *pp, DualArray2D<Real> uin,
+                             DvceArray5D<Real> u0);
+  static void ScalarFieldBCsCoarse(MeshBlockPack *pp, DualArray2D<Real> uin,
+                                   DvceArray5D<Real> coarse_u0);
 
  protected:
   // must use pointer to MBPack and not parent physics module since parent can be one of

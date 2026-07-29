@@ -215,7 +215,14 @@ TaskStatus ScalarField::RestrictU(Driver *pdrive, int stage) {
 //! \brief prolongate solution at fine/coarse boundaries (SMR/AMR only)
 
 TaskStatus ScalarField::Prolongate(Driver *pdrive, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
+  if (pmy_pack->pmesh->multilevel) {  // only prolongate with SMR/AMR
+    // Step 1: apply physical BCs to the coarse array, so the prolongation stencil
+    //         reads valid data in coarse ghost zones that sit at a physical boundary.
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      pbval_u->ScalarFieldBCsCoarse(pmy_pack, pbval_u->u_in, coarse_u0);
+    }
+
+    // Step 2: prolongate fine ghost zones from the coarse array.
     pbval_u->ProlongateCC(u0, coarse_u0, true);
   }
   return TaskStatus::complete;
@@ -225,17 +232,24 @@ TaskStatus ScalarField::Prolongate(Driver *pdrive, int stage) {
 //! \fn  TaskStatus ScalarField::ApplyPhysicalBCs
 //! \brief
 //!
-//! No dedicated ScalarField boundary-value formula lives here -- the Phase 4
-//! Yukawa-falloff Sommerfeld condition for the massive field ended up as its own task,
-//! SF_SomBC (ScalarFieldBoundaryRHS, in scalar_field_Sbc.cpp), queued right after
-//! CalcRHS, mirroring where Z4c_SomBC sits relative to Z4c_CalcRHS -- not here, since
-//! this task runs after boundary communication/RK-update, too late to affect the RHS
-//! the way a Sommerfeld condition needs to. Ghost zones are filled by inter-MeshBlock
-//! communication above; only the generic user-BC hook runs here, matching the
-//! convention used by every other physics module (Z4c, MHD, ...).
+//! Fills sphi/Pi ghost zones at true physical (domain-edge) boundaries via
+//! pbval_u->ScalarFieldBCs (scalar_field_bcs.cpp), mirroring Z4c::ApplyPhysicalBCs'
+//! pbval_u->Z4cBCs call. This is a *separate* mechanism from the inter-MeshBlock
+//! communication above (SendU/RecvU only exchange data with real neighbor MeshBlocks,
+//! never touching true domain-edge ghost cells) -- without it, sphi/Pi ghost zones at
+//! any reflect/outflow/diode/vacuum/inflow face stay frozen at their problem-generator
+//! initial values for the entire run. Unlike Z4cBCs, there is no odd-parity sign flip
+//! anywhere in ScalarFieldBCs: sphi and Pi are true 3-scalars (even parity under every
+//! reflection), unlike Z4c's tensor components. (SF_SomBC/ScalarFieldBoundaryRHS in
+//! scalar_field_Sbc.cpp is unrelated: that's an RHS/source-term correction applied
+//! during CalcRHS, not a ghost-zone fill, and doesn't substitute for this.)
 
 TaskStatus ScalarField::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   if (!(pmy_pack->pmesh->strictly_periodic)) {
+    // Step 3: apply physical BCs to the fine array. This is called *after*
+    //         prolongation, so that the corner ghost zones between a coarse neighbor
+    //         and a physical boundary read valid data.
+    pbval_u->ScalarFieldBCs((pmy_pack), (pbval_u->u_in), u0);
     if (pmy_pack->pmesh->pgen->user_bcs) {
       (pmy_pack->pmesh->pgen->user_bcs_func)(pmy_pack->pmesh);
     }

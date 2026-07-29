@@ -26,6 +26,7 @@ add_executable(
         bvals/physics/bfield_bcs.cpp
         bvals/physics/radiation_bcs.cpp
         bvals/physics/z4c_bcs.cpp
+        bvals/physics/scalar_field_bcs.cpp
 
         coordinates/adm.cpp
         coordinates/coordinates.cpp

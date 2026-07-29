@@ -1,9 +1,13 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phase 4 (explicit mass term + Yukawa Sommerfeld BC) complete; scalarized-star
-initial data still NOT built, so neither Phase 3's nor Phase 4's physics is validated
-against SACRA yet -- see "Next step" below.**
-This directory implements a massive
+Status: **Phases 0-6 done.** Scalarized-star initial data (Phase 5, an external-reader
+pgen rather than the in-repo shooting solve originally planned) and physical-boundary
+ghost-zone filling for the scalar field (Phase 6) are both built and verified. Still
+open: whether the MPA1 star's evolution instability (Phase 5) is a genuine physical
+instability of that configuration or a numerical/coupling issue (unresolved even after
+Phase 6's fix, see below); a quantitative Yukawa `exp(-m*r)/r` falloff check against
+SACRA (Phase 4's still-missing verification item); and `Z4c::ADMConstraints` scalar-
+awareness (see the dedicated gap note below). This directory implements a massive
 scalar-tensor (Damour-Esposito-Farese-type) gravity sector for AthenaK, ported from
 `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and cross-checked against arXiv:2406.05211 ("Binary
 neutron star mergers in massive scalar-tensor theory", Lam, Kuan, Shibata, Van Aelst,
@@ -121,11 +125,17 @@ absent from the input file):
     before this module is exercised under genuine dynamic (`adaptive`) AMR, or
     `sphi`/`Pi` will simply not exist on any MeshBlock created/destroyed by a real
     regridding event.
-- **`ApplyPhysicalBCs` is a no-op** (beyond the generic user-BC hook every physics module
-  calls). There is no `ScalarFieldBCs` formula yet -- ghost zones at the edge of the whole
-  domain will hold whatever the problem generator set them to, or whatever a pgen's
-  `user_bcs_func` sets. This is fine for Phase 0/1 (periodic or reflecting test domains);
-  Phase 4 is where the Yukawa-falloff Sommerfeld condition gets added (see the plan file).
+- **`ApplyPhysicalBCs` is a no-op (superseded in Phase 6, see below)**: beyond the
+  generic user-BC hook every physics module calls, there was no `ScalarFieldBCs`
+  formula -- ghost zones at the edge of the whole domain held whatever the problem
+  generator set them to, forever, regardless of BC type. This was originally assumed
+  harmless for Phase 0/1's periodic/reflecting test domains, and conflated with the
+  Yukawa-falloff Sommerfeld condition added in Phase 4 (`SF_SomBC`) -- but that task is
+  an RHS/source-term correction, not a ghost-zone fill, and does not substitute for
+  one. **This turned out to matter in practice**: every `<scalarfield>` run through
+  Phase 5 (RNS-ST, `reflect`/`diode` domain-edge BCs) silently left `sphi`/`Pi` ghost
+  zones frozen at their `t=0` values for the whole run. Fixed in Phase 6 with a
+  dedicated `ScalarFieldBCs`, mirroring `Z4cBCs`.
 - **No `SF_Newdt` task**: the scalar field's own characteristic speed is the speed of
   light, already reflected in Z4c's existing CFL-based timestep. (Originally this bullet
   anticipated Phase 4's mass term needing a separate stiff-source timestep/IMEX
@@ -464,25 +474,27 @@ explicit RHS term, so it's just added alongside them. Three pieces:
   `dyngr_tov.cpp`). Build `scalar_field_linear_wave` (and any other `pgen/tests/*.cpp`
   pgen dispatched by `pgen_name`) with the default `PROBLEM=built_in_pgens` instead.
 
-## Next step: scalarized initial data, then quantitative Phase 4 validation
+## Next step (as of Phase 4 -- superseded in part by Phase 5/6, see below)
 
 Phase 4's code (explicit mass term, Yukawa Sommerfeld BC) is done and structurally
 verified (regression + stability), but -- same as Phase 3 -- not yet *physics*-validated
 against SACRA, because that requires a genuinely nonzero, constraint-satisfying `sphi`,
 which still doesn't exist in this repo. The remaining open items, in the order they
 naturally unblock each other:
-1. Build the scalarized-TOV shooting solve in-repo (extend `src/utils/tov/tov.cpp` +
-   `dyngr_tov.cpp`), compare central `sphi` and radial profile against SACRA's
-   single-star output, check static equilibrium (no secular drift) and constraint
-   convergence with matter. This is the PLAN.md Phase 3 verification step, still open,
-   and now also unblocks Phase 4's own missing check (below).
-2. Extend that same solver to a massive scalarized star (`mass2>0`), and verify the
-   `exp(-m*r)/r` far-field falloff over several e-foldings against SACRA's `pmass2>0`
-   single-star output -- this is Phase 4's still-missing quantitative verification step
-   (the mass-term *code* is done, but the physics it implements has only been sanity-
-   checked for stability, not validated).
+1. ~~Build the scalarized-TOV shooting solve in-repo (extend `src/utils/tov/tov.cpp` +
+   `dyngr_tov.cpp`)~~ -- **this path was not taken.** Phase 5 instead ported an
+   external RNS-ST equilibrium solver's own reader/interpolator into a new pgen
+   (`dyngr_rns_st.cpp`), which already produces genuinely nonzero, constraint-
+   satisfying `sphi` initial data (validated against two real stars) -- see Phase 5
+   below for what that closed and what it left open (an unexplained MPA1 instability).
+2. Verify the `exp(-m*r)/r` far-field falloff over several e-foldings against SACRA's
+   `pmass2>0` single-star output using the now-available RNS-ST data (both tested
+   stars already have `mass2>0`) -- this is Phase 4's still-missing quantitative
+   verification step (the mass-term *code* is done and stable, but this specific
+   physics check has not been performed). **Still open.**
 3. Close the `Z4c::ADMConstraints` scalar-awareness gap above before relying on
-   constraint convergence as a verification method for either of the above.
+   constraint convergence as a verification method for either of the above. **Still
+   open.**
 
 ## Phase 5 -- RNS-ST scalarized-star initial data (new pgen, closes the open gap above)
 
@@ -588,6 +600,68 @@ sign-changing scalar profile could in principle be tested later; for both stars
 tested so far `sphi` is positive everywhere so `sphi-max` is unchanged from before,
 and `sphi-min` is a small positive value near the outer domain boundary where the
 field decays toward zero far from the star.
+
+Also added `variable = scalarfield` (and per-component `sf_sphi`/`sf_pi`) support to
+`outputs.hpp`/`basetype_output.cpp`, modeled on `Tmunu`'s dispatch pattern -- works for
+`bin`/`tab`/`vtk` output alike, since they all share one variable-dispatch path.
+Verified against a real run via `vis/python/bin_convert.py`: `sf_sphi` max/min in the
+`.bin` output match the `.hst` diagnostics exactly, `sf_pi=0` everywhere (correct for
+a `J=0` star).
+
+## Phase 6 -- ScalarFieldBCs: physical-boundary ghost-zone fill (closes a Phase-0 gap)
+
+Found and fixed a real, live gap while investigating `ScalarField::ApplyPhysicalBCs`
+(`scalar_field_tasks.cpp`): it was a true no-op beyond the generic `user_bcs_func`
+hook (which never fires for any RNS-ST input, since those use `reflect`/`diode`, not
+`user`). Every other physics module (Hydro, MHD, Radiation, Z4c) has its own
+dedicated `<Module>BCs` function in `src/bvals/physics/` that fills ghost zones at
+true physical (domain-edge) boundaries every stage; `ScalarField` never got one.
+Confirmed this is a *separate* mechanism from inter-MeshBlock communication (which
+only exchanges data with real neighbor blocks and never touches true domain-edge
+ghost cells, regardless of BC type) -- so this was not a redundant safety net, it was
+the only mechanism that could have filled these cells, and it was entirely absent.
+
+**Practical consequence, retroactive**: every `<scalarfield>` run to date (all of
+Phase 5, both MPA1 and Gam2_K100) left `sphi`/`Pi` ghost zones at every
+`reflect`/`diode` domain-edge face frozen at whatever the problem generator set at
+`t=0`, for the entire run -- they were never updated as the interior solution
+evolved. This means the Phase 5 conclusion above ("not a generic bug in the new pgen
+or the reflect-BC/back-reaction wiring") should be read narrowly: there was, in fact,
+no reflect-BC ghost-zone wiring at all for the scalar field at that point, for either
+star. The Gam2_K100 stability result itself doesn't change (that run's `sphi` ghost
+zones were simply stale for its whole duration and it was still stable), but the
+open MPA1 instability question has NOT been re-examined with this fix in place -- it
+remains exactly as open as before, now with one more variable (frozen vs.
+correctly-filled ghost zones) worth trying if/when someone returns to it.
+
+Fix: new `src/bvals/physics/scalar_field_bcs.cpp`, `MeshBoundaryValues::ScalarFieldBCs`,
+a direct structural port of `Z4cBCs`/`BCHelper` (same per-face `switch` over
+`reflect`/`outflow`/`diode`/`vacuum`/`inflow`, same coarse-array second pass for
+`multilevel`). The one simplification vs. `Z4cBCs`: `sphi` and `Pi` are true
+3-scalars (even parity under every reflection), unlike Z4c's tensor components
+(which need a hardcoded odd-parity sign flip for 6 of 25 variables) -- so every
+`reflect` case here is a plain mirror copy, no parity branch at all. Reuses
+`pz4c->opt.extrap_order` for the `outflow`/`diode`/`vacuum` extrapolation order
+rather than adding an independent `<scalarfield>` input option, since `ScalarField`
+already hard-requires `<z4c>` and its RHS already piggybacks on Z4c's derivative
+conventions. Wired via `ApplyPhysicalBCs` (mirroring `Z4c::ApplyPhysicalBCs`) and a
+new `bvals.hpp` declaration + `CMakeLists.txt` entry, same pattern as the other three
+`*_bcs.cpp` files.
+
+**Verified directly, not just by absence of crashes**: reran `rns_st_gam2k100.athinput`
+with `ghost_zones=true` on the `scalarfield` bin output and inspected raw ghost-cell
+values at the meshblock touching the inner (reflecting) domain corner. At `t=0` the
+mirror property `u0(is-i-1)==u0(is+i)` holds (expected -- the problem generator fills
+ghost cells directly from the same interpolator). At `t=3.2` (cycle 5) it *still*
+holds exactly, but the interior values themselves have changed slightly (e.g.
+`0.0217578448 -> 0.0217578653`) -- confirming the ghost cells are being actively
+recomputed from the evolving interior every step, not left stale. Separately checked
+the outer `diode` face (a different MeshBlock): ghost-cell values there also shift
+between `t=0` and `t=3.2` in a manner consistent with linear extrapolation from the
+(also slightly shifted) interior edge value, not a frozen constant. Also reran the
+plain `rns_st_gam2k100.athinput` regression (no `ghost_zones` override, `nlim=30`):
+still clean, zero NaNs -- this fix doesn't destabilize the one star that was already
+working.
 
 ## Sample input block
 

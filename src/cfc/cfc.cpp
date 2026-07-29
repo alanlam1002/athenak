@@ -111,7 +111,6 @@ void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
 
 CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     pmy_pack(pmbp),
-    u_x("cfc_u_x", 1, 1, 1, 1, 1),
     u_beta("cfc_u_beta", 1, 1, 1, 1, 1),
     u_adual("cfc_u_adual", 1, 1, 1, 1, 1),
     a_sq("cfc_a_sq", 1, 1, 1, 1, 1),
@@ -128,11 +127,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     pmgd_pietabeta(nullptr),
     pmgd_psi(nullptr),
     pmgd_alpha(nullptr),
-    pbval_pietax(nullptr), pbval_x(nullptr),
+    pbval_pietax(nullptr),
     pbval_psi(nullptr), pbval_alpha_psi(nullptr),
     pbval_pietabeta(nullptr),
     coarse_u_pietax("cfc_coarse_u_pietax", 1, 1, 1, 1, 1),
-    coarse_u_x("cfc_coarse_u_x", 1, 1, 1, 1, 1),
     coarse_psi("cfc_coarse_psi", 1, 1, 1, 1, 1),
     coarse_alpha_psi("cfc_coarse_alpha_psi", 1, 1, 1, 1, 1),
     coarse_u_pietabeta("cfc_coarse_u_pietabeta", 1, 1, 1, 1, 1),
@@ -148,7 +146,6 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*(indcs.ng)) : 1;
   int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*(indcs.ng)) : 1;
-  Kokkos::realloc(u_x,      nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_beta,   nmb, 3, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_adual,  nmb, 6, ncells3, ncells2, ncells1);
   Kokkos::realloc(a_sq,     nmb, 1, ncells3, ncells2, ncells1);
@@ -170,7 +167,6 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::deep_copy(delta_psi, 0.0);
   Kokkos::deep_copy(delta_alpha_psi, 0.0);
 
-  x_u.InitWithShallowSlice(u_x, 0, 2);
   beta_u.InitWithShallowSlice(u_beta, 0, 2);
   a_dd.InitWithShallowSlice(u_adual, 0, 5);
   s_tilde_d.InitWithShallowSlice(u_stilde, 0, 2);
@@ -203,8 +199,6 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // z4c::Z4c::pbval_u/coarse_u0 (is_z4c=false throughout -- see cfc.hpp).
   pbval_pietax = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_pietax->InitializeBuffers(4);
-  pbval_x = new MeshBoundaryValuesCC(pmbp, pin, false);
-  pbval_x->InitializeBuffers(3);
   pbval_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
   pbval_psi->InitializeBuffers(1);
   pbval_alpha_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
@@ -226,7 +220,6 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     int nccells2 = (indcs.cnx2 > 1) ? (indcs.cnx2 + 2*(indcs.ng)) : 1;
     int nccells3 = (indcs.cnx3 > 1) ? (indcs.cnx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(coarse_u_pietax,    nmb, 4, nccells3, nccells2, nccells1);
-    Kokkos::realloc(coarse_u_x,         nmb, 3, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_psi,         nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_alpha_psi,   nmb, 1, nccells3, nccells2, nccells1);
     Kokkos::realloc(coarse_u_pietabeta, nmb, 4, nccells3, nccells2, nccells1);
@@ -278,7 +271,6 @@ CFC::~CFC() {
   delete pmgd_psi;
   delete pmgd_alpha;
   delete pbval_pietax;
-  delete pbval_x;
   delete pbval_psi;
   delete pbval_alpha_psi;
   delete pbval_pietabeta;
@@ -312,22 +304,11 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::BCSPiEtaXTask, this, CFC_BCSPiEtaX, "CFC_BCSPiEtaX",
                  Task_Run, {CFC_ProlongPiEtaX});
 
-  pnr->QueueTask(&CFC::ReconstructXTask, this, CFC_ReconstructX, "CFC_ReconstructX",
-                 Task_Run, {CFC_BCSPiEtaX});
-
-  pnr->QueueTask(&CFC::RestXTask, this, CFC_RestX, "CFC_RestX",
-                 Task_Run, {CFC_ReconstructX});
-  pnr->QueueTask(&CFC::SendXTask, this, CFC_SendX, "CFC_SendX",
-                 Task_Run, {CFC_RestX});
-  pnr->QueueTask(&CFC::RecvXTask, this, CFC_RecvX, "CFC_RecvX",
-                 Task_Run, {CFC_SendX});
-  pnr->QueueTask(&CFC::ProlongXTask, this, CFC_ProlongX, "CFC_ProlongX",
-                 Task_Run, {CFC_RecvX});
-  pnr->QueueTask(&CFC::BCSXTask, this, CFC_BCSX, "CFC_BCSX",
-                 Task_Run, {CFC_ProlongX});
-
+  // Adual^ij is computed directly from u_p_x's already ghost-exchanged (P_i, eta)
+  // -- X^i is never materialized, so no reconstruct/ghost-exchange quintet is
+  // needed for it (see cfc::ComputeADualFromPotentials).
   pnr->QueueTask(&CFC::ComputeADualTask, this, CFC_ComputeADual, "CFC_ComputeADual",
-                 Task_Run, {CFC_BCSX});
+                 Task_Run, {CFC_BCSPiEtaX});
 
   pnr->QueueTask(&CFC::SolvePsiTask, this, CFC_SolvePsi, "CFC_SolvePsi",
                  Task_Run, {CFC_ComputeADual});
@@ -410,13 +391,10 @@ void CFC::QueueCFCTasks() {
 
 void CFC::InitRecvXFields() {
   pbval_pietax->InitRecv(4);
-  pbval_x->InitRecv(3);
 }
 void CFC::ClearXFields() {
   pbval_pietax->ClearSend();
-  pbval_x->ClearSend();
   pbval_pietax->ClearRecv();
-  pbval_x->ClearRecv();
 }
 void CFC::InitRecvTailFields() {
   pbval_psi->InitRecv(1);
@@ -452,24 +430,18 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
 
   InitRecvXFields();
 
-  // Solve X^i: build S_i-tilde/U-tilde from the current cons, solve the packed
-  // (P_i, eta), ghost-exchange it, reconstruct x_u, ghost-exchange it too.
+  // Solve X^i's packed (P_i, eta) source and ghost-exchange it.
   SolveVectorPotential(pdriver, 0);
   RestPiEtaXTask(pdriver, 0);  SendPiEtaXTask(pdriver, 0);
   while (RecvPiEtaXTask(pdriver, 0) != TaskStatus::complete) {}
   ProlongPiEtaXTask(pdriver, 0);
   BCSPiEtaXTask(pdriver, 0);
 
-  ReconstructVectorPotential();
-  RestXTask(pdriver, 0);  SendXTask(pdriver, 0);
-  while (RecvXTask(pdriver, 0) != TaskStatus::complete) {}
-  ProlongXTask(pdriver, 0);
-  BCSXTask(pdriver, 0);
-
   ClearXFields();
 
-  // Adual^ij/Ahat^2 from the just-exchanged x_u, then solve psi -- this updates
-  // padm->adm.g_dd/psi4 (via AssembleConformalMetric) for whatever comes next.
+  // Adual^ij/Ahat^2 computed directly from the just-exchanged (P_i, eta), then
+  // solve psi -- this updates padm->adm.g_dd/psi4 (via AssembleConformalMetric)
+  // for whatever comes next.
   ComputeADual();
   SolveConformalFactor(pdriver, 0, cfc_init_use_psi5_);
 }
@@ -823,35 +795,6 @@ TaskStatus CFC::BCSPiEtaXTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 
-TaskStatus CFC::RestXTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u_x, coarse_u_x, false);
-  }
-  return TaskStatus::complete;
-}
-TaskStatus CFC::SendXTask(Driver *pdriver, int stage) {
-  return pbval_x->PackAndSendCC(u_x, coarse_u_x);
-}
-TaskStatus CFC::RecvXTask(Driver *pdriver, int stage) {
-  return pbval_x->RecvAndUnpackCC(u_x, coarse_u_x);
-}
-TaskStatus CFC::ProlongXTask(Driver *pdriver, int stage) {
-  if (pmy_pack->pmesh->multilevel) {
-    if (!(pmy_pack->pmesh->strictly_periodic)) {
-      MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_x, 3, 1);
-    }
-    pbval_x->FillCoarseInBndryCC(u_x, coarse_u_x);
-    pbval_x->ProlongateCC(u_x, coarse_u_x, false);
-  }
-  return TaskStatus::complete;
-}
-TaskStatus CFC::BCSXTask(Driver *pdriver, int stage) {
-  if (!(pmy_pack->pmesh->strictly_periodic)) {
-    MeshBoundaryValues::CFCBCs(pmy_pack, u_x, 3, 1);
-  }
-  return TaskStatus::complete;
-}
-
 TaskStatus CFC::RestPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(delta_psi, coarse_psi, false);
@@ -985,10 +928,9 @@ TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
 // InitRecv/ClearSend/ClearRecv (bvals_tasks.cpp) all unconditionally return
 // TaskStatus::complete, so no incomplete-status propagation is needed -- matches
 // z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
-// over CFC's 6 MeshBoundaryValuesCC instances instead of one.
+// over CFC's 5 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   pbval_pietax->InitRecv(4);
-  pbval_x->InitRecv(3);
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
   pbval_pietabeta->InitRecv(4);
@@ -997,7 +939,6 @@ TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
   pbval_pietax->ClearSend();
-  pbval_x->ClearSend();
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
   pbval_pietabeta->ClearSend();
@@ -1006,7 +947,6 @@ TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
   pbval_pietax->ClearRecv();
-  pbval_x->ClearRecv();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
   pbval_pietabeta->ClearRecv();
@@ -1015,25 +955,17 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 }
 
 //----------------------------------------------------------------------------------------
-// step 1: X^i's packed (P_i, eta) right-hand side, solved (not yet reconstructed into
-// x_u -- needs u_p_x's own ghost exchange first, see CFC_ReconstructX). Runs after
-// MHD_AddSrc, once this stage's hydro flux+source update has produced the conserved
-// state AssembleVectorSource reads from.
+// step 1: X^i's packed (P_i, eta) right-hand side, solved. Runs after MHD_AddSrc,
+// once this stage's hydro flux+source update has produced the conserved state
+// AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   SolveVectorPotential(pdriver, stage);
   return TaskStatus::complete;
 }
 
-// CFC_ReconstructX: build x_u from u_p_x (packed P_i, eta) once its ghost exchange
-// has completed.
-
-TaskStatus CFC::ReconstructXTask(Driver *pdriver, int stage) {
-  ReconstructVectorPotential();
-  return TaskStatus::complete;
-}
-
-// step 2: Adual^ij/Ahat^2 from x_u, once x_u's own ghost exchange completes.
+// step 2: Adual^ij/Ahat^2, computed directly from u_p_x's (P_i, eta) once its own
+// ghost exchange (CFC_BCSPiEtaX) completes -- X^i is never materialized.
 
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   ComputeADual();
@@ -1208,13 +1140,8 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   return;
 }
 
-void CFC::ReconstructVectorPotential() {
-  cfc::ReconstructVectorFromPotentials(pmy_pack, p_x, u_p_x, x_u, 3);
-  return;
-}
-
 void CFC::ComputeADual() {
-  cfc::ComputeADualFromX(pmy_pack, x_u, a_dd);
+  cfc::ComputeADualFromPotentials(pmy_pack, p_x, u_p_x, a_dd, 3);
 
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;

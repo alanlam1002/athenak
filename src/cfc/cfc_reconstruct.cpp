@@ -19,40 +19,6 @@ namespace cfc {
 
 namespace {
 
-// Gmunu eq. 76: Adual^ij = D^i X^j + D^j X^i - (2/3) D_k X^k f^ij. Symmetrizing the two
-// raw derivative terms gives the same result regardless of which index of dX[][] is
-// "component" vs. "direction".
-
-template <int NGHOST>
-void ComputeADualFromXImpl(MeshBlockPack *pmbp,
-                            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
-                            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd) {
-  auto &indcs = pmbp->pmesh->mb_indcs;
-  auto &size = pmbp->pmb->mb_size;
-  int &is = indcs.is; int &ie = indcs.ie;
-  int &js = indcs.js; int &je = indcs.je;
-  int &ks = indcs.ks; int &ke = indcs.ke;
-  int nmb = pmbp->nmb_thispack;
-
-  par_for("cfc_adual", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
-  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
-                  1.0/size.d_view(m).dx3};
-    Real dX[3][3];
-    for (int a = 0; a < 3; ++a) {
-      for (int b = 0; b < 3; ++b) {
-        dX[a][b] = Dx<NGHOST>(b, idx, x_u, m, a, k, j, i);
-      }
-    }
-    Real trace = dX[0][0] + dX[1][1] + dX[2][2];
-    for (int a = 0; a < 3; ++a) {
-      for (int b = a; b < 3; ++b) {
-        a_dd(m,a,b,k,j,i) = dX[a][b] + dX[b][a] - (a == b ? (2./3.)*trace : 0.0);
-      }
-    }
-  });
-}
-
 // Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k). eta's
 // eta_chan'th channel is shallow-sliced into a rank-0 AthenaTensor to reuse the
 // generic Dx<NGHOST> scalar overload.
@@ -95,16 +61,81 @@ void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
   });
 }
 
+// Gmunu eq. 76 with X^j = 0.875*P^j - 0.125*(eta,_j + P_k,_j x^k) (Shibata eq. 3.9)
+// substituted in and expanded: D_i X^j = 0.875*D_i P^j - 0.125*[D_i D_j eta +
+// sum_k (D_i D_j P^k) x^k + D_j P^i]. D_i D_j is Dxx(i,...) when i==j, Dxy(i,j,...)
+// otherwise -- both have the same stencil radius as Dx<NGHOST>, so this needs no
+// wider ghost region than P_i/eta's own exchange already provides. Trace/
+// symmetrization: Adual^ab = D_a X^b + D_b X^a - (2/3) delta_ab * (D_0 X^0 +
+// D_1 X^1 + D_2 X^2).
+
+template <int NGHOST>
+void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
+                                     const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
+                                         &p_i,
+                                     const DvceArray5D<Real> &eta,
+                                     AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                                     int eta_chan) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  auto &size = pmbp->pmb->mb_size;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmbp->nmb_thispack;
+
+  AthenaTensor<Real, TensorSymm::NONE, 3, 0> eta_view;
+  eta_view.InitWithShallowSlice(eta, eta_chan);
+
+  par_for("cfc_adual_direct", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
+                  1.0/size.d_view(m).dx3};
+    Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
+    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+    Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
+    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+    Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
+    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    Real xk[3] = {x1v, x2v, x3v};
+
+    Real dX[3][3];
+    for (int idir = 0; idir < 3; ++idir) {
+      for (int jdir = 0; jdir < 3; ++jdir) {
+        Real d2eta = (idir == jdir) ? Dxx<NGHOST>(idir, idx, eta_view, m, k, j, i)
+                                     : Dxy<NGHOST>(idir, jdir, idx, eta_view, m, k, j, i);
+        Real sum = 0.0;
+        for (int kdir = 0; kdir < 3; ++kdir) {
+          Real d2p = (idir == jdir)
+                     ? Dxx<NGHOST>(idir, idx, p_i, m, kdir, k, j, i)
+                     : Dxy<NGHOST>(idir, jdir, idx, p_i, m, kdir, k, j, i);
+          sum += d2p*xk[kdir];
+        }
+        Real dj_pi = Dx<NGHOST>(jdir, idx, p_i, m, idir, k, j, i);
+        Real di_pj = Dx<NGHOST>(idir, idx, p_i, m, jdir, k, j, i);
+        dX[idir][jdir] = 0.875*di_pj - 0.125*(d2eta + sum + dj_pi);
+      }
+    }
+    Real trace = dX[0][0] + dX[1][1] + dX[2][2];
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        a_dd(m,a,b,k,j,i) = dX[a][b] + dX[b][a] - (a == b ? (2./3.)*trace : 0.0);
+      }
+    }
+  });
+}
+
 }  // namespace
 
-void ComputeADualFromX(MeshBlockPack *pmbp,
-                        const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
-                        AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd) {
+void ComputeADualFromPotentials(MeshBlockPack *pmbp,
+                                 const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
+                                 const DvceArray5D<Real> &eta,
+                                 AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                                 int eta_chan) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: ComputeADualFromXImpl<2>(pmbp, x_u, a_dd); break;
-    case 3: ComputeADualFromXImpl<3>(pmbp, x_u, a_dd); break;
-    case 4: ComputeADualFromXImpl<4>(pmbp, x_u, a_dd); break;
+    case 2: ComputeADualFromPotentialsImpl<2>(pmbp, p_i, eta, a_dd, eta_chan); break;
+    case 3: ComputeADualFromPotentialsImpl<3>(pmbp, p_i, eta, a_dd, eta_chan); break;
+    case 4: ComputeADualFromPotentialsImpl<4>(pmbp, p_i, eta, a_dd, eta_chan); break;
   }
 }
 

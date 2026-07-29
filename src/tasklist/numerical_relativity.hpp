@@ -94,8 +94,6 @@ enum TaskName {
   CFC_InitRecv,
   CFC_BuildSrcX,
   CFC_RestPiEtaX, CFC_SendPiEtaX, CFC_RecvPiEtaX, CFC_ProlongPiEtaX, CFC_BCSPiEtaX,
-  CFC_ReconstructX,
-  CFC_RestX, CFC_SendX, CFC_RecvX, CFC_ProlongX, CFC_BCSX,
   CFC_ComputeADual,
   CFC_SolvePsi,
   CFC_RescaleSrc,

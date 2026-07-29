@@ -89,7 +89,7 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // elsewhere).
     void LoadMatterSource(const DvceArray5D<Real> &u_tilde, int ngh);
 
-    // Load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromX),
+    // Load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromPotentials),
     // stored in coeff_ channel 1 (ncoeff_ = 2 total). Can't reuse Multigrid::
     // LoadCoefficients() (copies all ncoeff_ channels at once, no per-channel
     // offset) -- does its own single-channel par_for via CoeffAtLevel(), mirroring

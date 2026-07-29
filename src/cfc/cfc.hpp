@@ -51,9 +51,6 @@ class CFC {
   // storage array; scalars are plain DvceArray5D<Real>. All sized at mesh-NGHOST
   // depth (nmb, ncomp, nx3+2*ng, nx2+2*ng, nx1+2*ng).
 
-  DvceArray5D<Real> u_x;
-  AthenaTensor<Real, TensorSymm::NONE, 3, 1> x_u;      // X^i, vector potential (eq. 72)
-
   DvceArray5D<Real> u_beta;
   AthenaTensor<Real, TensorSymm::NONE, 3, 1> beta_u;   // beta^i, shift vector
 
@@ -96,8 +93,11 @@ class CFC {
   // Delta eta = -S_i x^i). Both are packed into one nvar_=4 array (P_i at channels
   // 0-2, eta at channel 3) and solved together by one MGCFCVectorPoissonDriver::
   // Solve() call -- eta has no dedicated view, read/written as channel 3 of
-  // u_p_x/u_p_beta directly. Reconstructed into x_u/beta_u by
-  // cfc::ReconstructVectorFromPotentials.
+  // u_p_x/u_p_beta directly. beta^i is reconstructed into beta_u by
+  // cfc::ReconstructVectorFromPotentials; X^i is never materialized at all --
+  // Adual^ij is computed directly from (P_i, eta) via
+  // cfc::ComputeADualFromPotentials (X^i's own definition substituted into and
+  // expanded through Adual's formula), which needs no ghost exchange of its own.
   //
   // Unlike u_p_src below, these are solve OUTPUTS that cfc_reconstruct.cpp then
   // differentiates -- sized at mesh-NGHOST depth (not this solver's own shallower
@@ -174,10 +174,10 @@ class CFC {
   // coarse_u0; is_z4c=false throughout). coarse_* arrays are only sized under
   // SMR/AMR (RestrictCC/ProlongateCC are no-ops otherwise). u_p_x/u_p_beta each get
   // one round covering all 4 packed channels at once.
-  MeshBoundaryValuesCC *pbval_pietax, *pbval_x;
+  MeshBoundaryValuesCC *pbval_pietax;
   MeshBoundaryValuesCC *pbval_psi, *pbval_alpha_psi;
   MeshBoundaryValuesCC *pbval_pietabeta;
-  DvceArray5D<Real> coarse_u_pietax, coarse_u_x;
+  DvceArray5D<Real> coarse_u_pietax;
   DvceArray5D<Real> coarse_psi, coarse_alpha_psi;
   DvceArray5D<Real> coarse_u_pietabeta;
 
@@ -265,7 +265,6 @@ class CFC {
   // NumericalRelativity::QueueTask). Each wraps the like-named private Step method
   // below; kept separate so the "Step N" structure stays visible.
   TaskStatus SolveVecXTask(Driver *pdriver, int stage);       // step 1 (CFC_BuildSrcX)
-  TaskStatus ReconstructXTask(Driver *pdriver, int stage);    // CFC_ReconstructX
   TaskStatus ComputeADualTask(Driver *pdriver, int stage);    // step 2 (CFC_ComputeADual)
   TaskStatus SolvePsiTask(Driver *pdriver, int stage);        // step 3
   TaskStatus RescaleSrcTask(Driver *pdriver, int stage);      // step 4
@@ -281,11 +280,6 @@ class CFC {
   TaskStatus RecvPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus ProlongPiEtaXTask(Driver *pdriver, int stage);
   TaskStatus BCSPiEtaXTask(Driver *pdriver, int stage);
-  TaskStatus RestXTask(Driver *pdriver, int stage);
-  TaskStatus SendXTask(Driver *pdriver, int stage);
-  TaskStatus RecvXTask(Driver *pdriver, int stage);
-  TaskStatus ProlongXTask(Driver *pdriver, int stage);
-  TaskStatus BCSXTask(Driver *pdriver, int stage);
   TaskStatus RestPsiTask(Driver *pdriver, int stage);
   TaskStatus SendPsiTask(Driver *pdriver, int stage);
   TaskStatus RecvPsiTask(Driver *pdriver, int stage);
@@ -326,13 +320,13 @@ class CFC {
   void AssembleVectorSource(bool for_shift);
 
   // Step 1: build eq. 72's source from pmhd->u0, solve pmgd_pietax (packed P_i,
-  // eta) into u_p_x. x_u itself is reconstructed later, after u_p_x's own ghost
-  // exchange (see ReconstructVectorPotential).
+  // eta) into u_p_x.
   void SolveVectorPotential(Driver *pdriver, int stage);
 
-  void ReconstructVectorPotential();  // CFC_ReconstructX: x_u from u_p_x
-
-  void ComputeADual();  // step 2: Adual^ij (eq. 76) and Ahat^2, from x_u
+  // Step 2: Adual^ij (eq. 76) and Ahat^2, computed directly from u_p_x's already
+  // ghost-exchanged (P_i, eta) via cfc::ComputeADualFromPotentials -- X^i itself
+  // is never materialized (see the comment on u_p_x/u_p_beta above).
+  void ComputeADual();
 
   // Step 3: solve eq. 73 for psi (nonlinear), then write psi4/g_dd into
   // padm->u_adm -- the con2prim shared with dyn_grmhd (MHD_C2P) depends on this

@@ -25,14 +25,22 @@ class MeshBlockPack;
 namespace cfc {
 
 //----------------------------------------------------------------------------------------
-//! \fn void ComputeADualFromX(MeshBlockPack *pmbp,
-//!                             const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
-//!                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd)
-//! \brief Gmunu (2021) eq. 76: Adual^ij ~= D^i X^j + D^j X^i - (2/3) D_k X^k f^ij,
-//! evaluated with flat-space finite differences (f_ij = delta_ij in Cartesian).
-void ComputeADualFromX(MeshBlockPack *pmbp,
-                        const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &x_u,
-                        AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd);
+//! \fn void ComputeADualFromPotentials(MeshBlockPack *pmbp,
+//!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
+//!            const DvceArray5D<Real> &eta,
+//!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd, int eta_chan = 0)
+//! \brief Gmunu (2021) eq. 76 (Adual^ij ~= D^i X^j + D^j X^i - (2/3) D_k X^k f^ij)
+//! with X^j (Shibata 1999 eq. 3.9) substituted in and expanded analytically, so
+//! Adual^ij is computed directly from P_i/eta's own (up to second) derivatives --
+//! X^i itself is never materialized, so it needs no ghost exchange of its own. Use
+//! this instead of reconstructing X^i via ReconstructVectorFromPotentials() when
+//! X^i is not otherwise needed (as for CFC's own Adual, unlike beta^i which is also
+//! written directly to the ADM shift).
+void ComputeADualFromPotentials(MeshBlockPack *pmbp,
+                                 const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
+                                 const DvceArray5D<Real> &eta,
+                                 AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                                 int eta_chan = 0);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
@@ -42,8 +50,9 @@ void ComputeADualFromX(MeshBlockPack *pmbp,
 //! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k) --
 //! reconstructs a vector field from the packed vector potential P_i (channels 0-2) and
 //! scalar potential eta (channel eta_chan), solved together by one
-//! MGCFCVectorPoissonDriver (see mg_cfc_vector_poisson.hpp). Used for both X^i
-//! (feeds ComputeADualFromX) and beta^i (written to the ADM shift).
+//! MGCFCVectorPoissonDriver (see mg_cfc_vector_poisson.hpp). Used for beta^i
+//! (written to the ADM shift) -- X^i's own Adual is computed directly from P_i/eta
+//! instead, via ComputeADualFromPotentials(), without ever reconstructing X^i.
 void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
                                           &p_i,

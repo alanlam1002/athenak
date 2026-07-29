@@ -6297,3 +6297,73 @@ src/cfc/
       `git diff` of all three files on `cfc` is clean (matches `HEAD`).
       Check out that branch to reuse the probes for future item 38/39 work
       instead of re-deriving them.
+
+43. **(2026-07-30) Skip reconstructing X^i entirely -- compute Adual^ij
+    directly from P_i/eta, eliminating X^i's own ghost-exchange pipeline
+    (1 fewer MPI communication per stage).** User-proposed: `X^i` (the
+    vector potential reconstructed from the packed `P_i`/`eta` solve,
+    Shibata 1999 eq. 3.9) was used for exactly one thing --
+    `ComputeADualFromX` (Gmunu eq. 76) differentiates it to get `Adual^ij`.
+    Confirmed via grep before touching anything: `x_u`/`u_x` had zero other
+    call sites anywhere in `cfc.cpp`/`cfc.hpp`. `X^i` needed its own full
+    `RestX -> SendX -> RecvX -> ProlongX -> BCSX` ghost-exchange quintet
+    (mirroring `P_i`/`eta`'s own) purely so that differentiation could read
+    valid ghost cells -- unlike `beta^i` (reconstructed the same way from
+    `u_p_beta`), which never gets its own ghost exchange because
+    `AssembleADM` only reads it at interior points, never differentiates it.
+    - **The math**: substituting `X^j`'s own definition into `Adual`'s
+      formula and expanding gives `D_i X^j = 0.875*D_i P^j -
+      0.125*[D_i D_j eta + sum_k (D_i D_j P^k) x^k + D_j P^i]` (worked out
+      by hand from the code's own two formulas, not copied from the paper --
+      Gmunu/Shibata don't give this combined form). `D_i D_j` is a genuine
+      second derivative (`Dxx(i,...)` when `i==j`, `Dxy(i,j,...)` otherwise)
+      of `P_i`/`eta` directly -- `X^i` is never materialized at all. Trace/
+      symmetrization into `Adual^ab` is otherwise identical to the old
+      `ComputeADualFromXImpl`.
+    - **Confirmed feasible before implementing, not assumed**: checked
+      `src/utils/finite_diff.hpp` directly -- `Dxx<NGHOST>`/`Dxy<NGHOST>`
+      already exist as proper single-application second-derivative stencils
+      with the *same* radius as `Dx<NGHOST>` (not "apply `Dx` twice"), so
+      the direct computation needs no wider ghost region than `P_i`/`eta`'s
+      existing exchange already provides.
+    - **Mandatory empirical cross-check before removing anything** (given
+      this is a from-scratch derivation, not trusted on algebra alone):
+      added the new `cfc::ComputeADualFromPotentials` function
+      (`cfc_reconstruct.hpp`/`.cpp`) alongside the old `X`-based path,
+      temporarily computed *both* in `CFC::ComputeADual` gated behind
+      `CFC_DEBUG_ADUAL_CHECK`, and diffed. Rebuilt, reran the 1-rank
+      `cfc_amr_dynamic_check`-style sanity test: **`max|Adual_direct -
+      Adual_via_X| = 0.000000e+00`** at every single call (multiple per
+      stage, multiple stages/cycles) -- exact bit-for-bit agreement, not
+      just close. This is the actual correctness gate; only removed the old
+      path afterward.
+    - **Removal**: deleted `X^i`'s entire ghost-exchange pipeline --
+      `CFC_ReconstructX`/`CFC_RestX`/`CFC_SendX`/`CFC_RecvX`/
+      `CFC_ProlongX`/`CFC_BCSX` (task methods, `QueueCFCTasks()`
+      registrations, and `TaskName` enum entries in
+      `numerical_relativity.hpp`), the `u_x`/`x_u`/`coarse_u_x`/`pbval_x`
+      members, `ReconstructVectorPotential()`, the temporary cross-check
+      code, and the now-dead `ComputeADualFromX`/`ComputeADualFromXImpl`
+      (0 remaining call sites after the switch). `CFC_ComputeADual`'s
+      task-graph dependency changed from `{CFC_BCSX}` to `{CFC_BCSPiEtaX}`
+      directly. `RunXPsiSolvePass`'s manual sequence (used by
+      `InitializeMetric`/`ReinitializeMetricForAMR`) updated the same way.
+      `ReconstructVectorFromPotentials` itself (the shared low-level
+      helper) is unchanged and still used for `beta^i`
+      (`CFC::ReconstructShift`).
+    - **Verified**: rebuilt `build_cfc` cleanly (no dangling references --
+      confirmed via grep across `src/` for every removed symbol before and
+      after). Reran both established sanity tests fresh (1-rank/8-rank
+      `cfc_amr_dynamic_check`-style, `rst`/`perrank` cleared): no
+      crash/NaN/fatal, and `max|delta psi - initial guess|` came back
+      **byte-identical** to every prior run this session (`9.844341e-02`
+      1-rank, `5.261418e-02` 8-rank) -- confirms zero behavior change, a
+      pure optimization. (This was tested concurrently with an unrelated,
+      already-running long physics test job on the same `build_cfc` binary
+      -- confirmed rebuilding mid-run doesn't disturb an already-executing
+      job, since the linker replaces the executable via a new inode/rename,
+      not an in-place truncate.)
+    - **Net effect**: 1 fewer full ghost-exchange round trip
+      (`PackAndSendCC`/`RecvAndUnpackCC`, plus the restrict/prolongate/BC
+      work around it) per stage, with the removed code's correctness
+      confirmed empirically rather than assumed from the derivation alone.

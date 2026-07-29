@@ -5579,6 +5579,12 @@ src/cfc/
       block's j-high neighbor is on a different refinement level, and
       whether `ProlongateCC`'s coarse-fine treatment of `u_adm` -- as
       opposed to same-level `RecvAndUnpackCC` -- is where the gap lives).
+      **Correction (item 42): this "ruling out a BC-application gap" check
+      only verified the y-coordinate against the domain -- it never checked
+      x1. The actual corrupted cell sits at `i=0`, the block's own physical
+      `x1=0` reflect boundary. See item 42 for the real mechanism (`u_adm`
+      had no physical-BC pass at all before item 41) and the direct
+      cell-by-cell trace confirming it.
 
 39. **(2026-07-27, updated 2026-07-28) Item 38's residual: root cause
     confirmed, fix identified, but not yet safe to apply.** A deep,
@@ -5959,6 +5965,14 @@ src/cfc/
       `inputs/tests/lwave_hydro_diag_collision.athinput` +
       `build_generic`)** -- use it directly to verify the eventual structural
       fix, rather than reconstructing CFC's own TOV-star scenario each time.
+      **Update (item 42)**: the CFC 8-rank TOV scenario's own visible
+      `NANS_IN_CONS` symptom (used above to track this item) is now gone as
+      of item 41 -- but for an unrelated reason (item 41 gave `padm->u_adm`
+      its first-ever physical-BC pass, fixing a real but separate bug). This
+      item's own registration bug is confirmed still present and unfixed;
+      item 39g's reproducer remains the reliable way to verify (1)/(2) above,
+      since the CFC TOV scenario no longer surfaces this item's residual on
+      its own.
 
 40. **(2026-07-28) Cherry-picked upstream (unmerged) PR
     [IAS-Astrophysics/athenak#748](https://github.com/IAS-Astrophysics/athenak/pull/748)
@@ -6200,3 +6214,86 @@ src/cfc/
       particular topology) -- a dedicated test isolating that corner case,
       similar in spirit to item 40's own verification, would be the natural
       next check if this becomes load-bearing for future work.
+
+42. **(2026-07-29 -- 2026-07-30) Item 38's 896/rank residual explained: it was
+    never item 38's own bug -- `padm->u_adm` simply had no physical-BC pass
+    at all before item 41, and item 41's `BCSADMTask` addition fixed that
+    real, separate bug by coincidence. Item 38's own `SetNeighbors`
+    registration bug remains open and unfixed.** A direct, empirical A/B
+    test and cell-by-cell trace, prompted by re-running the CFC 8-rank
+    TOV/AMR scenario (`cfc_item38_topology_8rank`) with the item 39
+    diagnostic instrumentation (`CFC_DEBUG_NGHBR`) still in place and
+    noticing its `NANS_IN_CONS` count had silently dropped to 0.
+
+    - **A/B test**: built a clean git worktree at `baf91fcf` (item 40, one
+      commit before item 41), ported the same debug instrumentation, and
+      reran the identical scenario. Result: **896/rank `NANS_IN_CONS` on
+      3-of-8 ranks reappeared**, byte-for-byte matching the originally
+      documented signature (same regrid event, same `5.261418e-02`
+      convergence diagnostic, so a true apples-to-apples comparison) --
+      confirmed item 41 is what made the symptom disappear on current
+      `HEAD` (`11fed7a8`). Worktree/build removed after the comparison;
+      `git worktree` was used specifically so `HEAD`/the `cfc` branch were
+      never touched.
+    - **Cell-by-cell trace of *why***: the corrupted cell (`m=1` on rank 1,
+      later identified as `gid=2`, location `k=6, j=12, i=0`, `nghost=4`,
+      meshblock `8^3`) was first suspected to be explained by a masking
+      mechanism in `src/bvals/buffs_cc.cpp` -- `InitRecvIndices`'s `icoar`/
+      `iprol` index blocks widen the transverse (perpendicular-to-face)
+      range by `ng`/`ng/2`, gated by the `f1`/`f2` sub-block selector, when
+      a same-axis FACE neighbor is coarser (`isame`, same-level, has no
+      such widening). This is real code and does mean a single coarser face
+      neighbor can incidentally cover territory a missing diagonal neighbor
+      would otherwise be needed for. **This hypothesis was directly tested
+      and disproven for this specific cell**: a temporary print of the
+      actual computed `icoar` bounds for the relevant coarser face-neighbor
+      slot (slot 12, `gid=9`, one level coarser) gave `i=[4,11] j=[8,11]
+      k=[4,11]` in coarse-index units -- nowhere near coarse `i=0-3`, which
+      is where the corrupted fine-index `i=0` cell actually lives. So the
+      widening mechanism is real but was not what fixed this cell.
+    - **The actual mechanism, confirmed directly**: `gid=2`'s full 56-slot
+      neighbor table shows **all four x1-inner face slots (0-3)
+      `UNREGISTERED`** -- face registration in `SetNeighbors` is always
+      unconditional (no octant-parity guard, unlike edges/corners), so
+      finding nothing there means `gid=2` genuinely has no neighbor in the
+      `-x1` direction. Its logical location (`lx=(0,1,0)`) confirms `lx1=0`,
+      i.e. it sits at the mesh's actual `x1=0` edge, exactly where
+      `ix1_bc=reflect` applies. Before item 41, `padm->u_adm` had *no*
+      physical-BC call anywhere in its own ghost-exchange pipeline (item
+      41's own writeup already noted this: "stale doc comment... previously
+      claiming no physical-BC pass existed for u_adm" -- this was not
+      stale, it was literally true). At a genuine physical boundary, no
+      same-level/coarser/finer neighbor exchange and no prolongation touch
+      that ghost region (all gated on an actual registered neighbor
+      existing) -- so pre-item-41, this ghost slab was simply never written
+      by *anything*, left at whatever zero/garbage state was allocated,
+      producing `detg=0`. Item 41's new `BCSADMTask` (the first-ever call
+      to `ADMBCs` on `u_adm`'s fine array) is what actually fixes it.
+    - **This corrects item 38's own residual analysis** (see the forward-
+      pointer added there): its "ruling out a BC-application gap" check only
+      verified the y-coordinate against the domain extent -- it never
+      checked x1, where this cell actually sits at a physical edge.
+    - **Net implication**: item 41 fixed a real, previously-undocumented bug
+      (`u_adm` had zero physical-BC treatment, at any physical boundary, in
+      any CFC run with non-periodic BCs) -- independent of and unrelated to
+      item 38/39's `SetNeighbors` diagonal-registration bug, which remains
+      **confirmed present and unfixed** (`git diff` of `meshblock.cpp` is
+      clean; no guard-removal fix has been reapplied). It happened to also
+      make the CFC TOV scenario's visible symptom disappear, which is a
+      coincidence of this particular test's topology (the residual's
+      specific cell turned out to be a physical-boundary case, not a
+      genuine interior AMR corner) -- not evidence that item 38/39's actual
+      open problems (tie-break formula bug, extra-slot capacity, item 39c's
+      MPI abort) are resolved. Item 39g's CFC-independent minimal
+      reproducer (`inputs/tests/lwave_hydro_diag_collision.athinput`,
+      periodic BCs, no physical boundary anywhere) is unaffected by any of
+      this and remains the reliable way to verify future work on items
+      38/39's actual registration bug.
+    - **Diagnostic instrumentation**: all temporary `CFC_DEBUG_NGHBR`/
+      `CFC_DEBUG_ICOAR`-gated instrumentation used for this investigation
+      (`src/mesh/meshblock.cpp`, `src/bvals/bvals_cc.cpp`,
+      `src/bvals/buffs_cc.cpp`) has been moved to a dedicated branch,
+      `item39-debug-instrumentation`, rather than committed on `cfc` --
+      `git diff` of all three files on `cfc` is clean (matches `HEAD`).
+      Check out that branch to reuse the probes for future item 38/39 work
+      instead of re-deriving them.

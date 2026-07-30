@@ -173,6 +173,9 @@ class Mesh {
     return (mb_indcs.nx1)*(mb_indcs.nx2)*(mb_indcs.nx3);
   }
   bool IsMeshUpdated() const { return mesh_updated_; }
+  // Monotonic counter of mesh-topology update events (AMR and any resulting load
+  // balancing). Used by the rank-packed boundary communication path to detect when
+  // its cached communication metadata must be rebuilt.
   void MarkMeshUpdated() {mesh_updated_ = true; ++amr_lb_seq_;}
   void ClearMeshUpdated() { mesh_updated_ = false; }
   int GetAMRLoadBalanceUpdateSeq() const { return amr_lb_seq_; }

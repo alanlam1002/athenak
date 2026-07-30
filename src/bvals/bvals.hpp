@@ -166,6 +166,9 @@ class MeshBoundaryValues {
   std::vector<MPI_Request> send_var_reqs_, recv_var_reqs_;
   std::vector<MPI_Request> send_var_hdr_reqs_, recv_var_hdr_reqs_;
   DvceArray1D<Real> rank_sendbuf_vars_, rank_recvbuf_vars_;
+  // Scratch host buffers holding the (lid,dn,data_size) triples per entry, used
+  // only for the one-shot header exchange in BuildRankPackedVarMetadata that
+  // teaches each receiver its peers' pack order.
   HostArray1D<int> rank_sendhdr_vars_, rank_recvhdr_vars_;
   // Device-resident mirrors of the entry tables, used by fused pack/unpack
   // kernels (one launch per direction per call) instead of N small

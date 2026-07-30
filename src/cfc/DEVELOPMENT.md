@@ -6518,3 +6518,90 @@ src/cfc/
       1-rank/8-rank sanity tests too: no crash/NaN,
       `max|delta psi - initial guess|` still byte-identical to baseline
       (`9.844341e-02`/`5.261418e-02`).
+
+46. **(2026-07-31) Merged `origin/main` into `cfc`** (18 commits, merge-base
+    `5f199310`, user-synced from upstream). Main interest was
+    "Feature/rank packed bvals (#775)" (David A. Velasco-Romero), aggregating
+    per-neighbor small MPI boundary messages into per-rank packed messages
+    for performance.
+    - **Key discovery, not assumed**: `cfc` already had its own independent
+      lineage of this *exact same feature*, by the *same author*, built
+      commit-by-commit from the same merge-base between 2026-05-18 and
+      2026-07-10 ("Rank-packed boundary value communications", "Optimize
+      rank-packed hydro bvals for small meshblocks", "Cache rank-packed MG
+      metadata per level", "Make multigrid comms always rank-packed").
+      `origin/main`'s PR #775 is a later/parallel iteration of the same
+      work. The two diverged in complementary ways: cfc added
+      device-resident mirror tables (`send/recv_var_entries_d_`,
+      `unpack_tasks_d_`) fusing pack/unpack into single-launch device
+      kernels, which main's landed PR lacks; main added a more precise
+      cache-invalidation mechanism (monotonic `int amr_lb_seq_` counter,
+      `GetAMRLoadBalanceUpdateSeq()`) vs. cfc's coarser `bool
+      mesh_updated_`/`IsMeshUpdated()` flag (cleared once per driver step,
+      can't distinguish multiple rebuild triggers within one step). cfc's
+      `bvals.hpp` already *declared* `rank_packed_mesh_seq_` but never wired
+      it up -- dead scaffolding for exactly this.
+    - **This is why exactly 8 files conflicted** (confirmed via a safe,
+      non-destructive `git merge-tree --write-tree cfc origin/main` before
+      touching anything): `bvals.cpp` (14 hunks), `bvals.hpp` (2),
+      `bvals_cc.cpp`/`bvals_fc.cpp`/`bvals_tasks.cpp` (1 each), `driver.cpp`
+      (2), `mesh.hpp` (2), `mesh_refinement.cpp` (1) -- all one root cause,
+      not 8 unrelated problems. The other ~119 changed files (a
+      reconstruction-scheme refactor `recon.hpp`/`teno.hpp` replacing
+      per-scheme direct calls, pgen restructuring, a new WatchDog feature,
+      misc fixes) auto-merged cleanly -- confirmed `src/cfc/`/
+      `src/multigrid/` never reference the deleted reconstruction headers
+      directly, and `xns_rotator.hpp` (needed by CFC's own BU8 pgen)
+      survives untouched.
+    - **One real landmine, not a pick-a-side**: `mesh_refinement.cpp`'s
+      single hunk was a "twin insertion" -- both branches independently
+      added a `MarkMeshUpdated()` + `InitBoundaryValuesAndPrimitives(...)`
+      pair at the same post-regrid spot, but cfc's calls the richer 2-arg
+      overload (`is_amr_regrid=true`, triggering
+      `CFC::ReinitializeMetricForAMR`) while main's calls the plain 1-arg
+      overload. Because the two calls are textually different, git only
+      marked main's block as conflicting, leaving cfc's as trailing
+      "resolved" context -- a naive "accept both" resolution would have
+      silently called `InitBoundaryValuesAndPrimitives` (and CFC's metric
+      re-solve) *twice* per regrid event. Resolved by keeping only cfc's
+      block, discarding main's entirely.
+    - **Resolution summary**: `mesh.hpp` keeps *both* mechanisms side by
+      side (`multigrid_driver.cpp`, cfc-only and not in the conflict list,
+      silently depends on `IsMeshUpdated()` surviving); `bvals_cc.cpp`/
+      `bvals_fc.cpp`/`bvals_tasks.cpp` adopt main's precise
+      `rank_packed_mesh_seq_ != GetAMRLoadBalanceUpdateSeq()` staleness
+      check (finally wiring up cfc's dead member); `bvals.cpp`/`bvals.hpp`
+      keep cfc's richer device-mirror implementation as the base, splicing
+      in main's missing `rank_packed_mesh_seq_` assignment; `driver.cpp`
+      trivially combines both (WatchDog heartbeat, confirmed no interaction
+      with CFC's task-graph wiring).
+    - **Verified**: no leftover conflict markers anywhere in `src/`. Clean
+      rebuild of both `build_cfc` and `build_cfc_xns` (the latter needed
+      for the benchmark below) -- exercises all ~119 auto-merged files, not
+      just the 8 hand-resolved ones. 1-rank/8-rank CFC TOV sanity tests:
+      no crash/NaN, `max|delta psi - initial guess|` still byte-identical
+      to baseline (`9.844341e-02`/`5.261418e-02`) -- confirms the merge
+      changed no CFC solver behavior.
+    - **Performance benchmark (BU8 rotating-star stability test,
+      `build_cfc_xns`, 16 nodes/32 ranks, 204 MeshBlocks, fresh from `t=0`,
+      `nlim=110`, steady-state window cycles 20-110)**: contrary to
+      expectation, the post-merge run was **~20% slower**, not faster --
+      `4.450` sec/cycle before vs. `5.321` sec/cycle after. The physics
+      trajectory is byte-identical cycle-by-cycle between the two runs
+      (same `time`/`dt` at every cycle), so this is purely a wall-clock
+      effect, not a correctness regression. Root cause not yet confirmed,
+      but the rank-packed bvals change itself is an unlikely culprit --
+      cfc already had that optimization, and the merge only swapped in a
+      more precise cache-invalidation check, a small change. The more
+      likely candidate is the *other*, unrelated change bundled in the
+      same sync: "Split recon rsolver clean (#757)" replaced direct
+      per-scheme reconstruction calls with a unified `recon.hpp` that
+      dispatches the method via a runtime (if "grid-uniform") branch inside
+      a more generic per-cell function -- this test uses `reconstruct =
+      wenoz`, and that kind of indirection is a plausible source of a real
+      CPU-side slowdown, unrelated to bvals. A secondary, unconfirmed
+      confound: the before/after runs landed on different physical nodes
+      (`sakura345-392` vs. `sakura245-261`), which can't be fully ruled out
+      given no repeat run was done. Follow-up investigation (isolating
+      `recon.hpp`, or a same-node rerun) not yet undertaken -- reported
+      as-is since it doesn't block the merge's correctness.

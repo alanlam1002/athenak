@@ -12,6 +12,7 @@
 #include <utility>
 #include <algorithm> // max
 #include <map>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -31,6 +32,7 @@ MeshBoundaryValues::MeshBoundaryValues(MeshBlockPack *pp, ParameterInput *pin, b
 #if MPI_PARALLEL_ENABLED
   ,
   rank_packed_bvals_nvars_(-1),
+  rank_packed_mesh_seq_(-1),
   rank_sendbuf_vars_("rank_sendbuf_vars",1),
   rank_recvbuf_vars_("rank_recvbuf_vars",1),
   rank_sendhdr_vars_("rank_sendhdr_vars",1),
@@ -135,6 +137,7 @@ int MeshBoundaryValues::GetVarDataSize(const MeshBoundaryBuffer &buf, int m, int
 
 void MeshBoundaryValues::BuildRankPackedVarMetadata(const int nvars) {
   rank_packed_bvals_nvars_ = nvars;
+  rank_packed_mesh_seq_ = pmy_pack->pmesh->GetAMRLoadBalanceUpdateSeq();
   send_var_entries_.clear();
   recv_var_entries_.clear();
   send_var_msgs_.clear();

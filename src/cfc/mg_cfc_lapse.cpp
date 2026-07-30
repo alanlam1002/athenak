@@ -10,21 +10,59 @@
 //! real_Laplacian(u) = -lap(u)/dx^2). Eq. 74 (Gmunu 2021) is
 //!   Delta(alpha*psi) = (alpha*psi) * [2*pi*(Utilde+2*Stilde)*psi^-2
 //!                                     + (7/8)*Ahat^2*psi^-8] =: (alpha*psi)*K(x),
-//! with alpha*psi = u+1 (u = delta_(alpha*psi)). Substituting:
-//!   lap(u) + dx^2*K(x)*(u+1) = 0  =:  F(u) = 0
-//! K(x) depends only on already-fixed fields (psi, Ahat^2 from earlier steps;
-//! Utilde+2*Stilde is this equation's own known source), not on u -- so F(u) is
-//! affine in u and F'(u) = 6 + dx^2*K(x) is u-independent: the "Newton" step below
-//! is an exact one-step Gauss-Seidel solve (mg_cfc_lapse.hpp). K(x) lives in coeff_
-//! (ncoeff_=1), not src_, for the same FAS-consistency reason as
-//! mg_cfc_conformal_factor.cpp.
+//! with alpha*psi = u+v0 (u = delta_(alpha*psi), v0 = alpha0*psi0, the analytic
+//! trumpet background's alpha0*psi0 product -- 1 everywhere unless <cfc>
+//! puncture_enabled). K(x) depends only on already-fixed fields (psi, Ahat^2 from
+//! earlier steps; Utilde+2*Stilde is this equation's own known source), not on u --
+//! affine in u, no Newton iteration needed (mg_cfc_lapse.hpp).
 //!
-//! K(x) is precomputed ONCE, at the finest level, from psi/Ahat^2/Utilde+2*Stilde
-//! (LoadReactionCoefficient below); only the combined scalar K(x) is then carried
-//! through coeff_/RestrictCoefficients() to coarser levels -- restricting the three
-//! raw ingredients separately and recombining at each level would be
-//! FAS-inconsistent (restrict(f(a,b)) != f(restrict(a), restrict(b)) for K(x)'s
-//! nonlinear psi^-2/psi^-8 combination).
+//! Puncture regularization (CFC_PUNCTURE_TDE_PLAN.md Sec 3.7/Sec 5 Phase A item 5):
+//! unlike eq. 73 (psi), this equation is HOMOGENEOUS in the physical field
+//! (Delta v = K(x)*v, no separate additive source -- matter is folded entirely into
+//! K(x)). The background v0 independently satisfies the vacuum equation
+//! Delta v0 = K0*v0, K0 = (7/8)*Ahat0^2*psi0^-8 (no matter term, exact for the
+//! analytic trumpet solution). Writing v = v0+u and subtracting:
+//!   Delta u = Delta v - Delta v0 = K(x)*v - K0*v0 = K(x)*u + v0*(K(x)-K0)
+//! so the DEVIATION equation gains a genuine additive source term
+//! S := v0*(K(x)-K0) that the unregularized (flat-background) code has no channel
+//! for at all. Computing S via a direct K(x)-K0 subtraction would reintroduce
+//! exactly the cancellation this exercise avoids (K(x) and K0 agree to relative
+//! order x=delta_psi/psi0 near the puncture) -- instead, expand and apply the same
+//! psi^-8-psi0^-8 factoring already validated in mg_cfc_conformal_factor.cpp:
+//!   K(x)-K0 = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*DeltaAhat^2*psi^-8
+//!             - (7/8)*Ahat0^2*reg8(x)
+//!   reg8(x) = psi0^-8 * x*P8(x)/(1+x)^8,  x = delta_psi/psi0  (psi's OWN deviation
+//!             ratio -- psi is already solved/fixed by the time this solve runs, so
+//!             x is a known input here, not this equation's unknown)
+//!   P8(x)   = 8+28x+56x^2+70x^3+56x^4+28x^5+8x^6+x^7  (same Horner pattern as
+//!             mg_cfc_conformal_factor.cpp's P7, one degree higher)
+//!   DeltaAhat^2 = Ahat^2_total - Ahat0^2 (safe direct subtraction, Ahat0^2 is
+//!             bounded/O(1), doesn't diverge at the puncture)
+//!   ==> S = v0*[2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*DeltaAhat^2*psi^-8
+//!             - (7/8)*Ahat0^2*reg8(x)]
+//! With <cfc> puncture_enabled=false (psi0=1, v0=1, Ahat0^2=0 identically), S
+//! reduces to exactly K(x), and Delta u = K(x)*u + S becomes Delta u = K(x)*(u+1),
+//! i.e. today's formula -- confirms the derivation.
+//!
+//! Per-point update: F(u) = lap(u) + dx^2*[K(x)*u + S] = 0. No Newton-Jacobian
+//! analog to worry about (this equation stays affine): S is precomputed once at
+//! load time, same as K(x) already is, so F'(u) = 6 + dx^2*K(x) is UNCHANGED from
+//! the pre-regularization formula -- the "Newton" step is still an exact one-step
+//! Gauss-Seidel solve.
+//!
+//! K(x) and S are each precomputed ONCE, at the finest level, from
+//! psi/Ahat^2/psi0/Ahat0^2/Utilde+2*Stilde (LoadReactionCoefficient below); only
+//! the two combined scalars are then carried through coeff_/RestrictCoefficients()
+//! to coarser levels (ncoeff_=2) -- restricting the raw ingredients separately and
+//! recombining at each level would be FAS-inconsistent (restrict(f(a,b)) !=
+//! f(restrict(a), restrict(b)) for K(x)/S's nonlinear psi^-2/psi^-8 combinations).
+//!
+//! NOTE: bit-for-bit reduction to the pre-regularization code is NOT expected in
+//! the puncture_enabled=false case, even though S reduces to exactly K(x) there --
+//! `kx*u+kx` and `kx*(u+1.0)` are different floating-point operation sequences
+//! (multiply-then-add vs add-then-multiply) and are not guaranteed bit-identical in
+//! IEEE754 in general. Validate via numerical closeness instead (see
+//! CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 5's stage-5b validation notes).
 //!
 //! SmoothPack/CalculateDefectPack must also add src(m,0,k,j,i) (the FAS tau-
 //! correction CalculateFASRHSPack accumulates) -- omitting it silently discards
@@ -79,7 +117,9 @@ MGCFCLapse::MGCFCLapse(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
     : Multigrid(pmd, pmbp, nghost, on_host) {
   // See MGCFCConformalFactor's ctor -- coeff_/ncoeff_ are never allocated by the
   // base Multigrid ctor, so we do it ourselves.
-  ncoeff_ = 1;  // channel 0 = K(x), precomputed at the finest level
+  ncoeff_ = 2;  // channel 0 = K(x), channel 1 = S (Sec 3.7 puncture
+                // regularization source term), both precomputed at the
+                // finest level
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -114,9 +154,10 @@ void MGCFCLapse::SmoothPack(int color) {
     const int c = (c0 + k + j) & 1;
     for (int i = is + c; i <= ie; i += 2) {
       Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
+      Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
       Real lap = LapseLap(u, m, k, j, i);
       Real u_old = u(m,0,k,j,i);
-      Real fval = lap + dx2*kx*(u_old + 1.0) - dx2*src(m,0,k,j,i);
+      Real fval = lap + dx2*(kx*u_old + s) - dx2*src(m,0,k,j,i);
       Real fprime = 6.0 + dx2*kx;
       u(m,0,k,j,i) = u_old - fval/fprime;
     }
@@ -146,10 +187,11 @@ void MGCFCLapse::CalculateDefectPack() {
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
     Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
+    Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
     Real lap = LapseLap(u, m, k, j, i);
-    // def = (RHS(u) + src) - lap(u)*idx2, RHS(u) = -kx*(u+1)
+    // def = (RHS(u) + src) - lap(u)*idx2, RHS(u) = -(kx*u+s)
     // (F(u) = lap(u) - dx^2*(RHS(u) + src)).
-    def(m,0,k,j,i) = (-kx*(u(m,0,k,j,i) + 1.0) + src(m,0,k,j,i)) - lap*idx2;
+    def(m,0,k,j,i) = (-(kx*u(m,0,k,j,i) + s) + src(m,0,k,j,i)) - lap*idx2;
   });
 }
 
@@ -171,22 +213,23 @@ void MGCFCLapse::CalculateFASRHSPack() {
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
     Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
+    Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
     Real lap = LapseLap(u, m, k, j, i);
-    // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + kx*(u+1).
-    src(m,0,k,j,i) += lap*idx2 + kx*(u(m,0,k,j,i) + 1.0);
+    // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + (kx*u+s).
+    src(m,0,k,j,i) += lap*idx2 + (kx*u(m,0,k,j,i) + s);
   });
 }
 
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 1 (K(x), precomputed at the finest level -- see this
-//! file's header comment); mg_robin boundary conditions by default (Gmunu eq. 78,
-//! isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 2 (K(x), S -- both precomputed at the finest level,
+//! see this file's header comment); mg_robin boundary conditions by default (Gmunu
+//! eq. 78, isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  ncoeff_ = 1;
+  ncoeff_ = 2;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
@@ -282,15 +325,17 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   return;
 }
 
-// Evaluates K(x) = LapseReactionCoeff(...) once per point, at the finest level, and
-// writes only that value into coeff_ (see this file's header comment for why).
-// u_plus_2s_tilde/delta_psi/a_sq/u_psi0 are padded to depth ngh (mesh-NGHOST, per
-// cfc.cpp). delta_psi stores psi - psi0 (cfc::CFC::delta_psi, cfc.hpp); the physical
-// psi LapseReactionCoeff needs is reconstructed (+u_psi0, 1.0 everywhere unless <cfc>
-// puncture_enabled).
+// Evaluates K(x) = LapseReactionCoeff(...) and the Sec 3.7 regularization source
+// term S = v0*(K(x)-K0) once per point, at the finest level, and writes both values
+// into coeff_ (see this file's header comment for the full derivation).
+// u_plus_2s_tilde/delta_psi/a_sq/u_psi0/a0_sq/u_alpha0_psi0 are padded to depth ngh
+// (mesh-NGHOST, per cfc.cpp). delta_psi stores psi - psi0 (cfc::CFC::delta_psi,
+// cfc.hpp); the physical psi LapseReactionCoeff needs is reconstructed (+u_psi0, 1.0
+// everywhere unless <cfc> puncture_enabled).
 void MGCFCLapseDriver::LoadReactionCoefficient(
     const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
-    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a_sq, int ngh) {
+    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a_sq,
+    const DvceArray5D<Real> &a0_sq, const DvceArray5D<Real> &u_alpha0_psi0, int ngh) {
   // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
@@ -306,10 +351,35 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
     Real u2s = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
-    Real psi_known = delta_psi(m, 0, mk+off, mj+off, mi+off)
-                     + u_psi0(m, 0, mk+off, mj+off, mi+off);
+    Real dpsi = delta_psi(m, 0, mk+off, mj+off, mi+off);
+    Real psi0 = u_psi0(m, 0, mk+off, mj+off, mi+off);
+    Real psi_known = dpsi + psi0;
     Real ahat_sq = a_sq(m, 0, mk+off, mj+off, mi+off);
+    Real a0sq = a0_sq(m, 0, mk+off, mj+off, mi+off);
+    Real v0 = u_alpha0_psi0(m, 0, mk+off, mj+off, mi+off);
     cm_d(m, 0, mk, mj, mi) = LapseReactionCoeff(u2s, psi_known, ahat_sq);
+
+    // Sec 3.7 regularization source term S = v0*(K(x)-K0), built via the safe
+    // reg8(x) factoring -- see this file's header comment. delta_a_sq is a safe
+    // direct subtraction (Ahat0^2 bounded/O(1), unlike psi0 doesn't diverge at the
+    // puncture); reg8(x) is the cancellation-free replacement for
+    // (psi^-8 - psi0^-8).
+    Real delta_a_sq = ahat_sq - a0sq;
+    Real psi_inv2 = 1.0 / (psi_known * psi_known);
+    Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
+    Real psi0_inv = 1.0 / psi0;
+    Real x = dpsi * psi0_inv;
+    Real onepx_inv = psi0 * (1.0 / psi_known);   // = 1/(1+x) = psi0/psi
+    Real onepx_inv2 = onepx_inv * onepx_inv;
+    Real onepx_inv8 = onepx_inv2*onepx_inv2*onepx_inv2*onepx_inv2;
+    Real psi0_inv2 = psi0_inv * psi0_inv;
+    Real psi0_inv8 = psi0_inv2*psi0_inv2*psi0_inv2*psi0_inv2;
+    Real p8 = 8.0 + x*(28.0 + x*(56.0 + x*(70.0 + x*(56.0 + x*(28.0 +
+                  x*(8.0 + x))))));
+    Real reg8 = psi0_inv8 * x * p8 * onepx_inv8;
+    cm_d(m, 1, mk, mj, mi) = v0 * (2.0*M_PI*u2s*psi_inv2
+                                    + 0.875*delta_a_sq*psi_inv8
+                                    - 0.875*a0sq*reg8);
   });
 }
 
@@ -415,9 +485,10 @@ void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
         Real kx = oct.Coeff(0,k,j,i);
+        Real s = oct.Coeff(1,k,j,i);
         Real lap = OctLapseLap(oct, k, j, i);
         Real u_old = oct.U(0,k,j,i);
-        Real fval = lap + dx2*kx*(u_old + 1.0) - dx2*oct.Src(0,k,j,i);
+        Real fval = lap + dx2*(kx*u_old + s) - dx2*oct.Src(0,k,j,i);
         Real fprime = 6.0 + dx2*kx;
         oct.U(0,k,j,i) = u_old - fval/fprime;
       }
@@ -434,8 +505,9 @@ void MGCFCLapseDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
         Real kx = oct.Coeff(0,k,j,i);
+        Real s = oct.Coeff(1,k,j,i);
         Real lap = OctLapseLap(oct, k, j, i);
-        oct.Def(0,k,j,i) = (-kx*(oct.U(0,k,j,i) + 1.0) + oct.Src(0,k,j,i)) - lap*idx2;
+        oct.Def(0,k,j,i) = (-(kx*oct.U(0,k,j,i) + s) + oct.Src(0,k,j,i)) - lap*idx2;
       }
     }
   }
@@ -450,8 +522,9 @@ void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
         Real kx = oct.Coeff(0,k,j,i);
+        Real s = oct.Coeff(1,k,j,i);
         Real lap = OctLapseLap(oct, k, j, i);
-        oct.Src(0,k,j,i) += lap*idx2 + kx*(oct.U(0,k,j,i) + 1.0);
+        oct.Src(0,k,j,i) += lap*idx2 + (kx*oct.U(0,k,j,i) + s);
       }
     }
   }

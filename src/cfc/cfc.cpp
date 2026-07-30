@@ -1372,7 +1372,8 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     pmgd_alpha->SeedInitialGuess(delta_alpha_psi, indcs.ng);
   }
 
-  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, u_psi0, a_sq, indcs.ng);
+  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, u_psi0, a_sq, a0_sq,
+                                       u_alpha0_psi0, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
   return;

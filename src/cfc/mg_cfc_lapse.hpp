@@ -64,18 +64,23 @@ class MGCFCLapseDriver : public MultigridDriver {
 
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
-    // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 once, at the
-    // finest level, and store only that value in coeff_ (channel 0, ncoeff_ = 1),
+    // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 and the Sec
+    // 3.7 puncture-regularization source term S = v0*(K(x)-K0) once, at the finest
+    // level, and store them in coeff_ (channel 0 = K(x), channel 1 = S, ncoeff_ = 2),
     // not src_ -- see this file's header comment (mg_cfc_lapse.cpp) for the full
-    // FAS-consistency rationale. u_plus_2s_tilde/delta_psi/a_sq/u_psi0 are padded to
-    // depth ngh (the mesh's own NGHOST, not this driver's shallower ngh_). delta_psi is
-    // psi - psi0 (cfc::CFC::delta_psi, cfc.hpp); the physical psi K(x) needs is
-    // reconstructed internally (+u_psi0, 1.0 everywhere unless <cfc> puncture_enabled --
-    // CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 3).
+    // FAS-consistency and regularization derivation. u_plus_2s_tilde/delta_psi/a_sq/
+    // u_psi0/a0_sq/u_alpha0_psi0 are padded to depth ngh (the mesh's own NGHOST, not
+    // this driver's shallower ngh_). delta_psi is psi - psi0 (cfc::CFC::delta_psi,
+    // cfc.hpp); the physical psi K(x) needs is reconstructed internally (+u_psi0,
+    // 1.0 everywhere unless <cfc> puncture_enabled -- CFC_PUNCTURE_TDE_PLAN.md Sec 5
+    // Phase A item 3). a0_sq/u_alpha0_psi0 are the analytic trumpet background's
+    // Ahat0^2/alpha0*psi0 (0/1 everywhere when disabled -- Sec 5 Phase A item 5).
     void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
                                  const DvceArray5D<Real> &delta_psi,
                                  const DvceArray5D<Real> &u_psi0,
-                                 const DvceArray5D<Real> &a_sq, int ngh);
+                                 const DvceArray5D<Real> &a_sq,
+                                 const DvceArray5D<Real> &a0_sq,
+                                 const DvceArray5D<Real> &u_alpha0_psi0, int ngh);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);

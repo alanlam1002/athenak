@@ -156,7 +156,7 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   const std::string eos_file = bconfig.eos<std::string>(EOSFILE, BCO1);
   const std::string eos_type = bconfig.eos<std::string>(EOSTYPE, BCO1);
 
-  const double units    = bconfig(QPIG);
+  const double units    = 4.0 * M_PI;
   const double omega    = bconfig(GOMEGA);
   const bool is_corotating = bconfig.control(COROT_BIN);
   double &ome1     = bconfig(OMEGA, BCO1);

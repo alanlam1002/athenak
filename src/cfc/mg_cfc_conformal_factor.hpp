@@ -10,14 +10,21 @@
 //! conformal factor psi:
 //!   Delta psi = -2 pi Ũ psi^-1 - (1/8) Ahat^2 psi^-7,
 //! where Ahat^2 = f_ik f_jl Adual^kl Adual^ij and Ũ = psi^6 U is the matter energy
-//! density. Solved for the deviation delta_psi = psi - 1. Nonlinear in the unknown
+//! density. Solved for the deviation delta_psi = psi - psi0, where psi0 is the
+//! analytic stationary BH "trumpet" background (1 everywhere unless <cfc>
+//! puncture_enabled -- CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6). Near a puncture
+//! (psi0 -> infinity) the naive psi^-7-psi0^-7 difference this deviation form would
+//! otherwise require is catastrophically cancellation-prone, so the psi^-7/Ahat^2
+//! source term is built via the Sec 3.7 regularized factoring instead (see
+//! ConformalFactorRHS's doc comment in the .cpp). Nonlinear in the unknown
 //! (self-coupled through psi^-7), so SmoothPack/CalculateDefectPack/
 //! CalculateFASRHSPack are hand-written Newton-Gauss-Seidel point relaxation (Gmunu
 //! sec. 2.7.2, eq. 94) rather than Multigrid's generic constant-diagonal
-//! Smooth<StencilOp> template. Ũ/Ahat^2 are carried in Multigrid::coeff_/ncoeff_
-//! (ncoeff_=2) rather than src_, since src_ is what the V-cycle's FAS machinery
-//! restricts/corrects at coarser levels. See mg_cfc_conformal_factor.cpp's file
-//! header for the full sign-convention derivation.
+//! Smooth<StencilOp> template. Ũ/Ahat^2/psi0/Ahat0^2 are carried in
+//! Multigrid::coeff_/ncoeff_ (ncoeff_=4) rather than src_, since src_ is what the
+//! V-cycle's FAS machinery restricts/corrects at coarser levels. See
+//! mg_cfc_conformal_factor.cpp's file header for the full sign-convention
+//! derivation.
 
 // C++ headers
 #include <string>
@@ -80,11 +87,20 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     void LoadMatterSource(const DvceArray5D<Real> &u_tilde, int ngh);
 
     // Load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromPotentials),
-    // stored in coeff_ channel 1 (ncoeff_ = 2 total). Can't reuse Multigrid::
-    // LoadCoefficients() (copies all ncoeff_ channels at once, no per-channel
-    // offset) -- does its own single-channel par_for via CoeffAtLevel(), mirroring
-    // LoadCoefficients' offset-aware ngh handling.
+    // stored in coeff_ channel 1 (ncoeff_ = 4 total, see LoadPunctureCoefficients
+    // below for channels 2-3). Can't reuse Multigrid::LoadCoefficients() (copies all
+    // ncoeff_ channels at once, no per-channel offset) -- does its own single-channel
+    // par_for via CoeffAtLevel(), mirroring LoadCoefficients' offset-aware ngh
+    // handling.
     void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq, int ngh);
+
+    // Load the analytic trumpet background's psi0 (channel 2) and Ahat0^2 (channel
+    // 3) -- the Sec 3.7 regularization ConformalFactorRHS needs to build the
+    // cancellation-free psi^-7-psi0^-7 factoring. Zero-cost/inert when <cfc>
+    // puncture_enabled is false (psi0=1, Ahat0^2=0 everywhere, cfc.cpp's ctor).
+    // Same single-channel-par_for pattern as LoadNonlinearCoefficient above.
+    void LoadPunctureCoefficients(const DvceArray5D<Real> &u_psi0,
+                                   const DvceArray5D<Real> &a0_sq, int ngh);
 
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
@@ -121,7 +137,7 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
 
   private:
     // Newton-relaxation controls (Gmunu sec. 2.7.2, eq. 94). mg_omega_psi_ damps
-    // the per-point Newton step (1.0 = undamped); psi_floor_ prevents psi = u+1
+    // the per-point Newton step (1.0 = undamped); psi_floor_ prevents psi = u+psi0
     // from being driven non-positive (psi^-7 is ill-defined there) on a bad guess.
     Real mg_omega_psi_, psi_floor_;
 

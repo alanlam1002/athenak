@@ -1,0 +1,113 @@
+# Athena++ (Kokkos version) input file: small/fast single-rank smoke test for the
+# CFC BH-puncture regularization (CFC_PUNCTURE_TDE_PLAN.md Sec 3.7/Sec 5 Phase A
+# item 5, psi solver only). Based on whisky_tov.athinput's octant-symmetric TOV
+# setup, but with the central density pushed to near-floor level so the "star"
+# carries negligible mass/stress-energy compared to <cfc> puncture_mass, plus a
+# <cfc> block with puncture_enabled=true. This directly instantiates
+# CFC_PUNCTURE_TDE_PLAN.md Phase D item 13's validation case: single static BH +
+# (near-)no matter should give delta_psi ~0 everywhere, including the cells
+# nearest the puncture (isotropic origin, x1=x2=x3=0) specifically -- a sign
+# error in the new regularization term would inject a spurious source there,
+# visible as either non-convergence or a delta_psi profile clearly peaked at the
+# puncture. Small grid (single MeshBlock, nlim=20) for fast iteration; see
+# cfc_puncture_vacuum.athinput for the full-resolution regression-pass variant.
+
+<comment>
+problem  = CFC BH-puncture regularization smoke test (near-vacuum TOV + puncture_enabled)
+
+<job>
+basename = cfc_puncture_vacuum_small
+
+<mesh>
+nghost = 4       # Number of ghost cells
+nx1    = 16      # number of cells in x1-direction
+x1min  = 0.0     # minimum x1
+x1max  = 16.0    # maximum x1
+ix1_bc = reflect # inner boundary
+ox1_bc = diode   # outer boundary
+
+nx2    = 16      # number of cells in x2-direction
+x2min  = 0.0     # minimum x2
+x2max  = 16.0    # maximum x2
+ix2_bc = reflect # inner boundary
+ox2_bc = diode   # outer boundary
+
+nx3    = 16      # number of cells in x3-direction
+x3min  = 0.0     # minimum x3
+x3max  = 16.0    # maximum x3
+ix3_bc = reflect # inner boundary
+ox3_bc = diode   # outer boundary
+
+<meshblock>
+nx1  = 16        # single MeshBlock -- must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = 20         # a handful of cycles -- fast iteration, not a physics run
+tlim       = -1.0
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal     # EOS type
+dyn_eos     = ideal     # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx      # spatial reconstruction method
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-10   # floor on density rho
+tfloor      = 1.0e-8
+dthreshold  = 1.02      # Threshold for flooring
+gamma       = 2.0       # ratio of specific heats Gamma
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold = 1.0e-10
+mg_debug_defect_by_level = true  # report worst-defect cell (root vs refined) each
+                                  # Solve() -- useful here to see the defect isn't
+                                  # concentrated at the puncture corner
+puncture_enabled = true
+puncture_mass    = 1.0           # M_BH, comparable to/larger than the "star"'s
+                                  # negligible mass below -- the near-vacuum limit
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 1.28e-4   # 10x below the reference BU8 star's 1.28e-3 --
+                         # negligible mass/stress-energy compared to puncture_mass
+kappa       = 100.0     # P = kappa*rho^gamma
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 1e-2      # radial step for TOV calculation -- larger than
+                         # whisky_tov.athinput's 1e-3 since this lower-density
+                         # star is less compact and needs a longer integration
+                         # range (npoints*dr) to reach its surface
+b_norm      = 0.0
+pcut        = 1e-6
+magindex    = 1
+user_hist   = true
+
+<output1>
+file_type   = hst      # History data dump
+dt          = 0.0
+dcycle      = 1
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- inspect delta_psi/alpha near the puncture
+variable    = adm
+dcycle      = 5
+slice_x3    = 0.0
+id = adm_xy

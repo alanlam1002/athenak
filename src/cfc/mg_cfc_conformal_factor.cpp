@@ -12,21 +12,50 @@
 //! LoadSource(u0, IDN, ng, -four_pi_G_) -> src=-4*pi*G*rho for Delta(phi)=4*pi*G*rho).
 //! Eq. 73 (Gmunu 2021) is
 //!   Delta psi = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7,
-//! with psi = u+1 (u = delta_psi). Substituting:
+//! with psi = u+psi0 (u = delta_psi, psi0 = the analytic trumpet background, 1
+//! everywhere unless <cfc> puncture_enabled). Substituting:
 //!   lap(u) = dx^2 * [2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7] =: dx^2*RHS(u)
 //! i.e. F(u) := lap(u) - dx^2*RHS(u) = 0 is the discrete equation solved per point.
 //!
-//! Utilde and Ahat^2 are fixed external fields (never depend on u), loaded into
-//! coeff_ (channel 0 = Utilde, channel 1 = Ahat^2, ncoeff_=2) rather than src_ via
-//! LoadSource: src_ is what the generic V-cycle machinery restricts and adds FAS
-//! tau-corrections into, which would corrupt Utilde/Ahat^2. Since F(u)=0 is
-//! homogeneous in u, src_'s only role here is the FAS correction accumulator
-//! (starts at zero, touched only by the generic machinery and CalculateFASRHSPack).
+//! Puncture regularization (CFC_PUNCTURE_TDE_PLAN.md Sec 3.7/Sec 5 Phase A item 5):
+//! psi0's own background Hamiltonian constraint is Delta(psi0) = -(1/8)*Ahat0^2*psi0^-7
+//! (vacuum, exact for the analytic trumpet solution). Subtracting this from the full
+//! equation above and splitting Ahat^2 = Ahat0^2 + DeltaAhat^2 gives the equivalent,
+//! cancellation-free RHS actually implemented in ConformalFactorRHS below:
+//!   RHS(u) = 2*pi*Utilde*psi^-1 + (1/8)*DeltaAhat^2*psi^-7 - (1/8)*Ahat0^2*reg(x),
+//!   reg(x) = psi0^-7 * x*P7(x)/(1+x)^7,  x = u/psi0,  P7(x) = ((1+x)^7-1)/x
+//!          = 7+21x+35x^2+35x^3+21x^4+7x^5+x^6  (an exact factoring of psi^-7-psi0^-7,
+//!            well-conditioned as x->0, unlike computing that difference directly --
+//!            both psi^-7 and psi0^-7 individually underflow toward 0 as psi0->infinity
+//!            at the puncture, so their naive difference loses all significant digits).
+//! DeltaAhat^2 = Ahat^2_total - Ahat0^2 is a safe direct subtraction (Ahat0^2 is
+//! bounded/O(1) for a good slicing, unlike psi0 it does not diverge at the puncture).
+//! drhs_du's formula is UNCHANGED by this regularization: the background-subtraction
+//! term -(1/8)*Ahat0^2*psi0^-7 is constant w.r.t. u (fixed background quantities at
+//! that grid point), so its derivative is exactly zero -- the Newton Jacobian is the
+//! same expression as before, evaluated at the total psi = u+psi0. With <cfc>
+//! puncture_enabled=false (psi0=1, Ahat0^2=0 identically, cfc.cpp's ctor), reg(x)'s
+//! contribution vanishes and DeltaAhat^2 reduces to the total Ahat^2 exactly,
+//! reproducing the pre-regularization formula bit-for-bit.
+//!
+//! Utilde, Ahat^2, psi0, and Ahat0^2 are fixed external fields (never depend on u),
+//! loaded into coeff_ (channel 0 = Utilde, channel 1 = Ahat^2 total, channel 2 =
+//! psi0, channel 3 = Ahat0^2, ncoeff_=4) rather than src_ via LoadSource: src_ is
+//! what the generic V-cycle machinery restricts and adds FAS tau-corrections into,
+//! which would corrupt these coefficients. Since F(u)=0 is homogeneous in u, src_'s
+//! only role here is the FAS correction accumulator (starts at zero, touched only by
+//! the generic machinery and CalculateFASRHSPack). Channels 2-3 (psi0/Ahat0^2) are
+//! restricted to coarser multigrid levels the same generic way channels 0-1 are (a
+//! plain volume average) -- CFC_PUNCTURE_TDE_PLAN.md Sec 3.8's per-level analytic
+//! evaluation (Sec 5 Phase A item 4) is not yet implemented, so a sharply-peaked
+//! psi0 near the puncture may restrict less accurately at coarse levels than a fresh
+//! analytic evaluation would; a known, documented limitation, not a correctness bug.
 //!
 //! Multigrid::LoadCoefficients() copies all coeff channels in one shot (no
 //! per-channel offset), so it can't be called twice without clobbering --
-//! LoadMatterSource/LoadNonlinearCoefficient below each do their own single-channel
-//! par_for via the CoeffAtLevel() accessor instead.
+//! LoadMatterSource/LoadNonlinearCoefficient/LoadPunctureCoefficients below each do
+//! their own single-channel (or two-channel) par_for via the CoeffAtLevel() accessor
+//! instead.
 //!
 //! coeff_ channel 0 can instead hold U_raw = Utilde/sqrt(detg) (raw, undensitized
 //! energy density), writing the U-term as U_raw*psi^5 instead of Utilde*psi^-1 --
@@ -76,8 +105,9 @@ namespace {
 //     psi_prev/psi_current staleness above entirely.
 template <bool UsePsi5>
 KOKKOS_INLINE_FUNCTION
-void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real *rhs, Real *drhs_du) {
-  Real psi = u + 1.0;
+void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real psi0, Real a0_sq,
+                         Real *rhs, Real *drhs_du) {
+  Real psi = u + psi0;
   Real psi_inv = 1.0 / psi;
   Real psi_inv2 = psi_inv * psi_inv;
   Real psi_inv7 = psi_inv2 * psi_inv2 * psi_inv2 * psi_inv;
@@ -91,7 +121,24 @@ void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real *rhs, Real *dr
     u_term = u_matter * psi_inv;         // Utilde * psi^-1
     du_term = -u_matter * psi_inv2;
   }
-  *rhs = 2.0 * M_PI * u_term + 0.125 * ahat_sq * psi_inv7;
+  // Sec 3.7 puncture regularization: reg(x) = psi0^-7 * x*P7(x)/(1+x)^7, an exact,
+  // cancellation-free factoring of (psi^-7 - psi0^-7) -- see this file's header
+  // comment for the full derivation. x=0/psi0=1 (puncture disabled) makes reg
+  // vanish identically, so this reduces bit-for-bit to the pre-regularization
+  // Ahat^2*psi_inv7 formula below.
+  Real delta_a_sq = ahat_sq - a0_sq;  // safe direct subtraction, see header comment
+  Real psi0_inv = 1.0 / psi0;
+  Real x = u * psi0_inv;
+  Real onepx_inv = psi0 * psi_inv;   // = 1/(1+x) = psi0/psi
+  Real onepx_inv2 = onepx_inv * onepx_inv;
+  Real onepx_inv7 = onepx_inv2 * onepx_inv2 * onepx_inv2 * onepx_inv;
+  Real psi0_inv2 = psi0_inv * psi0_inv;
+  Real psi0_inv7 = psi0_inv2 * psi0_inv2 * psi0_inv2 * psi0_inv;
+  Real p7 = 7.0 + x*(21.0 + x*(35.0 + x*(35.0 + x*(21.0 + x*(7.0 + x)))));
+  Real reg = psi0_inv7 * x * p7 * onepx_inv7;
+  *rhs = 2.0 * M_PI * u_term + 0.125 * delta_a_sq * psi_inv7 - 0.125 * a0_sq * reg;
+  // Unchanged from the pre-regularization formula: the background-subtraction term
+  // is constant w.r.t. u, so its derivative is exactly zero (see header comment).
   *drhs_du = 2.0 * M_PI * du_term - 0.875 * ahat_sq * psi_inv8;
 }
 
@@ -121,7 +168,8 @@ MGCFCConformalFactor::MGCFCConformalFactor(MultigridDriver *pmd, MeshBlockPack *
   // The base Multigrid ctor allocates u_/src_/def_/uold_ per level but never
   // coeff_/matrix_, and never sets ncoeff_ from the driver -- both are the
   // responsibility of the first real user of coeff_, i.e. us.
-  ncoeff_ = 2;  // channel 0 = Utilde, channel 1 = Ahat^2
+  ncoeff_ = 4;  // channel 0 = Utilde, channel 1 = Ahat^2, channel 2 = psi0,
+                // channel 3 = Ahat0^2 (Sec 3.7 puncture regularization)
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -169,12 +217,14 @@ void MGCFCConformalFactor::SmoothPackImpl(int color) {
     const int c = (c0 + k + j) & 1;
     for (int i = is + c; i <= ie; i += 2) {
       Real u_old = u(m,0,k,j,i);
+      Real psi0 = coeff(m,2,k,j,i);
       Real rhs, drhs_du;
-      ConformalFactorRHS<UsePsi5>(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), &rhs, &drhs_du);
+      ConformalFactorRHS<UsePsi5>(u_old, coeff(m,0,k,j,i), coeff(m,1,k,j,i), psi0,
+                                   coeff(m,3,k,j,i), &rhs, &drhs_du);
       Real lap = ConformalFactorLap(u, m, k, j, i);
       Real fprime = 6.0 - dx2*drhs_du;
       Real u_new = u_old - omega*(lap - (rhs + src(m,0,k,j,i))*dx2)/fprime;
-      if (u_new + 1.0 < psi_floor) u_new = psi_floor - 1.0;
+      if (u_new + psi0 < psi_floor) u_new = psi_floor - psi0;
       u(m,0,k,j,i) = u_new;
     }
   });
@@ -210,7 +260,7 @@ void MGCFCConformalFactor::CalculateDefectPackImpl() {
     Real idx2 = 1.0 / (dx*dx);
     Real rhs, drhs_du;
     ConformalFactorRHS<UsePsi5>(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i),
-                                 &rhs, &drhs_du);
+                                 coeff(m,2,k,j,i), coeff(m,3,k,j,i), &rhs, &drhs_du);
     Real lap = ConformalFactorLap(u, m, k, j, i);
     def(m,0,k,j,i) = (rhs + src(m,0,k,j,i)) - lap*idx2;
   });
@@ -241,7 +291,7 @@ void MGCFCConformalFactor::CalculateFASRHSPackImpl() {
     Real idx2 = 1.0 / (dx*dx);
     Real rhs, drhs_du;
     ConformalFactorRHS<UsePsi5>(u(m,0,k,j,i), coeff(m,0,k,j,i), coeff(m,1,k,j,i),
-                                 &rhs, &drhs_du);
+                                 coeff(m,2,k,j,i), coeff(m,3,k,j,i), &rhs, &drhs_du);
     Real lap = ConformalFactorLap(u, m, k, j, i);
     src(m,0,k,j,i) += lap*idx2 - rhs;
   });
@@ -250,13 +300,14 @@ void MGCFCConformalFactor::CalculateFASRHSPackImpl() {
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 2 (carries Utilde, Ahat^2); mg_robin boundary
-//! conditions by default (Gmunu eq. 77, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 4 (carries Utilde, Ahat^2, psi0, Ahat0^2); mg_robin
+//! boundary conditions by default (Gmunu eq. 77, isolated/asymptotically-flat
+//! falloff).
 
 MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
                                                        ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  ncoeff_ = 2;
+  ncoeff_ = 4;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
@@ -445,6 +496,27 @@ void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
     cm_d(m, 1, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off);
+  });
+}
+
+void MGCFCConformalFactorDriver::LoadPunctureCoefficients(
+    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a0_sq, int ngh) {
+  // See LoadMatterSource's identical comment above.
+  mglevels_->ReallocateForAMR();
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  const int off = ngh - lngh;  // see LoadMatterSource above
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCConformalFactorDriver::LoadPunctureCoefficients", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
+    cm_d(m, 2, mk, mj, mi) = u_psi0(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 3, mk, mj, mi) = a0_sq(m, 0, mk+off, mj+off, mi+off);
   });
 }
 
@@ -1090,13 +1162,14 @@ void MGCFCConformalFactorDriver::SmoothOctetImpl(MGOctet &oct, int rlev, int col
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
         Real u_old = oct.U(0,k,j,i);
+        Real psi0 = oct.Coeff(2,k,j,i);
         Real rhs, drhs_du;
         ConformalFactorRHS<UsePsi5>(u_old, oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                                     &rhs, &drhs_du);
+                                     psi0, oct.Coeff(3,k,j,i), &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         Real fprime = 6.0 - dx2*drhs_du;
         Real u_new = u_old - mg_omega_psi_*(lap - (rhs + oct.Src(0,k,j,i))*dx2)/fprime;
-        if (u_new + 1.0 < psi_floor_) u_new = psi_floor_ - 1.0;
+        if (u_new + psi0 < psi_floor_) u_new = psi_floor_ - psi0;
         oct.U(0,k,j,i) = u_new;
       }
     }
@@ -1119,7 +1192,7 @@ void MGCFCConformalFactorDriver::CalculateDefectOctetImpl(MGOctet &oct, int rlev
       for (int i = ngh; i <= ngh+1; ++i) {
         Real rhs, drhs_du;
         ConformalFactorRHS<UsePsi5>(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                                     &rhs, &drhs_du);
+                                     oct.Coeff(2,k,j,i), oct.Coeff(3,k,j,i), &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         oct.Def(0,k,j,i) = (rhs + oct.Src(0,k,j,i)) - lap*idx2;
       }
@@ -1143,7 +1216,7 @@ void MGCFCConformalFactorDriver::CalculateFASRHSOctetImpl(MGOctet &oct, int rlev
       for (int i = ngh; i <= ngh+1; ++i) {
         Real rhs, drhs_du;
         ConformalFactorRHS<UsePsi5>(oct.U(0,k,j,i), oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i),
-                                     &rhs, &drhs_du);
+                                     oct.Coeff(2,k,j,i), oct.Coeff(3,k,j,i), &rhs, &drhs_du);
         Real lap = OctConformalFactorLap(oct, k, j, i);
         oct.Src(0,k,j,i) += lap*idx2 - rhs;
       }

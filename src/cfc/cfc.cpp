@@ -242,22 +242,22 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // <cfc> puncture_enabled (default false): opt-in stationary BH trumpet background
   // (CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6, cfc_puncture.hpp). u_psi0/u_alpha0_psi0/
-  // u_a0dual are always allocated (unconditionally, at the same AMR headroom as every
-  // other CFC array above) since cfc_reconstruct.cpp/cfc.cpp/mg_cfc_lapse.cpp now read
-  // them unconditionally (Sec 5 Phase A items 3, 6) -- filled with the exact flat-space
-  // values (psi0=1, alpha0*psi0=1, Ahat0_ij=0) when disabled, so every existing non-TDE
-  // run is a bit-for-bit no-op. The remaining background fields (beta0/a0_sq/its
-  // shift-source ingredient) are not yet read by anything, so stay opt-in-only
-  // allocated as before.
+  // u_a0dual/a0_sq are always allocated (unconditionally, at the same AMR headroom as
+  // every other CFC array above) since cfc_reconstruct.cpp/cfc.cpp/mg_cfc_lapse.cpp/
+  // mg_cfc_conformal_factor.cpp now read them unconditionally (Sec 5 Phase A items 3,
+  // 5, 6) -- filled with the exact flat-space values (psi0=1, alpha0*psi0=1,
+  // Ahat0_ij=0, Ahat0^2=0) when disabled, so every existing non-TDE run is a
+  // bit-for-bit no-op. The remaining background fields (beta0/its shift-source
+  // ingredient) are not yet read by anything, so stay opt-in-only allocated as before.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
   Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
   a0_dd.InitWithShallowSlice(u_a0dual, 0, 5);
+  Kokkos::realloc(a0_sq,         nmb, 1, ncells3, ncells2, ncells1);
   if (puncture_enabled_) {
     Kokkos::realloc(u_beta0,       nmb, 3, ncells3, ncells2, ncells1);
-    Kokkos::realloc(a0_sq,         nmb, 1, ncells3, ncells2, ncells1);
     Kokkos::realloc(u_s0_beta,     nmb, 3, ncells3, ncells2, ncells1);
     beta0_u.InitWithShallowSlice(u_beta0, 0, 2);
     s0_beta_u.InitWithShallowSlice(u_s0_beta, 0, 2);
@@ -267,6 +267,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::deep_copy(u_psi0, 1.0);
     Kokkos::deep_copy(u_alpha0_psi0, 1.0);
     Kokkos::deep_copy(u_a0dual, 0.0);
+    Kokkos::deep_copy(a0_sq, 0.0);
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -1253,6 +1254,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   pmgd_psi->SetUsePsi5Source(use_psi5_source);
   pmgd_psi->LoadMatterSource(use_psi5_source ? u_raw : u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
+  pmgd_psi->LoadPunctureCoefficients(u_psi0, a0_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
   pmgd_psi->RetrieveSolution(delta_psi);
 

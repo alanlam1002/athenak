@@ -64,9 +64,13 @@ class CFC {
   // FillPunctureBackground(), at construction and again after every AMR regrid (mirrors
   // cfc_puncture arrays, same "analytic, cheap to just recompute" treatment
   // ReinitializeMetricForAMR already gives every other CFC-owned field); never touched
-  // in the per-stage solve. Gated entirely by <cfc> puncture_enabled_ (default false) --
-  // left at their dummy (1,1,1,1,1) construction size and never filled when disabled, so
-  // this costs nothing and changes nothing for any non-TDE CFC run.
+  // in the per-stage solve. Gated by <cfc> puncture_enabled_ (default false), but
+  // u_psi0/u_alpha0_psi0/u_a0dual/a0_sq are always allocated (same AMR headroom as
+  // every other CFC array) and filled with the exact flat-space values (psi0=1,
+  // alpha0*psi0=1, Ahat0_ij=0, Ahat0^2=0) when disabled, since cfc_reconstruct.cpp/
+  // cfc.cpp/mg_cfc_lapse.cpp/mg_cfc_conformal_factor.cpp now read them unconditionally
+  // (Sec 5 Phase A items 3, 5, 6) -- every existing non-TDE run is a bit-for-bit no-op.
+  // u_beta0/u_s0_beta remain opt-in-only allocated: nothing reads them yet (item 7).
   DvceArray5D<Real> u_psi0;          // psi0
   DvceArray5D<Real> u_alpha0_psi0;   // alpha0*psi0 (the product, matching how
                                      // delta_alpha_psi stores alpha*psi -- see Sec 3.3)

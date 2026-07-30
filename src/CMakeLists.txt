@@ -30,6 +30,7 @@ add_executable(
         bvals/physics/adm_bcs.cpp
 
         cfc/cfc.cpp
+        cfc/cfc_puncture.cpp
         cfc/cfc_reconstruct.cpp
         cfc/mg_cfc_conformal_factor.cpp
         cfc/mg_cfc_lapse.cpp

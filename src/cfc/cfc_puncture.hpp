@@ -23,7 +23,11 @@
 #include <cmath>
 
 #include "athena.hpp"
+#include "athena_tensor.hpp"
 #include "eos/primitive-solver/numtools_root.hpp"
+
+// forward declarations
+class MeshBlockPack;
 
 namespace cfc {
 
@@ -149,6 +153,28 @@ void WormholeBackground(Real m_bh, Real x1, Real x2, Real x3,
   for (int a = 0; a < 6; ++a) { Aij0[a] = 0.0; }
   *a2 = 0.0;
 }
+
+//----------------------------------------------------------------------------------------
+//! \fn void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
+//!            DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
+//!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+//!            DvceArray5D<Real> &a0_sq,
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &s0_beta_u)
+//! \brief One-time (per construction / per AMR regrid) ghost-inclusive fill of the
+//! trumpet background arrays, mirroring src/pgen/z4c/z4c_one_puncture.cpp's
+//! ADMOnePuncture -- CellCenterX for coordinates, is-ng..ie+ng bounds. u_alpha0_psi0
+//! stores alpha0*psi0 (the product, matching delta_alpha_psi's own convention).
+//! s0_beta_u = 2*Ahat0^ij*D_j(alpha0*psi0^-6) (Sec 3.9) is assembled here from
+//! TrumpetBackground's dpsi0/dalpha0 via D_j(alpha0*psi0^-6) =
+//! (alpha0*psi0^-6)*[dalpha0/alpha0 - 6*dpsi0/psi0]*x_j/r -- not yet consumed by
+//! anything (Sec 5 Phase A item 7), stored now since it costs nothing extra here.
+void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
+                            DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
+                            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+                            DvceArray5D<Real> &a0_sq,
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &s0_beta_u);
 
 }  // namespace cfc
 

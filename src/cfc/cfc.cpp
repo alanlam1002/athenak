@@ -25,6 +25,7 @@
 #include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "cfc.hpp"
+#include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
 
 namespace cfc {
@@ -123,6 +124,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     u_p_x("cfc_u_p_x", 1, 1, 1, 1, 1),
     u_p_beta("cfc_u_p_beta", 1, 1, 1, 1, 1),
     u_p_src("cfc_u_p_src", 1, 1, 1, 1, 1),
+    u_psi0("cfc_u_psi0", 1, 1, 1, 1, 1),
+    u_alpha0_psi0("cfc_u_alpha0_psi0", 1, 1, 1, 1, 1),
+    u_beta0("cfc_u_beta0", 1, 1, 1, 1, 1),
+    u_a0dual("cfc_u_a0dual", 1, 1, 1, 1, 1),
+    a0_sq("cfc_a0_sq", 1, 1, 1, 1, 1),
+    u_s0_beta("cfc_u_s0_beta", 1, 1, 1, 1, 1),
     pmgd_pietax(nullptr),
     pmgd_pietabeta(nullptr),
     pmgd_psi(nullptr),
@@ -227,6 +234,29 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::realloc(coarse_u_pietabeta, nmb, 4, nccells3, nccells2, nccells1);
     // u_adm's own coarse shadow is padm->coarse_u_adm (adm.cpp:57-67) -- no
     // separate CFC-owned copy; see cfc.hpp's pbval_adm comment.
+  }
+
+  // <cfc> puncture_enabled (default false): opt-in stationary BH trumpet background
+  // (CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6, cfc_puncture.hpp) -- off by default, so
+  // every existing non-TDE CFC run allocates none of this and is completely
+  // unaffected. When enabled, size the background arrays with the same AMR headroom
+  // as every other CFC array above and fill them once here; ReinitializeMetricForAMR
+  // re-fills them (cheap, analytic) after every regrid, the same "just recompute from
+  // the current mesh state" treatment that function already gives everything else.
+  puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
+  puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  if (puncture_enabled_) {
+    Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
+    Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
+    Kokkos::realloc(u_beta0,       nmb, 3, ncells3, ncells2, ncells1);
+    Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
+    Kokkos::realloc(a0_sq,         nmb, 1, ncells3, ncells2, ncells1);
+    Kokkos::realloc(u_s0_beta,     nmb, 3, ncells3, ncells2, ncells1);
+    beta0_u.InitWithShallowSlice(u_beta0, 0, 2);
+    a0_dd.InitWithShallowSlice(u_a0dual, 0, 5);
+    s0_beta_u.InitWithShallowSlice(u_s0_beta, 0, 2);
+    FillPunctureBackground(pmbp, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u, a0_dd,
+                           a0_sq, s0_beta_u);
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -670,6 +700,15 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
   int nmb = pmy_pack->nmb_thispack;
+
+  // Re-derive the (analytic, time-independent) trumpet background at the post-regrid
+  // mesh's own cell positions -- cheap, so just recompute rather than remap; mirrors
+  // this function's own treatment of every other CFC-owned field (re-seed/re-solve,
+  // never a cross-layout data transfer). No-op when puncture_enabled_ is false.
+  if (puncture_enabled_) {
+    FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
+                           a0_dd, a0_sq, s0_beta_u);
+  }
 
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;

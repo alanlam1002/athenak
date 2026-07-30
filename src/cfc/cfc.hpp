@@ -59,6 +59,38 @@ class CFC {
 
   DvceArray5D<Real> a_sq;   // Ahat^2 = f_ik f_jl Adual^kl Adual^ij
 
+  // Analytic stationary BH "trumpet" background (CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6,
+  // cfc_puncture.hpp). Time-independent (puncture fixed at x=0) -- populated once by
+  // FillPunctureBackground(), at construction and again after every AMR regrid (mirrors
+  // cfc_puncture arrays, same "analytic, cheap to just recompute" treatment
+  // ReinitializeMetricForAMR already gives every other CFC-owned field); never touched
+  // in the per-stage solve. Gated entirely by <cfc> puncture_enabled_ (default false) --
+  // left at their dummy (1,1,1,1,1) construction size and never filled when disabled, so
+  // this costs nothing and changes nothing for any non-TDE CFC run.
+  DvceArray5D<Real> u_psi0;          // psi0
+  DvceArray5D<Real> u_alpha0_psi0;   // alpha0*psi0 (the product, matching how
+                                     // delta_alpha_psi stores alpha*psi -- see Sec 3.3)
+  DvceArray5D<Real> u_beta0;
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> beta0_u;   // beta0^i
+
+  DvceArray5D<Real> u_a0dual;
+  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> a0_dd;     // Ahat0_ij, packed like a_dd
+
+  DvceArray5D<Real> a0_sq;   // Ahat0_ij*Ahat0^ij
+
+  // Shift-source ingredient s0_beta^i = 2*Ahat0^ij*D_j(alpha0*psi0^-6) (Sec 3.9),
+  // closed-form from TrumpetBackground's dpsi0/dalpha0 outputs -- not yet consumed by
+  // BuildShiftSource (Sec 5 Phase A item 7, a later stage), stored now since it falls
+  // out of the same per-cell fill at no extra cost.
+  DvceArray5D<Real> u_s0_beta;
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> s0_beta_u;
+
+  // <cfc> puncture_enabled (default false): opt-in switch for the trumpet background
+  // above. <cfc> puncture_mass (default 1.0): the BH mass M_BH the background is built
+  // for -- see cfc.cpp's constructor for both.
+  bool puncture_enabled_;
+  Real puncture_mass_;
+
   // Store psi-1 / alpha*psi-1, not the physical field -- this is exactly what the
   // multigrid solve iterates on internally, and avoids losing precision far from
   // the star where the physical value is ~1+tiny. Consumers add 1.0 back at the

@@ -252,3 +252,16 @@ configure_file(config.hpp.in config.hpp)
 
 install( TARGETS athena DESTINATION bin )
 
+#------ standalone unit tests -------------------------------------------------------------
+# Small executables exercising pure, mesh/Driver/MPI-independent device math in isolation
+# (e.g. src/cfc/cfc_puncture.hpp), built alongside the main "athena" target but with no
+# dependency on Mesh/MeshBlockPack/Driver machinery. Linked against the same Kokkos::kokkos
+# target athena uses (Kokkos is already add_subdirectory'd above, so this is free).
+
+add_executable(test_cfc_puncture tst/unit/test_cfc_puncture.cpp)
+target_include_directories(test_cfc_puncture PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${CMAKE_CURRENT_BINARY_DIR}
+)
+target_link_libraries(test_cfc_puncture PUBLIC Kokkos::kokkos)
+

@@ -28,6 +28,7 @@ namespace cfc {
 //! \fn void ComputeADualFromPotentials(MeshBlockPack *pmbp,
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
 //!            const DvceArray5D<Real> &eta,
+//!            const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
 //!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd, int eta_chan = 0)
 //! \brief Gmunu (2021) eq. 76 (Adual^ij ~= D^i X^j + D^j X^i - (2/3) D_k X^k f^ij)
 //! with X^j (Shibata 1999 eq. 3.9) substituted in and expanded analytically, so
@@ -35,10 +36,14 @@ namespace cfc {
 //! X^i itself is never materialized, so it needs no ghost exchange of its own. Use
 //! this instead of reconstructing X^i via ReconstructVectorFromPotentials() when
 //! X^i is not otherwise needed (as for CFC's own Adual, unlike beta^i which is also
-//! written directly to the ADM shift).
+//! written directly to the ADM shift). a0_dd is the analytic trumpet background
+//! Ahat0_ij (CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 6, cfc_puncture.hpp) --
+//! zero everywhere unless <cfc> puncture_enabled, so a_dd = a0_dd + matter part
+//! reduces to the matter part alone by default.
 void ComputeADualFromPotentials(MeshBlockPack *pmbp,
                                  const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
                                  const DvceArray5D<Real> &eta,
+                                 const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                                  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                                  int eta_chan = 0);
 

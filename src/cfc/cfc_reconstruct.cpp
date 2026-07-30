@@ -74,6 +74,8 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
                                      const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
                                          &p_i,
                                      const DvceArray5D<Real> &eta,
+                                     const AthenaTensor<Real, TensorSymm::SYM2, 3, 2>
+                                         &a0_dd,
                                      AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                                      int eta_chan) {
   auto &indcs = pmbp->pmesh->mb_indcs;
@@ -118,7 +120,8 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
     Real trace = dX[0][0] + dX[1][1] + dX[2][2];
     for (int a = 0; a < 3; ++a) {
       for (int b = a; b < 3; ++b) {
-        a_dd(m,a,b,k,j,i) = dX[a][b] + dX[b][a] - (a == b ? (2./3.)*trace : 0.0);
+        a_dd(m,a,b,k,j,i) = a0_dd(m,a,b,k,j,i) + dX[a][b] + dX[b][a]
+                             - (a == b ? (2./3.)*trace : 0.0);
       }
     }
   });
@@ -129,13 +132,17 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
 void ComputeADualFromPotentials(MeshBlockPack *pmbp,
                                  const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
                                  const DvceArray5D<Real> &eta,
+                                 const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                                  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                                  int eta_chan) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: ComputeADualFromPotentialsImpl<2>(pmbp, p_i, eta, a_dd, eta_chan); break;
-    case 3: ComputeADualFromPotentialsImpl<3>(pmbp, p_i, eta, a_dd, eta_chan); break;
-    case 4: ComputeADualFromPotentialsImpl<4>(pmbp, p_i, eta, a_dd, eta_chan); break;
+    case 2: ComputeADualFromPotentialsImpl<2>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+            break;
+    case 3: ComputeADualFromPotentialsImpl<3>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+            break;
+    case 4: ComputeADualFromPotentialsImpl<4>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+            break;
   }
 }
 

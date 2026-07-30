@@ -40,6 +40,8 @@ namespace {
 template <int NGHOST>
 void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                           const DvceArray5D<Real> &delta_alpha_psi,
+                          const DvceArray5D<Real> &u_psi0,
+                          const DvceArray5D<Real> &u_alpha0_psi0,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
                           int mg_nghost, DvceArray5D<Real> &ap6) {
@@ -60,9 +62,9 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
   par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real psi_val = delta_psi(m,0,k,j,i) + 1.0;
+    Real psi_val = delta_psi(m,0,k,j,i) + u_psi0(m,0,k,j,i);
     Real psi7 = psi_val*psi_val*psi_val*psi_val*psi_val*psi_val*psi_val;
-    ap6(m,0,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + 1.0)/psi7;
+    ap6(m,0,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + u_alpha0_psi0(m,0,k,j,i))/psi7;
   });
 
   AthenaTensor<Real, TensorSymm::NONE, 3, 0> ap6_view;
@@ -89,17 +91,19 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
 
 void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                       const DvceArray5D<Real> &delta_alpha_psi,
+                      const DvceArray5D<Real> &u_psi0,
+                      const DvceArray5D<Real> &u_alpha0_psi0,
                       const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
                       int mg_nghost, DvceArray5D<Real> &ap6) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: BuildShiftSourceImpl<2>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost, ap6); break;
-    case 3: BuildShiftSourceImpl<3>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost, ap6); break;
-    case 4: BuildShiftSourceImpl<4>(pmbp, delta_psi, delta_alpha_psi, a_dd, p_src,
-                                     mg_nghost, ap6); break;
+    case 2: BuildShiftSourceImpl<2>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
+                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
+    case 3: BuildShiftSourceImpl<3>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
+                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
+    case 4: BuildShiftSourceImpl<4>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
+                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
   }
 }
 
@@ -237,17 +241,18 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   }
 
   // <cfc> puncture_enabled (default false): opt-in stationary BH trumpet background
-  // (CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6, cfc_puncture.hpp) -- off by default, so
-  // every existing non-TDE CFC run allocates none of this and is completely
-  // unaffected. When enabled, size the background arrays with the same AMR headroom
-  // as every other CFC array above and fill them once here; ReinitializeMetricForAMR
-  // re-fills them (cheap, analytic) after every regrid, the same "just recompute from
-  // the current mesh state" treatment that function already gives everything else.
+  // (CFC_PUNCTURE_TDE_PLAN.md Sec 3.2/3.6, cfc_puncture.hpp). u_psi0/u_alpha0_psi0 are
+  // always allocated (unconditionally, at the same AMR headroom as every other CFC
+  // array above) since cfc_reconstruct.cpp/cfc.cpp/mg_cfc_lapse.cpp now read them
+  // unconditionally (Sec 5 Phase A item 3) -- filled with the exact flat-space values
+  // (psi0=1, alpha0*psi0=1) when disabled, so every existing non-TDE run is a
+  // bit-for-bit no-op. The remaining background fields (beta0/Ahat0/its shift-source
+  // ingredient) are not yet read by anything, so stay opt-in-only allocated as before.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
   if (puncture_enabled_) {
-    Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
-    Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
     Kokkos::realloc(u_beta0,       nmb, 3, ncells3, ncells2, ncells1);
     Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
     Kokkos::realloc(a0_sq,         nmb, 1, ncells3, ncells2, ncells1);
@@ -257,6 +262,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     s0_beta_u.InitWithShallowSlice(u_s0_beta, 0, 2);
     FillPunctureBackground(pmbp, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u, a0_dd,
                            a0_sq, s0_beta_u);
+  } else {
+    Kokkos::deep_copy(u_psi0, 1.0);
+    Kokkos::deep_copy(u_alpha0_psi0, 1.0);
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -514,9 +522,11 @@ void CFC::InitializeMetric(Driver *pdriver) {
                                   delta_psi.extent_int(4));
     auto &adm_ = pmy_pack->padm->adm;
     auto &psi_before_seed = psi_before;
+    auto &u_psi0_ = u_psi0;
     par_for("cfc_init_psi_before_seed", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25) - 1.0;
+      psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25)
+                                    - u_psi0_(m,0,k,j,i);
     });
 
     RunXPsiSolvePass(pdriver);
@@ -575,7 +585,7 @@ void CFC::InitializeMetric(Driver *pdriver) {
           psi_relax(m,0,k,j,i) = (1.0 - omega)*psi_old_relax(m,0,k,j,i) +
                                   omega*psi_relax(m,0,k,j,i);
         });
-        cfc::AssembleConformalMetric(pmy_pack, delta_psi);
+        cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0);
       }
 
       Real dpsi = 0.0;
@@ -722,9 +732,11 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
                                 delta_psi.extent_int(4));
   auto &adm_ = pmy_pack->padm->adm;
   auto &psi_before_seed = psi_before;
+  auto &u_psi0_ = u_psi0;
   par_for("cfc_regrid_psi_before_seed", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25) - 1.0;
+    psi_before_seed(m,0,k,j,i) = Kokkos::pow(adm_.psi4(m,k,j,i), 0.25)
+                                  - u_psi0_(m,0,k,j,i);
   });
 
   RunXPsiSolvePass(pdriver);
@@ -1139,21 +1151,23 @@ void CFC::AssembleVectorSource(bool for_shift) {
     // built.
     auto &delta_psi_ = delta_psi;
     auto &delta_alpha_psi_ = delta_alpha_psi;
+    auto &u_psi0_ = u_psi0;
+    auto &u_alpha0_psi0_ = u_alpha0_psi0;
     par_for("cfc_assemble_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
-      Real psi_val = delta_psi_(m,0,k,j,i) + 1.0;
+      Real psi_val = delta_psi_(m,0,k,j,i) + u_psi0_(m,0,k,j,i);
       Real psi2 = psi_val*psi_val;
       Real psi7 = psi2*psi2*psi2*psi_val;
       // alpha*psi^-6 = (alpha_psi/psi)*psi^-6 = alpha_psi*psi^-7.
-      Real ap6 = (delta_alpha_psi_(m,0,k,j,i) + 1.0)/psi7;
+      Real ap6 = (delta_alpha_psi_(m,0,k,j,i) + u_alpha0_psi0_(m,0,k,j,i))/psi7;
       for (int a = 0; a < 3; ++a) {
         p_src_(m,a,mk,mj,mi) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
       }
     });
     // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
-    BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, a_dd, p_src, mg_nghost,
-                      u_alpha_psi6);
+    BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0, a_dd,
+                     p_src, mg_nghost, u_alpha_psi6);
 
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
@@ -1226,9 +1240,10 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
     int nmb = pmy_pack->nmb_thispack;
     auto &adm = pmy_pack->padm->adm;
     auto &psi_ = delta_psi;
+    auto &u_psi0_ = u_psi0;
     par_for("cfc_seed_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      psi_(m,0,k,j,i) = Kokkos::pow(adm.psi4(m,k,j,i), 0.25) - 1.0;
+      psi_(m,0,k,j,i) = Kokkos::pow(adm.psi4(m,k,j,i), 0.25) - u_psi0_(m,0,k,j,i);
     });
     pmgd_psi->SeedInitialGuess(delta_psi, indcs.ng);
   }
@@ -1239,7 +1254,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   pmgd_psi->Solve(pdriver, stage);
   pmgd_psi->RetrieveSolution(delta_psi);
 
-  cfc::AssembleConformalMetric(pmy_pack, delta_psi);
+  cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0);
   return;
 }
 
@@ -1343,14 +1358,17 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     auto &adm = pmy_pack->padm->adm;
     auto &psi_c = delta_psi;
     auto &alpha_psi_c = delta_alpha_psi;
+    auto &u_psi0_ = u_psi0;
+    auto &u_alpha0_psi0_ = u_alpha0_psi0;
     par_for("cfc_seed_alpha_psi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      alpha_psi_c(m,0,k,j,i) = adm.alpha(m,k,j,i)*(psi_c(m,0,k,j,i) + 1.0) - 1.0;
+      alpha_psi_c(m,0,k,j,i) = adm.alpha(m,k,j,i)*(psi_c(m,0,k,j,i) + u_psi0_(m,0,k,j,i))
+                               - u_alpha0_psi0_(m,0,k,j,i);
     });
     pmgd_alpha->SeedInitialGuess(delta_alpha_psi, indcs.ng);
   }
 
-  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, a_sq, indcs.ng);
+  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, u_psi0, a_sq, indcs.ng);
   pmgd_alpha->Solve(pdriver, stage);
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
   return;
@@ -1371,7 +1389,8 @@ void CFC::ReconstructShift() {
 }
 
 void CFC::AssembleADM() {
-  cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, a_dd, beta_u);
+  cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
+                           a_dd, beta_u);
   return;
 }
 

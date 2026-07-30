@@ -284,12 +284,13 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
 // Evaluates K(x) = LapseReactionCoeff(...) once per point, at the finest level, and
 // writes only that value into coeff_ (see this file's header comment for why).
-// u_plus_2s_tilde/delta_psi/a_sq are padded to depth ngh (mesh-NGHOST, per cfc.cpp).
-// delta_psi stores psi - 1 (cfc::CFC::delta_psi, cfc.hpp); the physical psi
-// LapseReactionCoeff needs is reconstructed (+1.0).
+// u_plus_2s_tilde/delta_psi/a_sq/u_psi0 are padded to depth ngh (mesh-NGHOST, per
+// cfc.cpp). delta_psi stores psi - psi0 (cfc::CFC::delta_psi, cfc.hpp); the physical
+// psi LapseReactionCoeff needs is reconstructed (+u_psi0, 1.0 everywhere unless <cfc>
+// puncture_enabled).
 void MGCFCLapseDriver::LoadReactionCoefficient(
     const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
-    const DvceArray5D<Real> &a_sq, int ngh) {
+    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a_sq, int ngh) {
   // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
@@ -305,7 +306,8 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
     Real u2s = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
-    Real psi_known = delta_psi(m, 0, mk+off, mj+off, mi+off) + 1.0;
+    Real psi_known = delta_psi(m, 0, mk+off, mj+off, mi+off)
+                     + u_psi0(m, 0, mk+off, mj+off, mi+off);
     Real ahat_sq = a_sq(m, 0, mk+off, mj+off, mi+off);
     cm_d(m, 0, mk, mj, mi) = LapseReactionCoeff(u2s, psi_known, ahat_sq);
   });

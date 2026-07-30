@@ -62,23 +62,33 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleConformalMetric(MeshBlockPack *pmbp,
-//!                                   const DvceArray5D<Real> &delta_psi)
-//! \brief writes psi4 = psi^4 and g_dd = psi^4*delta_ij into pmbp->padm->u_adm. Must
-//! run before MHD_C2P (dyn_grmhd's per-stage con2prim, queued to depend on
-//! CFC_SolvePsi): PrimitiveSolverHydro::ConsToPrim reads padm->adm.g_dd directly to
-//! invert conserved to primitive variables.
-void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi);
+//!                                   const DvceArray5D<Real> &delta_psi,
+//!                                   const DvceArray5D<Real> &u_psi0)
+//! \brief writes psi4 = psi^4 and g_dd = psi^4*delta_ij into pmbp->padm->u_adm, where
+//! psi = delta_psi + u_psi0 (u_psi0 is the analytic background, 1.0 everywhere unless
+//! <cfc> puncture_enabled -- CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 3). Must run
+//! before MHD_C2P (dyn_grmhd's per-stage con2prim, queued to depend on CFC_SolvePsi):
+//! PrimitiveSolverHydro::ConsToPrim reads padm->adm.g_dd directly to invert conserved
+//! to primitive variables.
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                              const DvceArray5D<Real> &u_psi0);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
 //!            const DvceArray5D<Real> &delta_alpha_psi,
+//!            const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &u_alpha0_psi0,
 //!            const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u)
 //! \brief final XCFC step: writes vK_dd = psi^-2*Adual_ij (maximal slicing, K=0),
-//! alpha = (alpha*psi)/psi, and beta_u into pmbp->padm->u_adm. psi4/g_dd are already
-//! set by AssembleConformalMetric() and not rewritten here.
+//! alpha = (alpha*psi)/psi, and beta_u into pmbp->padm->u_adm, where
+//! psi = delta_psi + u_psi0 and alpha*psi = delta_alpha_psi + u_alpha0_psi0 (Sec 5
+//! Phase A item 3). psi4/g_dd are already set by AssembleConformalMetric() and not
+//! rewritten here. beta_u is copied through unchanged (no background offset yet --
+//! that's item 7, coupled to the shift-source rework, not this generalization).
 void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                           const DvceArray5D<Real> &delta_alpha_psi,
+                          const DvceArray5D<Real> &u_psi0,
+                          const DvceArray5D<Real> &u_alpha0_psi0,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u);
 

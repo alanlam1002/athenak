@@ -67,12 +67,14 @@ class MGCFCLapseDriver : public MultigridDriver {
     // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 once, at the
     // finest level, and store only that value in coeff_ (channel 0, ncoeff_ = 1),
     // not src_ -- see this file's header comment (mg_cfc_lapse.cpp) for the full
-    // FAS-consistency rationale. u_plus_2s_tilde/delta_psi/a_sq are padded to depth
-    // ngh (the mesh's own NGHOST, not this driver's shallower ngh_). delta_psi is
-    // psi - 1 (cfc::CFC::delta_psi, cfc.hpp); the physical psi K(x) needs is
-    // reconstructed internally (+1.0).
+    // FAS-consistency rationale. u_plus_2s_tilde/delta_psi/a_sq/u_psi0 are padded to
+    // depth ngh (the mesh's own NGHOST, not this driver's shallower ngh_). delta_psi is
+    // psi - psi0 (cfc::CFC::delta_psi, cfc.hpp); the physical psi K(x) needs is
+    // reconstructed internally (+u_psi0, 1.0 everywhere unless <cfc> puncture_enabled --
+    // CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 3).
     void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
                                  const DvceArray5D<Real> &delta_psi,
+                                 const DvceArray5D<Real> &u_psi0,
                                  const DvceArray5D<Real> &a_sq, int ngh);
 
     // retrieve the converged delta_(alpha psi) solution after Solve() completes.

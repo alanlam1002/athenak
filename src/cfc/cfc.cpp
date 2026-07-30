@@ -196,21 +196,23 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp later differentiates, mirroring
-  // z4c::Z4c::pbval_u/coarse_u0 (is_z4c=false throughout -- see cfc.hpp).
-  pbval_pietax = new MeshBoundaryValuesCC(pmbp, pin, false);
+  // z4c::Z4c::pbval_u/coarse_u0. is_z4c=true throughout -- these fields need the
+  // same smooth-across-AMR-levels treatment Z4c's own metric variables get, so they
+  // reuse z4c's higher-order (Lagrange) restrict/prolong path (see cfc.hpp).
+  pbval_pietax = new MeshBoundaryValuesCC(pmbp, pin, true);
   pbval_pietax->InitializeBuffers(4);
-  pbval_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_psi = new MeshBoundaryValuesCC(pmbp, pin, true);
   pbval_psi->InitializeBuffers(1);
-  pbval_alpha_psi = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_alpha_psi = new MeshBoundaryValuesCC(pmbp, pin, true);
   pbval_alpha_psi->InitializeBuffers(1);
-  pbval_pietabeta = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_pietabeta = new MeshBoundaryValuesCC(pmbp, pin, true);
   pbval_pietabeta->InitializeBuffers(4);
 
   // Ghost-exchange for padm->u_adm itself -- see pbval_adm's comment in cfc.hpp.
   // CFC never runs with z4c active, so u_adm always carries the full nadm channels
   // (adm::ADM::ADM's constructor only shrinks it and aliases alpha/beta_u into
   // pz4c->u0 when pz4c != nullptr -- never true here).
-  pbval_adm = new MeshBoundaryValuesCC(pmbp, pin, false);
+  pbval_adm = new MeshBoundaryValuesCC(pmbp, pin, true);
   pbval_adm->InitializeBuffers(adm::ADM::nadm);
 
   // coarse_* shadow arrays: only needed with SMR/AMR (RestrictCC/ProlongateCC are
@@ -757,11 +759,12 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 //----------------------------------------------------------------------------------------
 // Ghost-exchange task-graph entry points: one Rest/Send/Recv/Prolong quartet per field,
 // mirroring z4c::Z4c::RestrictU/SendU/RecvU/Prolongate (RestrictCC/ProlongateCC are
-// internal no-ops without SMR/AMR; is_z4c=false throughout since CFC is not z4c).
+// internal no-ops without SMR/AMR; is_z4c=true throughout, reusing z4c's higher-order
+// Lagrange restrict/prolong path -- see the constructor's comment above).
 
 TaskStatus CFC::RestPiEtaXTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_pietax, false);
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_pietax, true);
   }
   return TaskStatus::complete;
 }
@@ -778,8 +781,16 @@ TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietax, 4, 1);
     }
-    pbval_pietax->FillCoarseInBndryCC(u_p_x, coarse_u_pietax);
-    pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, false);
+    // Note: FillCoarseInBndryCC is intentionally not called here (mirrors
+    // z4c::Z4c::Prolongate, z4c_tasks.cpp:281-284). Its is_z4c branch restricts
+    // this block's own just-received same-level ghost strip, but that strip is
+    // already at the edge of the fine array's own ghost padding -- the 4th-order
+    // Lagrange stencil then reads one cell beyond it (index -1), an out-of-bounds
+    // access confirmed at runtime. The same same-level coarse data is instead
+    // delivered directly via the isame_z4c payload in Send/RecvPiEtaX, computed
+    // from the *neighbor's* own interior data (which has proper margin), so
+    // restricting it again here would be both redundant and unsafe.
+    pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, true);
   }
   return TaskStatus::complete;
 }
@@ -797,7 +808,7 @@ TaskStatus CFC::BCSPiEtaXTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::RestPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(delta_psi, coarse_psi, false);
+    pmy_pack->pmesh->pmr->RestrictCC(delta_psi, coarse_psi, true);
   }
   return TaskStatus::complete;
 }
@@ -812,8 +823,9 @@ TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_psi, 1, 1);
     }
-    pbval_psi->FillCoarseInBndryCC(delta_psi, coarse_psi);
-    pbval_psi->ProlongateCC(delta_psi, coarse_psi, false);
+    // FillCoarseInBndryCC intentionally skipped here -- see ProlongPiEtaXTask's
+    // comment above (mirrors z4c::Z4c::Prolongate).
+    pbval_psi->ProlongateCC(delta_psi, coarse_psi, true);
   }
   return TaskStatus::complete;
 }
@@ -826,7 +838,7 @@ TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::RestAlphaPsiTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(delta_alpha_psi, coarse_alpha_psi, false);
+    pmy_pack->pmesh->pmr->RestrictCC(delta_alpha_psi, coarse_alpha_psi, true);
   }
   return TaskStatus::complete;
 }
@@ -841,8 +853,9 @@ TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_alpha_psi, 1, 1);
     }
-    pbval_alpha_psi->FillCoarseInBndryCC(delta_alpha_psi, coarse_alpha_psi);
-    pbval_alpha_psi->ProlongateCC(delta_alpha_psi, coarse_alpha_psi, false);
+    // FillCoarseInBndryCC intentionally skipped here -- see ProlongPiEtaXTask's
+    // comment above (mirrors z4c::Z4c::Prolongate).
+    pbval_alpha_psi->ProlongateCC(delta_alpha_psi, coarse_alpha_psi, true);
   }
   return TaskStatus::complete;
 }
@@ -855,7 +868,7 @@ TaskStatus CFC::BCSAlphaPsiTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::RestPiEtaBetaTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
-    pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pietabeta, false);
+    pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pietabeta, true);
   }
   return TaskStatus::complete;
 }
@@ -870,8 +883,9 @@ TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietabeta, 4, 1);
     }
-    pbval_pietabeta->FillCoarseInBndryCC(u_p_beta, coarse_u_pietabeta);
-    pbval_pietabeta->ProlongateCC(u_p_beta, coarse_u_pietabeta, false);
+    // FillCoarseInBndryCC intentionally skipped here -- see ProlongPiEtaXTask's
+    // comment above (mirrors z4c::Z4c::Prolongate).
+    pbval_pietabeta->ProlongateCC(u_p_beta, coarse_u_pietabeta, true);
   }
   return TaskStatus::complete;
 }
@@ -890,7 +904,7 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
-                                      false);
+                                      true);
   }
   return TaskStatus::complete;
 }
@@ -907,8 +921,9 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::ADMBCsCoarse(pmy_pack, pmy_pack->padm->coarse_u_adm);
     }
-    pbval_adm->FillCoarseInBndryCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
-    pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm, false);
+    // FillCoarseInBndryCC intentionally skipped here -- see ProlongPiEtaXTask's
+    // comment above (mirrors z4c::Z4c::Prolongate).
+    pbval_adm->ProlongateCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm, true);
   }
   return TaskStatus::complete;
 }

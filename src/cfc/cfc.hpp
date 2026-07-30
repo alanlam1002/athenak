@@ -171,9 +171,10 @@ class CFC {
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp differentiates (mirrors z4c::Z4c::pbval_u/
-  // coarse_u0; is_z4c=false throughout). coarse_* arrays are only sized under
-  // SMR/AMR (RestrictCC/ProlongateCC are no-ops otherwise). u_p_x/u_p_beta each get
-  // one round covering all 4 packed channels at once.
+  // coarse_u0; is_z4c=true throughout, reusing z4c's higher-order Lagrange
+  // restrict/prolong path -- see cfc.cpp's constructor comment). coarse_* arrays
+  // are only sized under SMR/AMR (RestrictCC/ProlongateCC are no-ops otherwise).
+  // u_p_x/u_p_beta each get one round covering all 4 packed channels at once.
   MeshBoundaryValuesCC *pbval_pietax;
   MeshBoundaryValuesCC *pbval_psi, *pbval_alpha_psi;
   MeshBoundaryValuesCC *pbval_pietabeta;

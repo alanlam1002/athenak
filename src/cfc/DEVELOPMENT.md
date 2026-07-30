@@ -578,7 +578,9 @@ src/cfc/
   `z4c::Z4c::RestrictU`/`SendU`/`RecvU`/`Prolongate`'s exact shape, using one
   `MeshBoundaryValuesCC` + `coarse_*` pair per field (`pbval_pietax`/
   `coarse_u_pietax`, etc. -- `pbval_px`/`pbval_etax` before item 18's merge,
-  `cfc.hpp`) -- `is_z4c=false` throughout since CFC is not z4c.
+  `cfc.hpp`) -- `is_z4c=false` throughout since CFC is not z4c (as of this
+  writing; item 44 later switches all five fields to `is_z4c=true` to reuse
+  z4c's higher-order restrict/prolong path).
   `MHD_C2P`/`MHD_Newdt`'s CFC dependencies are *optional*
   (`NumericalRelativity::AddExtraDependencies`), so a run without a `<cfc>` block
   produces the exact same task graph as before this change. Because
@@ -5603,9 +5605,14 @@ src/cfc/
     still-unexplained bug. See 39f/39g for the current state and a minimal,
     CFC-independent reproducer with confirmed physics-level evidence.
 
-    - **39a. Real, scoped fix applied and kept**: CFC's six ghost-exchanged
-      fields (`u_p_x`, `u_x`, `delta_psi`, `delta_alpha_psi`, `u_p_beta`,
-      `padm->u_adm`) all use `is_z4c=false` (like Hydro/MHD), which means
+    - **39a. Real, scoped fix applied and kept** (superseded for `is_z4c`/
+      `FillCoarseInBndryCC` specifically by item 43 -- `u_x` removed -- and
+      item 44 -- fields switched to `is_z4c=true` and `FillCoarseInBndryCC`
+      removed entirely; the same-level corner-padding gap this bullet fixes
+      is still real and still needed for the `is_z4c=false` era it
+      describes): CFC's six ghost-exchanged fields (`u_p_x`, `u_x`,
+      `delta_psi`, `delta_alpha_psi`, `u_p_beta`, `padm->u_adm`) all use
+      `is_z4c=false` (like Hydro/MHD), which means
       `ProlongateCC`'s stencil needs a `FillCoarseInBndryCC` call
       immediately beforehand to correctly populate the coarse scratch
       array's transverse padding at same-level-neighbor-adjacent corners --
@@ -6133,9 +6140,14 @@ src/cfc/
       `HydroBCsCoarse`/`BFieldBCsCoarse`/`RadiationBCsCoarse`/`Z4cBCsCoarse`
       naming precedent, called inside each field's `Prolong*Task` right
       before the existing `FillCoarseInBndryCC`/`ProlongateCC` pair (kept
-      unchanged -- unlike z4c, which skips `FillCoarseInBndryCC` entirely
-      since its same-level-neighbor coarse data arrives via a dedicated MPI
-      buffer CFC's own `MeshBoundaryValuesCC` objects don't use).
+      unchanged as of this writing -- unlike z4c, which skips
+      `FillCoarseInBndryCC` entirely since its same-level-neighbor coarse
+      data arrives via a dedicated MPI buffer CFC's own `MeshBoundaryValuesCC`
+      objects don't use yet. **Superseded by item 44**: CFC's objects switch
+      to `is_z4c=true` -- gaining that same MPI buffer -- and
+      `FillCoarseInBndryCC` is removed from all five `Prolong*Task`s, exactly
+      because keeping it turned out to be unsafe, not merely un-mirrored.
+      `CFCBCsCoarse`/`ADMBCsCoarse` themselves are untouched by that change.)
       **Non-obvious correctness point**: `CFCScalarBCs`/`CFCVectorBCs`/
       `ADMBCs`'s `order>0` falloff branch computes a real physical radius via
       `CellCenterX(idx, indcs.nx1, x1min, x1max)` -- hardcoded to the *fine*
@@ -6367,3 +6379,78 @@ src/cfc/
       (`PackAndSendCC`/`RecvAndUnpackCC`, plus the restrict/prolongate/BC
       work around it) per stage, with the removed code's correctness
       confirmed empirically rather than assumed from the derivation alone.
+
+44. **(2026-07-30) Switch CFC's ghost-exchanged fields (and `padm->u_adm`) to
+    z4c's higher-order (Lagrange) restrict/prolong path -- closes out item
+    39's own "future direction" note and item 39a's deliberate `is_z4c=false`
+    choice.** User-requested: CFC's five ghost-exchanged fields (`u_p_x`,
+    `delta_psi`, `delta_alpha_psi`, `u_p_beta`, `padm->u_adm` -- `u_x` no
+    longer exists after item 43) all used the plain (non-z4c) path: simple
+    cell-averaging restriction and a min-mod-limited piecewise-linear
+    prolongation. `z4c::Z4c` has always had a second path for its own metric
+    fields (`u0`, `u_weyl`): unlimited Lagrange-polynomial restrict/prolong
+    (`RestrictInterpolation<NGHOST>`/`HighOrderProlongCC<NGHOST>`, 2nd/4th
+    order keyed off `mesh/nghost`), selected by a `bool is_z4c` argument
+    threaded through `RestrictCC`/`FillCoarseInBndryCC`/`ProlongateCC` and a
+    matching `bool z4c` constructor argument on `MeshBoundaryValuesCC`. This
+    is exactly the improvement item 39's own AMR analytic-residual
+    investigation flagged but did not undertake (see the note ~line
+    3382-3395: the coarse-fine boundary residual for CFC's elliptic solve is
+    limited by prolongation order, and "a genuine improvement... would mean
+    a higher-order/curvature-matching prolongation formula").
+    - **Confirmed feasible with zero new plumbing**, by reading (not
+      assuming) the actual generic implementations before touching
+      anything: `PackAndSendCC`/`RecvAndUnpackCC` (`bvals_cc.cpp`) gate the
+      extra same-level `isame_z4c` coarse-data payload purely on the
+      `is_z4c_` member set at construction -- no per-module code needed
+      beyond passing `true`. `InitSendIndices`/`InitRecvIndices`
+      (`buffs_cc.cpp`) compute `isame_z4c` bounds unconditionally for every
+      `MeshBoundaryValuesCC`, so no buffer-init changes were needed either.
+      CFC already had the Z4c-mirroring physical-BC-before-prolongation
+      pattern fully wired from item 41's BC-reorder work (`CFCBCsCoarse`/
+      `ADMBCsCoarse` before `ProlongateCC`; `CFCBCs`/`ADMBCs` after) -- built
+      for exactly this purpose, so no task-graph or BC-ordering changes were
+      needed. All of CFC's own test inputs (`inputs/dyn_grmhd/cfc_tov*
+      .athinput`) use `nghost = 4`, one of the only two cases (`ng==2`/`4`)
+      the Lagrange-weight switch handles.
+    - **The change itself**: in `CFC::CFC`, all five
+      `new MeshBoundaryValuesCC(pmbp, pin, false)` -> `true`
+      (`pbval_pietax`/`pbval_psi`/`pbval_alpha_psi`/`pbval_pietabeta`/
+      `pbval_adm`). In each field's `Rest*Task`/`Prolong*Task`: the trailing
+      `false` on `RestrictCC`/`ProlongateCC` -> `true`.
+    - **A crash, not a redundancy -- `FillCoarseInBndryCC` had to be removed,
+      not just flipped to `true`.** The original plan (mirroring the literal
+      request) kept the existing `FillCoarseInBndryCC` call in each
+      `Prolong*Task` and passed it `is_z4c=true` too. Rebuilding and rerunning
+      the 1-rank/8-rank sanity tests immediately crashed with a Kokkos
+      bounds-check failure: `out of bounds access label=("cfc_u_p_x") with
+      indices [6,0,-1,4,4] but extents [128,4,16,16,16]` (and several more,
+      including one overflowing the *high* side too). Traced to the actual
+      cause rather than guessed at: `FillCoarseInBndryCC`'s `is_z4c` branch
+      restricts *this block's own* just-received same-level ghost strip
+      (`rbuf[n].isame[0]`, which for a `-x1` neighbor sits at fine indices
+      `0..ng-1` -- already the very edge of the array) down into the coarse
+      array. For CFC's TOV test (`MeshBlock size: 8 x 8 x 8`, `nghost=4` --
+      an unusually high ghost-to-interior ratio), `RestrictInterpolation<4>`'s
+      5-point-wide Lagrange stencil, applied to a strip that already sits at
+      the fine array's outer edge, needs to read one cell *beyond* that edge
+      (index `-1`) -- data that simply doesn't exist. This is exactly why
+      z4c's own `Prolongate()` (`z4c_tasks.cpp:281-284`) skips calling
+      `FillCoarseInBndryCC` when `is_z4c=true` -- not a perf-only redundancy
+      as first assumed, but a genuine correctness/safety requirement: the
+      same same-level coarse data is instead delivered via the `isame_z4c`
+      payload in `Send`/`Recv`, computed by the *neighbor* from its own
+      interior data (which has proper margin), sidestepping the problem
+      entirely. **Fix**: removed all five `FillCoarseInBndryCC` calls from
+      CFC's `Prolong*Task` functions (matching z4c's pattern exactly), each
+      replaced with a comment explaining why.
+    - **Verified**: rebuilt `build_cfc` cleanly. Reran the established
+      1-rank/8-rank `cfc_amr_dynamic_check`-style sanity tests (fresh
+      `rst`/`perrank`): no crash/NaN/`NANS_IN_CONS`, and
+      `max|delta psi - initial guess|` came back **byte-identical** to the
+      long-standing baseline (`9.844341e-02` 1-rank, `5.261418e-02` 8-rank)
+      -- this particular diagnostic measures the regrid re-solve's Newton
+      convergence against its own initial guess, which is dominated by the
+      coarse-level guess quality rather than ghost-exchange interpolation
+      order, so an unchanged value here is expected and not a sign the
+      switch had no effect.

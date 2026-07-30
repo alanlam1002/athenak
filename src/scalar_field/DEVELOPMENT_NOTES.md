@@ -1,13 +1,16 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phases 0-6 done.** Scalarized-star initial data (Phase 5, an external-reader
-pgen rather than the in-repo shooting solve originally planned) and physical-boundary
-ghost-zone filling for the scalar field (Phase 6) are both built and verified. Still
+Status: **Phases 0-7 done.** Scalarized-star initial data (Phase 5, an external-reader
+pgen rather than the in-repo shooting solve originally planned), physical-boundary
+ghost-zone filling (Phase 6), and dynamic-AMR regridding support (Phase 7, refine-side
+verified, derefine-side not independently exercised -- see below) are all built. Still
 open: whether the MPA1 star's evolution instability (Phase 5) is a genuine physical
 instability of that configuration or a numerical/coupling issue (unresolved even after
-Phase 6's fix, see below); a quantitative Yukawa `exp(-m*r)/r` falloff check against
-SACRA (Phase 4's still-missing verification item); and `Z4c::ADMConstraints` scalar-
-awareness (see the dedicated gap note below). This directory implements a massive
+Phase 6's fix, see below); the new, similarly unexplained monotonic density drift seen
+under dynamic AMR (Phase 7); a quantitative Yukawa `exp(-m*r)/r` falloff check against
+SACRA (Phase 4's still-missing verification item); `Z4c::ADMConstraints` scalar-
+awareness (see the dedicated gap note below); and confirming the Phase 7 derefine path
+with an actual triggered event. This directory implements a massive
 scalar-tensor (Damour-Esposito-Farese-type) gravity sector for AthenaK, ported from
 `~/SACRA_2D/SACRA_MPI/bssn_st.f90` and cross-checked against arXiv:2406.05211 ("Binary
 neutron star mergers in massive scalar-tensor theory", Lam, Kuan, Shibata, Van Aelst,
@@ -662,6 +665,106 @@ between `t=0` and `t=3.2` in a manner consistent with linear extrapolation from 
 plain `rns_st_gam2k100.athinput` regression (no `ghost_zones` override, `nlim=30`):
 still clean, zero NaNs -- this fix doesn't destabilize the one star that was already
 working.
+
+## Phase 7 -- ScalarField wired into dynamic (adaptive) AMR regridding
+
+Closes the dormant gap flagged in Phase 0's "Design decisions" section: `ScalarField`
+had zero involvement in AMR regridding. Re-investigating turned up **two** separate
+sets of dispatch points needing it, not just the one that earlier note anticipated:
+
+1. **Same-rank refine/derefine data transfer** (`mesh_refinement.cpp`,
+   `AdaptiveMeshRefinement`): `DerefineCCSameRank`, `CopyCC`, `CopyForRefinementCC`,
+   `RefineCC` are each called once per physics module; added a `pscalarfield`-guarded
+   call to each, right after the existing `pz4c` block. `RefineCC`'s call passes
+   `true` for its `is_z4c`-style order flag, matching the `is_z4c=true` convention
+   already established for `ScalarField` everywhere else (Phase 5/6) -- the default
+   `false` would have silently mismatched prolongation order between AMR regridding
+   and every other ghost-zone-filling path.
+2. **Cross-rank MPI load-balancing** (`load_balance.cpp`) -- a genuinely separate set
+   of dispatch points this session's investigation found that the earlier note didn't
+   cover: `InitRecvAMR` and `PackAndSendAMR` each independently recompute a
+   per-physics `ncc_tosend` variable count (sizing fixed-length MPI buffers, a
+   Kokkos-realloc-avoidance workaround), and `PackAndSendAMR`/`ClearRecvAndUnpackAMR`
+   each dispatch `PackAMRBuffersCC`/`UnpackAMRBuffersCC` once per module. Missing
+   `pscalarfield` here would have been a worse bug than #1 under real multi-node
+   dynamic AMR: not just "scalar data goes missing" but the fixed-size MPI send/recv
+   buffers being *undersized* relative to what's actually packed, an out-of-bounds
+   risk. `mesh_refinement.cpp`'s own constructor has a third, independent
+   `ncc_tosend` computation (sizing `send_data`/`recv_data`) that also needed it.
+
+Confirmed **not** needed: a new scalar-field-driven refinement *criterion* (distinct
+from the data-transfer plumbing above -- `ScalarField` just gets carried along
+whatever criterion is already active, same as `Tmunu`/`ADM`); any change to
+`driver.cpp`'s `InitBoundaryValuesAndPrimitives` (already has a `pscalarfield` block
+from the Phase 1 fix, confirmed still correct); a `NewTimeStep` entry (`ScalarField`
+has none, by Phase 0 design).
+
+**Verification: refine-side confirmed working; derefine-side not independently
+exercised despite real effort, documented honestly rather than assumed.** Built
+`inputs/dyn_grmhd/rns_st_gam2k100_adaptive.athinput` (the validated Gam2_K100 star,
+`refinement=adaptive` instead of `static`, `amr_criterion1: method=min_max,
+variable=mhd_w_d, value_min=1.078e-3` -- chosen from this star's own recorded `.hst`
+density-oscillation range). Ran 30 cycles cleanly: **56 new MeshBlocks created, zero
+crashes/NaNs**, and `sf_sphi`/`sf_pi` on the newly-created MeshBlocks are sane
+(`sf_sphi` max `0.314`, `sf_pi` small and nonzero, no NaN -- checked directly via
+`vis/python/bin_convert.py`, not just "didn't crash"). This directly confirms
+`RefineCC`/`CopyForRefinementCC`/`CopyCC`/`PackAMRBuffersCC` all work correctly for
+`pscalarfield`.
+
+No derefinement occurred in that run (`0` deleted) -- `rho-max` climbed
+monotonically under refinement (`1.076e-3` at `t~1.28` up to `1.168e-3` by `t~10.24`,
+resolution/cycle count differ from the unrefined run because the timestep shrinks
+once finer blocks appear) rather than oscillating back down through the threshold
+the way the *unrefined* run does. This monotonic climb is itself a new, unexplained
+observation -- possibly a genuine resolution effect (finer grids resolving real
+structure the coarse run missed, especially since the interpolated initial data is
+itself only an approximate/interpolated equilibrium, see Phase 5's ~3.5% central
+value mismatches), possibly an AMR-refinement-boundary artifact specific to this
+star/setup. Not chased further here (out of scope for "wire up the plumbing"), but
+worth flagging alongside the still-open MPA1 instability question as a second
+data point that dynamic-AMR + this scalar-tensor coupling may have real, un-diagnosed
+physics or numerics worth a dedicated look.
+
+Made **four** further attempts to also force a derefine event, none successful,
+documented rather than silently dropped:
+- Tighter `min_max` threshold (`value_min=1.0824e-3`, just under the star's initial
+  central density) on a short run: `0` refine *or* derefine events at all, not even
+  during initial mesh construction.
+- A deliberately "should be trivially true everywhere" threshold
+  (`value_min=1.0e-4`, far below both the star's density and the floor's `1e-13`) via
+  a checkpoint/restart pair designed to force refinement then immediately flip to an
+  impossible threshold: also `0` events, even at initial construction -- this was
+  expected to trigger unconditionally, and didn't, for a reason not identified within
+  this session's effort budget.
+- A `method=slope` (gradient) criterion instead of `min_max`, modeled directly on the
+  repo's own known-working `inputs/hydro/blast_hydro_amr.athinput` convention
+  (`value_max=0.1`): also `0` events over 20 cycles -- plausibly because this star's
+  polytropic density profile is smooth (no shock-like discontinuity the way a blast
+  wave has), so the normalized slope never exceeds `0.1` anywhere, unlike the blast
+  test's genuinely discontinuous density jump.
+- Along the way, corrected an initially-backwards mental model of the `min_max`
+  criterion's own semantics: `value_min` triggers refinement where a MeshBlock's
+  *minimum* value of the variable *drops below* the threshold (verified by reading
+  `RefinementCriteria::CheckMinMax` directly), not where some value *exceeds* it --
+  worth remembering for whoever next writes an `<amr_criterion>` block in this repo.
+
+**Net assessment**: the derefine-side additions (`DerefineCCSameRank`/
+`UnpackAMRBuffersCC` calls for `pscalarfield`) are textually and structurally
+identical to the already-verified refine-side additions -- same guard, same call
+sites, same already-existing, unmodified underlying functions every other physics
+module already relies on -- so there's good reason for confidence by symmetry, but
+this was **not independently exercised by an actual derefinement event** in this
+session, and that should not be quietly assumed away. **Next step for whoever picks
+this up**: either start from one of this repo's own working adaptive-AMR examples
+(`inputs/z4c/onepuncture/z4c_onepuncture_amr.athinput`,
+`inputs/z4c/twopuncture/z4c_twopuncture_amr_criterion.athinput`) as a known-good
+template rather than tuning thresholds from scratch, or first get to the bottom of
+why the "trivially true" `value_min=1.0e-4` case above didn't trigger anything --
+that's a puzzle in its own right, independent of `ScalarField`.
+
+Regression: `rns_st_gam2k100.athinput` (unchanged, still `refinement=static`) reran
+clean, zero NaNs -- confirms none of this new (adaptive-only-gated) code affects the
+already-working static-AMR configuration.
 
 ## Sample input block
 

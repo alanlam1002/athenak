@@ -19,6 +19,7 @@
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
 #include "z4c/z4c.hpp"
+#include "scalar_field/scalar_field.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -150,6 +151,9 @@ void MeshRefinement::InitRecvAMR(int nleaf) {
   }
   if (pmy_mesh->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pmy_mesh->pmb_pack->pz4c->nz4c);
+  }
+  if (pmy_mesh->pmb_pack->pscalarfield != nullptr) {
+    ncc_tosend += (pmy_mesh->pmb_pack->pscalarfield->nscalarfield);
   }
 
   // Step 2. (InitRecvAMR)
@@ -403,6 +407,9 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   if (pmy_mesh->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pmy_mesh->pmb_pack->pz4c->nz4c);
   }
+  if (pmy_mesh->pmb_pack->pscalarfield != nullptr) {
+    ncc_tosend += (pmy_mesh->pmb_pack->pscalarfield->nscalarfield);
+  }
 
   // Step 2. (PackAndSendAMR)
   // loop over old MBs on this rank, initialize send buffer metadata
@@ -524,6 +531,7 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   mhd::MHD* pmhd = pmy_mesh->pmb_pack->pmhd;
   radiation::Radiation* prad = pmy_mesh->pmb_pack->prad;
   z4c::Z4c* pz4c = pmy_mesh->pmb_pack->pz4c;
+  scalarfield::ScalarField* pscalarfield = pmy_mesh->pmb_pack->pscalarfield;
 
   int ncc_sent = 0, nfc_sent = 0;
   if (phydro != nullptr) {
@@ -543,6 +551,10 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   if (pz4c != nullptr) {
     PackAMRBuffersCC(pz4c->u0, pz4c->coarse_u0, ncc_sent, nfc_sent);
     ncc_sent += pz4c->nz4c;
+  }
+  if (pscalarfield != nullptr) {
+    PackAMRBuffersCC(pscalarfield->u0, pscalarfield->coarse_u0, ncc_sent, nfc_sent);
+    ncc_sent += pscalarfield->nscalarfield;
   }
 
   // Step 4. (PackAndSendAMR)
@@ -813,6 +825,7 @@ void MeshRefinement::ClearRecvAndUnpackAMR() {
   mhd::MHD* pmhd = pmy_mesh->pmb_pack->pmhd;
   radiation::Radiation* prad = pmy_mesh->pmb_pack->prad;
   z4c::Z4c* pz4c = pmy_mesh->pmb_pack->pz4c;
+  scalarfield::ScalarField* pscalarfield = pmy_mesh->pmb_pack->pscalarfield;
 
   int ncc_recv=0, nfc_recv=0;
 
@@ -833,6 +846,10 @@ void MeshRefinement::ClearRecvAndUnpackAMR() {
   if (pz4c != nullptr) {
     UnpackAMRBuffersCC(pz4c->u0, pz4c->coarse_u0, ncc_recv, nfc_recv);
     ncc_recv += pz4c->nz4c;
+  }
+  if (pscalarfield != nullptr) {
+    UnpackAMRBuffersCC(pscalarfield->u0, pscalarfield->coarse_u0, ncc_recv, nfc_recv);
+    ncc_recv += pscalarfield->nscalarfield;
   }
 #endif
   return;

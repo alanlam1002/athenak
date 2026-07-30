@@ -32,6 +32,7 @@
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_amr.hpp"
+#include "scalar_field/scalar_field.hpp"
 #include "prolongation.hpp"
 #include "restriction.hpp"
 
@@ -114,6 +115,9 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   }
   if (pm->pmb_pack->pz4c != nullptr) {
     ncc_tosend += (pm->pmb_pack->pz4c->nz4c);
+  }
+  if (pm->pmb_pack->pscalarfield != nullptr) {
+    ncc_tosend += (pm->pmb_pack->pscalarfield->nscalarfield);
   }
   int nmb = std::max((pm->pmb_pack->nmb_thispack), (pm->nmb_maxperrank));
   // number of cells per MB, including ghost zones
@@ -513,6 +517,7 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   radiation::Radiation* prad = pm->pmb_pack->prad;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   adm::ADM* padm = pm->pmb_pack->padm;
+  scalarfield::ScalarField* pscalarfield = pm->pmb_pack->pscalarfield;
   if ((ndel > 0) && (pmhd != nullptr)) {
     RestrictFC(pmhd->b0, pmhd->coarse_b0);
   }
@@ -545,6 +550,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (pz4c != nullptr) {
       DerefineCCSameRank(pz4c->u0, pz4c->coarse_u0);
     }
+    if (pscalarfield != nullptr) {
+      DerefineCCSameRank(pscalarfield->u0, pscalarfield->coarse_u0);
+    }
   }
 
   // Step 6.
@@ -565,6 +573,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   } else if (padm != nullptr) {
     CopyCC(padm->u_adm);
   }
+  if (pscalarfield != nullptr) {
+    CopyCC(pscalarfield->u0);
+  }
   // Step 7.
   // Copy evolved physics variables for MBs flagged for refinement from source fine array
   // to target coarse array, when both are on same rank.
@@ -581,6 +592,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (pz4c != nullptr) {
       CopyForRefinementCC(pz4c->u0, pz4c->coarse_u0);
+    }
+    if (pscalarfield != nullptr) {
+      CopyForRefinementCC(pscalarfield->u0, pscalarfield->coarse_u0);
     }
   }
 
@@ -616,6 +630,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (pz4c != nullptr) {
       RefineCC(new_to_old, pz4c->u0, pz4c->coarse_u0, true);
+    }
+    if (pscalarfield != nullptr) {
+      RefineCC(new_to_old, pscalarfield->u0, pscalarfield->coarse_u0, true);
     }
   }
 

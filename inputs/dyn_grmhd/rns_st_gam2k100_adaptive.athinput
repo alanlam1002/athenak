@@ -1,0 +1,128 @@
+# Scalarized-neutron-star (RNS-ST) test: same star as rns_st_gam2k100.athinput
+# (single polytrope EOS, omega_c=12, mphi=0.01), but with <mesh_refinement>/
+# refinement=adaptive instead of static -- the first-ever exercise of ScalarField's
+# new dynamic-AMR wiring (mesh_refinement.cpp/load_balance.cpp Derefine/Copy/
+# CopyForRefinement/RefineCC/PackAMRBuffersCC/UnpackAMRBuffersCC dispatch).
+#
+# amr_criterion1 refines wherever mhd_w_d exceeds value_min=1.078e-3. From the
+# already-recorded .hst time series for this star at this resolution, rho-max
+# oscillates between ~1.0695e-3 and ~1.0858e-3 over t=0..19.2 -- so this threshold,
+# roughly mid-oscillation, is crossed (both up and down) multiple times during a
+# 30-cycle run, forcing both refine and derefine events on the central region, not
+# just one or the other.
+
+<comment>
+problem  = Scalarized NS (RNS-ST/Gam2_K100), Z4c-evolved, adaptive AMR
+
+<job>
+basename = rns_st_gam2k100_adaptive
+
+<mesh>
+nghost = 4       # Number of ghost cells
+nx1    = 64      # number of cells in x1-direction
+x1min  = 0.0
+x1max  = 102.4
+ix1_bc = reflect
+ox1_bc = diode
+
+nx2    = 64
+x2min  = 0.0
+x2max  = 102.4
+ix2_bc = reflect
+ox2_bc = diode
+
+nx3    = 64
+x3min  = 0.0
+x3max  = 102.4
+ix3_bc = reflect
+ox3_bc = diode
+
+<meshblock>
+nx1  = 32
+nx2  = 32
+nx3  = 32
+
+<mesh_refinement>
+refinement          = adaptive
+num_levels          = 2
+max_nmb_per_rank     = 400
+ncycle_check         = 1
+refinement_interval  = 2
+
+<amr_criterion1>
+method     = min_max
+variable   = mhd_w_d
+value_min  = 1.078e-3
+
+<time>
+evolution  = dynamic
+integrator = rk3
+cfl_number = 0.4
+nlim       = 30
+tlim       = 10000
+ndiag      = 1
+
+<coord>
+general_rel = true
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal          # placeholder (unused, required by parser)
+gamma       = 2.0            # ratio of specific heats Gamma (also used by
+                              # tov::PolytropeEOS below -- P = kappa*rho^gamma)
+
+dyn_eos     = ideal          # PrimitiveSolver EOSPolicy -- single polytrope, matches
+                              # this RNS-ST ID's EOS (K=100, Gamma=2, code units)
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 1.0e-13
+tfloor      = 1.0e-12
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<z4c>
+# 1+log lapse
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+
+# Gamma-driver shift
+shift_eta       = 0.3
+shift_advect    = 1.0
+
+# Kreiss-Oliger dissipation
+diss            = 0.5
+chi_div_floor   = 1e-05
+
+# Constraint damping (Z4c)
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+id_file     = /sakura/ptmp/tlam/initial/rns_new/Gam2_K100_J.00_Mb1.338_B1.20E+01_mphi1.00E-02_rhoc7.168E+14_sphim.316.dat
+user_hist   = true
+kappa       = 100.0    # P = kappa*rho^gamma (tov::PolytropeEOS)
+
+<scalarfield>
+omega_c   = 12.0     # "B" in the filename / paper's notation
+beta0     = 1.0      # hardcoded throughout this module -- not independently free
+mass2     = 0.0001    # mphi=0.01 -> mass2 = mphi^2
+sphi0     = 0.0
+diss      = 0.5
+
+<output1>
+file_type   = hst
+dt          = 0.00001
+data_format = %20.15e
+
+<output2>
+file_type   = bin
+variable    = scalarfield
+ghost_zones = true
+dt          = 1.0

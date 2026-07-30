@@ -14,20 +14,15 @@
 //! Ahat^2 = f_ik f_jl Adual^kl Adual^ij (already computed from Adual^ij) are known,
 //! fixed fields for this solve, and Ũ, S̃ are the psi^6-rescaled matter source terms.
 //!
-//! Unlike eq. 73 (psi), this operator is NOT actually nonlinear: by the time this
-//! solve runs, psi and Ahat^2 are already converged, fixed fields (from the earlier
-//! X^i/psi steps), so the bracketed factor
-//!   K(x) := 2 pi (Ũ + 2 S̃) psi^-2 + (7/8) Ahat^2 psi^-8
-//! depends only on those known fields, not on the unknown alpha*psi itself. The
-//! equation is therefore an affine (screened/Helmholtz-type) equation in
-//! delta_(alpha psi) = alpha*psi - 1: Delta(u+1) - K(x)*(u+1) = 0. It still can't
-//! reuse the generic Smooth<StencilOp> template (that assumes a *constant* diagonal
-//! via omega_over_diag; here the diagonal 6 + dx^2*K(x) varies per point), so
-//! SmoothPack/CalculateDefectPack/CalculateFASRHSPack are still hand-written -- but
-//! since F(u) is affine in u, the per-point "Newton" step (u_new = u_old -
-//! F(u_old)/F'(u_old)) is an *exact* one-step Gauss-Seidel solve, not an approximate
-//! linearization, and needs no damping or positivity floor the way eq. 73's does.
-//! The solve is done for the deviation delta_(alpha psi) = alpha*psi - 1.
+//! Unlike eq. 73 (psi), this operator is NOT nonlinear: psi/Ahat^2 are already
+//! converged by the time this solve runs, so K(x) := 2 pi (Ũ + 2 S̃) psi^-2 +
+//! (7/8) Ahat^2 psi^-8 depends only on known fields, not on the unknown alpha*psi.
+//! The equation is affine in delta_(alpha psi) = alpha*psi - 1: Delta(u+1) -
+//! K(x)*(u+1) = 0. Still can't reuse the generic Smooth<StencilOp> template (its
+//! diagonal is constant; here 6 + dx^2*K(x) varies per point), so SmoothPack/
+//! CalculateDefectPack/CalculateFASRHSPack are hand-written -- but since F(u) is
+//! affine, the per-point "Newton" step is an *exact* one-step Gauss-Seidel solve,
+//! needing no damping or positivity floor the way eq. 73's does.
 
 // Athenak headers
 #include "../athena.hpp"
@@ -70,19 +65,12 @@ class MGCFCLapseDriver : public MultigridDriver {
     void Solve(Driver *pdriver, int stage, Real dt = 0.0) final;
 
     // Compute K(x) = 2*pi*(Utilde+2*Stilde)*psi^-2 + (7/8)*Ahat^2*psi^-8 once, at the
-    // finest level, from the three known fixed fields it depends on, and store only
-    // that single value in coeff_ (channel 0, ncoeff_ = 1) -- restricting the
-    // already-combined K(x) directly through the V-cycle hierarchy, rather than
-    // restricting Utilde+2*Stilde/psi/Ahat^2 separately and recombining at each
-    // coarser level, is required for FAS consistency (restrict(f(a,b)) !=
-    // f(restrict(a), restrict(b)) for this nonlinear combination) -- see this file's
-    // header comment (mg_cfc_lapse.cpp) for the full derivation. Not stored in src_
-    // via Multigrid::LoadSource(): src_ is what the generic V-cycle machinery
-    // restricts and adds FAS tau-corrections into, which would corrupt K(x).
-    // u_plus_2s_tilde/delta_psi/a_sq are all padded to the same depth ngh -- the
-    // mesh's own NGHOST, not this driver's shallower ngh_. delta_psi is psi - 1 (see
-    // cfc::CFC::delta_psi's doc comment, cfc.hpp) -- the physical psi that K(x)
-    // needs is reconstructed internally (+1.0).
+    // finest level, and store only that value in coeff_ (channel 0, ncoeff_ = 1),
+    // not src_ -- see this file's header comment (mg_cfc_lapse.cpp) for the full
+    // FAS-consistency rationale. u_plus_2s_tilde/delta_psi/a_sq are padded to depth
+    // ngh (the mesh's own NGHOST, not this driver's shallower ngh_). delta_psi is
+    // psi - 1 (cfc::CFC::delta_psi, cfc.hpp); the physical psi K(x) needs is
+    // reconstructed internally (+1.0).
     void LoadReactionCoefficient(const DvceArray5D<Real> &u_plus_2s_tilde,
                                  const DvceArray5D<Real> &delta_psi,
                                  const DvceArray5D<Real> &a_sq, int ngh);

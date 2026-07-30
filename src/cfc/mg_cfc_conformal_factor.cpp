@@ -6,39 +6,37 @@
 //! \file mg_cfc_conformal_factor.cpp
 //! \brief implementation of MGCFCConformalFactor[Driver]
 //!
-//! Sign/scaling convention: Multigrid::Smooth's stencil.Apply computes
-//! lap(u) = 6*u_c - sum(6 nbrs), and the generic linear solve converges when
-//! lap(u)/dx^2 = src, i.e. real_Laplacian(u) = -src (confirmed against gravity:
-//! LoadSource(u0, IDN, ng, -four_pi_G_) gives src=-4*pi*G*rho, converging to
-//! Delta(phi) = 4*pi*G*rho). Eq. 73 (Gmunu 2021) is
+//! Sign convention: Multigrid::Smooth's stencil.Apply computes
+//! lap(u) = 6*u_c - sum(6 nbrs); the generic linear solve converges when
+//! lap(u)/dx^2 = src, i.e. real_Laplacian(u) = -src (matches gravity's own
+//! LoadSource(u0, IDN, ng, -four_pi_G_) -> src=-4*pi*G*rho for Delta(phi)=4*pi*G*rho).
+//! Eq. 73 (Gmunu 2021) is
 //!   Delta psi = -2*pi*Utilde*psi^-1 - (1/8)*Ahat^2*psi^-7,
-//! with psi = u+1 (u = delta_psi). Substituting into the AthenaK convention above:
+//! with psi = u+1 (u = delta_psi). Substituting:
 //!   lap(u) = dx^2 * [2*pi*Utilde*psi^-1 + (1/8)*Ahat^2*psi^-7] =: dx^2*RHS(u)
 //! i.e. F(u) := lap(u) - dx^2*RHS(u) = 0 is the discrete equation solved per point.
 //!
-//! Utilde and Ahat^2 are fixed, externally-supplied fields (never depend on this
-//! equation's own unknown u), but are loaded into coeff_ (channel 0 = Utilde,
-//! channel 1 = Ahat^2, ncoeff_=2), not into src_ via LoadSource: src_ is exactly the
-//! array MultigridDriver's generic V-cycle machinery restricts and adds FAS tau-
-//! corrections into, which would corrupt Utilde/Ahat^2 if they lived there. Since
-//! this equation has no separate additive "given" term (F(u)=0 is homogeneous in u),
-//! src_'s entire role here is the FAS correction accumulator (starts at zero, only
-//! touched by the generic machinery and this file's CalculateFASRHSPack).
+//! Utilde and Ahat^2 are fixed external fields (never depend on u), loaded into
+//! coeff_ (channel 0 = Utilde, channel 1 = Ahat^2, ncoeff_=2) rather than src_ via
+//! LoadSource: src_ is what the generic V-cycle machinery restricts and adds FAS
+//! tau-corrections into, which would corrupt Utilde/Ahat^2. Since F(u)=0 is
+//! homogeneous in u, src_'s only role here is the FAS correction accumulator
+//! (starts at zero, touched only by the generic machinery and CalculateFASRHSPack).
 //!
-//! Multigrid::LoadCoefficients() copies coeff channels 0..ncoeff_-1 in one shot (no
-//! per-channel offset), so it can't be called twice without the second call
-//! clobbering the first -- LoadMatterSource/LoadNonlinearCoefficient below each do
-//! their own single-channel par_for via the CoeffAtLevel() accessor instead.
+//! Multigrid::LoadCoefficients() copies all coeff channels in one shot (no
+//! per-channel offset), so it can't be called twice without clobbering --
+//! LoadMatterSource/LoadNonlinearCoefficient below each do their own single-channel
+//! par_for via the CoeffAtLevel() accessor instead.
 //!
 //! coeff_ channel 0 can instead hold U_raw = Utilde/sqrt(detg) (raw, undensitized
-//! energy density), in which case the U-term is written as U_raw*psi^5 rather than
-//! Utilde*psi^-1 -- algebraically identical (Utilde == psi^6*U_raw), but numerically
-//! different whenever the psi that built Utilde (a stale outer-loop iterate) differs
-//! from the live Newton iterate. Used only by cfc::CFC::InitializeMetric() (<cfc>
-//! init_use_psi5_source): faster convergence for most stars, but diverges to NaN for
-//! very compact/unstable ones, which must opt out. See ConformalFactorRHS below for
-//! the full derivation -- selected via a compile-time template parameter, not a
-//! runtime flag, so each formulation gets its own separately-compiled code path.
+//! energy density), writing the U-term as U_raw*psi^5 instead of Utilde*psi^-1 --
+//! algebraically identical (Utilde == psi^6*U_raw), but numerically different
+//! whenever the psi that built Utilde (a stale outer-loop iterate) differs from the
+//! live Newton iterate. Used only by cfc::CFC::InitializeMetric() (<cfc>
+//! init_use_psi5_source): faster convergence for most stars, but diverges to NaN
+//! for very compact/unstable ones. See ConformalFactorRHS below for the full
+//! derivation; selected via a compile-time template parameter (UsePsi5), not a
+//! runtime branch.
 
 #include <algorithm>
 #include <cmath>
@@ -288,28 +286,18 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   pin_ = pin;
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin:
-  // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a purely local
-  // extrapolation enforcing Gmunu eq. 77's isolated 1/r^n falloff (n=1,
-  // mg_robin_order's default) for any leading coefficient, without ever needing to
-  // know that coefficient -- no matter integral, no MPI reduction, no dependence on
-  // src_/coeff_. mg_multipole is not used here: CalculateCenterOfMass()/
-  // CalculateMultipoleCoefficients() (multigrid_driver.cpp) integrate
-  // mglevels_->src_ as "the density," but this solver's own Utilde/Ahat^2 live in
-  // coeff_, not src_ (see this file's top-of-file comment) -- src_ is always zero
-  // here, so CalculateCenterOfMass's 1.0/totals[0] divides by zero. mg_robin
-  // sidesteps this bug class entirely (no moments computed at all); mporder_/
-  // autompo_/AllocateMultipoleCoefficients() below are left in place, inert, so
-  // real multipole support can be revisited later without redoing this parsing.
+  // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a local
+  // extrapolation of Gmunu eq. 77's isolated 1/r^n falloff with no matter integral
+  // or MPI reduction. mg_multipole is not used: CalculateCenterOfMass()/
+  // CalculateMultipoleCoefficients() integrate src_ as "the density," but Utilde/
+  // Ahat^2 live in coeff_ here (src_ is always zero), so its 1.0/totals[0] would
+  // divide by zero. mporder_/autompo_/AllocateMultipoleCoefficients() below are
+  // left in place, inert. <cfc> mg_outer_bc ("robin" [default] or "zerofixed")
+  // allows falling back to the old Dirichlet-zero behavior without a rebuild.
   //
-  // <cfc> mg_outer_bc ("robin" [default] or "zerofixed") lets a run fall back to
-  // the old Dirichlet-zero behavior for direct A/B comparison without a rebuild.
-  //
-  // Faces where the *mesh* itself is reflecting (e.g. an octant-reduced domain's
-  // inner symmetry planes) still need BoundaryFlag::mg_zerograd, not plain
-  // BoundaryFlag::reflect (mg_mesh_bcs_ is multigrid-internal state; MGRootBoundary's
-  // device path only recognizes periodic/mg_zerofixed/mg_zerograd/mg_robin, and a
-  // face left at ordinary BoundaryFlag::reflect falls through every branch
-  // silently).
+  // Faces where the *mesh* itself is reflecting still need BoundaryFlag::mg_zerograd,
+  // not plain BoundaryFlag::reflect: MGRootBoundary's device path has no case for
+  // plain reflect and leaves that ghost cell untouched.
   robin_order_ = pin->GetOrAddInteger("cfc", "mg_robin_order", 1);
   std::string outer_bc_str = pin->GetOrAddString("cfc", "mg_outer_bc", "robin");
   BoundaryFlag outer_bc;
@@ -386,11 +374,9 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
 
   SetupMultigrid(dt, false);
 
-  // No mg_multipole face is ever set (see the constructor's boundary-flag comment),
-  // so CalculateCenterOfMass()/CalculateMultipoleCoefficients() would be pure dead
-  // work -- and worse, CalculateCenterOfMass's 1.0/totals[0] divides by an
-  // always-zero src_ for this solver, producing inf/NaN internally. Skipped
-  // entirely.
+  // No mg_multipole face is ever set (see ctor's boundary-flag comment), so
+  // CalculateCenterOfMass()/CalculateMultipoleCoefficients() are skipped entirely
+  // (would otherwise divide by an always-zero src_).
   if (mg_debug_analytic_residual_test_) {
     DebugAnalyticResidualTest(pdriver);
   }
@@ -553,14 +539,10 @@ void MGCFCConformalFactorDriver::TransferCoeffToRoot() {
   if (!mgc_root->OnHost()) {
     Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
   }
-  // The above only populates mgroot_'s own finest internal level (the root grid
-  // can itself span multiple V-cycle levels, e.g. 4x4x4 -> 2x2x2 -> 1x1x1). Every
-  // coarser root level's coeff_ still needs restricting from this one --
-  // mglevels_->RestrictCoefficients() (called by Solve() just before this
-  // function) only restricts the per-block hierarchy, not mgroot_ itself.
-  // mgc_root->RestrictCoefficients() (Solve(), right after RestrictCoeffOctets())
-  // does that, once the finest root level is fully populated here (both
-  // root-level-direct and refined-patch-via-octet cells).
+  // The above only populates mgroot_'s own finest internal level (the root grid can
+  // itself span multiple V-cycle levels). Every coarser root level's coeff_ still
+  // needs restricting from this one -- mgc_root->RestrictCoefficients() (called in
+  // Solve(), right after RestrictCoeffOctets()) does that.
   return;
 }
 
@@ -924,11 +906,9 @@ void MGCFCConformalFactorDriver::DebugDumpCoarseBuf() {
     }
     std::cout << std::endl;
 
-    // Direct ghost-vs-analytic comparison: u_h was mirrored from GetCurrentData()
-    // after ProlongateFCBoundary already filled the +x1 ghost cells, so
-    // u_h(m,0,fk,fj,fig) below is the actual post-prolongation ghost value.
-    // Compare it, per fine cell, against the true analytic psi-1 at that cell's
-    // own physical position.
+    // Compare the actual post-prolongation +x1 ghost value (u_h was mirrored after
+    // ProlongateFCBoundary ran) against the true analytic psi-1 at each fine
+    // cell's physical position.
     int fig = ngh_l + ncells_l;
     tov::PolytropeEOS eos2(pin_);
     tov::TOVStar tov_star2 = tov::TOVStar::ConstructTOV(pin_, eos2, false);

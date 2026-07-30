@@ -254,8 +254,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     if (global_variable::my_rank == 0) {
       std::cout << "### WARNING in CFC::CFC" << std::endl
                 << "<cfc> init_freeze_conserved=true is incompatible with"
-                << " init_use_psi5_source=true (the latter defaults to true --"
-                << " see DEVELOPMENT.md items 27-29): freezing Utilde and letting"
+                << " init_use_psi5_source=true (the latter defaults to true):"
+                << " freezing Utilde and letting"
                 << " the Newton solve treat U_raw=Utilde/psi^6 as the fixed"
                 << " quantity are contradictory assumptions. Forcing"
                 << " init_use_psi5_source=false for this run." << std::endl;
@@ -287,7 +287,7 @@ void CFC::QueueCFCTasks() {
   using namespace numrel;  // NOLINT(build/namespaces)
   NumericalRelativity *pnr = pmy_pack->pnr;
 
-  // Post all 6 fields' non-blocking MPI receives up front, before any of this
+  // Post all 5 fields' non-blocking MPI receives up front, before any of this
   // stage's Send/Recv rounds run -- mirrors z4c::Z4c_Recv (Task_Start). See
   // InitRecvTask's comment in cfc.hpp for why this is required for correctness.
   pnr->QueueTask(&CFC::InitRecvTask, this, CFC_InitRecv, "CFC_InitRecv", Task_Start);
@@ -603,8 +603,8 @@ void CFC::InitializeMetric(Driver *pdriver) {
   // so the other quantity's ghost cells -- or, for ConToPrim's ghost-inclusive
   // recompute, the metric ghosts it read -- are stale until padm->u_adm's own
   // ghost exchange (inside RunLapseShiftAssemblePass) completes. Reuses the same
-  // function already run once before this solve (Driver::Initialize()), safe to
-  // call again: confirmed to not touch padm->SetADMVariables.
+  // function already run once before this solve (Driver::Initialize()); safe to
+  // call again since it doesn't touch padm->SetADMVariables.
   pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
   return;
 }
@@ -699,18 +699,14 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   // Ghost-shell-only con2prim, now that padm->u_adm is fully final and fully
   // ghost-exchanged (RunLapseShiftAssemblePass's own tail, just completed):
-  // recovers w0's ghost cells against the *correct* metric, closing the
-  // window where they'd otherwise read a zero/stale one (DEVELOPMENT.md item
-  // 37/38). Hydro's own u0/b0 ghosts don't need re-exchanging here -- that
-  // already happened once, earlier in the same enclosing
-  // Driver::InitBoundaryValuesAndPrimitives call this function is now called
-  // from (mirroring z4c::Z4c::ConvertZ4cToADM's placement) -- so unlike the
-  // old design, no second full InitBoundaryValuesAndPrimitives call is
-  // needed. 6-slab decomposition of the full ghost shell (mirrors
-  // DynGRMHD::ApplyPhysicalBCs's own boundary-strip pattern, but full ghost
-  // width instead of a thin band): x1-faces get full y/z extent (covering
-  // corners too); y-/z-faces only need the interior x-range (already covered
-  // by the x1-faces) to avoid redundant work at edges/corners.
+  // recovers w0's ghost cells against the correct metric instead of a
+  // zero/stale one. Hydro's own u0/b0 ghosts don't need re-exchanging here --
+  // that already happened earlier in the same enclosing
+  // Driver::InitBoundaryValuesAndPrimitives call this runs from (mirroring
+  // z4c::Z4c::ConvertZ4cToADM's placement). 6-slab decomposition of the full
+  // ghost shell (mirrors DynGRMHD::ApplyPhysicalBCs's boundary-strip pattern,
+  // but full ghost width): x1-faces get full y/z extent (covering corners
+  // too); y-/z-faces only need the interior x-range to avoid redundant work.
   {
     auto *pm = pmy_pack->pmesh;
     auto *pdyngr = pmy_pack->pdyngr;
@@ -781,15 +777,14 @@ TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietax, 4, 1);
     }
-    // Note: FillCoarseInBndryCC is intentionally not called here (mirrors
-    // z4c::Z4c::Prolongate, z4c_tasks.cpp:281-284). Its is_z4c branch restricts
-    // this block's own just-received same-level ghost strip, but that strip is
-    // already at the edge of the fine array's own ghost padding -- the 4th-order
-    // Lagrange stencil then reads one cell beyond it (index -1), an out-of-bounds
-    // access confirmed at runtime. The same same-level coarse data is instead
-    // delivered directly via the isame_z4c payload in Send/RecvPiEtaX, computed
-    // from the *neighbor's* own interior data (which has proper margin), so
-    // restricting it again here would be both redundant and unsafe.
+    // FillCoarseInBndryCC is intentionally not called here (mirrors
+    // z4c::Z4c::Prolongate). Its is_z4c branch restricts this block's own
+    // just-received same-level ghost strip, but that strip already sits at the
+    // edge of the fine array's own ghost padding, so the 4th-order Lagrange
+    // stencil needs one cell beyond it (index -1) -- out of bounds. The same
+    // same-level coarse data is instead delivered via the isame_z4c payload in
+    // Send/RecvPiEtaX, computed from the neighbor's own interior data (which
+    // has proper margin), so restricting it again here would be unsafe.
     pbval_pietax->ProlongateCC(u_p_x, coarse_u_pietax, true);
   }
   return TaskStatus::complete;
@@ -896,11 +891,10 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 
-// Ghost-exchange padm->u_adm itself, once per stage, right after AssembleFinalTask
-// writes its interior (see pbval_adm's comment in cfc.hpp). Physical-boundary BCs
-// (ADMBCs/ADMBCsCoarse, adm_bcs.cpp) are applied by ProlongADMTask/BCSADMTask below,
-// in the same Restrict->Send->Recv->Prolong->ApplyPhysicalBCs order every other CFC
-// field and z4c::Z4c use.
+// u_adm's ghost exchange (queued in QueueCFCTasks() above) follows the same
+// Restrict->Send->Recv->Prolong->ApplyPhysicalBCs order as every other CFC field
+// and z4c::Z4c; ADMBCs/ADMBCsCoarse (adm_bcs.cpp) are applied below by
+// ProlongADMTask/BCSADMTask.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,

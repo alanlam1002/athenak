@@ -1227,10 +1227,9 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     // gradient at that edge to a wasted one-sided difference. The high
                     // bound is deliberately left unconditional (always ngh_l+half): an
                     // earlier attempt that also narrowed it for high children (mirroring
-                    // the low-edge fix) made things WORSE there -- confirmed by direct
-                    // ghost-vs-analytic comparison -- so whatever cbuf holds one past the
-                    // nominal high edge is apparently still useful and must not be
-                    // clamped away. Only the low edge was ever actually wasted.
+                    // the low-edge fix) made things WORSE there -- so whatever cbuf holds
+                    // one past the nominal high edge is apparently still useful and must
+                    // not be clamped away. Only the low edge was ever actually wasted.
                     int y_lo = child_y ? ngh_l - 1 : ngh_l;
                     int y_hi = ngh_l + half;
                     int z_lo = child_z ? ngh_l - 1 : ngh_l;

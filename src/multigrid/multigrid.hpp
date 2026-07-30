@@ -80,13 +80,13 @@ class MGOctet {
   bool fleaf;
   int nc, nvar;  // nc = 2 + 2*ngh
   int ncoeff;    // 0 for every current user except cfc::MGCFCConformalFactor/
-                 // MGCFCLapse (item 12) -- 0 makes Coeff() unreachable/unsized,
+                 // MGCFCLapse -- 0 makes Coeff() unreachable/unsized,
                  // matching Multigrid::ncoeff_'s own "0 = unused" convention.
   OctetNeighborInfo neighbors[27];
 
   // Raw pointers into contiguous per-level buffers managed by MultigridDriver.
   Real *u, *def, *src, *uold;
-  // Optional per-point coefficient storage (item 12) -- unlike u/def/src/uold,
+  // Optional per-point coefficient storage -- unlike u/def/src/uold,
   // never restricted every V-cycle iteration (coeff_ is static for the whole
   // solve) and never needs cross-octet ghost exchange (every SmoothOctet/
   // CalculateDefectOctet/CalculateFASRHSOctet reads Coeff() only at the exact
@@ -427,13 +427,9 @@ class MultigridDriver {
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
   // caller -- gravity, the CFC vector-Poisson solvers -- gets byte-identical
-  // behavior). Overridden by MGCFCConformalFactorDriver as a hypothesis test
-  // (2026-07-24) for why psi's outer Picard loop converges to the wrong answer
-  // for a compact migration-test star -- empirically found NOT to be the cause
-  // (damping the correction left the wrong answer unchanged, only slowed/
-  // destabilized convergence), so the actual root cause lies elsewhere (see
-  // src/cfc/DEVELOPMENT.md item 24). Left in place as a generically useful,
-  // zero-risk-when-unused knob, not because it fixed anything.
+  // behavior). Note: this knob does NOT explain psi's outer Picard loop
+  // converging to the wrong answer for a compact migration-test star (already
+  // ruled out -- see src/cfc/DEVELOPMENT.md item 24), so don't re-try it there.
   virtual Real CorrectionOmega() const { return 1.0; }
   void MGRootBoundary();
   void TransferFromBlocksToRoot(bool initflag);
@@ -611,7 +607,7 @@ class MultigridDriver {
   std::vector<Real> *oct_u_buf_, *oct_def_buf_, *oct_src_buf_, *oct_uold_buf_;
   int octet_stride_;  // elements per octet = nvar * nc^3
 
-  // Optional per-point coefficient storage (item 12), same contiguous-per-level-
+  // Optional per-point coefficient storage, same contiguous-per-level-
   // buffer pattern as oct_u_buf_ above. Zero-sized (harmless) unless a subclass
   // sets ncoeff_ > 0 -- see MGOctet::coeff's doc comment.
   std::vector<Real> *oct_coeff_buf_;
@@ -632,10 +628,8 @@ class MultigridDriver {
   int nb_rank_;
 };
 
-// Out-of-line definition of Multigrid::Smooth (declared in the Multigrid class
-// body above) -- must appear after MultigridDriver's full definition, since the
-// body's pmy_driver_->GetCoffset() call needs MultigridDriver to be complete
-// (see the declaration's comment for why this can't stay inline in-class).
+// Out-of-line definition of Multigrid::Smooth -- see the declaration's
+// comment above for why.
 template <typename ViewType, typename StencilOp>
 void Multigrid::Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
                         const ViewType &matrix, const StencilOp &stencil, int rlev,
@@ -779,10 +773,10 @@ inline Real RestrictOneDef(const MGOctet &oct, int v, int fi, int fj, int fk) {
                +oct.Def(v, fk+1, fj+1, fi)   + oct.Def(v, fk+1, fj+1, fi+1));
 }
 
-// Item 12: coeff_-flavored counterpart of RestrictOne/RestrictOneSrc/
-// RestrictOneDef above, used by MultigridDriver::RestrictCoeffOctets() for a
-// one-time (not per-V-cycle) coefficient restriction through the octet
-// hierarchy -- coeff_ is static for the whole solve, unlike u_/src_.
+// coeff_-flavored counterpart of RestrictOne/RestrictOneSrc/RestrictOneDef
+// above, used by MultigridDriver::RestrictCoeffOctets() for a one-time (not
+// per-V-cycle) coefficient restriction through the octet hierarchy --
+// coeff_ is static for the whole solve, unlike u_/src_.
 inline Real RestrictOneCoeff(const MGOctet &oct, int c, int fi, int fj, int fk) {
   return 0.125*(oct.Coeff(c, fk,   fj,   fi)   + oct.Coeff(c, fk,   fj,   fi+1)
                +oct.Coeff(c, fk,   fj+1, fi)   + oct.Coeff(c, fk,   fj+1, fi+1)

@@ -40,14 +40,13 @@ namespace {
 //
 // coeff/matrix are NOT threaded through here: CFCVectorPoissonStencil::Apply() never
 // reads either (flat decoupled Laplacian, no coefficient term), and neither
-// Multigrid::coeff_ (ncoeff_ stays 0 -- this solver never sets it, unlike
-// MGCFCConformalFactor/MGCFCLapse's genuinely-coupled equations) nor Multigrid::
-// matrix_ (nmatrix_/matrix_ are never allocated by *any* solver in this codebase,
-// gravity included) actually hold usable per-channel data here. Smooth/
+// Multigrid::coeff_ (ncoeff_ stays 0 here, unlike MGCFCConformalFactor/MGCFCLapse's
+// genuinely-coupled equations) nor Multigrid::matrix_ (never allocated by any solver
+// in this codebase, gravity included) hold usable per-channel data. Smooth/
 // CalculateDefect/CalculateFASRHS still require a same-typed 4th/5th ViewType
 // argument, so u/src's own already-valid per-channel subview is passed through in
-// that slot instead of constructing a subview of an unallocated array (which is
-// what crashed under Kokkos bounds checking before this comment was written).
+// that slot instead of constructing a subview of an unallocated array (which fails
+// Kokkos bounds checking).
 
 template <typename StencilOp>
 void SmoothChannels(Multigrid *mg, DualArray5D<Real> &u_lv, DualArray5D<Real> &src_lv,

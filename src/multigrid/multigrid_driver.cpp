@@ -307,7 +307,7 @@ void MultigridDriver::InitializeOctets() {
   {
     int nc = 2 + 2*ngh;
     octet_stride_ = nvar_ * nc * nc * nc;
-    // Item 12: 0 for every current user except cfc::MGCFCConformalFactor/
+    // ncoeff_ is 0 for every current user except cfc::MGCFCConformalFactor/
     // MGCFCLapse -- oct_coeff_buf_[l] stays empty (total=0, .data() never
     // dereferenced since ncoeff==0 makes Coeff() unreachable) for gravity and
     // CFC's linear vector/scalar Poisson solvers.
@@ -1604,35 +1604,21 @@ void MultigridDriver::PreRestrictOctetU() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::RestrictCoeffOctets()
-//! \brief Item 12: one-time coefficient restriction through the octet hierarchy,
-//! mirroring PreRestrictOctetU's structure exactly but for Coeff() instead of U(),
-//! looped over ncoeff_ channels instead of nvar_. Unlike u_/src_, coeff_ is static
-//! for the whole solve (loaded once, before Solve() begins, never touched by
-//! smoothing) so this only needs to run once -- called right after the driver's
-//! own TransferCoeffToRoot() has populated the finest octet level's Coeff() values
-//! from the per-block coeff_ arrays, before SetupMultigrid()/SolveMG() begins. A
-//! no-op (single early return) for every current driver except cfc::
-//! MGCFCConformalFactorDriver/MGCFCLapseDriver, the only ones with ncoeff_ > 0.
+//! \brief One-time coefficient restriction through the octet hierarchy, mirroring
+//! PreRestrictOctetU's structure exactly but for Coeff() instead of U(), looped over
+//! ncoeff_ channels instead of nvar_. Unlike u_/src_, coeff_ is static for the whole
+//! solve (loaded once, before Solve() begins, never touched by smoothing) so this
+//! only needs to run once -- called right after the driver's own TransferCoeffToRoot()
+//! has populated the finest octet level's Coeff() values from the per-block coeff_
+//! arrays, before SetupMultigrid()/SolveMG() begins. A no-op (single early return) for
+//! every current driver except cfc::MGCFCConformalFactorDriver/MGCFCLapseDriver, the
+//! only ones with ncoeff_ > 0.
 //!
-//! 2026-07-21 fix: the fine-octet-to-coarser-octet loop below only ever mirrored
-//! the generic (per-V-cycle-sweep) RestrictOctets()'s "lev>=1" branch. RestrictOctets()
-//! itself has a second branch, for lev<1 ("octets to root grid"), that explicitly
-//! writes the coarsest octet level's data into the *root grid's* corresponding cell
-//! -- this function had no equivalent, so octet level 0's Coeff() (correctly
-//! populated by TransferCoeffToRoot's else-branch) was never pushed into mgroot_'s
-//! own finest-level Coeff() array. At nreflevel_==1 the loop below never executes at
-//! all (0 >= 1 is false), making this a *complete* no-op: the root-level cell(s)
-//! under any refined patch stayed at coeff_'s post-construction default (0.0) for
-//! the entire solve, corrupting the Newton relaxation at every coarser level mgroot_
-//! itself smooths. Empirically confirmed via a temporary diagnostic (DebugDump
-//! RootCoeffUnderOctet, mg_cfc_conformal_factor.cpp) before this fix: root coeff_
-//! read back as exactly 0.0 while the volume-averaged expectation from the octet's
-//! own (correct) Coeff() was ~7.4e-4 -- see DEVELOPMENT.md for the full trace.
-//! Callers must now run mgroot_->RestrictCoefficients() *after* this function (moved
-//! out of TransferCoeffToRoot(), which used to call it too early -- before this
-//! function had a chance to populate the finest-level root cell(s) it propagates
-//! from) so the newly-populated finest-level root cell(s) actually reach mgroot_'s
-//! own coarser internal levels too.
+//! Unlike the generic (per-V-cycle-sweep) RestrictOctets(), this function must also
+//! push octet level 0's Coeff() into mgroot_'s own finest-level Coeff() array (the
+//! "octets to root grid" case). Callers must therefore run
+//! mgroot_->RestrictCoefficients() *after* this function so the newly-populated
+//! finest-level root cell(s) reach mgroot_'s own coarser internal levels too.
 
 void MultigridDriver::RestrictCoeffOctets() {
   if (ncoeff_ <= 0) return;
@@ -1817,14 +1803,11 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
   // For zerofixed: ghost = -interior (antisymmetric reflection)
   // For zerograd:  ghost = +interior (symmetric reflection)
   // For multipole: ghost = 2*phi_mp - interior (linear extrapolation)
-  // For mg_robin (2026-07-24, closes the previously-documented gap): ghost =
-  // interior anchor * (r_anchor/r_ghost)^robin_order_, using this octet's own
-  // physical position -- derived from its LogicalLocation exactly the same way
-  // the outer-face checks below already derive `maxlx1/2/3` (nrbx*_ << lev),
-  // just carried one step further into an actual coordinate. See
-  // DEVELOPMENT.md's Robin BC entry for the derivation and why this was
-  // originally deferred (assumed to need new arithmetic that, on a closer
-  // read, was already half-present in this same function).
+  // For mg_robin: ghost = interior anchor * (r_anchor/r_ghost)^robin_order_,
+  // using this octet's own physical position -- derived from its LogicalLocation
+  // exactly the same way the outer-face checks below already derive
+  // `maxlx1/2/3` (nrbx*_ << lev), just carried one step further into an actual
+  // coordinate. See DEVELOPMENT.md's Robin BC entry for the full derivation.
   Real nmax1 = static_cast<Real>(nrbx1_ << lev);
   Real nmax2 = static_cast<Real>(nrbx2_ << lev);
   Real nmax3 = static_cast<Real>(nrbx3_ << lev);
@@ -1868,11 +1851,10 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
           }
       } else if (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_multipole
                  && mporder_ > 0) {
-        // 2026-07-25: closes the octet-level multipole gap (mirrors mg_robin's own
-        // fix above) -- see DEVELOPMENT.md. One phis evaluation per transverse
-        // cell, reused for every ghost depth (unlike Robin's per-depth ratio),
-        // paired symmetrically with interior cell ngh+n (matches zerofixed/
-        // zerograd's own pairing, not Robin's fixed-anchor convention).
+        // One phis evaluation per transverse cell, reused for every ghost depth
+        // (unlike Robin's per-depth ratio), paired symmetrically with interior
+        // cell ngh+n (matches zerofixed/zerograd's own pairing, not Robin's
+        // fixed-anchor convention).
         Real xf = ox1min - mpo_[0];
         for (int v = 0; v < nvar_; ++v) {
           const Real *mc = &mpcoeff_[v*25];

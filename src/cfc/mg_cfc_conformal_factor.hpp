@@ -9,22 +9,15 @@
 //! \brief defines MGCFCConformalFactor[Driver], solving Gmunu (2021) eq. 73 for the
 //! conformal factor psi:
 //!   Delta psi = -2 pi Ũ psi^-1 - (1/8) Ahat^2 psi^-7,
-//! where Ahat^2 = f_ik f_jl Adual^kl Adual^ij (precomputed, doesn't depend on psi) and
-//! Ũ = psi^6 U is the matter energy density.
-//!
-//! Nonlinear in the unknown (self-coupled through psi^-7), unlike gravity's Poisson
-//! equation or the CFC vector-potential equations -- Multigrid's generic constant-
-//! diagonal Smooth<StencilOp> template assumes a linear operator and can't be reused.
-//! SmoothPack/CalculateDefectPack/CalculateFASRHSPack are hand-written Newton-Gauss-
-//! Seidel point relaxation instead (Gmunu sec. 2.7.2, eq. 94).
-//!
-//! Solves for the deviation delta_psi = psi - 1 (so the isolated-system BC maps onto
-//! the existing 1/r multipole falloff), not psi directly.
-//!
-//! Reuses Multigrid::coeff_/ncoeff_ (otherwise unused by gravity) to carry Ũ and Ahat^2
-//! alongside the solution (ncoeff_=2): neither can live in src_, since src_ is what the
-//! V-cycle's FAS machinery restricts and corrects at coarser levels, which would
-//! corrupt these fields where RHS(u) needs them pristine.
+//! where Ahat^2 = f_ik f_jl Adual^kl Adual^ij and Ũ = psi^6 U is the matter energy
+//! density. Solved for the deviation delta_psi = psi - 1. Nonlinear in the unknown
+//! (self-coupled through psi^-7), so SmoothPack/CalculateDefectPack/
+//! CalculateFASRHSPack are hand-written Newton-Gauss-Seidel point relaxation (Gmunu
+//! sec. 2.7.2, eq. 94) rather than Multigrid's generic constant-diagonal
+//! Smooth<StencilOp> template. Ũ/Ahat^2 are carried in Multigrid::coeff_/ncoeff_
+//! (ncoeff_=2) rather than src_, since src_ is what the V-cycle's FAS machinery
+//! restricts/corrects at coarser levels. See mg_cfc_conformal_factor.cpp's file
+//! header for the full sign-convention derivation.
 
 // C++ headers
 #include <string>
@@ -57,13 +50,10 @@ class MGCFCConformalFactor : public Multigrid {
   DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
 
  private:
-  // Two algebraically-identical but numerically-different matter-source
-  // formulations (see ConformalFactorRHS's doc comment in the .cpp): "Utilde*psi^-1"
-  // (default) or "U_raw*psi^5" (used only by CFC::InitializeMetric() when opted
-  // in). Compiled as two separate template instantiations rather than a runtime
-  // branch inside the per-point loop -- SmoothPack/CalculateDefectPack/
-  // CalculateFASRHSPack read MGCFCConformalFactorDriver::use_psi5_source_ once and
-  // dispatch into the matching *Impl<UsePsi5>.
+  // Two algebraically-identical matter-source formulations, see ConformalFactorRHS's
+  // doc comment in the .cpp. Compiled as separate template instantiations;
+  // SmoothPack/CalculateDefectPack/CalculateFASRHSPack read
+  // MGCFCConformalFactorDriver::use_psi5_source_ once and dispatch accordingly.
   template <bool UsePsi5> void SmoothPackImpl(int color);
   template <bool UsePsi5> void CalculateDefectPackImpl();
   template <bool UsePsi5> void CalculateFASRHSPackImpl();
@@ -99,12 +89,9 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // retrieve the converged delta_psi = psi - 1 solution after Solve() completes.
     void RetrieveSolution(DvceArray5D<Real> &dst);
 
-    // Selects the matter-source formulation (see MGCFCConformalFactor's private
-    // section and ConformalFactorRHS's doc comment in the .cpp): false (default) =
-    // "Utilde*psi^-1"; true = "U_raw*psi^5", used only by CFC::InitializeMetric()
-    // when <cfc> init_use_psi5_source is set. Must be called before
-    // LoadMatterSource()/Solve() each time, since coeff_ channel 0's physical
-    // meaning depends on which formulation was requested.
+    // Selects the matter-source formulation (see ConformalFactorRHS's doc comment
+    // in the .cpp). Must be called before LoadMatterSource()/Solve() each time,
+    // since coeff_ channel 0's physical meaning depends on which was requested.
     void SetUsePsi5Source(bool flag) { use_psi5_source_ = flag; }
 
     // Seed the finest level's own solution array (the V-cycle's initial guess)
@@ -139,23 +126,17 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     Real mg_omega_psi_, psi_floor_;
 
     // Selects the matter-source formulation, see SetUsePsi5Source() above.
-    // Constructed false; the per-stage CFC_SolvePsi task always calls
-    // SetUsePsi5Source(false) explicitly. Only CFC::InitializeMetric() sets this
-    // true (by default, via <cfc> init_use_psi5_source), except for inputs known
-    // to be too compact/unstable for it (diverges to NaN there).
+    // Constructed false; only CFC::InitializeMetric() sets this true (by default,
+    // via <cfc> init_use_psi5_source), except for inputs too compact/unstable for
+    // it (diverges to NaN there).
     bool use_psi5_source_ = false;
 
     // Damping factor for the coarse-grid correction (see CorrectionOmega() above).
     // Default 1.0 (undamped) via <cfc> mg_correction_omega.
     Real mg_correction_omega_;
 
-    // MultigridDriver::TransferFromBlocksToRoot aggregates every rank's coarsest
-    // per-block cell into the distributed root grid via MPI_Allgatherv, but only
-    // for src_/u_ -- never coeff_. Runs for any multi-meshblock mesh (not just
-    // AMR), so mgroot_ needs its own coeff_ (Ũ, Ahat^2) populated the same way
-    // before the V-cycle can reach the root level. Duplicates the relevant slice
-    // of that logic locally (restricted to the non-refined case, since AMR+CFC is
-    // guarded against in Solve()) rather than changing src/multigrid/.
+    // mgroot_ never receives coeff_ via the generic TransferFromBlocksToRoot
+    // (src_/u_ only) -- see the .cpp's doc comment for this function.
     void TransferCoeffToRoot();
 
     // Debug-only: gated on mg_debug_defect_by_level_ (<cfc> mg_debug_defect_by_level,

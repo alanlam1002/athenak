@@ -36,7 +36,8 @@
 Multigrid::Multigrid(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
                      bool on_host):
   pmy_driver_(pmd), pmy_pack_(pmbp), pmy_mesh_(pmd->pmy_mesh_), ngh_(nghost),
-  nvar_(pmd->nvar_), ncoeff_(0), defscale_(1.0), on_host_(on_host) {
+  nvar_(pmd->nvar_), ncoeff_(0), defscale_(1.0), on_host_(on_host),
+  coord_(nullptr), ccoord_(nullptr) {
   // ncoeff_ defaults to 0 (no coefficient storage) unless a subclass explicitly
   // sets it and allocates coeff_ itself (e.g. cfc::MGCFCConformalFactor/MGCFCLapse
   // -- see src/cfc/DEVELOPMENT.md item 3's Finding B). This value is the guard

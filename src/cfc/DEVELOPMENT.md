@@ -6454,3 +6454,67 @@ src/cfc/
       coarse-level guess quality rather than ghost-exchange interpolation
       order, so an unchanged value here is expected and not a sign the
       switch had no effect.
+
+45. **(2026-07-30) `Multigrid::coord_`/`ccoord_` were uninitialized pointers,
+    unconditionally `delete[]`'d in the destructor -- a genuine
+    heap-corruption bug in the shared (non-CFC-specific) `Multigrid` base
+    class, affecting `gravity::Gravity` too, not just CFC.** Surfaced by the
+    full `tlim=1500` migration-test rerun (job 250507): the physics
+    completed cleanly (`t=1500` at cycle 9971, every `rst`/`bin`/`hst`
+    output present and correctly sized -- confirmed, not assumed), but all
+    16 MPI ranks then segfaulted (signal 11) simultaneously right after the
+    final "Terminating on time limit" summary print.
+    - **Ruled out before investigating further**: not a longstanding/benign
+      quirk (the last confirmed-good reference run of this exact scenario,
+      `cfc_migration_freezecons_tlim200_fixed2`, has a completely clean
+      `.err`); not caused by rebuilding `build_cfc` while 250507 was still
+      running (standard Linux `execve`/rename semantics -- an already-mapped
+      process's code pages can't be changed by replacing the on-disk file);
+      not today's `tov.hpp` fix (`ldd` confirms no CUDA/HIP libs -- this is
+      a CPU/OpenMP-only build, so a device-code `printf` portability issue
+      is moot here regardless).
+    - **Cheap reproduction, not another 6.5-hour run**: 250507's final `rst`
+      checkpoint was written at exactly `t=1500=tlim`, so restarting from it
+      makes the driver's main loop see `time>=tlim` immediately -- same
+      teardown path in ~5-10 seconds instead of hours. This let the whole
+      diagnosis cycle (including two further rebuild+rerun iterations)
+      finish in minutes.
+    - **This cluster forbids core dumps** (`ulimit -c unlimited` fails with
+      `Operation not permitted`, hard limit 0 on compute nodes) -- worked
+      around by running each rank under `gdb -batch -ex run -ex "thread
+      apply all bt full"`, which intercepts SIGSEGV via `ptrace` directly,
+      independent of the kernel core-dump mechanism/quota. First pass (no
+      debug symbols) already gave an unambiguous call chain: `main() ->
+      Mesh::~Mesh() -> MeshBlockPack::~MeshBlockPack() -> cfc::CFC::~CFC()
+      -> MGCFCVectorPoissonDriver::~MGCFCVectorPoissonDriver() ->
+      MGCFCVectorPoisson::~MGCFCVectorPoisson() -> Multigrid::~Multigrid()`.
+      Manually recompiled just `multigrid.cpp` with `-g` added (extracted
+      the exact compiler invocation from `flags.make`, no need to rebuild
+      the rest of the tree) and relinked, to get a precise
+      `multigrid.cpp:191` for the crash frame.
+    - **Root cause**: `multigrid.cpp:191`/`192` is `delete [] coord_; delete
+      [] ccoord_;` in `Multigrid::~Multigrid()`. `Coordinates *coord_,
+      *ccoord_;` (`multigrid.hpp`) are declared but -- confirmed via a
+      repo-wide grep for `\bcoord_\b`/`\bccoord_\b` -- never allocated,
+      never assigned, and never read anywhere in the entire codebase (the
+      only other `coord_` hits are unrelated local variables of a different
+      type in `hydro_fluxes.cpp`/`mhd_fluxes.cpp`/`dyn_grmhd_fluxes.cpp`).
+      The constructor's initializer list never sets them either, so every
+      `Multigrid` instance (CFC's and `gravity::Gravity`'s alike) carries
+      two genuinely indeterminate pointer values that the destructor
+      unconditionally frees -- undefined behavior. This also explains why
+      short sanity tests (`nlim=4`) never showed it: too little heap churn
+      for the indeterminate bytes to look like a plausible-but-invalid
+      pointer, whereas a long run with many meshblocks/regrids reliably
+      produces garbage that crashes on free.
+    - **Fix**: initialize `coord_(nullptr), ccoord_(nullptr)` in
+      `Multigrid`'s constructor initializer list -- makes both `delete[]`
+      calls guaranteed no-ops. Minimal, lowest-blast-radius fix for
+      shared/non-CFC-owned code; left the (apparently vestigial, never
+      wired up to anything) members in place rather than also removing them.
+    - **Verified**: rebuilt cleanly, reran the same cheap teardown
+      reproduction -- all 16 ranks now exit clean (`sacct` all
+      `COMPLETED 0:0`, zero "signal"/"exit code" lines in `.err`). Reran the
+      1-rank/8-rank sanity tests too: no crash/NaN,
+      `max|delta psi - initial guess|` still byte-identical to baseline
+      (`9.844341e-02`/`5.261418e-02`).

@@ -29,7 +29,9 @@
 //!            both psi^-7 and psi0^-7 individually underflow toward 0 as psi0->infinity
 //!            at the puncture, so their naive difference loses all significant digits).
 //! DeltaAhat^2 = Ahat^2_total - Ahat0^2 is a safe direct subtraction (Ahat0^2 is
-//! bounded/O(1) for a good slicing, unlike psi0 it does not diverge at the puncture).
+//! bounded/O(1) for a good slicing, unlike psi0 it does not diverge at the puncture) --
+//! done once, at the finest mesh grid, in LoadNonlinearCoefficient below, NOT inside
+//! ConformalFactorRHS itself (see Sec 5 Phase A item 4's note just below for why).
 //! drhs_du's formula is UNCHANGED by this regularization: the background-subtraction
 //! term -(1/8)*Ahat0^2*psi0^-7 is constant w.r.t. u (fixed background quantities at
 //! that grid point), so its derivative is exactly zero -- the Newton Jacobian is the
@@ -38,18 +40,33 @@
 //! contribution vanishes and DeltaAhat^2 reduces to the total Ahat^2 exactly,
 //! reproducing the pre-regularization formula bit-for-bit.
 //!
-//! Utilde, Ahat^2, psi0, and Ahat0^2 are fixed external fields (never depend on u),
-//! loaded into coeff_ (channel 0 = Utilde, channel 1 = Ahat^2 total, channel 2 =
+//! Per-level analytic puncture coefficients (CFC_PUNCTURE_TDE_PLAN.md Sec 3.8/Sec 5
+//! Phase A item 4): psi0/Ahat0^2 (channels 2/3) are NOT restricted from the finest
+//! grid like channels 0/1 -- FillPunctureCoefficients() (see its own doc comment,
+//! called from Solve() below) overwrites them at every level with a fresh analytic
+//! trumpet evaluation instead, since psi0 diverges at the puncture and a plain
+//! 8-cell average smooths that peak, degrading the coarse-grid operator exactly
+//! where the regularization above matters most. This is also WHY DeltaAhat^2 (not
+//! the total Ahat^2) is what channel 1 stores and restricts: if channel 1 held the
+//! total (background+matter) and channel 3 held an analytically-EXACT Ahat0^2, the
+//! DeltaAhat^2 a naive per-point (channel1-channel3) subtraction would produce
+//! inside ConformalFactorRHS would silently inherit channel 1's own restricted-total
+//! averaging error -- the very error item 4 exists to remove would just relocate
+//! into what's supposed to be the clean matter-only term. Subtracting a0_sq at the
+//! finest grid instead (LoadNonlinearCoefficient) means channel 1 is a genuinely
+//! smooth, matter-only quantity for which restriction is legitimate, matching Sec
+//! 3.8's own text (which calls this channel "DeltaAhat^2", not "total Ahat^2").
+//! Octet-refined patches are explicitly NOT given this treatment -- Sec 3.8 defers
+//! that to Phase C (intersects the still-open MGOctet coefficient-storage gap);
+//! octets still restrict channels 2/3 the old way.
+//!
+//! Utilde, DeltaAhat^2, psi0, and Ahat0^2 are fixed external fields (never depend on
+//! u), loaded into coeff_ (channel 0 = Utilde, channel 1 = DeltaAhat^2, channel 2 =
 //! psi0, channel 3 = Ahat0^2, ncoeff_=4) rather than src_ via LoadSource: src_ is
 //! what the generic V-cycle machinery restricts and adds FAS tau-corrections into,
 //! which would corrupt these coefficients. Since F(u)=0 is homogeneous in u, src_'s
 //! only role here is the FAS correction accumulator (starts at zero, touched only by
-//! the generic machinery and CalculateFASRHSPack). Channels 2-3 (psi0/Ahat0^2) are
-//! restricted to coarser multigrid levels the same generic way channels 0-1 are (a
-//! plain volume average) -- CFC_PUNCTURE_TDE_PLAN.md Sec 3.8's per-level analytic
-//! evaluation (Sec 5 Phase A item 4) is not yet implemented, so a sharply-peaked
-//! psi0 near the puncture may restrict less accurately at coarse levels than a fresh
-//! analytic evaluation would; a known, documented limitation, not a correctness bug.
+//! the generic machinery and CalculateFASRHSPack).
 //!
 //! Multigrid::LoadCoefficients() copies all coeff channels in one shot (no
 //! per-channel offset), so it can't be called twice without clobbering --
@@ -82,6 +99,7 @@
 #include "multigrid/multigrid.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
+#include "cfc_puncture.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 
 namespace {
@@ -105,7 +123,7 @@ namespace {
 //     psi_prev/psi_current staleness above entirely.
 template <bool UsePsi5>
 KOKKOS_INLINE_FUNCTION
-void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real psi0, Real a0_sq,
+void ConformalFactorRHS(Real u, Real u_matter, Real delta_a_sq, Real psi0, Real a0_sq,
                          Real *rhs, Real *drhs_du) {
   Real psi = u + psi0;
   Real psi_inv = 1.0 / psi;
@@ -125,8 +143,11 @@ void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real psi0, Real a0_
   // cancellation-free factoring of (psi^-7 - psi0^-7) -- see this file's header
   // comment for the full derivation. x=0/psi0=1 (puncture disabled) makes reg
   // vanish identically, so this reduces bit-for-bit to the pre-regularization
-  // Ahat^2*psi_inv7 formula below.
-  Real delta_a_sq = ahat_sq - a0_sq;  // safe direct subtraction, see header comment
+  // Ahat^2*psi_inv7 formula below. delta_a_sq is DeltaAhat^2 = total - background,
+  // already subtracted at load time (Sec 5 Phase A item 4's LoadNonlinearCoefficient
+  // -- restricting DeltaAhat^2 directly, rather than subtracting a per-level-exact
+  // a0_sq from a still-restricted total here, avoids silently reintroducing the
+  // averaging error item 4 exists to remove).
   Real psi0_inv = 1.0 / psi0;
   Real x = u * psi0_inv;
   Real onepx_inv = psi0 * psi_inv;   // = 1/(1+x) = psi0/psi
@@ -137,9 +158,12 @@ void ConformalFactorRHS(Real u, Real u_matter, Real ahat_sq, Real psi0, Real a0_
   Real p7 = 7.0 + x*(21.0 + x*(35.0 + x*(35.0 + x*(21.0 + x*(7.0 + x)))));
   Real reg = psi0_inv7 * x * p7 * onepx_inv7;
   *rhs = 2.0 * M_PI * u_term + 0.125 * delta_a_sq * psi_inv7 - 0.125 * a0_sq * reg;
-  // Unchanged from the pre-regularization formula: the background-subtraction term
-  // is constant w.r.t. u, so its derivative is exactly zero (see header comment).
-  *drhs_du = 2.0 * M_PI * du_term - 0.875 * ahat_sq * psi_inv8;
+  // Reconstruct the total (safe direct addition -- both bounded, no cancellation)
+  // only for the Jacobian: unchanged from the pre-regularization formula, since
+  // the background-subtraction term is constant w.r.t. u, so its derivative is
+  // exactly zero (see header comment).
+  Real ahat_sq_total = delta_a_sq + a0_sq;
+  *drhs_du = 2.0 * M_PI * du_term - 0.875 * ahat_sq_total * psi_inv8;
 }
 
 template <typename ViewType>
@@ -168,8 +192,8 @@ MGCFCConformalFactor::MGCFCConformalFactor(MultigridDriver *pmd, MeshBlockPack *
   // The base Multigrid ctor allocates u_/src_/def_/uold_ per level but never
   // coeff_/matrix_, and never sets ncoeff_ from the driver -- both are the
   // responsibility of the first real user of coeff_, i.e. us.
-  ncoeff_ = 4;  // channel 0 = Utilde, channel 1 = Ahat^2, channel 2 = psi0,
-                // channel 3 = Ahat0^2 (Sec 3.7 puncture regularization)
+  ncoeff_ = 4;  // channel 0 = Utilde, channel 1 = DeltaAhat^2, channel 2 = psi0,
+                // channel 3 = Ahat0^2 (Sec 3.7/3.8 puncture regularization)
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -297,10 +321,95 @@ void MGCFCConformalFactor::CalculateFASRHSPackImpl() {
   });
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh)
+//! \brief CFC_PUNCTURE_TDE_PLAN.md Sec 3.8/Sec 5 Phase A item 4 -- see this
+//! function's doc comment in the .hpp. Works identically whether called on a
+//! driver's mglevels_ or mgroot_: pmy_pack_ is non-null only for Pack-level
+//! objects (root-grid objects are constructed with pmbp=nullptr, mirroring
+//! MGCFCConformalFactorDriver's ctor), so a single runtime branch picks between
+//! each MeshBlock's own physical extent (mb_size) and the global mesh domain
+//! (pmy_mesh_->mesh_size) -- everything else (the nx1>>ll level-shift idiom,
+//! the per-cell trumpet evaluation) is identical in both cases.
+//!
+//! r_sch (needed by TrumpetBackground) is recomputed here via
+//! TrumpetIsoToAreal's false-position solve, not cached in its own coeff_
+//! channel -- this function only runs once per Solve() call (same cost profile
+//! as LoadPunctureCoefficients' own finest-grid fill), so the extra root-find
+//! is cheap relative to the V-cycle itself. alpha0/beta0/Aij0 (TrumpetBackground's
+//! other outputs) are discarded -- this solver only needs psi0/Ahat0^2.
+
+void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh) {
+  int is = ngh_, js = ngh_, ks = ngh_;
+  int nmmb = nmmb_;
+
+  // Normalize away the Pack-vs-root distinction up front: build a tiny per-"m"
+  // physical-extent array (nmmb entries for a Pack object, 1 entry -- the whole
+  // mesh domain -- for the root object, mirroring TransferCoeffToRoot's own
+  // "root always indexes m=0" convention) so the per-cell loop below can read
+  // uniformly from blk_size regardless of which kind of object this is.
+  DualArray1D<RegionSize> blk_size;
+  Kokkos::realloc(blk_size, nmmb);
+  if (pmy_pack_ != nullptr) {
+    auto &mb_size = pmy_pack_->pmb->mb_size;
+    for (int m = 0; m < nmmb; ++m) { blk_size.h_view(m) = mb_size.h_view(m); }
+  } else {
+    blk_size.h_view(0) = pmy_mesh_->mesh_size;
+  }
+  blk_size.template modify<HostExeSpace>();
+  blk_size.template sync<DevExeSpace>();
+
+  for (int lev = 0; lev < nlevel_; ++lev) {
+    int ll = nlevel_ - 1 - lev;
+    int ncx = (indcs_.nx1 >> ll), ncy = (indcs_.nx2 >> ll), ncz = (indcs_.nx3 >> ll);
+    int ie = is + ncx - 1, je = js + ncy - 1, ke = ks + ncz - 1;
+    if (on_host_) {
+      auto cm_h = coeff_[lev].h_view;
+      auto blk_h = blk_size.h_view;
+      par_for("MGCFCConformalFactor::FillPunctureCoefficients", HostExeSpace(),
+              0, nmmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        Real dx1 = (blk_h(m).x1max-blk_h(m).x1min)/static_cast<Real>(ncx);
+        Real dx2 = (blk_h(m).x2max-blk_h(m).x2min)/static_cast<Real>(ncy);
+        Real dx3 = (blk_h(m).x3max-blk_h(m).x3min)/static_cast<Real>(ncz);
+        Real x1v = blk_h(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
+        Real x2v = blk_h(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
+        Real x3v = blk_h(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+        Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
+        Real psi0, alpha0, beta0[3], aij0[6], a2;
+        cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
+                               beta0, aij0, &a2);
+        cm_h(m,2,k,j,i) = psi0;
+        cm_h(m,3,k,j,i) = a2;
+      });
+    } else {
+      auto cm_d = coeff_[lev].d_view;
+      auto blk_d = blk_size.d_view;
+      par_for("MGCFCConformalFactor::FillPunctureCoefficients", DevExeSpace(),
+              0, nmmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        Real dx1 = (blk_d(m).x1max-blk_d(m).x1min)/static_cast<Real>(ncx);
+        Real dx2 = (blk_d(m).x2max-blk_d(m).x2min)/static_cast<Real>(ncy);
+        Real dx3 = (blk_d(m).x3max-blk_d(m).x3min)/static_cast<Real>(ncz);
+        Real x1v = blk_d(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
+        Real x2v = blk_d(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
+        Real x3v = blk_d(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+        Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
+        Real psi0, alpha0, beta0[3], aij0[6], a2;
+        cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
+                               beta0, aij0, &a2);
+        cm_d(m,2,k,j,i) = psi0;
+        cm_d(m,3,k,j,i) = a2;
+      });
+    }
+  }
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 4 (carries Utilde, Ahat^2, psi0, Ahat0^2); mg_robin
+//! \brief nvar_ = 1, ncoeff_ = 4 (carries Utilde, DeltaAhat^2, psi0, Ahat0^2); mg_robin
 //! boundary conditions by default (Gmunu eq. 77, isolated/asymptotically-flat
 //! falloff).
 
@@ -335,6 +444,10 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   mg_debug_analytic_residual_test_ = pin->GetOrAddBoolean(
       "cfc", "mg_debug_analytic_residual_test", false);
   pin_ = pin;
+
+  // Sec 5 Phase A item 4: same <cfc> keys cfc::CFC's own constructor reads.
+  puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
+  puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin:
   // ghost = interior_anchor * (r_anchor/r_ghost)^mg_robin_order, a local
@@ -419,6 +532,20 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // just added, under any refined patch.
   mgroot_->RestrictCoefficients();
 
+  // Sec 5 Phase A item 4: overwrite psi0/Ahat0^2 (coeff_ channels 2/3) at every
+  // internal level of mglevels_/mgroot_ with a fresh analytic evaluation,
+  // replacing the plain-averaged value RestrictCoefficients() just wrote there
+  // (see FillPunctureCoefficients' doc comment). Octets are NOT touched (still
+  // restricted the old way, per CFC_PUNCTURE_TDE_PLAN.md Sec 3.8's explicit
+  // Phase C deferral). Skipped entirely when disabled: channels 2/3 are already
+  // exactly psi0=1/Ahat0^2=0 there (restriction of a uniform field is a no-op).
+  if (puncture_enabled_) {
+    static_cast<MGCFCConformalFactor*>(mglevels_)->FillPunctureCoefficients(
+        puncture_mass_);
+    static_cast<MGCFCConformalFactor*>(mgroot_)->FillPunctureCoefficients(
+        puncture_mass_);
+  }
+
   if (mg_debug_analytic_residual_test_) {
     DebugDumpRootCoeffUnderOctet();
   }
@@ -480,7 +607,7 @@ void MGCFCConformalFactorDriver::LoadMatterSource(const DvceArray5D<Real> &u_til
 }
 
 void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
-    const DvceArray5D<Real> &a_sq, int ngh) {
+    const DvceArray5D<Real> &a_sq, const DvceArray5D<Real> &a0_sq, int ngh) {
   // See LoadMatterSource's identical comment above.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
@@ -495,7 +622,11 @@ void MGCFCConformalFactorDriver::LoadNonlinearCoefficient(
   par_for("MGCFCConformalFactorDriver::LoadNonlinearCoefficient", DevExeSpace(),
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
-    cm_d(m, 1, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off);
+    // DeltaAhat^2 = total - background, subtracted here (at the finest grid,
+    // where a0_sq is exact) rather than left inside ConformalFactorRHS -- see
+    // this function's doc comment in the .hpp.
+    cm_d(m, 1, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off)
+                             - a0_sq(m, 0, mk+off, mj+off, mi+off);
   });
 }
 

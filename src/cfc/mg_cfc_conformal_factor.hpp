@@ -56,6 +56,22 @@ class MGCFCConformalFactor : public Multigrid {
   // reach into an arbitrary level's coeff_ storage directly.
   DualArray5D<Real> &CoeffAtLevel(int l) { return coeff_[l]; }
 
+  // CFC_PUNCTURE_TDE_PLAN.md Sec 3.8/Sec 5 Phase A item 4: overwrite coeff_
+  // channels 2 (psi0)/3 (Ahat0^2) at EVERY internal level of this object (works
+  // identically whether called on a driver's mglevels_ or mgroot_, exactly like
+  // the inherited RestrictCoefficients() already does) with a fresh analytic
+  // evaluation of the trumpet background at that level's own cell centers,
+  // instead of the plain-averaged value RestrictCoefficients() would otherwise
+  // leave there -- psi0 diverges at the puncture, so restriction's 8-cell average
+  // smooths the peak and degrades the coarse-grid operator exactly where it
+  // matters most. Octet-refined patches are NOT touched here (still restricted
+  // the old way) -- CFC_PUNCTURE_TDE_PLAN.md Sec 3.8 explicitly defers per-octet
+  // analytic coefficients to Phase C (intersects the still-open MGOctet
+  // coefficient-storage gap). No-op cost-wise if called with m_bh<=0, but callers
+  // should just skip calling this entirely when <cfc> puncture_enabled is false
+  // (see MGCFCConformalFactorDriver::Solve).
+  void FillPunctureCoefficients(Real m_bh);
+
  private:
   // Two algebraically-identical matter-source formulations, see ConformalFactorRHS's
   // doc comment in the .cpp. Compiled as separate template instantiations;
@@ -86,13 +102,17 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // elsewhere).
     void LoadMatterSource(const DvceArray5D<Real> &u_tilde, int ngh);
 
-    // Load Ahat^2 = f_ik f_jl Adual^kl Adual^ij (from cfc::ComputeADualFromPotentials),
-    // stored in coeff_ channel 1 (ncoeff_ = 4 total, see LoadPunctureCoefficients
-    // below for channels 2-3). Can't reuse Multigrid::LoadCoefficients() (copies all
-    // ncoeff_ channels at once, no per-channel offset) -- does its own single-channel
-    // par_for via CoeffAtLevel(), mirroring LoadCoefficients' offset-aware ngh
-    // handling.
-    void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq, int ngh);
+    // Load DeltaAhat^2 = Ahat^2_total - Ahat0^2 (matter-only -- a0_sq is
+    // subtracted here, at the finest grid, so what lands in coeff_ channel 1 is
+    // smooth/safe to restrict; see Sec 5 Phase A item 4's file-header note on why
+    // restricting the TOTAL Ahat^2 would silently reintroduce the same averaging
+    // error that channels 2/3's per-level analytic fill exists to remove).
+    // ncoeff_ = 4 total, see LoadPunctureCoefficients below for channels 2-3.
+    // Can't reuse Multigrid::LoadCoefficients() (copies all ncoeff_ channels at
+    // once, no per-channel offset) -- does its own single-channel par_for via
+    // CoeffAtLevel(), mirroring LoadCoefficients' offset-aware ngh handling.
+    void LoadNonlinearCoefficient(const DvceArray5D<Real> &a_sq,
+                                   const DvceArray5D<Real> &a0_sq, int ngh);
 
     // Load the analytic trumpet background's psi0 (channel 2) and Ahat0^2 (channel
     // 3) -- the Sec 3.7 regularization ConformalFactorRHS needs to build the
@@ -146,6 +166,14 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     // via <cfc> init_use_psi5_source), except for inputs too compact/unstable for
     // it (diverges to NaN there).
     bool use_psi5_source_ = false;
+
+    // <cfc> puncture_enabled/puncture_mass -- read directly from pin at
+    // construction (same convention as mg_threshold/psi_floor/etc. above, rather
+    // than having cfc::CFC pass them in), so Solve() can call
+    // FillPunctureCoefficients() itself (CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A
+    // item 4) without any new call-site plumbing from cfc.cpp.
+    bool puncture_enabled_;
+    Real puncture_mass_;
 
     // Damping factor for the coarse-grid correction (see CorrectionOmega() above).
     // Default 1.0 (undamped) via <cfc> mg_correction_omega.

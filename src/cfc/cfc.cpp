@@ -1253,7 +1253,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
 
   pmgd_psi->SetUsePsi5Source(use_psi5_source);
   pmgd_psi->LoadMatterSource(use_psi5_source ? u_raw : u_tilde, indcs.ng);
-  pmgd_psi->LoadNonlinearCoefficient(a_sq, indcs.ng);
+  pmgd_psi->LoadNonlinearCoefficient(a_sq, a0_sq, indcs.ng);
   pmgd_psi->LoadPunctureCoefficients(u_psi0, a0_sq, indcs.ng);
   pmgd_psi->Solve(pdriver, stage);
   pmgd_psi->RetrieveSolution(delta_psi);

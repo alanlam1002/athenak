@@ -20,7 +20,6 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
-#include "coordinates/adm.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
@@ -574,81 +573,6 @@ Real Driver::UpdateWallClock() {
 }
 
 //----------------------------------------------------------------------------------------
-// DEBUG: scan a DvceArray5D for NaN entries (including ghost zones) and print a summary.
-// Temporary instrumentation to locate the origin of a NaN-on-restart bug in bitant runs.
-
-namespace {
-void CheckNaN(DvceArray5D<Real> &arr, const char *label) {
-  int n0 = arr.extent_int(0), n1 = arr.extent_int(1), n2 = arr.extent_int(2),
-      n3 = arr.extent_int(3), n4 = arr.extent_int(4);
-  int nnan = 0;
-  Kokkos::parallel_reduce(label,
-    Kokkos::RangePolicy<>(DevExeSpace(), 0, n0*n1*n2*n3*n4),
-    KOKKOS_LAMBDA(const int idx, int &count) {
-      int i = idx % n4;
-      int j = (idx / n4) % n3;
-      int k = (idx / (n4*n3)) % n2;
-      int n = (idx / (n4*n3*n2)) % n1;
-      int m = idx / (n4*n3*n2*n1);
-      if (Kokkos::isnan(arr(m,n,k,j,i))) count++;
-    }, nnan);
-  if (nnan > 0) {
-    std::cout << "DEBUG NaN-check rank=" << global_variable::my_rank
-              << " [" << label << "]: " << nnan << " NaN entries" << std::endl
-              << std::flush;
-  }
-}
-
-// DEBUG: for MeshBlock local index 0 (already known to be the sole affected block),
-// classify every ghost/interior cell into one of 27 regions by whether i,j,k are each
-// in the lower ghost layer (lo), interior (mid), or upper ghost layer (hi), and count
-// exact-zero chi cells per region. Pinpoints exactly which face/edge/corner is zeroed.
-void CheckChiZeroRegionsBlock0(AthenaTensor<Real, TensorSymm::NONE, 3, 0> &chi,
-                                Mesh *pm, const char *label) {
-  auto &indcs = pm->mb_indcs;
-  int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je,
-      ks = indcs.ks, ke = indcs.ke;
-  int isg = is-indcs.ng, ieg = ie+indcs.ng, jsg = js-indcs.ng, jeg = je+indcs.ng,
-      ksg = ks-indcs.ng, keg = ke+indcs.ng;
-  Kokkos::View<int[27], DevExeSpace> region_counts("region_counts");
-  Kokkos::deep_copy(region_counts, 0);
-  Kokkos::parallel_for(label,
-  Kokkos::RangePolicy<>(DevExeSpace(), 0, (keg-ksg+1)*(jeg-jsg+1)*(ieg-isg+1)),
-  KOKKOS_LAMBDA(const int idx) {
-    int nk = keg-ksg+1, nj = jeg-jsg+1, ni = ieg-isg+1;
-    int i = idx % ni + isg; int j = (idx/ni) % nj + jsg; int k = (idx/(ni*nj)) + ksg;
-    if (chi(0,k,j,i) == 0.0) {
-      int ri = (i < is) ? 0 : ((i > ie) ? 2 : 1);
-      int rj = (j < js) ? 0 : ((j > je) ? 2 : 1);
-      int rk = (k < ks) ? 0 : ((k > ke) ? 2 : 1);
-      Kokkos::atomic_inc(&region_counts(rk*9 + rj*3 + ri));
-    }
-  });
-  auto region_counts_h = Kokkos::create_mirror_view(region_counts);
-  Kokkos::deep_copy(region_counts_h, region_counts);
-  const char *lbl[3] = {"lo", "mid", "hi"};
-  std::string regions;
-  int total = 0;
-  for (int rk = 0; rk < 3; ++rk) {
-    for (int rj = 0; rj < 3; ++rj) {
-      for (int ri = 0; ri < 3; ++ri) {
-        int c = region_counts_h(rk*9 + rj*3 + ri);
-        total += c;
-        if (c > 0) {
-          regions += std::string(" k") + lbl[rk] + ",j" + lbl[rj] + ",i" + lbl[ri]
-                     + "=" + std::to_string(c);
-        }
-      }
-    }
-  }
-  std::cout << "DEBUG ChiZero rank=" << global_variable::my_rank
-            << " [" << label << "] m=0 total=" << total
-            << (total > 0 ? ":" : " (clean)") << regions
-            << std::endl << std::flush;
-}
-} // namespace
-
-//----------------------------------------------------------------------------------------
 //! \fn Driver::InitBoundaryValuesAndPrimitives()
 //! \brief Sets boundary conditions on conserved and initializes primitives.  Used both
 //! on initialization, and when new MBs created with AMR.
@@ -659,30 +583,12 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
   // Initialize Z4c
   z4c::Z4c *pz4c = pm->pmb_pack->pz4c;
   if (pz4c != nullptr) {
-    // DEBUG: print every gid this rank owns, to check whether they are contiguous
-    // starting at mb_gid(0) -- PackAndSendCC's same-rank direct-copy path computes the
-    // destination MeshBlock's local index as (neighbor_gid - mb_gid(0)), which is only
-    // correct if this rank's gids form a contiguous block.
-    {
-      auto &mb_gid = pm->pmb_pack->pmb->mb_gid;
-      int nmb = pm->pmb_pack->nmb_thispack;
-      std::string gids;
-      for (int m = 0; m < nmb; ++m) {
-        gids += " " + std::to_string(mb_gid.h_view(m));
-      }
-      std::cout << "DEBUG mb_gid rank=" << global_variable::my_rank
-                << " gids:" << gids << std::endl << std::flush;
-    }
-    CheckChiZeroRegionsBlock0(pz4c->z4c.chi, pm, "z4c chi before RestrictU");
     (void) pz4c->RestrictU(this, 0);
-    CheckChiZeroRegionsBlock0(pz4c->z4c.chi, pm, "z4c chi after RestrictU");
     (void) pz4c->InitRecv(this, -1);  // stage < 0 suppresses InitFluxRecv
     (void) pz4c->SendU(this, 0);
     (void) pz4c->ClearSend(this, -1);
     (void) pz4c->ClearRecv(this, -1);
     (void) pz4c->RecvU(this, 0);
-    CheckNaN(pz4c->u0, "z4c u0 after RecvU");
-    CheckChiZeroRegionsBlock0(pz4c->z4c.chi, pm, "z4c chi after RecvU");
     (void) pz4c->Z4cBoundaryRHS(this, 0);
     (void) pz4c->Prolongate(this, 0); // coarse grid BCs and prolongation
     (void) pz4c->ApplyPhysicalBCs(this, 0); // fine grid BCs
@@ -735,7 +641,6 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm) {
     } else {
       if (pz4c != nullptr) {
         (void) pz4c->ConvertZ4cToADM(this, 0);
-        CheckNaN(pm->pmb_pack->padm->u_adm, "adm u_adm after ConvertZ4cToADM");
       }
       (void) pdyngr->ConToPrim(this, 0);
     }

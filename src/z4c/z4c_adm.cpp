@@ -12,12 +12,10 @@
 // C++ standard headers
 #include <iostream>
 #include <fstream>
-#include <string>
 
 // Athena++ headers
 #include "parameter_input.hpp"
 #include "athena.hpp"
-#include "globals.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
@@ -216,132 +214,6 @@ void Z4c::Z4cToADM(MeshBlockPack *pmbp) {
   auto &z4c = pmbp->pz4c->z4c;
   auto &adm = pmbp->padm->adm;
   auto &opt = pmbp->pz4c->opt;
-
-  // DEBUG: unconditional per-call marker -- static counter persists across calls within
-  // this rank's process, to disambiguate repeated Z4cToADM invocations.
-  {
-    static int call_count = 0;
-    call_count++;
-    std::cout << "DEBUG Z4cToADM-ENTRY rank=" << global_variable::my_rank
-              << " call#=" << call_count
-              << " pmbp=" << pmbp
-              << " nmb_thispack=" << nmb
-              << " ncycle=" << pmbp->pmesh->ncycle
-              << " nmb_total=" << pmbp->pmesh->nmb_total
-              << " caller=" << __builtin_return_address(0)
-              << " caller1up=" << __builtin_return_address(1)
-              << std::endl << std::flush;
-  }
-
-  // DEBUG: find the worst (smallest) chi value going into psi4=pow(chi,...) and
-  // whether it's exactly zero/negative, to diagnose a NaN in Z4cToADM.
-  {
-    Real chi_min;
-    int worst_flat;
-    Kokkos::MinLoc<Real,int>::value_type minloc{};
-    Kokkos::parallel_reduce("debug chi minloc",
-    Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*(keg-ksg+1)*(jeg-jsg+1)*(ieg-isg+1)),
-    KOKKOS_LAMBDA(const int idx, Kokkos::MinLoc<Real,int>::value_type &lminloc) {
-      int nk = keg-ksg+1, nj = jeg-jsg+1, ni = ieg-isg+1;
-      int i = idx % ni; int j = (idx/ni) % nj; int k = (idx/(ni*nj)) % nk;
-      int m = idx/(ni*nj*nk);
-      Real val = z4c.chi(m,k+ksg,j+jsg,i+isg);
-      if (val < lminloc.val) { lminloc.val = val; lminloc.loc = idx; }
-    }, Kokkos::MinLoc<Real,int>(minloc));
-    chi_min = minloc.val; worst_flat = minloc.loc;
-    int nk = keg-ksg+1, nj = jeg-jsg+1, ni = ieg-isg+1;
-    int wi = worst_flat % ni; int wj = (worst_flat/ni) % nj;
-    int wk = (worst_flat/(ni*nj)) % nk; int wm = worst_flat/(ni*nj*nk);
-    wi += isg; wj += jsg; wk += ksg;
-    auto &size = pmbp->pmb->mb_size;
-    Real x1v = CellCenterX(wi-is, indcs.nx1, size.h_view(wm).x1min, size.h_view(wm).x1max);
-    Real x2v = CellCenterX(wj-js, indcs.nx2, size.h_view(wm).x2min, size.h_view(wm).x2max);
-    Real x3v = CellCenterX(wk-ks, indcs.nx3, size.h_view(wm).x3min, size.h_view(wm).x3max);
-    // Count how many cells have chi exactly zero, and how many MeshBlocks (m) contain
-    // at least one such cell -- distinguishes "one isolated corner" from "a whole
-    // never-filled region/block".
-    int nzero = 0;
-    Kokkos::parallel_reduce("debug chi zero count",
-    Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*(keg-ksg+1)*(jeg-jsg+1)*(ieg-isg+1)),
-    KOKKOS_LAMBDA(const int idx, int &count) {
-      int nk = keg-ksg+1, nj = jeg-jsg+1, ni = ieg-isg+1;
-      int i = idx % ni; int j = (idx/ni) % nj; int k = (idx/(ni*nj)) % nk;
-      int m = idx/(ni*nj*nk);
-      if (z4c.chi(m,k+ksg,j+jsg,i+isg) == 0.0) count++;
-    }, nzero);
-
-    // Per-MeshBlock zero count (host loop over m, device reduce per block) so we can see
-    // whether the zeros are confined to m=0 or spread across many blocks on this rank.
-    std::string per_mb;
-    for (int m = 0; m < nmb; ++m) {
-      int nzero_m = 0;
-      Kokkos::parallel_reduce("debug chi zero count per mb",
-      Kokkos::RangePolicy<>(DevExeSpace(), 0, (keg-ksg+1)*(jeg-jsg+1)*(ieg-isg+1)),
-      KOKKOS_LAMBDA(const int idx, int &count) {
-        int nk = keg-ksg+1, nj = jeg-jsg+1, ni = ieg-isg+1;
-        int i = idx % ni; int j = (idx/ni) % nj; int k = (idx/(ni*nj)) % nk;
-        if (z4c.chi(m,k+ksg,j+jsg,i+isg) == 0.0) count++;
-      }, nzero_m);
-      if (nzero_m > 0) {
-        per_mb += " m" + std::to_string(m) + "=" + std::to_string(nzero_m);
-      }
-    }
-
-    std::cout << "DEBUG Z4cToADM rank=" << global_variable::my_rank
-              << " chi_psi_power=" << opt.chi_psi_power
-              << " min(chi)=" << chi_min
-              << " at m=" << wm << " (k,j,i)=(" << wk << "," << wj << "," << wi << ")"
-              << " coord=(" << x1v << "," << x2v << "," << x3v << ")"
-              << " total_zero_cells=" << nzero << " (out of "
-              << nmb*(keg-ksg+1)*(jeg-jsg+1)*(ieg-isg+1) << ")"
-              << " per-block-zero-counts:" << per_mb
-              << std::endl << std::flush;
-
-    // DEBUG: for MeshBlock local index 0 specifically (the one consistently affected),
-    // classify every ghost/interior cell into one of 27 regions by whether each of
-    // i,j,k is in the lower ghost layer (lo), the interior (mid), or the upper ghost
-    // layer (hi), and count exact-zero chi cells per region. This pinpoints exactly
-    // which face/edge/corner of the block is unfilled.
-    if (nmb > 0) {
-      Kokkos::View<int[27], DevExeSpace> region_counts("region_counts");
-      Kokkos::deep_copy(region_counts, 0);
-      int is_ = is, ie_ = ie, js_ = js, je_ = je, ks_ = ks, ke_ = ke;
-      int isg_ = isg, ieg_ = ieg, jsg_ = jsg, jeg_ = jeg, ksg_ = ksg, keg_ = keg;
-      Kokkos::parallel_for("debug chi region classify",
-      Kokkos::RangePolicy<>(DevExeSpace(), 0, (keg_-ksg_+1)*(jeg_-jsg_+1)*(ieg_-isg_+1)),
-      KOKKOS_LAMBDA(const int idx) {
-        int nk = keg_-ksg_+1, nj = jeg_-jsg_+1, ni = ieg_-isg_+1;
-        int i = idx % ni + isg_; int j = (idx/ni) % nj + jsg_; int k = (idx/(ni*nj)) + ksg_;
-        if (z4c.chi(0,k,j,i) == 0.0) {
-          int ri = (i < is_) ? 0 : ((i > ie_) ? 2 : 1);
-          int rj = (j < js_) ? 0 : ((j > je_) ? 2 : 1);
-          int rk = (k < ks_) ? 0 : ((k > ke_) ? 2 : 1);
-          int region = rk*9 + rj*3 + ri;
-          Kokkos::atomic_increment(&region_counts(region));
-        }
-      });
-      auto region_counts_h = Kokkos::create_mirror_view(region_counts);
-      Kokkos::deep_copy(region_counts_h, region_counts);
-      const char *lbl[3] = {"lo", "mid", "hi"};
-      std::string regions;
-      for (int rk = 0; rk < 3; ++rk) {
-        for (int rj = 0; rj < 3; ++rj) {
-          for (int ri = 0; ri < 3; ++ri) {
-            int region = rk*9 + rj*3 + ri;
-            int c = region_counts_h(region);
-            if (c > 0) {
-              regions += std::string(" k") + lbl[rk] + ",j" + lbl[rj] + ",i" + lbl[ri]
-                         + "=" + std::to_string(c);
-            }
-          }
-        }
-      }
-      std::cout << "DEBUG Z4cToADM rank=" << global_variable::my_rank
-                << " m=0 region breakdown (k,j,i each lo=ghost-, mid=interior, hi=ghost+):"
-                << regions << std::endl << std::flush;
-    }
-  }
-
   par_for("initialize z4c fields",DevExeSpace(),
   0,nmb-1,ksg,keg,jsg,jeg,isg,ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {

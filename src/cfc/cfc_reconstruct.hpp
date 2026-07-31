@@ -29,7 +29,8 @@ namespace cfc {
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
 //!            const DvceArray5D<Real> &eta,
 //!            const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
-//!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd, int eta_chan = 0)
+//!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd, int eta_chan,
+//!            const Real origin[3])
 //! \brief Gmunu (2021) eq. 76 (Adual^ij ~= D^i X^j + D^j X^i - (2/3) D_k X^k f^ij)
 //! with X^j (Shibata 1999 eq. 3.9) substituted in and expanded analytically, so
 //! Adual^ij is computed directly from P_i/eta's own (up to second) derivatives --
@@ -39,31 +40,42 @@ namespace cfc {
 //! written directly to the ADM shift). a0_dd is the analytic trumpet background
 //! Ahat0_ij (CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 6, cfc_puncture.hpp) --
 //! zero everywhere unless <cfc> puncture_enabled, so a_dd = a0_dd + matter part
-//! reduces to the matter part alone by default.
+//! reduces to the matter part alone by default. origin recenters the reconstruction's
+//! x^k cross-term (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) -- callers must pass
+//! the SAME origin used for that solve's mg_multipole BC and eta-source term (here,
+//! cfc::CFC::r_com_X_ specifically, since this function is used only for X^i);
+//! mismatching it against the solve's own origin, or reusing beta^i's origin here,
+//! silently reconstructs the wrong vector field. (0,0,0) whenever puncture_enabled_
+//! is false, an exact no-op.
 void ComputeADualFromPotentials(MeshBlockPack *pmbp,
                                  const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
                                  const DvceArray5D<Real> &eta,
                                  const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                                  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                                 int eta_chan = 0);
+                                 int eta_chan, const Real origin[3]);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //!            const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
 //!            const DvceArray5D<Real> &eta,
-//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan = 0)
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan,
+//!            const Real origin[3])
 //! \brief Shibata (1999) eq. 3.9: V^j = (7/8) P_j - (1/8)(eta,_j + P_k,_j x^k) --
 //! reconstructs a vector field from the packed vector potential P_i (channels 0-2) and
 //! scalar potential eta (channel eta_chan), solved together by one
 //! MGCFCVectorPoissonDriver (see mg_cfc_vector_poisson.hpp). Used for beta^i
 //! (written to the ADM shift) -- X^i's own Adual is computed directly from P_i/eta
-//! instead, via ComputeADualFromPotentials(), without ever reconstructing X^i.
+//! instead, via ComputeADualFromPotentials(), without ever reconstructing X^i. origin
+//! recenters the x^k cross-term (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) --
+//! see ComputeADualFromPotentials's doc comment above for the shared consistency
+//! requirement; here it must be cfc::CFC::r_com_beta_ specifically. (0,0,0) whenever
+//! puncture_enabled_ is false, an exact no-op.
 void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                       const AthenaTensor<Real, TensorSymm::NONE, 3, 1>
                                           &p_i,
                                       const DvceArray5D<Real> &eta,
                                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u,
-                                      int eta_chan = 0);
+                                      int eta_chan, const Real origin[3]);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleConformalMetric(MeshBlockPack *pmbp,

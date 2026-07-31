@@ -278,6 +278,17 @@ its Riemann solver and conserved-to-primitive conversion.
 ## wrong for this module's own octant-symmetric test fixtures). Item 46
 ## validates it end-to-end with a new off-center TOV star capability and a
 ## dynamical stability run -- see item 45 for the full writeup.
+##
+## Status update (2026-07-31, later): item 45's own "Explicitly deferred"
+## bullet is now closed -- item 47 adds the analogous recentering for the
+## `mg_multipole` BC used by `X^i`/`beta^i`'s vector-Poisson solves (Sec
+## 3.10 items 2-3/Sec 5 Phase A item 8, parts (b) and (c) together, since
+## they are one indivisible correctness unit -- see item 47). Item 48
+## validates it with a new nonzero-momentum off-center TOV fixture and a
+## full cluster regression, including a build-sensitivity false alarm in
+## the pre-existing, out-of-scope `Multigrid::~Multigrid` teardown bug
+## (already noted in item 46) that turned out not to be a new regression --
+## see item 48 for the full investigation.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -560,9 +571,10 @@ src/cfc/
   MHD_CopyU -> MHD_Flux -> ... -> MHD_ExplRK -> MHD_AddSrc
     -> CFC_BuildSrcX (step 1: S_i from pmhd->u0; solve merged P_i+eta, item 18)
     -> CFC_Rest/Send/Recv/ProlongPiEtaX (ghost-exchange the merged u_p_x)
-    -> CFC_ReconstructX (Shibata recon -> x_u)
-    -> CFC_Rest/Send/Recv/ProlongX (ghost-exchange x_u)
-    -> CFC_ComputeADual (step 2: Adual^ij/Ahat^2)
+    -> CFC_ComputeADual (step 2: Adual^ij/Ahat^2, computed directly from
+       (P_i,eta) since item 43 (2026-07-30) deleted X^i's own reconstruction
+       pipeline -- CFC_ReconstructX/CFC_Rest/Send/Recv/ProlongX no longer
+       exist; CFC_ComputeADual now depends on {CFC_BCSPiEtaX} directly)
     -> CFC_SolvePsi (step 3, writes psi4/g_dd)
     -> [B-field CT/restrict/send/recv/BCS/Prolong, unchanged, running in parallel]
     -> MHD_C2P (single con2prim; required dep {MHD_Prolong}, optional dep
@@ -2725,11 +2737,15 @@ src/cfc/
       anyway) and `mg_poisson_mporder` (int, default `4`, independent of
       `psi`/`alpha_psi`'s own `mporder`). Unlike `psi`/`alpha_psi`, `autompo_` is
       forced `false` unconditionally (no `auto_mporigin` input read at all) --
-      every current CFC test star sits at the coordinate origin, so the base
-      constructor's own `mpo_=(0,0,0)` default is already correct, and skipping
-      `CalculateCenterOfMass()` (gated by `if(autompo_)`, mirroring gravity's own
-      `Solve()`) avoids generalizing a *third* channel-0-only function that isn't
-      actually needed. `Solve()` in both drivers gained
+      at the time this item was written, every current CFC test star sat at the
+      coordinate origin, so the base constructor's own `mpo_=(0,0,0)` default was
+      already correct, and skipping `CalculateCenterOfMass()` (gated by
+      `if(autompo_)`, mirroring gravity's own `Solve()`) avoided generalizing a
+      *third* channel-0-only function that wasn't needed yet. **Superseded by item
+      47**: `mpo_` is no longer stuck at `(0,0,0)` for off-center puncture runs --
+      `MGCFCVectorPoissonDriver::SetMultipoleOrigin()` now drives it externally,
+      still without touching `autompo_`/`CalculateCenterOfMass()` (a different,
+      still-unneeded mechanism; see item 47). `Solve()` in both drivers gained
       `if (mporder_>0) { CalculateMultipoleCoefficients(); SyncMultipoleToDevice(); }`
       (mirroring `MGGravityDriver::Solve`), inserted after `SetupMultigrid`, before
       `SolveMG` -- previously absent entirely (neither driver computed multipole
@@ -2832,6 +2848,13 @@ src/cfc/
       `InitWithShallowSlice(eta, eta_chan)`. Call sites now pass the merged array
       itself plus `eta_chan=3` -- e.g. `ReconstructVectorFromPotentials(pmy_pack,
       p_x, u_p_x, x_u, 3)` -- no separate `eta_x`/`eta_beta` array needed.
+      **Stale as a literal example, do not copy-paste**: item 43 (2026-07-30)
+      deleted `x_u`/X^i's reconstruction entirely (this function is only ever
+      called for `beta^i` now), and item 47 (2026-07-31) added a trailing
+      `const Real origin[3]` parameter -- the real call site today is
+      `cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3,
+      r_com_beta_)` (`cfc.cpp`). The `eta_chan` mechanism itself this bullet
+      describes is unaffected.
     - `bvals.hpp`/`cfc_bcs.cpp`: `CFCScalarBCs`/`CFCVectorBCs` hardcoded channel 0
       (`u0(m,0,...)`, ~28 call sites) / looped `n=0..nvar-1` with `u0(m,n,...)`
       (`constexpr int nvar=3`, axis-parity checks on `n` itself). Added a trailing
@@ -4268,10 +4291,12 @@ src/cfc/
       multipole is never actually selected for them), but
       `MGCFCVectorPoissonDriver` (the merged `P_i`/`eta` solve for both `X^i`
       and `beta^i`, `nvar_=4`) defaults `mg_poisson_outer_bc` to `"multipole"`
-      (`mg_cfc_vector_poisson.cpp:210-216`, `autompo_=false`, fixed origin at
-      the coordinate origin) -- this driver's octets, created whenever *any*
-      CFC AMR run refines at all, hit this exact gap whenever refinement
-      reaches the domain boundary.
+      (`mg_cfc_vector_poisson.cpp`'s constructor, `autompo_=false`, origin fixed
+      at the coordinate origin at the time this item was written -- **superseded
+      by item 47**, which adds `SetMultipoleOrigin()` so puncture runs can drive
+      this origin externally; see item 47) -- this driver's octets, created
+      whenever *any* CFC AMR run refines at all, hit this exact gap whenever
+      refinement reaches the domain boundary.
     - **Formula, mirrored exactly from the already-working `MGRootBoundary`
       host-path multipole block** (`multigrid_driver.cpp`, the `"Multipole
       expansion boundaries on host"` block inside `MGRootBoundary` -- line
@@ -6622,3 +6647,168 @@ src/cfc/
       `cfc_puncture_vacuum_small.athinput` locally and confirmed
       bit-for-bit identical output to before this pgen change (`star_center`
       defaults to `0.0`) -- the new parameter is a strict no-op when unset.
+
+47. **(2026-07-31) `mg_multipole` outer BC recentering for `X^i`/`beta^i`,
+    closing item 45's own "Explicitly deferred" bullet (`CFC_PUNCTURE_TDE_PLAN.md`
+    Sec 3.10 items 2-3 / Sec 5 Phase A item 8, parts (b) and (c) together).**
+    Unlike item 45's part (a), parts (b)/(c) are one indivisible unit, not
+    separable into "mechanism" and "correctness fix": the plan doc's own
+    re-derivation of the Shibata (1999) decomposition identity shows it holds
+    for any constant shift `y=x-x0`, but *only if that same `y` is used
+    everywhere it appears* -- shifting the multipole origin without shifting
+    the eta-source and reconstruction cross-term by the identical amount
+    would silently reconstruct the *wrong* vector field, not just a
+    worse-conditioned one. So this item lands mechanism and consistency
+    together, matching how tightly item 45 itself bundled its own
+    shared-module fix, CFC-local centroid, and reflecting-boundary
+    correction into one item.
+    - **Mechanism, no shared-module change needed this time**: unlike
+      `mg_robin`, `mg_multipole`'s `mpo_`/`autompo_` (`MultigridDriver`,
+      `multigrid.hpp`) are already `protected`, not `private`, and
+      `MGCFCVectorPoissonDriver` *inherits* `MultigridDriver` (unlike
+      `cfc::CFC`, which only *composes* it) -- so no cross-class setter is
+      structurally required, just a new public
+      `MGCFCVectorPoissonDriver::SetMultipoleOrigin(x,y,z)` (one-liner
+      assigning the inherited `mpo_`, `mg_cfc_vector_poisson.{hpp,cpp}`).
+      `autompo_` stays permanently `false` (unchanged) -- `mpo_` is driven
+      externally by this setter, not by `MultigridDriver`'s own
+      `CalculateCenterOfMass()`, which uses a different (generic
+      mass-like) weight than the one this item needs (see next bullet).
+    - **Two independently-weighted centroids, not a shared "momentum"
+      proxy** (plan doc's own correction, verified against the actual
+      code): `r_com_X_` and `r_com_beta_` are computed from each equation's
+      own assembled source, separately, and are NOT forced equal.
+      - `X^i`'s source (`AssembleVectorSource`'s `!for_shift` branch) is
+        `p_src_(a) = 8*pi*S-tilde_a`, the RAW densitized momentum
+        (`= psi^6*S_a`) -- squaring this directly for a centroid weight
+        would introduce a spurious `psi^12` factor that biases the
+        centroid toward the puncture (where `psi` blows up). New
+        `CFC::ComputeVectorCentroidX()` divides out `psi^12` before
+        squaring (reads `cons(IM1+a)` plus `delta_psi_`/`u_psi0_` to
+        undensitize), mirroring `ComputeMassCentroid()`'s reduction shape
+        exactly otherwise (per-MeshBlock partial sums, host mirror, MPI
+        reduction, epsilon-safe divide). Uses whichever `psi` this solver
+        currently holds -- X^i solves *before* psi does in the per-stage
+        order, so this is a one-stage-lagged value by construction, not a
+        bug (a BC-placement heuristic, not part of the physical RHS).
+      - `beta^i`'s source (`AssembleVectorSource`'s `for_shift` branch,
+        read only *after* `BuildShiftSource()` finishes) is
+        `p_src_(a) = 16*pi*alpha*psi^-6*S-tilde_a + 2*Ahat^aj*D_j(alpha*psi^-6)`
+        -- the matter term's `alpha*psi^-6` already exactly cancels
+        `S-tilde`'s `psi^6` (confirmed: `ap6*s_tilde_d = alpha*S_a`), so no
+        `psi^12` correction is needed there; new
+        `CFC::ComputeVectorCentroidBeta()` squares the as-assembled
+        `p_src_` directly (read at this solver's own shallower
+        `mg_nghost_` depth, same index translation `AssembleVectorSource`
+        already uses).
+      - Both new centroid methods call the same
+        `CFC::ApplyReflectingBoundaryCorrection()` item 45's own reflecting-
+        boundary fix used (factored out of `ComputeMassCentroid()` into its
+        own method this item, pure refactor, zero behavior change -- shared
+        because the same octant-symmetric-domain bias applies to any
+        centroid computed this way, not just the mass one).
+    - **Consistency fix (item 8's part (c))**: both `AssembleVectorSource`
+      branches' eta-source loops (`eta_val -= p_a*xk[a]`) now subtract the
+      matching centroid (`r_com_X_` in the `!for_shift` branch, `r_com_beta_`
+      in the `for_shift` branch) from `xk` before use -- unconditional
+      edits, exact no-ops when the centroids are `(0,0,0)`.
+      `cfc_reconstruct.cpp`'s two reconstruction functions (confirmed two
+      *separate* function bodies, not one shared helper, despite the plan
+      doc implying otherwise) each gained a trailing `const Real origin[3]`
+      parameter with the identical `xk[3] = {x1v-ox, ...}` treatment:
+      `ComputeADualFromPotentialsImpl`/`ComputeADualFromPotentials` (X^i
+      only, called from `CFC::ComputeADual()`, passed `r_com_X_`) and
+      `ReconstructVectorFromPotentialsImpl`/`ReconstructVectorFromPotentials`
+      (beta^i only, called from `CFC::ReconstructShift()`, passed
+      `r_com_beta_`) -- each solve's three consumers (multipole origin,
+      eta-source, reconstruction cross-term) now consistently share that
+      solve's own centroid, with no cross-wiring between X^i and beta^i.
+    - **Call-site wiring**: `SolveVectorPotential()` computes `r_com_X_`
+      and calls `SetMultipoleOrigin()` on `pmgd_pietax` *before*
+      `AssembleVectorSource(false)` (whose eta-source loop needs it
+      already set); `SolveShift()` calls `SetMultipoleOrigin()` on
+      `pmgd_pietabeta` *after* `AssembleVectorSource(true)` returns (which
+      fills `r_com_beta_` internally, right after `BuildShiftSource()`).
+      All four new call sites (`ComputeVectorCentroidX`/`Beta`,
+      `SetMultipoleOrigin` x2) gated by `puncture_enabled_`; the unconditional
+      edits (eta-source `xk` subtraction, the two reconstruction functions'
+      `origin` parameter) reduce to exact no-ops when disabled, since
+      `r_com_X_`/`r_com_beta_` stay at their constructor-default `(0,0,0)`
+      and are never written otherwise.
+    - **Verified**: see item 48.
+
+48. **(2026-07-31) Validation of item 47: a nonzero-momentum off-center TOV
+    fixture, full cluster regression, and a build-sensitivity false alarm
+    in the pre-existing teardown bug that turned out not to be a new
+    regression.** Item 46's off-center TOV fixture has `S_i=0` identically
+    (static, non-rotating, unmagnetized star) -- structurally incapable of
+    exercising item 47, since `X^i`/`beta^i` solve to exactly zero
+    regardless of any BC in that case. A new fixture was needed.
+    - **New fixture**:
+      `inputs/dyn_grmhd/cfc_puncture_offcenter_tov_vpert.athinput`, identical
+      to item 46's fixture except `<problem> v_pert = 0.01` -- the TOV
+      pgen's existing (already-wired, unmodified) radial-pulsation
+      perturbation (`vr = 0.5*v_pert*(3x-x^3)`, `dyngr_tov.cpp:94,169,182`)
+      sources an immediate, nonzero, radially-oriented `S_i` about the
+      star's own off-center position at `t=0`, without waiting on item 46's
+      slow (~100-time-unit) natural gravitational infall.
+    - **Verified, local + cluster (`tlim=20`)**: no `FATAL`/NaN. Logged
+      `r_com_X_`/`r_com_beta_`/`r_com_mass_` every stage -- `r_com_X_`
+      tracks the star's actual position (`~57-60`, vs. `star_center_x1=60`),
+      transverse components `~1e-4` or smaller (consistent with the star's
+      spherical symmetry, not a drift toward the puncture at `x=0`, which
+      would indicate the `psi^12`-undensitizing step was omitted or wrong).
+      `r_com_beta_` settles around `~5-6.5` -- notably *not* coincident
+      with `r_com_X_` -- consistent with the plan doc's own explicit
+      caveat that the two need not agree once the `Ahat`-gradient
+      contribution (peaked near the puncture's own trumpet background,
+      not the star) becomes non-negligible relative to the matter term;
+      not forced equal, logged only as a sanity check per the plan.
+      `rho-max` declines smoothly `~4.6%` over the run (pulsation damping,
+      not instability); `alpha-min` and total mass stay essentially flat.
+      Identical behavior confirmed between a local Serial smoke run and
+      the 2-node/4-rank cluster run.
+    - **Regression, `puncture_enabled=false`**: `whisky_tov.athinput`
+      (local Serial, non-AMR, single MeshBlock) bit-for-bit identical
+      through several real dynamical cycles.
+      `cfc_puncture_vacuum_small.athinput` (`puncture_enabled=true` but
+      `S_i=0` identically, reflecting BCs) bit-for-bit identical through a
+      real dynamical cycle too -- confirms
+      `ApplyReflectingBoundaryCorrection` forces `r_com_X_`/`r_com_beta_`
+      back to exactly `(0,0,0)` even when numerical (non-physical) momentum
+      asymmetry develops during evolution, not just at `t=0`.
+      `cfc_puncture_offcenter_tov.athinput` (item 46's fixture, `v_pert=0`,
+      `diode` BCs, no reflecting correction) is **not** bit-for-bit past
+      the first stage -- a genuine, expected finding, not a bug: even with
+      `v_pert=0`, gravitational infall generates small nonzero `S_i` after
+      the first evolution step (the same effect item 46's own multi-cycle
+      run measured directly), so item 47's recentering correctly activates
+      and produces a small, physically-motivated behavioral change for that
+      *specific* fixture -- `puncture_enabled=false`/reflecting-BC fixtures
+      remain the valid strict no-op bar, not every `puncture_enabled=true`
+      fixture unconditionally.
+    - **Cluster regression, `puncture_enabled=false` + real AMR**
+      (`cfc_bu8_stability.athinput`, 16 nodes/32 ranks,
+      `dyn_grmhd/xns_rotstar` pgen -- not `dyngr_tov`, corrected after an
+      initial pgen-mismatch false start): an `nlim=0` before/after
+      comparison showed the "after" binary crashing (`SIGBUS`/`SIGSEGV`
+      depending on build) noticeably earlier in captured stdout than
+      "before", even with `stdbuf -oL` line-buffering ruling out an I/O
+      buffering artifact -- initially looked like a genuine new regression.
+      Root-caused by reading `driver.cpp`'s `Driver::Execute()` while-loop:
+      with `nlim=0` the loop body (which contains every `ExecuteTaskList`
+      call, and therefore every CFC per-stage solve this item touches)
+      never runs at all, so the crash-timing difference could not have
+      been caused by item 47's code, which is provably unreached at
+      `nlim=0`. A follow-up `nlim=1` rerun (forcing one real evolved cycle
+      through the actual per-stage solve pipeline, still
+      `puncture_enabled=false` + AMR + 32 ranks) came back **exactly
+      bit-for-bit identical** between before/after (only the `date` command's
+      timestamp line differed). Conclusion: the `nlim=0` crash-timing
+      difference is the same pre-existing, out-of-scope `Multigrid::
+      ~Multigrid` teardown bug already noted in item 46, manifesting
+      build/memory-layout-sensitively (an inherent property of genuine
+      undefined behavior, not evidence of a new bug) -- not a regression
+      from this item. A Debug build (Kokkos bounds-checking enabled)
+      rerun produced no bounds-check assertion, consistent with this
+      conclusion rather than a real out-of-bounds access in the new code.

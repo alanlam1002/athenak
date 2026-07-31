@@ -293,6 +293,12 @@ void MGCFCVectorPoissonDriver::RetrieveSolution(DvceArray5D<Real> &p_dst) {
   return;
 }
 
+void MGCFCVectorPoissonDriver::SetMultipoleOrigin(Real x, Real y, Real z) {
+  mpo_[0] = x;
+  mpo_[1] = y;
+  mpo_[2] = z;
+}
+
 //----------------------------------------------------------------------------------------
 // Host-side octet physics for MGCFCVectorPoissonDriver. Same 7-point Laplacian as
 // gravity::MGGravityDriver's octet functions, generalized to loop over all nvar_ (4:

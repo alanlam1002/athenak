@@ -27,7 +27,8 @@ template <int NGHOST>
 void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
     const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_i,
     const DvceArray5D<Real> &eta,
-    AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan) {
+    AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u, int eta_chan,
+    const Real origin[3]) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -37,6 +38,7 @@ void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
 
   AthenaTensor<Real, TensorSymm::NONE, 3, 0> eta_view;
   eta_view.InitWithShallowSlice(eta, eta_chan);
+  Real ox = origin[0], oy = origin[1], oz = origin[2];
 
   par_for("cfc_vec_reconstruct", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -48,7 +50,9 @@ void ReconstructVectorFromPotentialsImpl(MeshBlockPack *pmbp,
     Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
     Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-    Real xk[3] = {x1v, x2v, x3v};
+    // Recentered on the calling solve's own r_com (Sec 3.10 items 2-3/Sec 5 Phase A
+    // item 8b-8c) -- (0,0,0) whenever puncture_enabled_ is false, an exact no-op.
+    Real xk[3] = {x1v - ox, x2v - oy, x3v - oz};
 
     for (int jdir = 0; jdir < 3; ++jdir) {
       Real deta_ddir = Dx<NGHOST>(jdir, idx, eta_view, m, k, j, i);
@@ -77,7 +81,7 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
                                      const AthenaTensor<Real, TensorSymm::SYM2, 3, 2>
                                          &a0_dd,
                                      AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                                     int eta_chan) {
+                                     int eta_chan, const Real origin[3]) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -87,6 +91,7 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
 
   AthenaTensor<Real, TensorSymm::NONE, 3, 0> eta_view;
   eta_view.InitWithShallowSlice(eta, eta_chan);
+  Real ox = origin[0], oy = origin[1], oz = origin[2];
 
   par_for("cfc_adual_direct", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -98,7 +103,9 @@ void ComputeADualFromPotentialsImpl(MeshBlockPack *pmbp,
     Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
     Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-    Real xk[3] = {x1v, x2v, x3v};
+    // Recentered on the calling solve's own r_com (Sec 3.10 items 2-3/Sec 5 Phase A
+    // item 8b-8c) -- (0,0,0) whenever puncture_enabled_ is false, an exact no-op.
+    Real xk[3] = {x1v - ox, x2v - oy, x3v - oz};
 
     Real dX[3][3];
     for (int idir = 0; idir < 3; ++idir) {
@@ -134,14 +141,17 @@ void ComputeADualFromPotentials(MeshBlockPack *pmbp,
                                  const DvceArray5D<Real> &eta,
                                  const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                                  AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                                 int eta_chan) {
+                                 int eta_chan, const Real origin[3]) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: ComputeADualFromPotentialsImpl<2>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+    case 2: ComputeADualFromPotentialsImpl<2>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan,
+                                               origin);
             break;
-    case 3: ComputeADualFromPotentialsImpl<3>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+    case 3: ComputeADualFromPotentialsImpl<3>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan,
+                                               origin);
             break;
-    case 4: ComputeADualFromPotentialsImpl<4>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan);
+    case 4: ComputeADualFromPotentialsImpl<4>(pmbp, p_i, eta, a0_dd, a_dd, eta_chan,
+                                               origin);
             break;
   }
 }
@@ -151,12 +161,15 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
                                           &p_i,
                                       const DvceArray5D<Real> &eta,
                                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &v_u,
-                                      int eta_chan) {
+                                      int eta_chan, const Real origin[3]) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
-    case 2: ReconstructVectorFromPotentialsImpl<2>(pmbp, p_i, eta, v_u, eta_chan); break;
-    case 3: ReconstructVectorFromPotentialsImpl<3>(pmbp, p_i, eta, v_u, eta_chan); break;
-    case 4: ReconstructVectorFromPotentialsImpl<4>(pmbp, p_i, eta, v_u, eta_chan); break;
+    case 2: ReconstructVectorFromPotentialsImpl<2>(pmbp, p_i, eta, v_u, eta_chan,
+                                                    origin); break;
+    case 3: ReconstructVectorFromPotentialsImpl<3>(pmbp, p_i, eta, v_u, eta_chan,
+                                                    origin); break;
+    case 4: ReconstructVectorFromPotentialsImpl<4>(pmbp, p_i, eta, v_u, eta_chan,
+                                                    origin); break;
   }
 }
 

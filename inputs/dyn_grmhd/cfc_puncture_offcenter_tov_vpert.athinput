@@ -1,0 +1,125 @@
+# Athena++ (Kokkos version) input file: off-center TOV star with a small radial
+# velocity perturbation, exercising the mg_multipole recentering for X^i/beta^i
+# (CFC_PUNCTURE_TDE_PLAN.md Sec 3.10 items 2-3, Sec 5 Phase A item 8b-8c).
+#
+# Identical to cfc_puncture_offcenter_tov.athinput (item 46's stage-8a-only static
+# fixture) EXCEPT for one line: <problem> v_pert = 0.01. That fixture's own static,
+# unmagnetized star has S_i=0 identically, which structurally cannot exercise item
+# 8b/8c (X^i/beta^i solve to exactly zero regardless of any BC when S_i=0) -- v_pert
+# sources an immediate, nonzero, radially-oriented S_i about the star's own off-center
+# position at t=0 (dyngr_tov.cpp's existing vr = 0.5*v_pert*(3x-x^3) perturbation,
+# x=r/R_edge), giving the new recentering something non-degenerate to act on without
+# waiting on item 46's slow (~100-time-unit) natural gravitational infall. v_pert=0.01
+# is small, well below any shock-forming threshold for this near-vacuum EOS.
+#
+# Success criteria (Sec 5 Phase A item 8b-8c validation): no FATAL/NaN over a short
+# run; r_com_X_/r_com_beta_/r_com_mass_ should agree with each other and sit near
+# star_center_x1=60, not drift toward the puncture at x=0.
+
+<comment>
+problem  = Off-center TOV star with v_pert, validating CFC mg_multipole recentering for X^i/beta^i (Sec 5 Phase A item 8b-8c)
+
+<job>
+basename = cfc_puncture_offcenter_tov_vpert
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 80       # 5 MeshBlocks in x1-direction (root level), dx=1.6
+x1min  = -25.6    # minimum x1 -- BH puncture at x=0 sits one MeshBlock in from here
+x1max  = 102.4    # maximum x1 -- star surface (~71.8) has ~19 cells of buffer before here
+ix1_bc = diode    # inner boundary -- NOT reflect (star is off-center, no mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 32       # 2 MeshBlocks in x2-direction (root level), dx=1.6
+x2min  = -25.6    # minimum x2
+x2max  = 25.6     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 32       # 2 MeshBlocks in x3-direction (root level), dx=1.6
+x3min  = -25.6    # minimum x3
+x3max  = 25.6     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 20         # short smoke run -- item 8b/8c only needs a handful of stages
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method (matches cfc_puncture_vacuum*)
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-10    # floor on density rho (matches cfc_puncture_vacuum*)
+tfloor      = 1.0e-8
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10  # matches cfc_bu8_stability's genuine-dynamical-run setting
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH, fixed at the coordinate origin x=0
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 1.28e-4   # matches cfc_puncture_vacuum_small.athinput -- gives
+                         # isotropic radius R_iso~11.82 for this kappa/gamma
+kappa       = 100.0     # P = kappa*rho^gamma
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 1e-2      # radial step for TOV calculation
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0    # ~5x R_iso -- the star's actual center, away from the BH
+star_center_x2 = 0.0     # puncture (always fixed at x=0)
+star_center_x3 = 0.0
+v_pert      = 0.01       # small radial-pulsation kick -- sources nonzero S_i at t=0,
+                         # exercising item 8b/8c's mg_multipole recentering
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- inspect psi/alpha near the puncture and star
+variable    = adm
+dcycle      = 25
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- inspect density near the star for stability
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x3    = 0.0
+id = prim_xy

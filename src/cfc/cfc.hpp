@@ -109,6 +109,33 @@ class CFC {
   // simply never called then, a bit-for-bit no-op.
   Real r_com_mass_[3];
 
+  // Physical-S-squared-weighted centroid of X^i's own source (Sec 3.10 item 2/Sec 5
+  // Phase A item 8b), recomputed every SolveVectorPotential() call from cons(IM1+a)
+  // undensitized by psi^12 (raw S-tilde_a = psi^6*S_a; squaring it directly would
+  // spuriously bias toward the puncture -- must divide out psi^12 before squaring).
+  // Feeds MGCFCVectorPoissonDriver::SetMultipoleOrigin() for pmgd_pietax AND the
+  // AssembleVectorSource(!for_shift) eta-source xk offset AND
+  // ComputeADualFromPotentials's reconstruction cross-term offset -- all three MUST
+  // use this same value (Sec 3.10 item 3: shifting only one silently reconstructs
+  // the wrong vector field). Deliberately NOT forced equal to r_com_beta_/r_com_mass_
+  // -- logged each call as a cheap sanity check only. Zero (constructor default)
+  // whenever puncture_enabled_ is false -- ComputeVectorCentroidX()/
+  // SetMultipoleOrigin() are simply never called then, a bit-for-bit no-op.
+  Real r_com_X_[3];
+
+  // Same idea as r_com_X_, for beta^i's own source -- but weighted by p_src_ as
+  // assembled (16*pi*alpha*psi^-6*S-tilde_a + BuildShiftSource's Ahat-gradient term),
+  // squared directly with NO psi^12 correction: the matter term's alpha*psi^-6
+  // already exactly cancels S-tilde's psi^6 (Sec 3.10 item 2). Computed inside
+  // AssembleVectorSource(/*for_shift=*/true), immediately after BuildShiftSource()
+  // finishes (not before -- needs the fully-assembled source). Feeds
+  // MGCFCVectorPoissonDriver::SetMultipoleOrigin() for pmgd_pietabeta AND that same
+  // branch's eta-source xk offset AND ReconstructVectorFromPotentials's cross-term
+  // offset. Independent from r_com_X_ by design (item 2: NOT a shared "momentum"
+  // proxy) -- do not conflate. Zero whenever puncture_enabled_ is false, same
+  // reasoning as r_com_X_.
+  Real r_com_beta_[3];
+
   // Store psi-1 / alpha*psi-1, not the physical field -- this is exactly what the
   // multigrid solve iterates on internally, and avoids losing precision far from
   // the star where the physical value is ~1+tiny. Consumers add 1.0 back at the
@@ -338,7 +365,10 @@ class CFC {
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's
   // source (eq. 72, from pmhd->u0) or beta^i's (eq. 75, from alpha/psi/Adual^ij/
-  // S-tilde_i).
+  // S-tilde_i). When puncture_enabled_, the for_shift=true branch also calls
+  // ComputeVectorCentroidBeta() right after BuildShiftSource() finishes assembling
+  // p_src_ (Sec 3.10 item 2/Sec 5 Phase A item 8b) -- this is the one place a
+  // puncture-gated side effect lives inside an otherwise puncture-agnostic function.
   void AssembleVectorSource(bool for_shift);
 
   // Fills r_com_mass_ from a mass-weighted reduction over pmhd->u0(IDN) (Sec 3.10
@@ -349,6 +379,31 @@ class CFC {
   // reuses that same call's result (u0 is unchanged in between -- RescaleMatterSources
   // only rewrites s_tilde_).
   void ComputeMassCentroid();
+
+  // Fills r_com_X_ from a physical-S-squared-weighted reduction over
+  // pmy_pack->pmhd->u0(IM1..IM3), undensitized by psi^12 (Sec 3.10 item 2). Mirrors
+  // ComputeMassCentroid()'s reduction shape but with a different weight, and reads
+  // delta_psi_/u_psi0_ for the psi^12 correction -- NOT this stage's freshly-solved
+  // psi (X^i solves before psi does, steps 1 vs 3), just whatever psi this solver
+  // currently holds (last stage's converged value, or the analytic/zero seed before
+  // the very first-ever solve -- always well-defined, no bootstrap NaN risk). Called
+  // from SolveVectorPotential() only, before AssembleVectorSource(/*for_shift=*/
+  // false) and before pmgd_pietax->Solve().
+  void ComputeVectorCentroidX();
+
+  // Fills r_com_beta_ from a p_src_-squared-weighted reduction (Sec 3.10 item 2), no
+  // psi^12 correction needed (see r_com_beta_'s own doc comment). Called from
+  // AssembleVectorSource(/*for_shift=*/true) only, immediately after
+  // BuildShiftSource() returns and before that branch's eta-source loop.
+  void ComputeVectorCentroidBeta();
+
+  // Shared reflecting-mesh-boundary override, factored out of
+  // ComputeMassCentroid()'s original inline logic -- identical correction applies to
+  // any centroid computed from a reduction over the (possibly octant-symmetric)
+  // stored domain: force each axis to its own reflecting plane's coordinate rather
+  // than trusting the raw (spuriously off-center) integral. Called by
+  // ComputeMassCentroid(), ComputeVectorCentroidX(), and ComputeVectorCentroidBeta().
+  void ApplyReflectingBoundaryCorrection(Real center[3]);
 
   // Steps 1-6 of the per-stage/per-Picard-iteration solve pipeline; see the
   // like-named TaskStatus wrapper functions in cfc.cpp for the full per-step

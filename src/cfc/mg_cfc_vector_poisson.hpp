@@ -97,6 +97,20 @@ class MGCFCVectorPoissonDriver : public MultigridDriver {
     // cfc_reconstruct.hpp::ReconstructVectorFromPotentials).
     void RetrieveSolution(DvceArray5D<Real> &p_dst);
 
+    // Overrides mpo_ (inherited protected MultigridDriver member) so the
+    // mg_multipole outer BC falls off around the matter's own S-squared-weighted
+    // centroid (Sec 3.10 item 2/Sec 5 Phase A item 8b/8c), not the fixed coordinate
+    // origin the BH puncture sits at. Unlike MultigridDriver::SetRobinCenter (a
+    // genuine cross-class setter needed because cfc::CFC only composes that driver),
+    // this class INHERITS MultigridDriver, so this is a plain convenience one-liner
+    // over a member it could already write directly. autompo_ stays permanently
+    // false (set in the constructor) -- it must NOT be flipped true, since
+    // MultigridDriver's own CalculateCenterOfMass() uses a different (generic
+    // mass-like) weight definition than item 2 requires; mpo_ is driven externally
+    // by this setter instead. A no-op (mpo_ stays at its inherited (0,0,0) default)
+    // if this is never called.
+    void SetMultipoleOrigin(Real x, Real y, Real z);
+
     // octet-level (AMR) physics, mirroring gravity::MGGravityDriver
     void SmoothOctet(MGOctet &oct, int rlev, int color) final;
     void CalculateDefectOctet(MGOctet &oct, int rlev) final;

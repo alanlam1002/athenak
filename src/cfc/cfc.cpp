@@ -292,6 +292,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
   r_com_mass_[0] = r_com_mass_[1] = r_com_mass_[2] = 0.0;
+  r_com_X_[0] = r_com_X_[1] = r_com_X_[2] = 0.0;
+  r_com_beta_[0] = r_com_beta_[1] = r_com_beta_[2] = 0.0;
   Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
@@ -1125,6 +1127,164 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeVectorCentroidX()
+//! \brief physical-S-squared-weighted centroid of X^i's own source (Sec 3.10 item 2/
+//! Sec 5 Phase A item 8b), for the mg_multipole outer BC's recentering. Mirrors
+//! ComputeMassCentroid()'s reduction shape, but weights by the PHYSICAL S_aS^a --
+//! cons(IM1+a) is the raw densitized S-tilde_a = psi^6*S_a, so squaring it directly
+//! would introduce a spurious psi^12 factor that biases the centroid toward the
+//! puncture (where psi blows up); dividing by psi^12 first undoes that. Uses whatever
+//! psi this solver currently holds (last stage's converged delta_psi_/u_psi0_, not
+//! this stage's not-yet-solved value -- X^i solves before psi does) -- a one-stage
+//! lag that only affects where the BC is centered, not any physical RHS.
+
+void CFC::ComputeVectorCentroidX() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &cons = pmy_pack->pmhd->u0;
+  auto &delta_psi_ = delta_psi;
+  auto &u_psi0_ = u_psi0;
+
+  DvceArray2D<Real> partial("cfc_com_x_partial", nmb, 4);
+  par_for("cfc_vec_centroid_x", DevExeSpace(), 0, nmb-1,
+  KOKKOS_LAMBDA(const int m) {
+    Real dx1 = (size.d_view(m).x1max - size.d_view(m).x1min) / static_cast<Real>(indcs.nx1);
+    Real dx2 = (size.d_view(m).x2max - size.d_view(m).x2min) / static_cast<Real>(indcs.nx2);
+    Real dx3 = (size.d_view(m).x3max - size.d_view(m).x3min) / static_cast<Real>(indcs.nx3);
+    Real vol = dx1*dx2*dx3;
+    Real m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0;
+    for (int k = ks; k <= ke; ++k) {
+      Real z = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      for (int j = js; j <= je; ++j) {
+        Real y = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+        for (int i = is; i <= ie; ++i) {
+          Real x = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          Real psi_val = delta_psi_(m,0,k,j,i) + u_psi0_(m,0,k,j,i);
+          Real psi2 = psi_val*psi_val;
+          Real psi6 = psi2*psi2*psi2;
+          Real psi12 = psi6*psi6;
+          Real s2 = 0.0;
+          for (int a = 0; a < 3; ++a) {
+            Real sa = cons(m,IM1+a,k,j,i);
+            s2 += sa*sa;
+          }
+          Real w = (s2/psi12)*vol;
+          m0 += w;
+          m1 += w*x;
+          m2 += w*y;
+          m3 += w*z;
+        }
+      }
+    }
+    partial(m,0) = m0;
+    partial(m,1) = m1;
+    partial(m,2) = m2;
+    partial(m,3) = m3;
+  });
+
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  Real totals[4] = {};
+  for (int m = 0; m < nmb; ++m) {
+    for (int c = 0; c < 4; ++c) {
+      totals[c] += partial_h(m,c);
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, totals, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  Real im = 1.0/(totals[0] + 1.0e-30);
+  r_com_X_[0] = im*totals[1];
+  r_com_X_[1] = im*totals[2];
+  r_com_X_[2] = im*totals[3];
+
+  ApplyReflectingBoundaryCorrection(r_com_X_);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeVectorCentroidBeta()
+//! \brief p_src_-squared-weighted centroid of beta^i's own (fully-assembled) source
+//! (Sec 3.10 item 2/Sec 5 Phase A item 8b). No psi^12 correction needed here, unlike
+//! ComputeVectorCentroidX() -- the matter term's alpha*psi^-6 prefactor already
+//! exactly cancels S-tilde's psi^6 (confirmed: ap6*s_tilde_d = (alpha*psi^-6)*
+//! (psi^6*S_a) = alpha*S_a), so p_src_ as assembled is already the physical source,
+//! safe to square directly. Must be called AFTER BuildShiftSource() has added its
+//! Ahat-gradient term onto p_src_ -- called from AssembleVectorSource's for_shift
+//! branch, not from SolveShift(), specifically so it sees the complete source.
+//! p_src_/u_p_src_ live at this solver's own (shallower) mg_nghost_ depth, unlike
+//! ComputeMassCentroid()/ComputeVectorCentroidX() which read mesh-NGHOST-depth
+//! arrays directly -- same (k,j,i)->(mk,mj,mi) translation AssembleVectorSource uses.
+
+void CFC::ComputeVectorCentroidBeta() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto p_src_ = p_src;
+  int mg_nghost = mg_nghost_;
+
+  DvceArray2D<Real> partial("cfc_com_beta_partial", nmb, 4);
+  par_for("cfc_vec_centroid_beta", DevExeSpace(), 0, nmb-1,
+  KOKKOS_LAMBDA(const int m) {
+    Real dx1 = (size.d_view(m).x1max - size.d_view(m).x1min) / static_cast<Real>(indcs.nx1);
+    Real dx2 = (size.d_view(m).x2max - size.d_view(m).x2min) / static_cast<Real>(indcs.nx2);
+    Real dx3 = (size.d_view(m).x3max - size.d_view(m).x3min) / static_cast<Real>(indcs.nx3);
+    Real vol = dx1*dx2*dx3;
+    Real m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0;
+    for (int k = ks; k <= ke; ++k) {
+      Real z = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      for (int j = js; j <= je; ++j) {
+        Real y = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+        for (int i = is; i <= ie; ++i) {
+          Real x = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
+          Real p2 = 0.0;
+          for (int a = 0; a < 3; ++a) {
+            Real pa = p_src_(m,a,mk,mj,mi);
+            p2 += pa*pa;
+          }
+          Real w = p2*vol;
+          m0 += w;
+          m1 += w*x;
+          m2 += w*y;
+          m3 += w*z;
+        }
+      }
+    }
+    partial(m,0) = m0;
+    partial(m,1) = m1;
+    partial(m,2) = m2;
+    partial(m,3) = m3;
+  });
+
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  Real totals[4] = {};
+  for (int m = 0; m < nmb; ++m) {
+    for (int c = 0; c < 4; ++c) {
+      totals[c] += partial_h(m,c);
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, totals, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  Real im = 1.0/(totals[0] + 1.0e-30);
+  r_com_beta_[0] = im*totals[1];
+  r_com_beta_[1] = im*totals[2];
+  r_com_beta_[2] = im*totals[3];
+
+  ApplyReflectingBoundaryCorrection(r_com_beta_);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void CFC::AssembleVectorSource(bool for_shift)
 //! \brief Gmunu eq. 72 (for_shift=false) / eq. 75 (for_shift=true) right-hand sides,
 //! plus Shibata eq. 3.11's eta source (packed at channel 3 of u_p_src), built from
@@ -1158,6 +1318,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
     auto &cons = pmy_pack->pmhd->u0;
     auto &u_tilde_ = u_tilde;
     auto &u_raw_ = u_raw;
+    Real rcx = r_com_X_[0], rcy = r_com_X_[1], rcz = r_com_X_[2];
     par_for("cfc_assemble_vecX_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
@@ -1179,7 +1340,9 @@ void CFC::AssembleVectorSource(bool for_shift) {
       Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
       Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
       Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-      Real xk[3] = {x1v, x2v, x3v};
+      // Recentered on r_com_X_ (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) --
+      // (0,0,0) whenever puncture_enabled_ is false, an exact no-op.
+      Real xk[3] = {x1v - rcx, x2v - rcy, x3v - rcz};
 
       Real eta_val = 0.0;
       for (int a = 0; a < 3; ++a) {
@@ -1215,6 +1378,14 @@ void CFC::AssembleVectorSource(bool for_shift) {
     BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0, a_dd,
                      a0_dd, grad_ap6_0, p_src, mg_nghost, u_alpha_psi6);
 
+    // r_com_beta_ (Sec 3.10 item 2/Sec 5 Phase A item 8b) needs the now-complete
+    // p_src_ -- must run after BuildShiftSource(), before this branch's eta-source
+    // loop and before SolveShift()'s SetMultipoleOrigin() call.
+    if (puncture_enabled_) {
+      ComputeVectorCentroidBeta();
+    }
+    Real rcx = r_com_beta_[0], rcy = r_com_beta_[1], rcz = r_com_beta_[2];
+
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
             is, ie,
@@ -1226,7 +1397,9 @@ void CFC::AssembleVectorSource(bool for_shift) {
       Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
       Real &x3min = size.d_view(m).x3min; Real &x3max = size.d_view(m).x3max;
       Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
-      Real xk[3] = {x1v, x2v, x3v};
+      // Recentered on r_com_beta_ (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) --
+      // (0,0,0) whenever puncture_enabled_ is false, an exact no-op.
+      Real xk[3] = {x1v - rcx, x2v - rcy, x3v - rcz};
       Real eta_val = 0.0;
       for (int a = 0; a < 3; ++a) {
         eta_val -= p_src_(m,a,mk,mj,mi)*xk[a];
@@ -1240,6 +1413,13 @@ void CFC::AssembleVectorSource(bool for_shift) {
 //----------------------------------------------------------------------------------------
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
+  // r_com_X_ (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) only needs u0/psi, both
+  // already available -- must run before AssembleVectorSource(false), whose
+  // eta-source loop reads r_com_X_.
+  if (puncture_enabled_) {
+    ComputeVectorCentroidX();
+    pmgd_pietax->SetMultipoleOrigin(r_com_X_[0], r_com_X_[1], r_com_X_[2]);
+  }
   AssembleVectorSource(/*for_shift=*/false);
 
   pmgd_pietax->LoadPoissonSource(u_p_src);
@@ -1249,7 +1429,7 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
 }
 
 void CFC::ComputeADual() {
-  cfc::ComputeADualFromPotentials(pmy_pack, p_x, u_p_x, a0_dd, a_dd, 3);
+  cfc::ComputeADualFromPotentials(pmy_pack, p_x, u_p_x, a0_dd, a_dd, 3, r_com_X_);
 
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -1337,34 +1517,46 @@ void CFC::ComputeMassCentroid() {
   r_com_mass_[1] = im*totals[2];
   r_com_mass_[2] = im*totals[3];
 
-  // A reflecting mesh boundary means the true (unreflected) matter distribution is
-  // symmetric about that face's own coordinate -- the true centroid component along
-  // that axis is exactly the reflecting plane's location, not whatever the
-  // reduction above gives (which only ever sees the stored octant/quadrant of a
-  // symmetric star, and is spuriously off-center as a result). Every existing CFC
-  // test uses reflecting BCs this way (octant-symmetric TOV stars); without this
-  // correction, enabling recentering on one of those fixtures would spuriously shift
-  // the Robin BC away from the star's/puncture's shared true center at the domain
-  // corner, degrading convergence for no physical reason (confirmed empirically: the
-  // near-vacuum puncture smoke test needed more V-cycle iterations without this fix).
+  ApplyReflectingBoundaryCorrection(r_com_mass_);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ApplyReflectingBoundaryCorrection(Real center[3])
+//! \brief shared override for any mass/momentum-like centroid reduction (Sec 3.10
+//! items 1-2/Sec 5 Phase A items 8a-8b), factored out of ComputeMassCentroid()'s
+//! original inline logic -- identical correction applies to ComputeVectorCentroidX()/
+//! ComputeVectorCentroidBeta() too, since all three integrate over the same (possibly
+//! octant-symmetric) stored domain. A reflecting mesh boundary means the true
+//! (unreflected) matter distribution is symmetric about that face's own coordinate --
+//! the true centroid component along that axis is exactly the reflecting plane's
+//! location, not whatever the raw reduction gives (which only ever sees the stored
+//! octant/quadrant of a symmetric star, and is spuriously off-center as a result).
+//! Every existing CFC test uses reflecting BCs this way (octant-symmetric TOV stars);
+//! without this correction, enabling recentering on one of those fixtures would
+//! spuriously shift the BC away from the star's/puncture's shared true center at the
+//! domain corner, degrading convergence for no physical reason (confirmed
+//! empirically: the near-vacuum puncture smoke test needed more V-cycle iterations
+//! without this fix).
+
+void CFC::ApplyReflectingBoundaryCorrection(Real center[3]) {
   auto &mesh_bcs = pmy_pack->pmesh->mesh_bcs;
   auto &msize = pmy_pack->pmesh->mesh_size;
   if (mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::reflect) {
-    r_com_mass_[0] = msize.x1min;
+    center[0] = msize.x1min;
   } else if (mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::reflect) {
-    r_com_mass_[0] = msize.x1max;
+    center[0] = msize.x1max;
   }
   if (mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::reflect) {
-    r_com_mass_[1] = msize.x2min;
+    center[1] = msize.x2min;
   } else if (mesh_bcs[BoundaryFace::outer_x2] == BoundaryFlag::reflect) {
-    r_com_mass_[1] = msize.x2max;
+    center[1] = msize.x2max;
   }
   if (mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::reflect) {
-    r_com_mass_[2] = msize.x3min;
+    center[2] = msize.x3min;
   } else if (mesh_bcs[BoundaryFace::outer_x3] == BoundaryFlag::reflect) {
-    r_com_mass_[2] = msize.x3max;
+    center[2] = msize.x3max;
   }
-  return;
 }
 
 void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source) {
@@ -1527,8 +1719,14 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 }
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
+  // AssembleVectorSource(true) fills r_com_beta_ internally (right after
+  // BuildShiftSource() completes, Sec 3.10 item 2/Sec 5 Phase A item 8b) -- by the
+  // time it returns, r_com_beta_ is ready for SetMultipoleOrigin() below.
   AssembleVectorSource(/*for_shift=*/true);
 
+  if (puncture_enabled_) {
+    pmgd_pietabeta->SetMultipoleOrigin(r_com_beta_[0], r_com_beta_[1], r_com_beta_[2]);
+  }
   pmgd_pietabeta->LoadPoissonSource(u_p_src);
   pmgd_pietabeta->Solve(pdriver, stage);
   pmgd_pietabeta->RetrieveSolution(u_p_beta);
@@ -1536,7 +1734,7 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
 }
 
 void CFC::ReconstructShift() {
-  cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3);
+  cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3, r_com_beta_);
   return;
 }
 

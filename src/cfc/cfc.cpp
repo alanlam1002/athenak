@@ -291,6 +291,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // non-TDE run is a bit-for-bit no-op.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  r_com_mass_[0] = r_com_mass_[1] = r_com_mass_[2] = 0.0;
   Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_alpha0_psi0, nmb, 1, ncells3, ncells2, ncells1);
   Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
@@ -1272,6 +1273,100 @@ void CFC::ComputeADual() {
   return;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeMassCentroid()
+//! \brief mass-weighted centroid of pmhd->u0(IDN) (Sec 3.10 item 1), for the mg_robin
+//! outer BC's recentering (Sec 5 Phase A item 8a). Mirrors MultigridDriver::
+//! CalculateCenterOfMass()'s reduction shape (per-MeshBlock partial sums -> host mirror
+//! -> MPI_Allreduce), but reads u0(IDN) directly rather than src_ -- psi/alpha_psi's
+//! matter lives in coeff_ (Finding B), so their src_ is always zero and
+//! CalculateCenterOfMass() would divide by zero if reused as-is here. u0(IDN) is
+//! already the fully densitized conserved rest-mass density (sqrt(g)*rho*W) -- no
+//! extra sqrt(g)/psi^6 factor is applied, which would double-count it.
+
+void CFC::ComputeMassCentroid() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &cons = pmy_pack->pmhd->u0;
+
+  DvceArray2D<Real> partial("cfc_com_partial", nmb, 4);
+  par_for("cfc_mass_centroid", DevExeSpace(), 0, nmb-1,
+  KOKKOS_LAMBDA(const int m) {
+    Real dx1 = (size.d_view(m).x1max - size.d_view(m).x1min) / static_cast<Real>(indcs.nx1);
+    Real dx2 = (size.d_view(m).x2max - size.d_view(m).x2min) / static_cast<Real>(indcs.nx2);
+    Real dx3 = (size.d_view(m).x3max - size.d_view(m).x3min) / static_cast<Real>(indcs.nx3);
+    Real vol = dx1*dx2*dx3;
+    Real m0 = 0.0, m1 = 0.0, m2 = 0.0, m3 = 0.0;
+    for (int k = ks; k <= ke; ++k) {
+      Real z = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      for (int j = js; j <= je; ++j) {
+        Real y = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+        for (int i = is; i <= ie; ++i) {
+          Real x = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          Real s = cons(m,IDN,k,j,i)*vol;
+          m0 += s;
+          m1 += s*x;
+          m2 += s*y;
+          m3 += s*z;
+        }
+      }
+    }
+    partial(m,0) = m0;
+    partial(m,1) = m1;
+    partial(m,2) = m2;
+    partial(m,3) = m3;
+  });
+
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  Real totals[4] = {};
+  for (int m = 0; m < nmb; ++m) {
+    for (int c = 0; c < 4; ++c) {
+      totals[c] += partial_h(m,c);
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, totals, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  Real im = 1.0/(totals[0] + 1.0e-30);
+  r_com_mass_[0] = im*totals[1];
+  r_com_mass_[1] = im*totals[2];
+  r_com_mass_[2] = im*totals[3];
+
+  // A reflecting mesh boundary means the true (unreflected) matter distribution is
+  // symmetric about that face's own coordinate -- the true centroid component along
+  // that axis is exactly the reflecting plane's location, not whatever the
+  // reduction above gives (which only ever sees the stored octant/quadrant of a
+  // symmetric star, and is spuriously off-center as a result). Every existing CFC
+  // test uses reflecting BCs this way (octant-symmetric TOV stars); without this
+  // correction, enabling recentering on one of those fixtures would spuriously shift
+  // the Robin BC away from the star's/puncture's shared true center at the domain
+  // corner, degrading convergence for no physical reason (confirmed empirically: the
+  // near-vacuum puncture smoke test needed more V-cycle iterations without this fix).
+  auto &mesh_bcs = pmy_pack->pmesh->mesh_bcs;
+  auto &msize = pmy_pack->pmesh->mesh_size;
+  if (mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::reflect) {
+    r_com_mass_[0] = msize.x1min;
+  } else if (mesh_bcs[BoundaryFace::outer_x1] == BoundaryFlag::reflect) {
+    r_com_mass_[0] = msize.x1max;
+  }
+  if (mesh_bcs[BoundaryFace::inner_x2] == BoundaryFlag::reflect) {
+    r_com_mass_[1] = msize.x2min;
+  } else if (mesh_bcs[BoundaryFace::outer_x2] == BoundaryFlag::reflect) {
+    r_com_mass_[1] = msize.x2max;
+  }
+  if (mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::reflect) {
+    r_com_mass_[2] = msize.x3min;
+  } else if (mesh_bcs[BoundaryFace::outer_x3] == BoundaryFlag::reflect) {
+    r_com_mass_[2] = msize.x3max;
+  }
+  return;
+}
+
 void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
 
@@ -1297,6 +1392,10 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   pmgd_psi->LoadMatterSource(use_psi5_source ? u_raw : u_tilde, indcs.ng);
   pmgd_psi->LoadNonlinearCoefficient(a_sq, a0_sq, indcs.ng);
   pmgd_psi->LoadPunctureCoefficients(u_psi0, a0_sq, indcs.ng);
+  if (puncture_enabled_) {
+    ComputeMassCentroid();
+    pmgd_psi->SetRobinCenter(r_com_mass_[0], r_com_mass_[1], r_com_mass_[2]);
+  }
   pmgd_psi->Solve(pdriver, stage);
   pmgd_psi->RetrieveSolution(delta_psi);
 
@@ -1416,6 +1515,12 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 
   pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, u_psi0, a_sq, a0_sq,
                                        u_alpha0_psi0, indcs.ng);
+  if (puncture_enabled_) {
+    // Reuses this stage's r_com_mass_ (set by SolveConformalFactor(), which always
+    // runs first -- u0 is unchanged in between, see ComputeMassCentroid()'s own doc
+    // comment) -- no need to recompute.
+    pmgd_alpha->SetRobinCenter(r_com_mass_[0], r_com_mass_[1], r_com_mass_[2]);
+  }
   pmgd_alpha->Solve(pdriver, stage);
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
   return;

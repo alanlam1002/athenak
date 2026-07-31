@@ -1,0 +1,147 @@
+# Athena++ (Kokkos version) input file: off-center TOV star stability test for the
+# CFC BH-puncture extension's Robin BC recentering (CFC_PUNCTURE_TDE_PLAN.md Sec 3.10
+# item 1, Sec 5 Phase A item 8a). The BH puncture is always fixed at the coordinate
+# origin x=0; this places a static, non-rotating, unmagnetized TOV star at
+# star_center_x1=60 (~5x the star's own isotropic radius R_iso~11.82 for this EOS,
+# see below), using the new <problem> star_center_x1/2/3 offset parameter added to
+# dyngr_tov.cpp for this test.
+#
+# Why a static TOV star isolates stage 8a specifically: S_i=0 identically for a
+# static, unmagnetized perfect fluid, so the matter-sourced vector potential X^i (and
+# hence beta^i) solves to exactly zero regardless of any boundary condition -- the
+# still-deferred item 8b (X^i/beta^i multipole recentering) is structurally
+# irrelevant here. Only psi/alpha_psi (and their newly-recentered mg_robin BC) are
+# actually exercised by a nonzero matter distribution in this test.
+#
+# EOS parameters (rhoc/kappa/gamma/npoints/dr/isotropic) are copied verbatim from the
+# already-validated cfc_puncture_vacuum_small.athinput -- the only new variable here
+# versus already-proven physics is the star's position, not new EOS territory.
+#
+# Domain: full (non-symmetric) domain, diode on all 6 faces -- required since an
+# off-center star breaks the reflection symmetry the existing octant-symmetric
+# puncture fixtures rely on (mirrors cfc_bu8_stability.athinput's own precedent for a
+# domain without octant symmetry). 5x2x2=20 MeshBlocks of 16^3 at dx=1.6 (matches
+# cfc_puncture_vacuum.athinput's resolution): x1 in [-25.6,102.4] (BH at x=0 sits one
+# MeshBlock in from the low edge; star's surface at ~71.8 leaves ~19 cells of buffer
+# before the high edge), x2,x3 in [-25.6,25.6] (comfortable buffer past the stellar
+# radius in both transverse directions). No AMR -- deliberately avoids conflating
+# this test with the separately-documented CFC+AMR interaction fragility
+# (DEVELOPMENT.md item 3b); AMR is out of scope for both this test and stage 8a.
+#
+# <coord> excise=false, matching every existing puncture_enabled=true fixture --
+# deliberately NOT enabling excision_scheme=lapse (Phase B item 9, still
+# unimplemented in any fixture) in this same test, to avoid conflating two
+# independent, separately-unvalidated features. The 5xR_iso separation means no real
+# stellar matter should ever approach x=0 where alpha->0.
+#
+# tlim=100: a first attempt, a few dynamical times for the star at modest cost;
+# extend if stable and cheap. mg_threshold/mg_poisson_threshold/mg_npresmooth/
+# mg_npostsmooth mirror cfc_bu8_stability.athinput's own genuine-dynamical-run
+# settings (not the init_iter_max=2/nlim=0 smoke-test overrides used for the
+# single-cycle puncture fixtures so far).
+
+<comment>
+problem  = Off-center TOV star stability test for CFC BH-puncture Robin BC recentering (Sec 5 Phase A item 8a)
+
+<job>
+basename = cfc_puncture_offcenter_tov
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 80       # 5 MeshBlocks in x1-direction (root level), dx=1.6
+x1min  = -25.6    # minimum x1 -- BH puncture at x=0 sits one MeshBlock in from here
+x1max  = 102.4    # maximum x1 -- star surface (~71.8) has ~19 cells of buffer before here
+ix1_bc = diode    # inner boundary -- NOT reflect (star is off-center, no mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 32       # 2 MeshBlocks in x2-direction (root level), dx=1.6
+x2min  = -25.6    # minimum x2
+x2max  = 25.6     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 32       # 2 MeshBlocks in x3-direction (root level), dx=1.6
+x3min  = -25.6    # minimum x3
+x3max  = 25.6     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 100        # first attempt -- a few dynamical times for the star
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method (matches cfc_puncture_vacuum*)
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-10    # floor on density rho (matches cfc_puncture_vacuum*)
+tfloor      = 1.0e-8
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10  # matches cfc_bu8_stability's genuine-dynamical-run setting
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH, fixed at the coordinate origin x=0
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 1.28e-4   # matches cfc_puncture_vacuum_small.athinput -- gives
+                         # isotropic radius R_iso~11.82 for this kappa/gamma
+kappa       = 100.0     # P = kappa*rho^gamma
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 1e-2      # radial step for TOV calculation
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0    # ~5x R_iso -- the star's actual center, away from the BH
+star_center_x2 = 0.0     # puncture (always fixed at x=0)
+star_center_x3 = 0.0
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- inspect psi/alpha near the puncture and star
+variable    = adm
+dcycle      = 25
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- inspect density near the star for stability
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x3    = 0.0
+id = prim_xy

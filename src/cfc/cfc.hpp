@@ -99,6 +99,16 @@ class CFC {
   bool puncture_enabled_;
   Real puncture_mass_;
 
+  // Mass-weighted centroid of pmy_pack->pmhd->u0(IDN), recomputed every
+  // SolveConformalFactor() call and reused by SolveLapse() the same stage (Sec 3.10
+  // item 1/Sec 5 Phase A item 8a) -- psi and alpha*psi share this one centroid since
+  // both have the same mass-like leading source. Feeds MultigridDriver::
+  // SetRobinCenter() so the mg_robin outer BC falls off around the matter, not the
+  // fixed coordinate origin the BH puncture sits at. Zero (its constructor default)
+  // whenever puncture_enabled_ is false -- ComputeMassCentroid()/SetRobinCenter() are
+  // simply never called then, a bit-for-bit no-op.
+  Real r_com_mass_[3];
+
   // Store psi-1 / alpha*psi-1, not the physical field -- this is exactly what the
   // multigrid solve iterates on internally, and avoids losing precision far from
   // the star where the physical value is ~1+tiny. Consumers add 1.0 back at the
@@ -330,6 +340,15 @@ class CFC {
   // source (eq. 72, from pmhd->u0) or beta^i's (eq. 75, from alpha/psi/Adual^ij/
   // S-tilde_i).
   void AssembleVectorSource(bool for_shift);
+
+  // Fills r_com_mass_ from a mass-weighted reduction over pmhd->u0(IDN) (Sec 3.10
+  // item 1) -- mirrors MultigridDriver::CalculateCenterOfMass()'s reduction shape,
+  // but reads u0 directly instead of src_ (psi/alpha_psi's matter lives in coeff_,
+  // Finding B, so their src_ is always zero -- CalculateCenterOfMass() would divide
+  // by zero if reused as-is). Called from SolveConformalFactor() only; SolveLapse()
+  // reuses that same call's result (u0 is unchanged in between -- RescaleMatterSources
+  // only rewrites s_tilde_).
+  void ComputeMassCentroid();
 
   // Steps 1-6 of the per-stage/per-Picard-iteration solve pipeline; see the
   // like-named TaskStatus wrapper functions in cfc.cpp for the full per-step

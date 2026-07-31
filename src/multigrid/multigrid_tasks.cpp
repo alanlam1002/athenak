@@ -171,6 +171,7 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
   int nx2 = pmg->indcs_.nx2 >> shift;
   int nx3 = pmg->indcs_.nx3 >> shift;
   Real rorder = static_cast<Real>(robin_order_);
+  Real rcx = robin_center_[0], rcy = robin_center_[1], rcz = robin_center_[2];
 
   Kokkos::parallel_for("MGPhysicalBoundary",
     Kokkos::RangePolicy<DevExeSpace>(0, nmb),
@@ -203,15 +204,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3_l = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real xv_a = mb_size.d_view(m).x1min + 0.5*dx1;
+            Real xv_a = mb_size.d_view(m).x1min + 0.5*dx1 - rcx;
             for (int k = ngh; k < ngh + ncells; ++k) {
-              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l;
+              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l - rcz;
               for (int j = ngh; j < ngh + ncells; ++j) {
-                Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l;
+                Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l - rcy;
                 Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
                 Real u_a = u(m, v, k, j, ngh);
                 for (int n = 0; n < ngh; ++n) {
-                  Real xv_g = mb_size.d_view(m).x1min - (0.5+n)*dx1;
+                  Real xv_g = mb_size.d_view(m).x1min - (0.5+n)*dx1 - rcx;
                   Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
                   u(m,v,k,j,ngh-1-n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -253,15 +254,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3_l = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real xv_a = mb_size.d_view(m).x1max - 0.5*dx1;
+            Real xv_a = mb_size.d_view(m).x1max - 0.5*dx1 - rcx;
             for (int k = ngh; k < ngh + ncells; ++k) {
-              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l;
+              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l - rcz;
               for (int j = ngh; j < ngh + ncells; ++j) {
-                Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l;
+                Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l - rcy;
                 Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
                 Real u_a = u(m, v, k, j, ngh+ncells-1);
                 for (int n = 0; n < ngh; ++n) {
-                  Real xv_g = mb_size.d_view(m).x1max + (0.5+n)*dx1;
+                  Real xv_g = mb_size.d_view(m).x1max + (0.5+n)*dx1 - rcx;
                   Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
                   u(m,v,k,j,ngh+ncells+n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -304,15 +305,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3_l = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real yv_a = mb_size.d_view(m).x2min + 0.5*dx2;
+            Real yv_a = mb_size.d_view(m).x2min + 0.5*dx2 - rcy;
             for (int k = ngh; k < ngh + ncells; ++k) {
-              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l;
+              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l - rcz;
               for (int i = ngh; i < ngh + ncells; ++i) {
-                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l;
+                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
                 Real u_a = u(m, v, k, ngh, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real yv_g = mb_size.d_view(m).x2min - (0.5+n)*dx2;
+                  Real yv_g = mb_size.d_view(m).x2min - (0.5+n)*dx2 - rcy;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
                   u(m,v,k,ngh-1-n,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -354,15 +355,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3_l = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real yv_a = mb_size.d_view(m).x2max - 0.5*dx2;
+            Real yv_a = mb_size.d_view(m).x2max - 0.5*dx2 - rcy;
             for (int k = ngh; k < ngh + ncells; ++k) {
-              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l;
+              Real zv = mb_size.d_view(m).x3min + (k-ngh+0.5)*dx3_l - rcz;
               for (int i = ngh; i < ngh + ncells; ++i) {
-                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l;
+                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
                 Real u_a = u(m, v, k, ngh+ncells-1, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real yv_g = mb_size.d_view(m).x2max + (0.5+n)*dx2;
+                  Real yv_g = mb_size.d_view(m).x2max + (0.5+n)*dx2 - rcy;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
                   u(m,v,k,ngh+ncells+n,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -405,15 +406,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3 = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real zv_a = mb_size.d_view(m).x3min + 0.5*dx3;
+            Real zv_a = mb_size.d_view(m).x3min + 0.5*dx3 - rcz;
             for (int j = ngh; j < ngh + ncells; ++j) {
-              Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l;
+              Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l - rcy;
               for (int i = ngh; i < ngh + ncells; ++i) {
-                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l;
+                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
                 Real u_a = u(m, v, ngh, j, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real zv_g = mb_size.d_view(m).x3min - (0.5+n)*dx3;
+                  Real zv_g = mb_size.d_view(m).x3min - (0.5+n)*dx3 - rcz;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
                   u(m,v,ngh-1-n,j,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -455,15 +456,15 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                        / static_cast<Real>(nx2);
             Real dx3 = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                        / static_cast<Real>(nx3);
-            Real zv_a = mb_size.d_view(m).x3max - 0.5*dx3;
+            Real zv_a = mb_size.d_view(m).x3max - 0.5*dx3 - rcz;
             for (int j = ngh; j < ngh + ncells; ++j) {
-              Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l;
+              Real yv = mb_size.d_view(m).x2min + (j-ngh+0.5)*dx2_l - rcy;
               for (int i = ngh; i < ngh + ncells; ++i) {
-                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l;
+                Real xv = mb_size.d_view(m).x1min + (i-ngh+0.5)*dx1_l - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
                 Real u_a = u(m, v, ngh+ncells-1, j, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real zv_g = mb_size.d_view(m).x3max + (0.5+n)*dx3;
+                  Real zv_g = mb_size.d_view(m).x3max + (0.5+n)*dx3 - rcz;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
                   u(m,v,ngh+ncells+n,j,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }

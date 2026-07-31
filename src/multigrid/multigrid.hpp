@@ -479,6 +479,14 @@ class MultigridDriver {
   void ScaleMultipoleCoefficients();
   void CalculateCenterOfMass();
 
+  // Settable center for the mg_robin BC (default (0,0,0), matching every existing
+  // caller's assumption that the source sits at the coordinate origin -- see
+  // robin_center_'s own doc comment below). Needed because a composing (not
+  // inheriting) owner like cfc::CFC cannot write the protected robin_center_
+  // directly; unlike mpo_ (written straight from within a MultigridDriver
+  // subclass's own constructor), this is a genuine cross-class setter.
+  void SetRobinCenter(Real x, Real y, Real z);
+
   friend class Multigrid;
 
  protected:
@@ -593,6 +601,13 @@ class MultigridDriver {
   // moment integral (and hence no dependence on src_/coeff_ or MPI reductions).
   // Only active on faces a subclass sets to BoundaryFlag::mg_robin.
   int robin_order_;
+
+  // Center subtracted from r_anchor/r_ghost before the Robin falloff is evaluated
+  // (CFC_PUNCTURE_TDE_PLAN.md Sec 3.10/Sec 5 Phase A item 8) -- default (0,0,0), the
+  // exact behavior every caller had before this existed (a bit-for-bit no-op unless
+  // SetRobinCenter() is called). Same shape as mask_origin_ above, a cleaner template
+  // here than mpo_ since it carries no multipole-expansion baggage.
+  Real robin_center_[3];
 
   // per-cell octets (Athena++ style)
   std::vector<MGOctet> *octets_;

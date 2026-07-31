@@ -57,6 +57,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     mporder_(-1), nmpcoeff_(0), robin_order_(1) {
   mask_origin_[0] = mask_origin_[1] = mask_origin_[2] = 0.0;
   mpo_[0] = mpo_[1] = mpo_[2] = 0.0;
+  robin_center_[0] = robin_center_[1] = robin_center_[2] = 0.0;
   std::memset(mpcoeff_, 0, sizeof(mpcoeff_));
   if (pmy_mesh_->mb_indcs.nx2==1 || pmy_mesh_->mb_indcs.nx3==1) {
     std::cout << "### FATAL ERROR in MultigridDriver::MultigridDriver" << std::endl
@@ -1808,6 +1809,15 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
   // exactly the same way the outer-face checks below already derive
   // `maxlx1/2/3` (nrbx*_ << lev), just carried one step further into an actual
   // coordinate. See DEVELOPMENT.md's Robin BC entry for the full derivation.
+  // Recentered by robin_center_ (CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase A item 8a),
+  // same as the root-grid (MGRootBoundary) and per-MeshBlock (PhysicalBoundary)
+  // Robin sites -- CFC's psi/alpha solvers do support AMR (DEVELOPMENT.md items 12,
+  // 25, 33), and mg_robin is already implemented here (item 25), so leaving this one
+  // site un-recentered while fixing the other two would be an inconsistency, not a
+  // deliberate scope cut. In practice this path stays inert for every current CFC
+  // test regardless (item 16's own observation still holds: refined regions never
+  // reach the domain's outer physical boundary), but there is no reason to leave it
+  // wrong for whenever one does.
   Real nmax1 = static_cast<Real>(nrbx1_ << lev);
   Real nmax2 = static_cast<Real>(nrbx2_ << lev);
   Real nmax3 = static_cast<Real>(nrbx3_ << lev);
@@ -1824,6 +1834,7 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
   Real dx2_eff = fcbuf ? ow2 : 0.5*ow2;
   Real dx3_eff = fcbuf ? ow3 : 0.5*ow3;
   Real rorder = static_cast<Real>(robin_order_);
+  Real rcx = robin_center_[0], rcy = robin_center_[1], rcz = robin_center_[2];
   auto pos1 = [&](int i) { return ox1min + (static_cast<Real>(i-ngh)+0.5)*dx1_eff; };
   auto pos2 = [&](int j) { return ox2min + (static_cast<Real>(j-ngh)+0.5)*dx2_eff; };
   auto pos3 = [&](int k) { return ox3min + (static_cast<Real>(k-ngh)+0.5)*dx3_eff; };
@@ -1838,13 +1849,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::inner_x1] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int k = 0; k < nc; ++k) {
-            Real zv = pos3(k);
+            Real zv = pos3(k) - rcz;
             for (int j = 0; j < nc; ++j) {
-              Real yv = pos2(j);
-              Real r_a = Kokkos::sqrt(SQR(pos1(ngh)) + SQR(yv) + SQR(zv));
+              Real yv = pos2(j) - rcy;
+              Real r_a = Kokkos::sqrt(SQR(pos1(ngh)-rcx) + SQR(yv) + SQR(zv));
               Real u_a = ref(v, k, j, ngh);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(pos1(ngh-1-n)) + SQR(yv) + SQR(zv));
+                Real r_g = Kokkos::sqrt(SQR(pos1(ngh-1-n)-rcx) + SQR(yv) + SQR(zv));
                 ref(v, k, j, ngh-1-n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -1886,13 +1897,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::outer_x1] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int k = 0; k < nc; ++k) {
-            Real zv = pos3(k);
+            Real zv = pos3(k) - rcz;
             for (int j = 0; j < nc; ++j) {
-              Real yv = pos2(j);
-              Real r_a = Kokkos::sqrt(SQR(pos1(ie)) + SQR(yv) + SQR(zv));
+              Real yv = pos2(j) - rcy;
+              Real r_a = Kokkos::sqrt(SQR(pos1(ie)-rcx) + SQR(yv) + SQR(zv));
               Real u_a = ref(v, k, j, ie);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(pos1(ie+n+1)) + SQR(yv) + SQR(zv));
+                Real r_g = Kokkos::sqrt(SQR(pos1(ie+n+1)-rcx) + SQR(yv) + SQR(zv));
                 ref(v, k, j, ie+n+1) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -1927,13 +1938,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::inner_x2] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int k = 0; k < nc; ++k) {
-            Real zv = pos3(k);
+            Real zv = pos3(k) - rcz;
             for (int i = 0; i < nc; ++i) {
-              Real xv = pos1(i);
-              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh)) + SQR(zv));
+              Real xv = pos1(i) - rcx;
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh)-rcy) + SQR(zv));
               Real u_a = ref(v, k, ngh, i);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh-1-n)) + SQR(zv));
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(ngh-1-n)-rcy) + SQR(zv));
                 ref(v, k, ngh-1-n, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -1971,13 +1982,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::outer_x2] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int k = 0; k < nc; ++k) {
-            Real zv = pos3(k);
+            Real zv = pos3(k) - rcz;
             for (int i = 0; i < nc; ++i) {
-              Real xv = pos1(i);
-              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(je)) + SQR(zv));
+              Real xv = pos1(i) - rcx;
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(pos2(je)-rcy) + SQR(zv));
               Real u_a = ref(v, k, je, i);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(je+n+1)) + SQR(zv));
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(pos2(je+n+1)-rcy) + SQR(zv));
                 ref(v, k, je+n+1, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -2012,13 +2023,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::inner_x3] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int j = 0; j < nc; ++j) {
-            Real yv = pos2(j);
+            Real yv = pos2(j) - rcy;
             for (int i = 0; i < nc; ++i) {
-              Real xv = pos1(i);
-              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh)));
+              Real xv = pos1(i) - rcx;
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh)-rcz));
               Real u_a = ref(v, ngh, j, i);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh-1-n)));
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ngh-1-n)-rcz));
                 ref(v, ngh-1-n, j, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -2056,13 +2067,13 @@ void MultigridDriver::ApplyPhysicalBoundariesOctet(MGOctet &oct, bool fcbuf) {
       if (mg_mesh_bcs_[BoundaryFace::outer_x3] == BoundaryFlag::mg_robin) {
         for (int v = 0; v < nvar_; ++v)
           for (int j = 0; j < nc; ++j) {
-            Real yv = pos2(j);
+            Real yv = pos2(j) - rcy;
             for (int i = 0; i < nc; ++i) {
-              Real xv = pos1(i);
-              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke)));
+              Real xv = pos1(i) - rcx;
+              Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke)-rcz));
               Real u_a = ref(v, ke, j, i);
               for (int n = 0; n < ngh; ++n) {
-                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke+n+1)));
+                Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(pos3(ke+n+1)-rcz));
                 ref(v, ke+n+1, j, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
               }
             }
@@ -2334,20 +2345,21 @@ void MultigridDriver::MGRootBoundary() {
       Real dx2 = (x2max_v - x2min_v) / static_cast<Real>(ncy);
       Real dx3 = (x3max_v - x3min_v) / static_cast<Real>(ncz);
       Real rorder = static_cast<Real>(robin_order_);
+      Real rcx = robin_center_[0], rcy = robin_center_[1], rcz = robin_center_[2];
 
       Kokkos::parallel_for("MGRootBnd_robin",
         Kokkos::RangePolicy<DevExeSpace>(0, 1),
         KOKKOS_LAMBDA(const int) {
           if (bc_ix1 == BoundaryFlag::mg_robin) {
-            Real xv_a = x1min_v + 0.5*dx1;
+            Real xv_a = x1min_v + 0.5*dx1 - rcx;
             for (int k = ngh; k < ngh + ncz; ++k) {
-              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
               for (int j = ngh; j < ngh + ncy; ++j) {
-                Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+                Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
                 Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
                 Real u_a = u(0, 0, k, j, ngh);
                 for (int n = 0; n < ngh; ++n) {
-                  Real xv_g = x1min_v - (0.5 + n)*dx1;
+                  Real xv_g = x1min_v - (0.5 + n)*dx1 - rcx;
                   Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
                   u(0, 0, k, j, ngh - 1 - n) =
                       u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
@@ -2356,15 +2368,15 @@ void MultigridDriver::MGRootBoundary() {
             }
           }
           if (bc_ox1 == BoundaryFlag::mg_robin) {
-            Real xv_a = x1max_v - 0.5*dx1;
+            Real xv_a = x1max_v - 0.5*dx1 - rcx;
             for (int k = ngh; k < ngh + ncz; ++k) {
-              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
               for (int j = ngh; j < ngh + ncy; ++j) {
-                Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+                Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
                 Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
                 Real u_a = u(0, 0, k, j, ngh+ncx-1);
                 for (int n = 0; n < ngh; ++n) {
-                  Real xv_g = x1max_v + (0.5 + n)*dx1;
+                  Real xv_g = x1max_v + (0.5 + n)*dx1 - rcx;
                   Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
                   u(0,0,k,j,ngh+ncx+n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -2372,15 +2384,15 @@ void MultigridDriver::MGRootBoundary() {
             }
           }
           if (bc_ix2 == BoundaryFlag::mg_robin) {
-            Real yv_a = x2min_v + 0.5*dx2;
+            Real yv_a = x2min_v + 0.5*dx2 - rcy;
             for (int k = ngh; k < ngh + ncz; ++k) {
-              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
               for (int i = ngh; i < ngh + ncx; ++i) {
-                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
                 Real u_a = u(0, 0, k, ngh, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real yv_g = x2min_v - (0.5 + n)*dx2;
+                  Real yv_g = x2min_v - (0.5 + n)*dx2 - rcy;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
                   u(0, 0, k, ngh - 1 - n, i) =
                       u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
@@ -2389,15 +2401,15 @@ void MultigridDriver::MGRootBoundary() {
             }
           }
           if (bc_ox2 == BoundaryFlag::mg_robin) {
-            Real yv_a = x2max_v - 0.5*dx2;
+            Real yv_a = x2max_v - 0.5*dx2 - rcy;
             for (int k = ngh; k < ngh + ncz; ++k) {
-              Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+              Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
               for (int i = ngh; i < ngh + ncx; ++i) {
-                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
                 Real u_a = u(0, 0, k, ngh+ncy-1, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real yv_g = x2max_v + (0.5 + n)*dx2;
+                  Real yv_g = x2max_v + (0.5 + n)*dx2 - rcy;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
                   u(0,0,k,ngh+ncy+n,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -2405,15 +2417,15 @@ void MultigridDriver::MGRootBoundary() {
             }
           }
           if (bc_ix3 == BoundaryFlag::mg_robin) {
-            Real zv_a = x3min_v + 0.5*dx3;
+            Real zv_a = x3min_v + 0.5*dx3 - rcz;
             for (int j = ngh; j < ngh + ncy; ++j) {
-              Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+              Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
               for (int i = ngh; i < ngh + ncx; ++i) {
-                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
                 Real u_a = u(0, 0, ngh, j, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real zv_g = x3min_v - (0.5 + n)*dx3;
+                  Real zv_g = x3min_v - (0.5 + n)*dx3 - rcz;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
                   u(0, 0, ngh - 1 - n, j, i) =
                       u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
@@ -2422,15 +2434,15 @@ void MultigridDriver::MGRootBoundary() {
             }
           }
           if (bc_ox3 == BoundaryFlag::mg_robin) {
-            Real zv_a = x3max_v - 0.5*dx3;
+            Real zv_a = x3max_v - 0.5*dx3 - rcz;
             for (int j = ngh; j < ngh + ncy; ++j) {
-              Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+              Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
               for (int i = ngh; i < ngh + ncx; ++i) {
-                Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+                Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
                 Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
                 Real u_a = u(0, 0, ngh+ncz-1, j, i);
                 for (int n = 0; n < ngh; ++n) {
-                  Real zv_g = x3max_v + (0.5 + n)*dx3;
+                  Real zv_g = x3max_v + (0.5 + n)*dx3 - rcz;
                   Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
                   u(0,0,ngh+ncz+n,j,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
                 }
@@ -2623,17 +2635,18 @@ void MultigridDriver::MGRootBoundary() {
       Real dx2 = (x2max_v - x2min_v) / static_cast<Real>(ncy);
       Real dx3 = (x3max_v - x3min_v) / static_cast<Real>(ncz);
       Real rorder = static_cast<Real>(robin_order_);
+      Real rcx = robin_center_[0], rcy = robin_center_[1], rcz = robin_center_[2];
 
       if (bc_ix1 == BoundaryFlag::mg_robin) {
-        Real xv_a = x1min_v + 0.5*dx1;
+        Real xv_a = x1min_v + 0.5*dx1 - rcx;
         for (int k = ngh; k < ngh + ncz; ++k) {
-          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
           for (int j = ngh; j < ngh + ncy; ++j) {
-            Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+            Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
             Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
             Real u_a = u(0, 0, k, j, ngh);
             for (int n = 0; n < ngh; ++n) {
-              Real xv_g = x1min_v - (0.5 + n)*dx1;
+              Real xv_g = x1min_v - (0.5 + n)*dx1 - rcx;
               Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
               u(0, 0, k, j, ngh - 1 - n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2641,15 +2654,15 @@ void MultigridDriver::MGRootBoundary() {
         }
       }
       if (bc_ox1 == BoundaryFlag::mg_robin) {
-        Real xv_a = x1max_v - 0.5*dx1;
+        Real xv_a = x1max_v - 0.5*dx1 - rcx;
         for (int k = ngh; k < ngh + ncz; ++k) {
-          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
           for (int j = ngh; j < ngh + ncy; ++j) {
-            Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+            Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
             Real r_a = Kokkos::sqrt(SQR(xv_a) + SQR(yv) + SQR(zv));
             Real u_a = u(0, 0, k, j, ngh+ncx-1);
             for (int n = 0; n < ngh; ++n) {
-              Real xv_g = x1max_v + (0.5 + n)*dx1;
+              Real xv_g = x1max_v + (0.5 + n)*dx1 - rcx;
               Real r_g = Kokkos::sqrt(SQR(xv_g) + SQR(yv) + SQR(zv));
               u(0,0,k,j,ngh+ncx+n) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2657,15 +2670,15 @@ void MultigridDriver::MGRootBoundary() {
         }
       }
       if (bc_ix2 == BoundaryFlag::mg_robin) {
-        Real yv_a = x2min_v + 0.5*dx2;
+        Real yv_a = x2min_v + 0.5*dx2 - rcy;
         for (int k = ngh; k < ngh + ncz; ++k) {
-          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
           for (int i = ngh; i < ngh + ncx; ++i) {
-            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
             Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
             Real u_a = u(0, 0, k, ngh, i);
             for (int n = 0; n < ngh; ++n) {
-              Real yv_g = x2min_v - (0.5 + n)*dx2;
+              Real yv_g = x2min_v - (0.5 + n)*dx2 - rcy;
               Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
               u(0, 0, k, ngh - 1 - n, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2673,15 +2686,15 @@ void MultigridDriver::MGRootBoundary() {
         }
       }
       if (bc_ox2 == BoundaryFlag::mg_robin) {
-        Real yv_a = x2max_v - 0.5*dx2;
+        Real yv_a = x2max_v - 0.5*dx2 - rcy;
         for (int k = ngh; k < ngh + ncz; ++k) {
-          Real zv = x3min_v + (k - ngh + 0.5)*dx3;
+          Real zv = x3min_v + (k - ngh + 0.5)*dx3 - rcz;
           for (int i = ngh; i < ngh + ncx; ++i) {
-            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
             Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv_a) + SQR(zv));
             Real u_a = u(0, 0, k, ngh+ncy-1, i);
             for (int n = 0; n < ngh; ++n) {
-              Real yv_g = x2max_v + (0.5 + n)*dx2;
+              Real yv_g = x2max_v + (0.5 + n)*dx2 - rcy;
               Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv_g) + SQR(zv));
               u(0,0,k,ngh+ncy+n,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2689,15 +2702,15 @@ void MultigridDriver::MGRootBoundary() {
         }
       }
       if (bc_ix3 == BoundaryFlag::mg_robin) {
-        Real zv_a = x3min_v + 0.5*dx3;
+        Real zv_a = x3min_v + 0.5*dx3 - rcz;
         for (int j = ngh; j < ngh + ncy; ++j) {
-          Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+          Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
           for (int i = ngh; i < ngh + ncx; ++i) {
-            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
             Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
             Real u_a = u(0, 0, ngh, j, i);
             for (int n = 0; n < ngh; ++n) {
-              Real zv_g = x3min_v - (0.5 + n)*dx3;
+              Real zv_g = x3min_v - (0.5 + n)*dx3 - rcz;
               Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
               u(0, 0, ngh - 1 - n, j, i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2705,15 +2718,15 @@ void MultigridDriver::MGRootBoundary() {
         }
       }
       if (bc_ox3 == BoundaryFlag::mg_robin) {
-        Real zv_a = x3max_v - 0.5*dx3;
+        Real zv_a = x3max_v - 0.5*dx3 - rcz;
         for (int j = ngh; j < ngh + ncy; ++j) {
-          Real yv = x2min_v + (j - ngh + 0.5)*dx2;
+          Real yv = x2min_v + (j - ngh + 0.5)*dx2 - rcy;
           for (int i = ngh; i < ngh + ncx; ++i) {
-            Real xv = x1min_v + (i - ngh + 0.5)*dx1;
+            Real xv = x1min_v + (i - ngh + 0.5)*dx1 - rcx;
             Real r_a = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_a));
             Real u_a = u(0, 0, ngh+ncz-1, j, i);
             for (int n = 0; n < ngh; ++n) {
-              Real zv_g = x3max_v + (0.5 + n)*dx3;
+              Real zv_g = x3max_v + (0.5 + n)*dx3 - rcz;
               Real r_g = Kokkos::sqrt(SQR(xv) + SQR(yv) + SQR(zv_g));
               u(0,0,ngh+ncz+n,j,i) = u_a * Kokkos::pow(r_a/(r_g+1.0e-30), rorder);
             }
@@ -2984,4 +2997,17 @@ void MultigridDriver::CalculateCenterOfMass() {
   mpo_[0] = im * totals[3];  // x
   mpo_[1] = im * totals[1];  // y
   mpo_[2] = im * totals[2];  // z
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::SetRobinCenter(Real x, Real y, Real z)
+//! \brief see robin_center_'s own doc comment (multigrid.hpp) -- a genuine setter is
+//! needed here (unlike mpo_'s direct-write-from-a-subclass-constructor pattern) since a
+//! composing (not inheriting) owner like cfc::CFC cannot write the protected
+//! robin_center_ directly.
+
+void MultigridDriver::SetRobinCenter(Real x, Real y, Real z) {
+  robin_center_[0] = x;
+  robin_center_[1] = y;
+  robin_center_[2] = z;
 }

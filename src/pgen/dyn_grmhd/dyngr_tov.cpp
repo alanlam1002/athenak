@@ -50,11 +50,17 @@ struct TOVParams {
   tov::TOVStar my_tov;
   bool isotropic;
   bool minkowski;
+  // Star-center offset (<problem> star_center_x1/2/3, default 0.0 -- every existing
+  // fixture is unaffected). Lets the star sit away from the coordinate origin, which
+  // the (separate, always-at-x=0) CFC BH puncture background does not move with.
+  Real x0, y0, z0;
 
-  TOVParams(tov::TOVStar& tov_star, bool isotropic_, bool minkowski_) :
+  TOVParams(tov::TOVStar& tov_star, bool isotropic_, bool minkowski_,
+            Real x0_, Real y0_, Real z0_) :
       my_tov(std::move(tov_star)) {
     isotropic = isotropic_;
     minkowski = minkowski_;
+    x0 = x0_; y0 = y0_; z0 = z0_;
   }
 };
 
@@ -68,6 +74,9 @@ template<class TOVEOS>
 void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   bool isotropic = pin->GetOrAddBoolean("problem", "isotropic", false);
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
+  Real x0 = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+  Real y0 = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
+  Real z0 = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
@@ -76,7 +85,7 @@ void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   if (pmbp->padm->is_dynamic || pmy_mesh_->adaptive) {
     TOVEOS eos{pin};
     auto my_tov = tov::TOVStar::ConstructTOV(pin, eos, false);
-    ptov_params = new TOVParams(my_tov, isotropic, minkowski);
+    ptov_params = new TOVParams(my_tov, isotropic, minkowski, x0, y0, z0);
   }
 }
 
@@ -85,6 +94,9 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   Real v_pert = pin->GetOrAddReal("problem", "v_pert", 0.0);
   Real p_pert = pin->GetOrAddReal("problem", "p_pert", 0.0);
   bool isotropic = pin->GetOrAddBoolean("problem", "isotropic", false);
+  Real x0 = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+  Real y0 = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
+  Real z0 = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
 
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
 
@@ -137,9 +149,14 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     // Calculate the rest-mass density, pressure, and mass for a specific isotropic
-    // radial coordinate.
-    Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-    Real s = sqrt(SQR(x1v) + SQR(x2v));
+    // radial coordinate, relative to the star's own center (x0,y0,z0) -- 0 by default,
+    // so this is a no-op for every existing fixture. Only the isotropic branch below
+    // (mandatory for CFC) also shifts the metric assembly to match; the non-isotropic
+    // (Schwarzschild-gauge) branch's own x1v*x1v-type metric terms are NOT shifted,
+    // since CFC never uses that branch and star_center is only meant to be combined
+    // with isotropic=true.
+    Real r = sqrt(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0));
+    Real s = sqrt(SQR(x1v-x0) + SQR(x2v-y0));
     Real rho, p, mass, alp, r_schw;
     Real vr = 0.;
     Real p_pert = 0.;
@@ -177,9 +194,9 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     //w0_(m,IPR,k,j,i) = fmax(p*(1. + p_pert), tov_.pfloor);
     w0_(m,IDN,k,j,i) = rho;
     w0_(m,IPR,k,j,i) = p*(1. + p_pert);
-    w0_(m,IVX,k,j,i) = vr*x1v/r;
-    w0_(m,IVY,k,j,i) = vr*x2v/r;
-    w0_(m,IVZ,k,j,i) = vr*x3v/r;
+    w0_(m,IVX,k,j,i) = vr*(x1v-x0)/r;
+    w0_(m,IVY,k,j,i) = vr*(x2v-y0)/r;
+    w0_(m,IVZ,k,j,i) = vr*(x3v-z0)/r;
     auto &nvars = nvars_;
     auto &nscal = nscal_;
     if (use_ye && nscal >= 1) {
@@ -394,7 +411,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 
   // Copy the TOV to another object for storage if needed.
   if (pmbp->padm->is_dynamic || pmy_mesh_->adaptive == true) {
-    ptov_params = new TOVParams(my_tov, isotropic, minkowski);
+    ptov_params = new TOVParams(my_tov, isotropic, minkowski, x0, y0, z0);
   }
 }
 
@@ -473,6 +490,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   return;
 }
 
+// NOT shifted by star_center_x1/2/3: B = b_norm*curl(A) (dyngr_tov.cpp:360-364) is a
+// pure multiplicative scale with no normalization, so b_norm=0 (every existing/planned
+// unmagnetized fixture, including the off-center TOV test) makes the resulting field
+// identically zero regardless of what A1/A2 evaluate here. Revisit if a magnetized
+// off-center star is ever needed.
 template<class TOVEOS>
 KOKKOS_INLINE_FUNCTION
 static Real A1(const tov::TOVStar& tov_, const TOVEOS& eos, bool isotropic, Real pcut,
@@ -517,6 +539,7 @@ void SetADMVariablesToTOV(MeshBlockPack *pmbp) {
   auto& tov_ = ptov_params->my_tov;
   bool isotropic = ptov_params->isotropic;
   bool minkowski = ptov_params->minkowski;
+  Real x0 = ptov_params->x0, y0 = ptov_params->y0, z0 = ptov_params->z0;
   par_for("update_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real &x1min = size.d_view(m).x1min;
@@ -534,8 +557,9 @@ void SetADMVariablesToTOV(MeshBlockPack *pmbp) {
     int nx3 = indcs.nx3;
     Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
 
-    Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
-    Real s = sqrt(SQR(x1v) + SQR(x2v));
+    // Relative to the star's own center (x0,y0,z0) -- see SetupTOV's own comment.
+    Real r = sqrt(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0));
+    Real s = sqrt(SQR(x1v-x0) + SQR(x2v-y0));
 
     Real mass, alp, r_schw;
     if (isotropic) {

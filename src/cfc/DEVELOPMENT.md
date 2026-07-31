@@ -266,6 +266,18 @@ its Riemann solver and conserved-to-primitive conversion.
 ## item 39's `nghbr` `dest`-slot collision. See item 40 for the full
 ## writeup; item 39's own open problem (the tie-break formula bug) is
 ## unchanged by this.
+##
+## Status update (2026-07-31): a new thread, unrelated to items 38-44's AMR/
+## registration-bug work above -- the BH-puncture/TDE project's own outer-BC
+## recentering (`CFC_PUNCTURE_TDE_PLAN.md` Sec 3.10/Sec 5 Phase A item 8).
+## Item 45 adds a settable center to `mg_robin` (wired at all four Robin
+## sites, including one this file's own item 25 already implemented but
+## item 45 had left un-recentered on a first pass) and a mass-weighted
+## centroid reduction for `psi`/`alpha_psi`, with a reflecting-boundary
+## correction found necessary empirically (naive centroid integration is
+## wrong for this module's own octant-symmetric test fixtures). Item 46
+## validates it end-to-end with a new off-center TOV star capability and a
+## dynamical stability run -- see item 45 for the full writeup.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -6454,3 +6466,159 @@ src/cfc/
       coarse-level guess quality rather than ghost-exchange interpolation
       order, so an unchanged value here is expected and not a sign the
       switch had no effect.
+
+45. **(2026-07-31) Robin outer BC recentering for `psi`/`alpha_psi`, for the
+    BH-puncture/TDE project's own extension of this module
+    (`CFC_PUNCTURE_TDE_PLAN.md` Sec 3.10 item 1 / Sec 5 Phase A item 8, part
+    (a) only).** Every existing CFC test places its star at the coordinate
+    origin, so `mg_robin`'s ghost fill (`u_ghost = u_anchor *
+    (r_anchor/r_ghost)^robin_order_`, item 16) never needed a settable
+    center -- it always used the raw distance from the mesh origin. That
+    assumption breaks once a BH puncture is fixed at `x=0` (a separate,
+    later addition to this module, `cfc_puncture.hpp` -- see that file/
+    `CFC_PUNCTURE_TDE_PLAN.md` for the puncture background itself, not
+    covered by this item) and the star sits somewhere else entirely: an
+    outer BC centered on the wrong point is systematically biased, the same
+    way an off-center multipole expansion is until centered on the source.
+    - **Fix, shared-module side**: new `Real robin_center_[3]` member on
+      `MultigridDriver` (same shape as the pre-existing `mask_origin_[3]`,
+      a cleaner template here than `mpo_` since it carries no
+      multipole-expansion baggage), default `(0,0,0)` -- a bit-for-bit
+      no-op for every caller that never sets it. New public
+      `SetRobinCenter(x,y,z)` (a genuine setter is needed here, unlike
+      `mpo_`'s direct-write-from-a-subclass-constructor pattern, since a
+      *composing* owner like `cfc::CFC` can't write a protected member
+      directly). Wired at **all four** existing Robin ghost-fill sites --
+      root-grid device path and its host-mirror duplicate (`MGRootBoundary`,
+      `multigrid_driver.cpp`), the per-MeshBlock path (`PhysicalBoundary`,
+      `multigrid_tasks.cpp`), and the AMR-octet path
+      (`ApplyPhysicalBoundariesOctet`, `multigrid_driver.cpp` -- item 25's
+      already-working `mg_robin` implementation there). All four use the
+      identical substitution (subtract the matching `robin_center_`
+      component from each face's anchor/ghost coordinate before the
+      `sqrt(SQR(...)+...)` radius calc) -- caught mid-implementation that
+      the octet site exists and already supports `mg_robin` (items 12/25/33
+      already establish `psi`/`alpha_psi` support AMR end-to-end), so
+      leaving it un-recentered while fixing the other three would have been
+      an inconsistency, not a deliberate scope cut. In practice this
+      fourth site stays inert for every current CFC test regardless (item
+      16's own observation still holds: no refined region reaches the
+      domain's outer physical boundary) -- fixed anyway since there's no
+      reason to leave it wrong for whenever one does.
+    - **Fix, CFC-local side**: new `CFC::ComputeMassCentroid()` (mirrors
+      `MultigridDriver::CalculateCenterOfMass()`'s reduction shape --
+      per-MeshBlock partial sums, host mirror, MPI reduction -- but reads
+      `pmhd->u0(IDN)` directly rather than `src_`, since `psi`/`alpha_psi`'s
+      matter lives in `coeff_` by design (Finding B, `src_` is always zero
+      there) and `CalculateCenterOfMass()` would divide by zero if reused
+      as-is). New `r_com_mass_[3]` member, shared by both solvers (computed
+      once in `SolveConformalFactor()`, reused by `SolveLapse()` the same
+      stage/Picard-iteration -- `u0` doesn't change in between). Both gated
+      by `puncture_enabled_` -- zero cost, zero behavior change when
+      disabled.
+    - **A real correctness subtlety found empirically, not anticipated in
+      the plan doc**: naively integrating `u0(IDN)*x` over the domain gives
+      the WRONG centroid for any of this module's existing octant-symmetric
+      test fixtures (reflecting BCs at `x=y=z=0`) -- the reduction only
+      ever sees the *stored* octant of a star that's actually symmetric
+      about the origin across all 8 octants, so it reports a spuriously
+      off-center result even though the true (reflected) star sits exactly
+      at the puncture's own center. Confirmed by direct empirical test:
+      applying the naive centroid to the existing near-vacuum puncture
+      fixture measurably *degraded* `psi` V-cycle convergence (more
+      Picard iterations, larger residual) relative to the un-recentered
+      baseline -- moving the Robin center away from `(0,0,0)` based on a
+      one-octant artifact actively hurt a case whose true physical center
+      already was `(0,0,0)`. **Fix**: `ComputeMassCentroid()` now overrides
+      any axis whose corresponding mesh boundary is `BoundaryFlag::reflect`
+      to that boundary's own coordinate (the reflection plane), rather than
+      trusting the raw integral for that axis -- restores exact `(0,0,0)`
+      for every existing octant-symmetric fixture and the original
+      (pre-regression) convergence behavior.
+    - **Explicitly deferred**: item 8, part (b) -- `X^i`/`beta^i`'s
+      `mg_multipole` BC recentering. That mechanism already has a settable,
+      non-auto origin (`mpo_`/`autompo_`) and a working per-channel moment
+      integral (item 17), so the remaining work is CFC-local only, but
+      needs two independently-weighted centroids threaded consistently
+      through three consumers each (the multipole origin itself, the
+      Shibata eta-source, and the reconstruction cross-term) -- a real
+      correctness trap (shifting only the source while leaving the
+      reconstruction's cross-term unshifted silently reconstructs the
+      *wrong* vector field), scoped out as a separate follow-up rather than
+      risked in the same change as the simpler Robin-side fix.
+    - **Verified**: (1) an ephemeral debug hook forcing an arbitrary,
+      non-physical `SetRobinCenter` offset confirmed the resulting ghost
+      value matches the closed-form Robin formula evaluated by hand with the
+      shifted radii, to full precision -- proves the plumbing itself is
+      correct, independent of any particular physical scenario. (2) with
+      the reflecting-boundary fix in place, `r_com_mass_` comes out to
+      exactly `(0,0,0)` for the existing symmetric fixture, and V-cycle
+      convergence is restored to the original (pre-regression) values. (3)
+      a 16-node/32-rank cluster regression with `puncture_enabled=false`
+      against `cfc_bu8_stability.athinput` came back **exactly
+      bit-for-bit identical** (`.out`/`.hst`/binary dumps all byte-for-byte
+      matching) -- the new code path is never entered when disabled
+      (`robin_center_` stays at its compiled-in default), so this hits the
+      strict bar rather than the relaxed near-machine-epsilon bar some
+      other puncture-project changes needed. See item 46 for an end-to-end
+      dynamical validation of this fix specifically (not just the
+      mechanism/regression checks above).
+
+46. **(2026-07-31) Off-center TOV star support (`dyngr_tov.cpp`) + a
+    dynamical stability test validating item 45's Robin recentering
+    end-to-end.** Every existing TOV/puncture fixture places the star at
+    the coordinate origin -- `dyngr_tov.cpp` had no way to move it, so item
+    45's own validation could only confirm the recentering *mechanism*
+    works (via the ephemeral hand-verification and the trivial
+    already-centered case), not that it actually keeps a genuinely
+    off-center configuration stable. `SetupTOV`'s isotropic branch (the
+    only mode CFC ever uses -- conformally flat, `g_dd = psi^4*delta_ij`,
+    no `x1v*x1v`-type directional cross-terms at all, unlike the
+    Schwarzschild-gauge branch) needed only its scalar radius and the
+    velocity-perturbation unit vector shifted; the non-isotropic branch's
+    own metric assembly was deliberately left alone (CFC never exercises
+    it, and `star_center` is only meant to combine with `isotropic=true`).
+    - **Fix**: new `<problem> star_center_x1/x2/x3` (default `0.0`,
+      mirrors `z4c_one_puncture.cpp`'s `punc_center_x1/2/3` convention),
+      stashed on `TOVParams` (alongside `isotropic`/`minkowski`) so
+      `SetADMVariablesToTOV`'s regrid/restart path picks it up too, not
+      just the one-time `SetupTOV` init path. The magnetized-only `A1`/`A2`
+      vector-potential helpers are **not** shifted -- confirmed by direct
+      read that `B = b_norm*curl(A)` is a pure multiplicative scale with no
+      normalization, so `b_norm=0` (every current/planned unmagnetized
+      fixture) makes the resulting field identically zero regardless of
+      what `A1`/`A2` evaluate; flagged as a real gap only if a magnetized
+      off-center star is ever needed.
+    - **New fixture**: `inputs/dyn_grmhd/cfc_puncture_offcenter_tov.athinput`
+      -- reuses the already-validated near-vacuum TOV EOS parameters from
+      `cfc_puncture_vacuum_small.athinput` verbatim (only the star's
+      position is new), star at `star_center_x1=60` (`~5x` the isotropic
+      radius `R_iso~11.82` this EOS gives), BH puncture fixed at the
+      origin as always. Full (non-symmetric) domain, `diode` on all 6
+      faces (an off-center star breaks the octant symmetry every other
+      puncture fixture relies on) -- `20` MeshBlocks of `16^3` at `dx=1.6`,
+      no AMR (deliberately, to avoid conflating this test with the
+      separately-documented CFC+AMR robustness history in this same file).
+      A static, non-rotating, unmagnetized TOV star has `S_i=0` identically
+      -- `X^i`/`beta^i` solve to exactly zero regardless of any BC -- so
+      this test isolates item 45's `psi`/`alpha_psi` recentering completely
+      from the still-deferred item 8(b) work; a "stable" result here is
+      unambiguous evidence about item 45 specifically.
+    - **Verified**: ran to `tlim=100` (47 cycles) on the cluster. Total
+      mass conserved to `~3e-5` relative throughout. `x`-momentum grows
+      smoothly from `0` to `-8.46e-3` -- the physically-expected
+      gravitational infall of the star toward the BH `60` units away
+      (order-of-magnitude consistent with `M/r^2` attraction over this
+      timescale), not numerical noise; transverse momenta stay at
+      `~1e-7`-`1e-8`, confirming no spurious drift off the star's own axis.
+      `rho-max` (user history) rises `~12%` over the run but with a
+      *decelerating* growth rate (~15x slower by the end than at the
+      start) -- the signature of the star relaxing from its continuum
+      initial profile onto this resolution's discrete equilibrium, not an
+      exponential instability. `alpha-min` stays essentially flat. No
+      `FATAL` errors during the run -- the only crash was the
+      already-root-caused, out-of-scope `Multigrid::~Multigrid` teardown
+      segfault (fires after all diagnostics print). Also reran
+      `cfc_puncture_vacuum_small.athinput` locally and confirmed
+      bit-for-bit identical output to before this pgen change (`star_center`
+      defaults to `0.0`) -- the new parameter is a strict no-op when unset.

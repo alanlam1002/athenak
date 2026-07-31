@@ -70,7 +70,10 @@ class CFC {
   // alpha0*psi0=1, Ahat0_ij=0, Ahat0^2=0) when disabled, since cfc_reconstruct.cpp/
   // cfc.cpp/mg_cfc_lapse.cpp/mg_cfc_conformal_factor.cpp now read them unconditionally
   // (Sec 5 Phase A items 3, 5, 6) -- every existing non-TDE run is a bit-for-bit no-op.
-  // u_beta0/u_s0_beta remain opt-in-only allocated: nothing reads them yet (item 7).
+  // beta0_u/grad_ap6_0, like psi0/alpha0_psi0/a0_dd/a0_sq above, are always allocated
+  // and read unconditionally every stage (AssembleLapseShiftK, BuildShiftSourceImpl --
+  // Sec 5 Phase A item 7), filled with the flat-space defaults (beta0=0, grad_ap6_0=0)
+  // when puncture_enabled_ is false.
   DvceArray5D<Real> u_psi0;          // psi0
   DvceArray5D<Real> u_alpha0_psi0;   // alpha0*psi0 (the product, matching how
                                      // delta_alpha_psi stores alpha*psi -- see Sec 3.3)
@@ -82,12 +85,13 @@ class CFC {
 
   DvceArray5D<Real> a0_sq;   // Ahat0_ij*Ahat0^ij
 
-  // Shift-source ingredient s0_beta^i = 2*Ahat0^ij*D_j(alpha0*psi0^-6) (Sec 3.9),
-  // closed-form from TrumpetBackground's dpsi0/dalpha0 outputs -- not yet consumed by
-  // BuildShiftSource (Sec 5 Phase A item 7, a later stage), stored now since it falls
-  // out of the same per-cell fill at no extra cost.
-  DvceArray5D<Real> u_s0_beta;
-  AthenaTensor<Real, TensorSymm::NONE, 3, 1> s0_beta_u;
+  // Shift-source ingredient grad_ap6_0^i = D_i(alpha0*psi0^-6) (Sec 3.9), the *bare*
+  // closed-form gradient from TrumpetBackground's dpsi0/dalpha0 outputs (NOT contracted
+  // with Ahat0^ij -- that contraction cancels out of the final shift residual, Sec 3.9).
+  // Consumed by BuildShiftSourceImpl's "2*Ahats^ij*D_j(alpha0*psi0^-6)" term (Sec 5
+  // Phase A item 7).
+  DvceArray5D<Real> u_grad_ap6_0;
+  AthenaTensor<Real, TensorSymm::NONE, 3, 1> grad_ap6_0;
 
   // <cfc> puncture_enabled (default false): opt-in switch for the trumpet background
   // above. <cfc> puncture_mass (default 1.0): the BH mass M_BH the background is built
@@ -111,7 +115,8 @@ class CFC {
 
   // Persistent scratch (avoids a fresh device allocation every stage).
   DvceArray5D<Real> u_plus_2s;     // SolveLapse: u_tilde + 2*s_tilde
-  DvceArray5D<Real> u_alpha_psi6;  // BuildShiftSource: alpha*psi^-6
+  DvceArray5D<Real> u_alpha_psi6;  // BuildShiftSource: Delta(alpha*psi^-6),
+                                   // cancellation-free (Sec 3.7/3.9)
 
   // Undensitized U = Utilde/sqrt(detg), computed alongside u_tilde using the same
   // g_dd that built the conserved state -- feeds the alternate psi^5 Newton

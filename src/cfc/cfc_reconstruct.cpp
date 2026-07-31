@@ -188,7 +188,8 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
                           const DvceArray5D<Real> &u_psi0,
                           const DvceArray5D<Real> &u_alpha0_psi0,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
-                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u) {
+                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
+                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
@@ -207,7 +208,7 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
     }
     adm.alpha(m,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + u_alpha0_psi0(m,0,k,j,i))/psi_val;
     for (int a = 0; a < 3; ++a) {
-      adm.beta_u(m,a,k,j,i) = beta_u(m,a,k,j,i);
+      adm.beta_u(m,a,k,j,i) = beta_u(m,a,k,j,i) + beta0_u(m,a,k,j,i);
     }
   });
 }

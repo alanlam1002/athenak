@@ -34,8 +34,23 @@ namespace {
 
 //----------------------------------------------------------------------------------------
 //! \fn void BuildShiftSourceImpl<NGHOST>(...)
-//! \brief Gmunu eq. 75's derivative term, 2*Adual^ij*D_j(alpha*psi^-6), added onto an
-//! already-built p_src (16*pi*alpha*psi^-6*S-tilde_i -- see CFC::AssembleVectorSource).
+//! \brief Gmunu eq. 75's derivative term, added onto an already-built p_src
+//! (16*pi*alpha*psi^-6*S-tilde_i -- see CFC::AssembleVectorSource). Sec 3.9's three
+//! background-deviation cross-terms 2*Ahat0^ij*D_j[Delta(alpha*psi^-6)] +
+//! 2*Ahats^ij*D_j(alpha0*psi0^-6) + 2*Ahats^ij*D_j[Delta(alpha*psi^-6)] collapse to two
+//! (Ahat0^ij*X + Ahats^ij*X = Ahat^ij*X for the shared-gradient terms 1+3):
+//!   2*Ahat^ij*D_j[Delta(alpha*psi^-6)]  +  2*Ahats^ij*D_j(alpha0*psi0^-6)
+//! using the TOTAL Ahat^ij (a_dd) for the first term and the matter-only
+//! Ahats^ij = a_dd-a0_dd for the second. Delta(alpha*psi^-6) = alpha*psi^-6-alpha0*psi0^-6
+//! is built cancellation-free (Sec 3.7/3.9): alpha*psi^-6 = (alpha*psi)*psi^-7, and only
+//! the psi^-7 factor needs the puncture regularization (alpha*psi = alpha0*psi0+v is a
+//! plain bounded sum). Re-derived directly (not copied from the plan doc's RHS-sign
+//! convention, which is tied to a different equation):
+//!   Delta(alpha*psi^-6) = alpha0*psi0*(psi^-7-psi0^-7) + v*psi^-7
+//!                       = v*psi^-7 - alpha0*psi0*reg7,   reg7 = psi0^-7-psi^-7
+//! reusing the same x=delta_psi/psi0, P7(x)/(1+x)^7 Horner-polynomial factoring already
+//! validated in mg_cfc_conformal_factor.cpp's ConformalFactorRHS (a fresh inline copy
+//! here, not a shared helper -- see this stage's plan for why).
 
 template <int NGHOST>
 void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
@@ -43,8 +58,10 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
                           const DvceArray5D<Real> &u_psi0,
                           const DvceArray5D<Real> &u_alpha0_psi0,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                          const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0,
                           AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                          int mg_nghost, DvceArray5D<Real> &ap6) {
+                          int mg_nghost, DvceArray5D<Real> &dap6) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -55,36 +72,55 @@ void BuildShiftSourceImpl(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_ps
   int ncells2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
   int ncells3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
 
-  // alpha*psi^-6 = alpha_psi * psi^-7 (alpha = alpha_psi/psi). ap6 is a persistent
-  // CFC member, sized over the full array extent (not just the interior) so
-  // Dx<NGHOST> below has valid neighbor data at every interior point -- both fields
-  // are already ghost-exchanged by the time this runs (see CFC::QueueCFCTasks).
-  par_for("cfc_build_alpha_psi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
+  // dap6 is a persistent CFC member, sized over the full array extent (not just the
+  // interior) so Dx<NGHOST> below has valid neighbor data at every interior point --
+  // both fields are already ghost-exchanged by the time this runs (see
+  // CFC::QueueCFCTasks).
+  par_for("cfc_build_dapsi6", DevExeSpace(), 0, nmb-1, 0, ncells3-1, 0, ncells2-1,
           0, ncells1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real psi_val = delta_psi(m,0,k,j,i) + u_psi0(m,0,k,j,i);
-    Real psi7 = psi_val*psi_val*psi_val*psi_val*psi_val*psi_val*psi_val;
-    ap6(m,0,k,j,i) = (delta_alpha_psi(m,0,k,j,i) + u_alpha0_psi0(m,0,k,j,i))/psi7;
+    Real psi0_val = u_psi0(m,0,k,j,i);
+    Real dpsi_val = delta_psi(m,0,k,j,i);
+    Real psi_val = dpsi_val + psi0_val;
+    Real psi_inv = 1.0/psi_val;
+    Real psi_inv2 = psi_inv*psi_inv;
+    Real psi_inv7 = psi_inv2*psi_inv2*psi_inv2*psi_inv;
+
+    Real psi0_inv = 1.0/psi0_val;
+    Real x = dpsi_val*psi0_inv;
+    Real onepx_inv = psi0_val*psi_inv;   // = 1/(1+x) = psi0/psi
+    Real onepx_inv2 = onepx_inv*onepx_inv;
+    Real onepx_inv7 = onepx_inv2*onepx_inv2*onepx_inv2*onepx_inv;
+    Real psi0_inv2 = psi0_inv*psi0_inv;
+    Real psi0_inv7 = psi0_inv2*psi0_inv2*psi0_inv2*psi0_inv;
+    Real p7 = 7.0 + x*(21.0 + x*(35.0 + x*(35.0 + x*(21.0 + x*(7.0 + x)))));
+    Real reg7 = psi0_inv7 * x * p7 * onepx_inv7;   // = psi0^-7 - psi^-7
+
+    Real alpha0psi0_val = u_alpha0_psi0(m,0,k,j,i);
+    Real dalpha_psi_val = delta_alpha_psi(m,0,k,j,i);
+    dap6(m,0,k,j,i) = dalpha_psi_val*psi_inv7 - alpha0psi0_val*reg7;
   });
 
-  AthenaTensor<Real, TensorSymm::NONE, 3, 0> ap6_view;
-  ap6_view.InitWithShallowSlice(ap6, 0);
+  AthenaTensor<Real, TensorSymm::NONE, 3, 0> dap6_view;
+  dap6_view.InitWithShallowSlice(dap6, 0);
 
   par_for("cfc_build_shift_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const int mk = k - ks + mg_nghost, mj = j - js + mg_nghost, mi = i - is + mg_nghost;
     Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
                   1.0/size.d_view(m).dx3};
-    Real dap6[3];
+    Real ddap6[3];
     for (int b = 0; b < 3; ++b) {
-      dap6[b] = Dx<NGHOST>(b, idx, ap6_view, m, k, j, i);
+      ddap6[b] = Dx<NGHOST>(b, idx, dap6_view, m, k, j, i);
     }
     for (int a = 0; a < 3; ++a) {
-      Real div = 0.0;
+      Real div_total = 0.0, div_bg = 0.0;
       for (int b = 0; b < 3; ++b) {
-        div += a_dd(m,a,b,k,j,i)*dap6[b];
+        Real aab = a_dd(m,a,b,k,j,i);
+        div_total += aab*ddap6[b];
+        div_bg += (aab - a0_dd(m,a,b,k,j,i))*grad_ap6_0(m,b,k,j,i);
       }
-      p_src(m,a,mk,mj,mi) += 2.0*div;
+      p_src(m,a,mk,mj,mi) += 2.0*(div_total + div_bg);
     }
   });
 }
@@ -94,16 +130,21 @@ void BuildShiftSource(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                       const DvceArray5D<Real> &u_psi0,
                       const DvceArray5D<Real> &u_alpha0_psi0,
                       const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                      const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+                      const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0,
                       AthenaTensor<Real, TensorSymm::NONE, 3, 1> &p_src,
-                      int mg_nghost, DvceArray5D<Real> &ap6) {
+                      int mg_nghost, DvceArray5D<Real> &dap6) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   switch (indcs.ng) {
     case 2: BuildShiftSourceImpl<2>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
-                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
+                                     u_alpha0_psi0, a_dd, a0_dd, grad_ap6_0, p_src,
+                                     mg_nghost, dap6); break;
     case 3: BuildShiftSourceImpl<3>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
-                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
+                                     u_alpha0_psi0, a_dd, a0_dd, grad_ap6_0, p_src,
+                                     mg_nghost, dap6); break;
     case 4: BuildShiftSourceImpl<4>(pmbp, delta_psi, delta_alpha_psi, u_psi0,
-                                     u_alpha0_psi0, a_dd, p_src, mg_nghost, ap6); break;
+                                     u_alpha0_psi0, a_dd, a0_dd, grad_ap6_0, p_src,
+                                     mg_nghost, dap6); break;
   }
 }
 
@@ -133,7 +174,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     u_beta0("cfc_u_beta0", 1, 1, 1, 1, 1),
     u_a0dual("cfc_u_a0dual", 1, 1, 1, 1, 1),
     a0_sq("cfc_a0_sq", 1, 1, 1, 1, 1),
-    u_s0_beta("cfc_u_s0_beta", 1, 1, 1, 1, 1),
+    u_grad_ap6_0("cfc_u_grad_ap6_0", 1, 1, 1, 1, 1),
     pmgd_pietax(nullptr),
     pmgd_pietabeta(nullptr),
     pmgd_psi(nullptr),
@@ -246,9 +287,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // every other CFC array above) since cfc_reconstruct.cpp/cfc.cpp/mg_cfc_lapse.cpp/
   // mg_cfc_conformal_factor.cpp now read them unconditionally (Sec 5 Phase A items 3,
   // 5, 6) -- filled with the exact flat-space values (psi0=1, alpha0*psi0=1,
-  // Ahat0_ij=0, Ahat0^2=0) when disabled, so every existing non-TDE run is a
-  // bit-for-bit no-op. The remaining background fields (beta0/its shift-source
-  // ingredient) are not yet read by anything, so stay opt-in-only allocated as before.
+  // Ahat0_ij=0, Ahat0^2=0, beta0^i=0, grad_ap6_0^i=0) when disabled, so every existing
+  // non-TDE run is a bit-for-bit no-op.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
   Kokkos::realloc(u_psi0,        nmb, 1, ncells3, ncells2, ncells1);
@@ -256,18 +296,20 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   Kokkos::realloc(u_a0dual,      nmb, 6, ncells3, ncells2, ncells1);
   a0_dd.InitWithShallowSlice(u_a0dual, 0, 5);
   Kokkos::realloc(a0_sq,         nmb, 1, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_beta0,       nmb, 3, ncells3, ncells2, ncells1);
+  Kokkos::realloc(u_grad_ap6_0,  nmb, 3, ncells3, ncells2, ncells1);
+  beta0_u.InitWithShallowSlice(u_beta0, 0, 2);
+  grad_ap6_0.InitWithShallowSlice(u_grad_ap6_0, 0, 2);
   if (puncture_enabled_) {
-    Kokkos::realloc(u_beta0,       nmb, 3, ncells3, ncells2, ncells1);
-    Kokkos::realloc(u_s0_beta,     nmb, 3, ncells3, ncells2, ncells1);
-    beta0_u.InitWithShallowSlice(u_beta0, 0, 2);
-    s0_beta_u.InitWithShallowSlice(u_s0_beta, 0, 2);
     FillPunctureBackground(pmbp, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u, a0_dd,
-                           a0_sq, s0_beta_u);
+                           a0_sq, grad_ap6_0);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
     Kokkos::deep_copy(u_alpha0_psi0, 1.0);
     Kokkos::deep_copy(u_a0dual, 0.0);
     Kokkos::deep_copy(a0_sq, 0.0);
+    Kokkos::deep_copy(u_beta0, 0.0);
+    Kokkos::deep_copy(u_grad_ap6_0, 0.0);
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -720,7 +762,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   // never a cross-layout data transfer). No-op when puncture_enabled_ is false.
   if (puncture_enabled_) {
     FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, s0_beta_u);
+                           a0_dd, a0_sq, grad_ap6_0);
   }
 
   psi_seeded_ = false;
@@ -1168,9 +1210,9 @@ void CFC::AssembleVectorSource(bool for_shift) {
         p_src_(m,a,mk,mj,mi) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
       }
     });
-    // Derivative part (2*Adual^ij*D_j(alpha*psi^-6)), added onto p_src in place.
+    // Derivative part (Sec 3.9's regularized cross-terms), added onto p_src in place.
     BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0, a_dd,
-                     p_src, mg_nghost, u_alpha_psi6);
+                     a0_dd, grad_ap6_0, p_src, mg_nghost, u_alpha_psi6);
 
     // eta_src = -S_i x^i, same formula as step 1, using the now-complete p_src.
     par_for("cfc_assemble_shift_eta_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je,
@@ -1395,7 +1437,7 @@ void CFC::ReconstructShift() {
 
 void CFC::AssembleADM() {
   cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
-                           a_dd, beta_u);
+                           a_dd, beta_u, beta0_u);
   return;
 }
 

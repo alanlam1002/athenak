@@ -19,7 +19,7 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                             DvceArray5D<Real> &a0_sq,
-                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &s0_beta_u) {
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -58,19 +58,17 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
       }
     }
 
-    // s0_beta^i = 2*Ahat0^ij*D_j(alpha0*psi0^-6), D_j(alpha0*psi0^-6) =
-    // (alpha0*psi0^-6)*[dalpha0/alpha0 - 6*dpsi0/psi0]*(x_j/r) -- Sec 3.9.
+    // Bare gradient D_j(alpha0*psi0^-6) = (alpha0*psi0^-6)*[dalpha0/alpha0 -
+    // 6*dpsi0/psi0]*(x_j/r) -- Sec 3.9's closed-form shift-source ingredient. Stored
+    // uncontracted (not dotted with Ahat0^ij here): cfc.cpp::BuildShiftSourceImpl dots
+    // it against the matter-only Ahats^ij = Ahat^ij-Ahat0^ij at the point of use, since
+    // the Ahat0-contracted combination cancels out of the final residual (Sec 3.9).
     Real psi0_inv6 = 1.0/(psi0*psi0*psi0*psi0*psi0*psi0);
     Real ap6 = alpha0*psi0_inv6;
     Real dfac = dalpha0/alpha0 - 6.0*dpsi0/psi0;
-    Real grad[3] = {ap6*dfac*x1v/r, ap6*dfac*x2v/r, ap6*dfac*x3v/r};
-    for (int a = 0; a < 3; ++a) {
-      Real contraction = 0.0;
-      for (int b = 0; b < 3; ++b) {
-        contraction += a0_dd(m,a,b,k,j,i)*grad[b];
-      }
-      s0_beta_u(m,a,k,j,i) = 2.0*contraction;
-    }
+    grad_ap6_0(m,0,k,j,i) = ap6*dfac*x1v/r;
+    grad_ap6_0(m,1,k,j,i) = ap6*dfac*x2v/r;
+    grad_ap6_0(m,2,k,j,i) = ap6*dfac*x3v/r;
   });
 }
 

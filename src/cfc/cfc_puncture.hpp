@@ -96,8 +96,9 @@ Real TrumpetIsoToAreal(Real chi_cell) {
 //! multigrid-level coordinates with r_sch precomputed once per level, not recomputed via
 //! a root-find on every call). Port of mod_bh.f90:11-54 (tbh_get_var); Aij0 is packed
 //! (xx,yy,zz,xy,xz,yz), matching that Fortran's own component order. dpsi0/dalpha0
-//! (radial derivatives) are optional out-params (nullptr to skip) -- unused until Sec
-//! 3.9's shift-source work but ported now since they fall out of the same formulas.
+//! (radial derivatives) are optional out-params (nullptr to skip) -- used by
+//! FillPunctureBackground below to assemble grad_ap6_0 = D_j(alpha0*psi0^-6) (Sec 3.9's
+//! shift-source ingredient, Sec 5 Phase A item 7).
 KOKKOS_INLINE_FUNCTION
 void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
                        Real *psi0, Real *alpha0, Real beta0[3], Real Aij0[6], Real *a2,
@@ -160,21 +161,25 @@ void WormholeBackground(Real m_bh, Real x1, Real x2, Real x3,
 //!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
 //!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
 //!            DvceArray5D<Real> &a0_sq,
-//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &s0_beta_u)
+//!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0)
 //! \brief One-time (per construction / per AMR regrid) ghost-inclusive fill of the
 //! trumpet background arrays, mirroring src/pgen/z4c/z4c_one_puncture.cpp's
 //! ADMOnePuncture -- CellCenterX for coordinates, is-ng..ie+ng bounds. u_alpha0_psi0
 //! stores alpha0*psi0 (the product, matching delta_alpha_psi's own convention).
-//! s0_beta_u = 2*Ahat0^ij*D_j(alpha0*psi0^-6) (Sec 3.9) is assembled here from
+//! grad_ap6_0 = D_j(alpha0*psi0^-6) (Sec 3.9's closed-form ingredient, the *bare*
+//! gradient 3-vector -- NOT contracted with Ahat0^ij) is assembled here from
 //! TrumpetBackground's dpsi0/dalpha0 via D_j(alpha0*psi0^-6) =
-//! (alpha0*psi0^-6)*[dalpha0/alpha0 - 6*dpsi0/psi0]*x_j/r -- not yet consumed by
-//! anything (Sec 5 Phase A item 7), stored now since it costs nothing extra here.
+//! (alpha0*psi0^-6)*[dalpha0/alpha0 - 6*dpsi0/psi0]*x_j/r. Consumed by
+//! cfc.cpp::BuildShiftSourceImpl's "2*Ahats^ij*D_j(alpha0*psi0^-6)" term (Sec 5 Phase A
+//! item 7) -- the bare form is what's needed there (dotted against the matter-only
+//! Ahats^ij = Ahat^ij-Ahat0^ij at the call site), not a pre-contracted-with-Ahat0
+//! quantity, which cancels out of the final residual entirely (Sec 3.9).
 void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
                             DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                             DvceArray5D<Real> &a0_sq,
-                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &s0_beta_u);
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0);
 
 }  // namespace cfc
 

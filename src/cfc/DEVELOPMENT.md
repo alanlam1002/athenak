@@ -6605,3 +6605,80 @@ src/cfc/
       given no repeat run was done. Follow-up investigation (isolating
       `recon.hpp`, or a same-node rerun) not yet undertaken -- reported
       as-is since it doesn't block the merge's correctness.
+      **Superseded by item 47**: a controlled follow-up found the ~20%
+      figure itself was mostly node-placement noise, not a reproducible
+      code-level regression -- see item 47 for the corrected picture.
+
+47. **(2026-07-31) Follow-up on item 46's ~20% BU8 slowdown: mostly
+    node-placement noise, not a reproducible regression -- but the
+    `recon.hpp` split-kernel hypothesis is real, just small.** User asked
+    to dig into the `recon.hpp` change specifically and rerun/diagnose.
+    - **Mechanism confirmed by reading the actual diffs, not assumed**: my
+      first guess (a per-cell runtime branch in `recon.hpp`) was wrong --
+      `ReconDispatch`'s `switch` runs once on the *host*, launching a fully
+      template-specialized (compile-time-fixed-method) kernel; no per-cell
+      branch survives in device code. The real change, confirmed via `git
+      diff c81e4005 origin/main -- src/dyn_grmhd/dyn_grmhd_fluxes.cpp` (the
+      file the BU8 test actually exercises): reconstruction and the Riemann
+      solve used to be **fused into one kernel per team**, using **team
+      scratch memory** (`ScrArray2D`, with the j/k sweeps *rotating*
+      scratch buffers to reuse already-reconstructed shared-face data).
+      Main's refactor ("Split recon rsolver clean" #757) replaced this with
+      **two-to-three separate kernels** that materialize `wl3d`/`wr3d`
+      (`bl3d`/`br3d` for MHD) as **full global-memory arrays** -- the file's
+      own new header comment literally says *"Uses the split-kernel
+      approach"*. The old row-batch helpers this fused design needed
+      (`WENOZX1`/`X2`/`X3` etc.) were deleted (`wenoz.hpp`: 193 -> 84
+      lines) -- not a superficial reshuffle.
+    - **Isolated the change with temporary instrumentation, not guesswork**:
+      wrapped `DynGRMHDPS::CalcFluxes` in a `Kokkos::fence()` +
+      `Kokkos::Timer`, printing `FLUXCALC_TIME=<seconds>` (rank 0 only)
+      each call. Applied identically to both the current `cfc` HEAD and a
+      temporary `git worktree` at the pre-merge commit (`c81e4005`, the
+      last commit with the old fused-kernel `dyn_grmhd_fluxes.cpp`),
+      building a throwaway `build_cfc_xns_prerecon` there with the exact
+      same CMake config (`cfc_sakura.sh`'s invocation) so the two binaries
+      differ *only* in this one file's kernel structure plus everything
+      else the merge changed.
+    - **Reran the BU8 benchmark twice per side (4 runs total)** to check
+      run-to-run variance -- and by chance, SLURM assigned the *same two
+      physical node sets* across the 4 jobs (`sakura245-261` for
+      before-run-1 and after-run-2; `sakura169-400`-range for before-run-2
+      and after-run-1), giving an accidental but clean paired comparison:
+      - Node set A: before `4.484` sec/cycle vs. after `4.472` sec/cycle --
+        indistinguishable.
+      - Node set B: before `4.339` sec/cycle vs. after `4.385` sec/cycle --
+        indistinguishable.
+      - **Conclusion**: item 46's original `4.450` vs. `5.321` sec/cycle
+        (~20%) comparison was overwhelmingly a node-placement artifact, not
+        a reproducible code-level regression. On matched nodes, total
+        per-cycle time is essentially unchanged by the merge.
+    - **But the `recon.hpp` split-kernel cost is real, just small in this
+      test's budget**: `FLUXCALC_TIME` summed over the full 110-cycle run
+      (330 calls = 110 cycles x 3 RK3 stages, consistent across all 4 runs)
+      was clearly and consistently higher after, with *no overlap* between
+      groups regardless of node pairing -- before: `23.75s`/`24.50s`
+      total; after: `31.64s`/`32.48s` total (~30% slower specifically in
+      flux calculation). This directly confirms the kernel-fusion-loss
+      mechanism is a genuine cost, not just a plausible story. But flux
+      calculation itself is only `~0.22-0.29` sec out of `~4.4` sec total
+      per cycle (~5-7%) for this CFC+GRMHD-heavy test -- so even a real
+      ~30% slowdown there adds only `~0.07-0.09` sec/cycle (~2% of total),
+      well under the noise floor set by node-to-node variance at the
+      whole-simulation level (bvals communication and CFC's own multigrid
+      metric solve dominate the per-cycle budget for this problem, not
+      flux calculation).
+    - **Net conclusion**: the merge does not meaningfully regress this
+      benchmark's overall performance. The `recon.hpp` refactor has a real,
+      reproducible, but minor cost specific to flux calculation, invisible
+      at the whole-simulation level for a CFC-heavy problem like BU8 (might
+      matter more for a pure-hydro test where flux calc dominates the
+      budget -- not tested here). No corrective action taken; not proposing
+      to re-fuse the kernels, since the measured benefit for CFC's own
+      workloads would be marginal against the cost of patching shared,
+      non-CFC-owned code against a deliberate upstream design choice.
+    - **Cleanup**: all instrumentation was temporary -- removed from
+      `src/dyn_grmhd/dyn_grmhd_fluxes.cpp` (`git checkout --` back to the
+      clean merged state) and the temporary worktree (`git worktree
+      remove --force`) after use. No permanent code changes from this
+      investigation.

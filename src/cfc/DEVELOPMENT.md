@@ -5587,6 +5587,18 @@ src/cfc/
       `x1=0` reflect boundary. See item 42 for the real mechanism (`u_adm`
       had no physical-BC pass at all before item 41) and the direct
       cell-by-cell trace confirming it.
+    - **Merge check (2026-07-31): unaffected by the `origin/main` merge**
+      (`f4e0fb35`, 18 commits, `c81e4005`..`290d5805`). This item's fold-in
+      lives in `driver.cpp`/`mesh_refinement.cpp`; confirmed intact post-merge
+      at `driver.cpp:606,671,676` and `mesh_refinement.cpp:165,174` -- the
+      `is_amr_regrid` dispatch and `ReinitializeMetricForAMR` call are exactly
+      as this item left them. This was already deliberately preserved during
+      the merge's own conflict resolution (`mesh_refinement.cpp`'s "twin
+      insertion" conflict kept this item's block over `origin/main`'s
+      competing plain-`InitBoundaryValuesAndPrimitives` insertion at the same
+      spot), so this is a re-confirmation, not new work. See item 39's own
+      merge-check note for why the merge doesn't touch this item's residual
+      either.
 
 39. **(2026-07-27, updated 2026-07-28) Item 38's residual: root cause
     confirmed, fix identified, but not yet safe to apply.** A deep,
@@ -5980,6 +5992,27 @@ src/cfc/
       item 39g's reproducer remains the reliable way to verify (1)/(2) above,
       since the CFC TOV scenario no longer surfaces this item's residual on
       its own.
+    - **Merge check (2026-07-31): completely unaffected by the `origin/main`
+      merge** (`f4e0fb35`, 18 commits, `c81e4005`..`290d5805`). Checked
+      directly: `git log c81e4005..290d5805 -- src/mesh/` shows the merge's
+      only `src/mesh/` change is `39e432f8`'s rank-packed-bvals commit, and
+      its own diffstat for that path is exactly `mesh.hpp` (+6 lines, the
+      `amr_lb_seq_` counter) and `mesh_refinement.cpp` (+4 lines); a full
+      `git diff c81e4005 290d5805 --stat -- src/mesh/` confirms
+      `meshblock.cpp` and `nghbr_index.hpp` -- where `SetNeighbors` and
+      `NeighborIndex` actually live -- are untouched. Confirmed again in the
+      live source: `meshblock.cpp`'s three edge/corner guards (currently at
+      lines 277/349/386) still read the original item-38-era
+      `nt->lloc_.level >= lloc.level || (myoxA==a && myoxB==b)` condition,
+      not 39f's `recip==nullptr` rule -- matching this item's own "Current
+      state" note above that only 39a is applied. The merge's actual
+      mesh-related content (rank-packed boundary-value *communication*
+      aggregation, `amr_lb_seq_` cache invalidation) is a different
+      subsystem entirely from the neighbor-*registration* bug this item is
+      about, so there was never a mechanism by which it could have helped.
+      Items #42 (tie-break formula bug), #43 (extra-slot capacity), #44
+      (39c's independent MPI abort) remain exactly as scoped -- no new
+      information, no change in priority or approach.
 
 40. **(2026-07-28) Cherry-picked upstream (unmerged) PR
     [IAS-Astrophysics/athenak#748](https://github.com/IAS-Astrophysics/athenak/pull/748)

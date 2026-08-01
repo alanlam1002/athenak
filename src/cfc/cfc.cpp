@@ -644,8 +644,16 @@ void CFC::InitializeMetric(Driver *pdriver) {
                                                               {nmb, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
                       Real &local_max) {
-          local_max = Kokkos::fmax(local_max,
-                                    Kokkos::fabs(psi_(m,0,k,j,i) - psi_old_(m,0,k,j,i)));
+          // Kokkos::fmax (like IEEE754 fmax) silently ignores a NaN operand and
+          // returns the other one, so a fully-NaN psi_ would otherwise leave
+          // local_max untouched at the reducer's identity value instead of
+          // signaling non-convergence -- map any non-finite diff to a huge but
+          // finite value so it always fails the dpsi < cfc_init_tol_ check below.
+          Real diff = Kokkos::fabs(psi_(m,0,k,j,i) - psi_old_(m,0,k,j,i));
+          if (!Kokkos::isfinite(diff)) {
+            diff = std::numeric_limits<Real>::max();
+          }
+          local_max = Kokkos::fmax(local_max, diff);
         }, Kokkos::Max<Real>(dpsi));
 #if MPI_PARALLEL_ENABLED
       Real global_dpsi = 0.0;

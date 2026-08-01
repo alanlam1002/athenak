@@ -1,0 +1,172 @@
+# Athena++ (Kokkos version) input file: off-center BU8 (rapidly rotating neutron
+# star) stability test for the CFC BH-puncture extension's outer-BC recentering
+# (CFC_PUNCTURE_TDE_PLAN.md Sec 3.10 items 1-3, Sec 5 Phase A item 8a/8b-8c).
+# Same BU8 model/XNS initial data as cfc_bu8_stability.athinput (see that file's
+# own header for the full model description/history) -- this variant places the
+# star off-center from a BH puncture fixed at the coordinate origin, using the
+# new <problem> star_center_x1/2/3 offset parameter added to xns_rotstar.cpp for
+# this test.
+#
+# Why a rotating star is the right test for item 8b/8c specifically: unlike the
+# static, unmagnetized TOV star used in cfc_puncture_offcenter_tov.athinput
+# (S_i=0 identically there, so X^i/beta^i solve to exactly zero regardless of
+# any BC), BU8 is uniformly rotating -- real, everywhere-nonzero angular
+# momentum from t=0, no artificial v_pert kick needed. This is the first test to
+# exercise the mg_multipole recentering for X^i/beta^i (item 47) against a
+# genuinely, persistently nonzero momentum source, and the first to combine
+# puncture_enabled=true with real AMR/octet refinement (previously only
+# validated together with puncture_enabled=false, items 45/48/49).
+#
+# Per explicit user decision, AMR is kept (not dropped, unlike the TOV
+# off-center tests) -- refined_region1 moves from the original's [-15,15]^3
+# (centered on the origin) to [45,75]x[-15,15]x[-15,15], the same 30x30x30 cube
+# translated by +60 in x1 only, landing exactly on root-MeshBlock boundaries in
+# all three directions (each root MeshBlock spans 30 code units, dx=1.875,
+# nx1(meshblock)=16) -- confines all refinement to a single root MeshBlock per
+# axis, avoiding the known CFC+AMR robustness gap (item 22) that requires a
+# refined region not to span multiple root MeshBlocks. The domain itself widens
+# only in x1 (star only shifts along x1, matching the TOV tests' own
+# one-axis-offset convention): x1 in [-15,105] (4 root MeshBlocks instead of 3;
+# BH puncture at x=0 sits centered in the first block, star at x=60 sits
+# centered in the third), x2,x3 unchanged at [-45,45] (3 root MeshBlocks each).
+#
+# star_center_x1=60.0: ~5.3x the star's own equatorial radius R_eq=11.24 (same
+# ~5x-stellar-radius convention as cfc_puncture_offcenter_tov.athinput's
+# star_center_x1=60 relative to its own R_iso~11.82), leaving 45 code units
+# (~4x R_eq) of buffer past the star before the domain's outer x1 edge.
+#
+# puncture_mass=1.0 (established convention from every prior puncture fixture)
+# is now LESS than BU8's own Komar mass (~1.69) -- unlike the TOV tests, where
+# the puncture dominated a near-vacuum star. This is a real, informative
+# difference, not a problem to avoid: it means beta^i's own Ahat-gradient term
+# (sourced by the puncture's trumpet background) may no longer dominate over
+# the star's own matter term the way it did in the TOV/v_pert test, so
+# r_com_beta_ may track the star more closely than it did there -- report what
+# is actually observed.
+#
+# excise=false, no excision_scheme (Phase B item 9 still unimplemented in any
+# fixture, same scope cut every existing puncture fixture makes) -- the
+# ~60-unit separation is the same ballpark as the TOV tests' own margin.
+#
+# tlim=20: a first attempt (short smoke run, matching cfc_puncture_offcenter_
+# tov_vpert.athinput's own scale, not the original centered BU8 regression's
+# tlim=200 physics run) -- extend later if stable and cheap.
+
+<comment>
+problem  = Off-center BU8 rotating-star stability test for CFC BH-puncture outer-BC recentering (Sec 5 Phase A item 8a/8b-8c)
+
+<job>
+basename = cfc_bu8_offcenter
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 64       # 4 MeshBlocks in x1-direction (root level), dx=1.875
+x1min  = -15.0    # minimum x1 -- BH puncture at x=0 sits centered in the first
+                  # root MeshBlock ([-15,15])
+x1max  = 105.0    # maximum x1 -- star at x=60 sits centered in the third root
+                  # MeshBlock ([45,75]), ~4x R_eq of buffer before this edge
+ix1_bc = diode    # inner boundary -- NOT reflect (rotation breaks x-mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 48       # 3 MeshBlocks in x2-direction (root level), dx=1.875 -- unchanged
+x2min  = -45.0    # from the original centered fixture (star only shifts along x1)
+x2max  = 45.0
+ix2_bc = diode    # inner boundary -- NOT reflect (rotation breaks y-mirror parity)
+ox2_bc = diode    # outer boundary
+
+nx3    = 48       # 3 MeshBlocks in x3-direction (root level), dx=1.875 -- unchanged
+x3min  = -45.0
+x3max  = 45.0
+ix3_bc = diode    # inner boundary -- NOT reflect
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement) -- same dx/meshblock
+nx2  = 16        # convention as the original cfc_bu8_stability.athinput
+nx3  = 16
+
+<mesh_refinement>
+refinement          = static
+max_nmb_per_rank    = 200
+num_levels          = 5
+refinement_interval = 1
+
+<refined_region1>
+level = 4        # finest level; dx = 1.875/2^4 = 0.1171875, same resolution as
+                  # the original centered fixture
+x1min = 45.0     # the third root MeshBlock's own boundaries exactly (star at
+x1max = 75.0     # x=60 sits centered within this cube) -- confines all
+x2min = -15.0    # refinement to a single root MeshBlock per axis, same
+x2max = 15.0     # precedent the original fixture established (item 22)
+x3min = -15.0
+x3max = 15.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 20         # first attempt -- short smoke run, extend if stable/cheap
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = wenoz      # spatial reconstruction method -- matches the original
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-14    # atmosphere density -- matches the original fixture
+tfloor      = 1.0e-10
+c2p_tol     = 2.49e-13
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma -- matches XNS's K1=100/
+                         # GAMMA=2 polytrope so P=kappa*rho^Gamma holds at t=0
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = true
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10  # matches the original centered fixture's own tightened
+mg_poisson_threshold = 1.0e-10  # values (see that file's own revision notes)
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+mg_debug_defect_by_level = false
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH, fixed at the coordinate origin x=0
+
+<problem>
+id_dir = /sakura/ptmp/tlam/XNS_runs/rot_bu8_gr_pol2
+star_center_x1 = 60.0    # ~5.3x R_eq -- the star's actual center, away from the
+star_center_x2 = 0.0     # BH puncture (always fixed at x=0)
+star_center_x3 = 0.0
+user_hist   = true       # enrolls XNSRotStarHistory (rho-max, alpha-min, ang-mom)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- sanity-check density/velocity slices
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x3    = 0.0
+id = prim_xy
+
+<output3>
+file_type   = bin      # Binary output -- sanity-check metric slices
+variable    = adm
+dcycle      = 25
+slice_x3    = 0.0
+id = adm_xy

@@ -103,7 +103,15 @@ KOKKOS_INLINE_FUNCTION
 void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
                        Real *psi0, Real *alpha0, Real beta0[3], Real Aij0[6], Real *a2,
                        Real *dpsi0 = nullptr, Real *dalpha0 = nullptr) {
-  Real r = std::sqrt(x1*x1 + x2*x2 + x3*x3);
+  // Epsilon-guarded (matches the +1.0e-30 convention used elsewhere, e.g.
+  // multigrid_driver.cpp's mg_robin branches): r feeds every division below
+  // (psi0, dpsi0, dalpha0, and r2 for beta0/Aij0), and while a fine-grid cell
+  // center never lands exactly on the puncture, FillPunctureCoefficients'
+  // per-internal-multigrid-level evaluation (CFC_PUNCTURE_TDE_PLAN.md Sec 3.8/
+  // item 4) can -- a MeshBlock's own coarsest-level "cell center" is that
+  // MeshBlock's geometric center, which is exactly the origin for a MeshBlock
+  // symmetric about the puncture in all three directions.
+  Real r = std::sqrt(x1*x1 + x2*x2 + x3*x3 + 1.0e-30);
   Real rrs = r_sch/m_bh;
   Real rrs3 = rrs*rrs*rrs;
   Real psi = std::sqrt(r_sch/r);

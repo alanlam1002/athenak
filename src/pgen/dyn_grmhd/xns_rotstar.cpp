@@ -36,9 +36,12 @@ struct XNSStarParams {
   xns::XNSRotator xns_star;
   Real dfloor;
   Real pfloor;
+  Real x0, y0, z0;  // star center (0,0,0 unless <problem> star_center_x1/2/3 set)
 
-  XNSStarParams(xns::XNSRotator&& xns_star_, Real dfloor_, Real pfloor_) :
-      xns_star(std::move(xns_star_)), dfloor(dfloor_), pfloor(pfloor_) {}
+  XNSStarParams(xns::XNSRotator&& xns_star_, Real dfloor_, Real pfloor_,
+                Real x0_, Real y0_, Real z0_) :
+      xns_star(std::move(xns_star_)), dfloor(dfloor_), pfloor(pfloor_),
+      x0(x0_), y0(y0_), z0(z0_) {}
 };
 
 XNSStarParams *pxns_params;
@@ -57,12 +60,15 @@ void XNSRotStarHistory(HistoryData *pdata, Mesh *pm);
 KOKKOS_INLINE_FUNCTION
 static void XNSInterpToADMAndPrim(const xns::XNSRotator &xns_star, Real dfloor,
                                    Real pfloor, Real x1, Real x2, Real x3,
+                                   Real x0, Real y0, Real z0,
                                    Real &rho, Real &p, Real &vx, Real &vy, Real &vz,
                                    Real &alpha, Real &bx, Real &by, Real &bz,
                                    Real &psi4) {
-  Real r = sqrt(SQR(x1) + SQR(x2) + SQR(x3));
-  Real s = sqrt(SQR(x1) + SQR(x2));
-  Real theta = atan2(s, x3);
+  // Star center offset (default (0,0,0), an exact no-op) -- rotation axis stays
+  // parallel to grid-z, only translated, not tilted.
+  Real r = sqrt(SQR(x1-x0) + SQR(x2-y0) + SQR(x3-z0));
+  Real s = sqrt(SQR(x1-x0) + SQR(x2-y0));
+  Real theta = atan2(s, x3-z0);
 
   if (r > xns_star.rmax()) {
     rho = dfloor;
@@ -99,12 +105,12 @@ static void XNSInterpToADMAndPrim(const xns::XNSRotator &xns_star, Real dfloor,
     // vector fields in flat/conformally-flat 3-space (CFC's spatial metric is
     // conformally flat), so the Cartesian transform is the exact flat-space
     // identity for a pure-azimuthal coordinate vector: V^i d_i = V^phi d_phi =
-    // V^phi*(-y d_x + x d_y).
-    vx = -vphi*x2;
-    vy = vphi*x1;
+    // V^phi*(-y d_x + x d_y) -- y,x here measured from the star's own center.
+    vx = -vphi*(x2-y0);
+    vy = vphi*(x1-x0);
     vz = 0.0;
-    bx = -betaphi*x2;
-    by = betaphi*x1;
+    bx = -betaphi*(x2-y0);
+    by = betaphi*(x1-x0);
     bz = 0.0;
 
     // vx,vy,vz above are the Eulerian-observer 3-velocity v^i (coordinate basis).
@@ -130,9 +136,12 @@ static void XNSInterpToADMAndPrim(const xns::XNSRotator &xns_star, Real dfloor,
 void SetupXNSRotStar(ParameterInput *pin, Mesh *pmy_mesh_) {
   Real dfloor = pin->GetOrAddReal("mhd", "dfloor", (FLT_MIN));
   Real pfloor = pin->GetOrAddReal("mhd", "pfloor", (FLT_MIN));
+  Real x0 = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+  Real y0 = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
+  Real z0 = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
-  pxns_params = new XNSStarParams(xns::XNSRotator(pin), dfloor, pfloor);
+  pxns_params = new XNSStarParams(xns::XNSRotator(pin), dfloor, pfloor, x0, y0, z0);
 
   auto &w0_ = pmbp->pmhd->w0;
   auto &adm = pmbp->padm->adm;
@@ -151,6 +160,9 @@ void SetupXNSRotStar(ParameterInput *pin, Mesh *pmy_mesh_) {
   auto &xns_star = pxns_params->xns_star;
   auto &dfloor_ = pxns_params->dfloor;
   auto &pfloor_ = pxns_params->pfloor;
+  auto &x0_ = pxns_params->x0;
+  auto &y0_ = pxns_params->y0;
+  auto &z0_ = pxns_params->z0;
 
   par_for("pgen_xns_rotstar", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -167,7 +179,7 @@ void SetupXNSRotStar(ParameterInput *pin, Mesh *pmy_mesh_) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     Real rho, p, vx, vy, vz, alpha, bx, by, bz, psi4;
-    XNSInterpToADMAndPrim(xns_star, dfloor_, pfloor_, x1v, x2v, x3v,
+    XNSInterpToADMAndPrim(xns_star, dfloor_, pfloor_, x1v, x2v, x3v, x0_, y0_, z0_,
                           rho, p, vx, vy, vz, alpha, bx, by, bz, psi4);
 
     w0_(m,IDN,k,j,i) = rho;
@@ -214,7 +226,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) {
     Real dfloor = pin->GetOrAddReal("mhd", "dfloor", (FLT_MIN));
     Real pfloor = pin->GetOrAddReal("mhd", "pfloor", (FLT_MIN));
-    pxns_params = new XNSStarParams(xns::XNSRotator(pin), dfloor, pfloor);
+    Real x0 = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+    Real y0 = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
+    Real z0 = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
+    pxns_params = new XNSStarParams(xns::XNSRotator(pin), dfloor, pfloor, x0, y0, z0);
     return;
   }
 
@@ -248,6 +263,9 @@ void SetADMVariablesToXNS(MeshBlockPack *pmbp) {
   auto &xns_star = pxns_params->xns_star;
   auto &dfloor_ = pxns_params->dfloor;
   auto &pfloor_ = pxns_params->pfloor;
+  auto &x0_ = pxns_params->x0;
+  auto &y0_ = pxns_params->y0;
+  auto &z0_ = pxns_params->z0;
 
   par_for("update_adm_vars_xns", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -264,7 +282,7 @@ void SetADMVariablesToXNS(MeshBlockPack *pmbp) {
     Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
 
     Real rho, p, vx, vy, vz, alpha, bx, by, bz, psi4;
-    XNSInterpToADMAndPrim(xns_star, dfloor_, pfloor_, x1v, x2v, x3v,
+    XNSInterpToADMAndPrim(xns_star, dfloor_, pfloor_, x1v, x2v, x3v, x0_, y0_, z0_,
                           rho, p, vx, vy, vz, alpha, bx, by, bz, psi4);
 
     adm.alpha(m,k,j,i) = alpha;

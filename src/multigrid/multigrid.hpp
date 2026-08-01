@@ -814,7 +814,7 @@ Real EvalMultipolePhi(Real x, Real y, Real z,
   Real x2 = x*x, y2 = y*y, z2 = z*z;
   Real xy = x*y, yz = y*z, zx = z*x;
   Real r2 = x2 + y2 + z2;
-  Real ir2 = 1.0/r2, ir1 = Kokkos::sqrt(ir2);
+  Real ir2 = 1.0/(r2+1.0e-30), ir1 = Kokkos::sqrt(ir2);
   Real ir3 = ir2*ir1, ir5 = ir3*ir2;
   Real hx2my2 = 0.5*(x2-y2);
   Real phis = ir1*mpc[0]

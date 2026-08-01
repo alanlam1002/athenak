@@ -6933,3 +6933,181 @@ src/cfc/
       fix for the bug above and that this item's own new code is a true
       no-op when `puncture_enabled=false`, matching item 45's own strict bar
       for this same fixture.
+
+50. **(2026-08-01) Off-center BU8 (rotating star) stability test -- validates
+    items 45/47's outer-BC recentering against a star with genuine,
+    everywhere-nonzero momentum for the first time, with AMR kept (following
+    the star) rather than dropped. Off-center support added to
+    `xns_rotstar.cpp`. Uncovered and fixed a real, pre-existing latent bug
+    in `cfc_puncture.hpp`, unrelated to AMR/octets/multipole recentering.**
+
+    - **Why this test**: items 46/48's off-center TOV star only ever
+      exercised item 47's `X^i`/`beta^i` recentering via an artificial
+      `v_pert` kick on top of an otherwise-static star (`S_i=0` identically
+      for an unmagnetized TOV star). `cfc_bu8_stability.athinput` (BU8, a
+      uniformly rotating neutron star) has real angular momentum everywhere
+      from `t=0`, but had only ever been run centered at the origin with
+      `puncture_enabled=false`. This test moves BU8 off-center from a BH
+      puncture fixed at the origin, and -- per explicit user decision --
+      keeps the existing static-AMR refined region, moved to follow the star
+      to its new location, rather than dropping AMR as the TOV tests did.
+      This also newly exercises `puncture_enabled=true` combined with real
+      AMR/octet refinement for the first time (item 49's own AMR validation
+      used `puncture_enabled=false`).
+    - **`xns_rotstar.cpp` off-center support**: mirrors `dyngr_tov.cpp`'s own
+      pattern (items 46/48), adapted for two differences specific to a
+      rotating star: (a) `theta` (not just `r`) must shift, since the
+      tabulated XNS equilibrium's surface radius `R_surf(theta)` depends on
+      polar angle; (b) both the velocity **and** shift-vector (`beta^i`)
+      numerators must shift (`vx=-vphi*(x2-y0)`, etc.), since BU8's own
+      shift is genuinely nonzero (unlike static TOV, always exactly 0).
+      `XNSStarParams` gained `x0,y0,z0`; `XNSInterpToADMAndPrim` gained
+      matching parameters; `SetupXNSRotStar`/`UserProblem`'s restart branch
+      read new `<problem> star_center_x1/2/3` keys (default `0.0`, bit-for-bit
+      no-op when unset). One real difference from `dyngr_tov.cpp`: the
+      AMR-regrid callback `SetADMVariablesToXNS(MeshBlockPack*)` has no
+      `pin` argument (fixed by the engine's callback signature), so the
+      offset is stashed in `XNSStarParams` (constructed where `pin` *is*
+      available) rather than re-read from `pin` there.
+    - **New fixture**: `inputs/dyn_grmhd/cfc_bu8_offcenter.athinput` --
+      domain widened to `x1 in [-15,105]` (was `[-45,45]`, star only shifts
+      along x1, matching the TOV tests' own one-axis convention),
+      `refined_region1` translated `+60` in x1 to follow the star to
+      `star_center_x1=60` (~5.3x `R_eq`), `puncture_enabled=true,
+      puncture_mass=1.0` (now *less* than BU8's own Komar mass, ~1.69 --
+      unlike the TOV tests where the puncture dominated a near-vacuum star).
+    - **The crash and the (mostly wrong) initial hypothesis**: the cluster
+      run of the new fixture crashed immediately --
+      `CFC::InitializeMetric iteration 0: max|delta psi| = -1.79769e+308`
+      (a never-updated `-DBL_MAX` reduction-identity sentinel), cascading
+      into `NANS_IN_CONS`. A `mesh_structure.dat` dump (`athena -m`, which
+      quits right after `BuildTreeFromScratch` -- confirmed via
+      `main.cpp:301-310` -- so it's cheap/safe to rerun) showed AMR's
+      proper-nesting buffer requirement puts **refined (non-root) octets
+      directly on the physical domain boundary on 5 of 6 faces** (this
+      fixture's specific domain construction happens to put a root
+      MeshBlock symmetric about the origin in all three directions, leaving
+      only one root MeshBlock of buffer on 5 sides) -- contradicting this
+      item's own first-draft comment claiming the refined region was
+      interior-only. Combined with `puncture_enabled=true` (nonzero
+      `mpo_`/`robin_center_`), this looked like the first-ever combination
+      of a boundary-touching refined octet with nonzero recentering origin
+      -- a plausible, but ultimately not the actual, culprit.
+    - **Investigation, in order, with what was ruled out and why**: (read-only
+      code tracing first) confirmed `mg_multipole`/`EvalMultipolePhi` is used
+      by exactly one driver codebase-wide (`MGCFCVectorPoissonDriver`,
+      `X^i`/`beta^i`) -- psi/alpha always use `mg_robin`, never multipole; the
+      octet coordinate arithmetic in `ApplyPhysicalBoundariesOctet`
+      (`multigrid_driver.cpp:1796-2114`) was hand-traced for arbitrary
+      levels/aspect ratios and found self-consistent, no bug there. A
+      **falsifiable experiment** (temporary guard: substitute `0.0` for any
+      non-finite `u_a`/reflected-reference read in all 12 `mg_robin`/
+      `mg_multipole` face branches, local debug build only, reverted after)
+      showed the `SolveIterative` defect trajectory was **bit-for-bit
+      identical** with and without the guard -- since the guard is applied
+      uniformly everywhere this code path could matter, this **falsifies**
+      the "corner-touching-octet boundary read" theory as the source of the
+      corruption (real gap, worth fixing on its own merits some day, but not
+      this bug). A coefficient-load NaN scan (`DebugScanCoeffForNaN`,
+      temporary, `mg_cfc_conformal_factor.cpp`, removed after use) then
+      caught the actual signal: `coeff_` channel 2 (`psi0`) is `inf` at a
+      MeshBlock's own **coarsest internal multigrid level** (`lev=0` of that
+      block's own per-block V-cycle hierarchy, not an AMR level) -- channel
+      3 (`Ahat0^2`) stayed finite, matching the formula difference below.
+    - **Root cause, confirmed by direct derivation**:
+      `MGCFCConformalFactor::FillPunctureCoefficients`
+      (`mg_cfc_conformal_factor.cpp:396-419`, item 4/49's per-level analytic
+      background fill) evaluates the trumpet background at *every* internal
+      multigrid level of each MeshBlock's own hierarchy. At level `lev`, the
+      effective cell size is `dx=(x1max-x1min)/ncx` with
+      `ncx = indcs_.nx1 >> (nlevel_-1-lev)` -- at the coarsest level (`ncx=1`
+      for a 16-cell MeshBlock, confirmed by the pre-existing "root grid
+      cannot be reduced to a single cell" warning), the "cell center"
+      formula becomes the **exact geometric center of the MeshBlock**. This
+      off-center BU8 domain has a root MeshBlock spanning exactly `[-15,15]`
+      in all three directions -- centered exactly on the origin, where the
+      BH puncture sits. At that MeshBlock's coarsest internal level,
+      `x1v=x2v=x3v=0` exactly, so `r=0` exactly. In `cfc_puncture.hpp:117`
+      (`TrumpetBackground`), `psi = sqrt(r_sch/r)` has **no epsilon guard on
+      `r`** (unlike `TrumpetIsoToAreal`, `cfc_puncture.hpp:76-78`, which
+      already special-cases `chi_cell<=kTrumpetThroat*tol` explicitly) --
+      `r_sch` finite, `r=0` exactly gives `psi0=inf`.
+      **Why this never surfaced before**: item 49's own AMR validation used
+      `puncture_enabled=false` (`FillPunctureCoefficients` never runs at
+      all), and every prior `puncture_enabled=true` fixture (the TOV tests)
+      places the puncture at a domain corner or exact MeshBlock *boundary*
+      (confirmed by direct arithmetic on each fixture's `<mesh>`/
+      `<meshblock>` block), never at a MeshBlock's own center -- this
+      domain does, by coincidence of its specific construction (root block
+      0 in x1 spans `[-15,15]`; the middle root block in x2/x3 also spans
+      `[-15,15]`). A genuine, narrow, pre-existing latent bug in
+      already-shipped code, just never exercised before.
+    - **Fixes** (three, found/applied in the course of this investigation):
+      (1) `CFC::InitializeMetric`'s convergence check (`cfc.cpp:639-649`,
+      the `Kokkos::parallel_reduce` computing `dpsi`) relied on
+      `Kokkos::fmax` to detect a bad iterate -- but `fmax` (like IEEE754
+      `fmax`) silently ignores a NaN operand and returns the other one, so a
+      fully-NaN `delta_psi` left `dpsi` at the reducer's own untouched
+      identity value (`-DBL_MAX`) instead of signaling non-convergence,
+      which then **passed** the `dpsi < cfc_init_tol_` check and falsely
+      declared convergence after a single already-poisoned pass. Fixed by
+      mapping any non-finite per-cell diff to `std::numeric_limits<Real>::
+      max()` before the `fmax` reduction, so a poisoned iterate always fails
+      the tolerance check and falls through to the existing "did not
+      converge" warning path -- a real, independently-worth-fixing bug,
+      confirmed by rerunning with only this fix: the sentinel changed from
+      `-1.79769e+308` (never updated) to `+1.79769e+308` (correctly
+      detected, and the outer Picard loop then correctly continued
+      iterating instead of stopping after one pass). (2)
+      `EvalMultipolePhi`'s `Real ir2 = 1.0/r2;` (`multigrid.hpp:817`) had no
+      epsilon guard, unlike the neighboring `mg_robin` branches'
+      `+1.0e-30` convention -- added the same guard for consistency/
+      robustness (not confirmed as this bug's trigger, but a real asymmetry
+      worth closing). (3) **the actual fix**: `cfc_puncture.hpp:117`'s
+      `r = sqrt(x1*x1+x2*x2+x3*x3)` epsilon-guarded to
+      `sqrt(x1*x1+x2*x2+x3*x3+1.0e-30)`, guarding the single source of `r`
+      that feeds every downstream division (`psi0`, `dpsi0`, `dalpha0`, and
+      `r2` for `beta0`/`Aij0`) rather than guarding each division site
+      individually.
+    - **Verified**: (1) local Serial reduced-depth repro (`num_levels=2`
+      instead of 5, same domain/box/`puncture_enabled` geometry, confirmed
+      via another `athena -m` mesh dump to reproduce the identical
+      boundary-contact pattern at 281 MeshBlocks instead of 5769 -- the
+      full-depth fixture is too slow to solve on a single serial thread,
+      the cluster run uses 640 threads total) -- with fix (3) in place,
+      zero NaN/Inf scan hits anywhere, and `max|delta psi|` converges
+      monotonically from `0.26` to `2.6e-11` by iteration 10, then evolution
+      proceeds normally. (2) full cluster run (32 ranks) of the actual,
+      unmodified `cfc_bu8_offcenter.athinput` fixture: identical clean
+      convergence pattern (`0.26 -> ... -> 1.9e-11` by iteration 10), no
+      crash, 2 real physics cycles processed successfully. (3) regression:
+      a 32-rank cluster run of the original, unmodified
+      `cfc_bu8_stability.athinput` (`puncture_enabled=false`, `nlim=1`,
+      matching item 49's own precedent) came back **exactly bit-for-bit
+      identical** (stdout content and the `.mhd.hst` history file) to a
+      pristine pre-this-item build -- confirms all three fixes are a true
+      no-op for this fixture, consistent with the direct-inspection
+      argument that each fix's changed code path is either never called
+      (`TrumpetBackground`, gated on `puncture_enabled_`), numerically
+      negligible to machine precision (`EvalMultipolePhi`'s `1e-30` guard,
+      never near-zero `r2` in this geometry), or branch-not-taken (the
+      `InitializeMetric` NaN guard, never non-finite in a working fixture).
+      The other existing `puncture_enabled=true` fixtures
+      (`cfc_puncture_vacuum{,_small}`, `cfc_puncture_offcenter_tov{,
+      _vpert}`) were confirmed unaffected by direct `<mesh>`/`<meshblock>`
+      arithmetic (puncture at a domain corner or exact MeshBlock boundary
+      in each, never a MeshBlock center) rather than by empirical rerun.
+    - **Operational lesson, unrelated to correctness**: this project's
+      established regression-check convention for large (5760-MeshBlock)
+      fixtures like `cfc_bu8_stability.athinput` is a **32-rank cluster
+      job** (item 49's own precedent), not bare Serial -- attempting a bare
+      Serial rerun of this fixture on the shared login node ballooned to
+      ~228GB RSS and fully exhausted the node's swap before completing even
+      one cycle (vs. ~38 min/lean memory for the equivalent 32-rank cluster
+      job), likely because Serial mode holds all 5760 MeshBlocks' full
+      per-block multigrid hierarchies (three separate drivers: psi, lapse,
+      X^i/beta^i) in one process instead of splitting them across ranks.
+      Killed proactively to protect the shared, multi-user node. Lesson:
+      **do not rerun large multi-thousand-MeshBlock fixtures in bare Serial
+      on a shared node** -- use a distributed cluster job even for a quick
+      regression check.

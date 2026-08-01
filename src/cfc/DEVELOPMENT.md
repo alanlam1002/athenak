@@ -289,6 +289,20 @@ its Riemann solver and conserved-to-primitive conversion.
 ## the pre-existing, out-of-scope `Multigrid::~Multigrid` teardown bug
 ## (already noted in item 46) that turned out not to be a new regression --
 ## see item 48 for the full investigation.
+##
+## Status update (2026-08-01): a different thread than items 45-48's outer-BC
+## recentering -- closes `CFC_PUNCTURE_TDE_PLAN.md` Sec 3.8/Sec 5 Phase A item
+## 4's own lapse-side deferral (commit `120d8ea7`, back when item 4 was first
+## implemented for `psi` only). Item 49 gives `MGCFCLapse`/`MGCFCLapseDriver`
+## the same per-level analytic background treatment `psi` already had --
+## splits the old fused `K(x)`/`S` (`ncoeff_=2`) into six separate channels
+## and moves the combine into a new shared `LapseReactionRHS()`, called fresh
+## by the smoother/defect/FAS-RHS kernels at every level, mirroring
+## `ConformalFactorRHS`'s existing role for `psi`. Also documents a real bug
+## caught during cluster validation (a `MultigridDriver`-level `ncoeff_`
+## left stale on the driver subclass while the `Multigrid`-level one on the
+## per-block subclass was updated, corrupting octet coefficient storage) --
+## see item 49 for the full writeup.
 
 All classes, member variables, and function signatures exist and the module builds
 into the project (registered in `src/CMakeLists.txt`, wired into `MeshBlockPack` and
@@ -2402,7 +2416,10 @@ src/cfc/
       `for_shift=true` branch and `BuildShiftSource` (`cfc.cpp`, `alpha*psi^-6`
       for the eq. 75 source), and `MGCFCLapseDriver::LoadReactionCoefficient`
       (`mg_cfc_lapse.cpp`/`.hpp`, `K(x) = 2pi(Ũ+2S̃)psi^-2 + (7/8)Ahat^2 psi^-8`
-      needs the physical `psi`). `RescaleMatterSources` needed no change --
+      needs the physical `psi`) -- **superseded by item 49**: `LoadReactionCoefficient`
+      no longer exists, split into `LoadMatterCoefficients`/`LoadPunctureCoefficients`,
+      with `K(x)`/`S` now recombined per level by `LapseReactionRHS()` instead of
+      fused once here; see item 49. `RescaleMatterSources` needed no change --
       it already avoids `psi` entirely via the `psi^6 == sqrt(detg)` identity
       (item from the previous simplification pass). `MGCFCConformalFactor`'s
       own solve needed no change either -- it never took an external `psi`
@@ -6812,3 +6829,107 @@ src/cfc/
       from this item. A Debug build (Kokkos bounds-checking enabled)
       rerun produced no bounds-check assertion, consistent with this
       conclusion rather than a real out-of-bounds access in the new code.
+
+49. **(2026-08-01) Lapse solver per-level analytic puncture coefficients,
+    closing `CFC_PUNCTURE_TDE_PLAN.md` Sec 3.8/Sec 5 Phase A item 4's own
+    lapse-side deferral.** Item 4 (commit `120d8ea7`) gave `psi` a way to
+    overwrite its background `coeff_` channels (`psi0`/`Ahat0^2`) at every
+    multigrid level with a fresh analytic trumpet evaluation, instead of
+    letting the generic `RestrictCoefficients()` plain-average them down
+    from the finest grid (which smooths `psi0`'s sharp near-puncture peak
+    and degrades the coarse-grid operator right where the regularization
+    work matters most). That commit's own message explicitly deferred the
+    lapse solver's half: `K(x)`/`S` were fused into two scalars, computed
+    once at the finest level from the already-converged `psi`/`Ahat^2` and
+    matter, with only the fused pair then restricted to coarser levels --
+    "a different architecture" from `psi`'s raw-channel swap, since there
+    was no separable background channel left to overwrite. Note: this is
+    the first item in this file's numbered log to touch the
+    puncture-regularization machinery's own internals directly -- items
+    45-48 only ever layered outer-BC recentering on top of it, and the
+    original psi/lapse/shift regularization work (commits `2d9dd8cb`
+    through `738fbc78`) was never itself logged here, only in those
+    commits' own messages.
+    - **Fix**: generalized `psi`'s pattern to the lapse solver. `MGCFCLapse`'s
+      `ncoeff_` grew from 2 (fused `K(x)`/`S`) to 6 -- channels 0-2 are
+      matter-derived (`Utilde+2*Stilde`, `delta_psi`, `DeltaAhat^2`, restrict
+      normally, same treatment matter always gets) and channels 3-5 are
+      analytic-background (`psi0`, `Ahat0^2`, `alpha0*psi0`, overwritten per
+      level by a new `MGCFCLapse::FillPunctureCoefficients()` -- near-identical
+      to `MGCFCConformalFactor`'s own, except this version keeps `alpha0`
+      [which the psi-side version discards] to also build `alpha0*psi0`).
+      `K(x)`/`S` are no longer standing channels -- a new shared
+      `LapseReactionRHS()` (`mg_cfc_lapse.cpp`, alongside the existing
+      `LapseReactionCoeff`) recombines all six per point, per level, reused
+      by `SmoothPack`/`CalculateDefectPack`/`CalculateFASRHSPack` *and* their
+      Octet counterparts -- exactly the role `ConformalFactorRHS()` already
+      plays for `psi`'s three analogous kernels. The old fused
+      `LoadReactionCoefficient` (superseding item 13's own citation of it)
+      is split into `LoadMatterCoefficients`/`LoadPunctureCoefficients`,
+      mirroring `MGCFCConformalFactorDriver::LoadNonlinearCoefficient`/
+      `LoadPunctureCoefficients` exactly -- both still call
+      `ReallocateForAMR()` first and write only the finest level, same AMR
+      pattern item 33 already established for this family of `Load*`
+      functions. `MGCFCLapseDriver` gained its own `puncture_enabled_`/
+      `puncture_mass_` (same `<cfc>` keys `MGCFCConformalFactorDriver` already
+      reads), and `Solve()` gained the matching
+      `if (puncture_enabled_) { ...FillPunctureCoefficients... }` block, in
+      the same relative position as `psi`'s.
+    - **An earlier draft of this file's own header comment argued
+      recombining raw ingredients per level would be "FAS-inconsistent"** --
+      reconsidered and corrected in the comment itself: `MGCFCConformalFactor`
+      already does exactly this (restrict `Utilde`/`DeltaAhat^2`/`psi0`/
+      `Ahat0^2` separately, recombine via `ConformalFactorRHS()` fresh at
+      every level) for an equation that IS genuinely nonlinear in its own
+      unknown, so applying the identical pattern to an equation merely
+      affine in `u` (this one) cannot introduce a new inconsistency.
+    - **A real bug found during cluster validation, distinct from item 12's
+      two `ncoeff_`/`coeff_` findings** (those were a base-class zero-init
+      gap and an AMR-resize gap, both in shared `Multigrid`/`MultigridDriver`
+      code): `Multigrid` and `MultigridDriver` each declare their *own*,
+      separately-named `ncoeff_` member (confirmed: `mg_cfc_lapse.cpp`'s
+      `MGCFCLapse::MGCFCLapse` ctor sets the `Multigrid`-level one; a wholly
+      separate assignment in `MGCFCLapseDriver::MGCFCLapseDriver` sets the
+      `MultigridDriver`-level one, which is what actually drives
+      `octet_coeff_stride_`/`MGOctet::Init`'s per-octet `Coeff()` allocation
+      size). This item's first draft bumped only the former, to 6, and left
+      the driver's own copy at its old value, 2 -- octet coefficient buffers
+      stayed sized for 2 channels while `SmoothOctet`/`CalculateDefectOctet`/
+      `CalculateFASRHSOctet`'s literal `oct.Coeff(2..5,...)` reads walked
+      past the end of that allocation into a neighboring octet's memory.
+      Silent and harmless on every fixture without real AMR (root-grid-only
+      paths use the correct `Multigrid`-level `ncoeff_=6` throughout) --
+      caught only when `cfc_bu8_stability.athinput`'s genuine octet
+      refinement exercised the corrupted path, producing `NANS_IN_CONS`
+      cascades in the hydro C2P within one cycle. Fixed by setting
+      `MGCFCLapseDriver`'s own `ncoeff_ = 6` too, restoring the same 4-and-4
+      (there, 6-and-6 here) consistency `MGCFCConformalFactorDriver`/
+      `MGCFCConformalFactor` already had. **Lesson for future `ncoeff_`
+      changes to either solver**: the two members are not the same variable
+      and must be bumped together -- nothing enforces this at compile time.
+    - **Verified**: (1) local Serial `puncture_enabled=false` regression
+      (`whisky_tov.athinput`) bit-for-bit identical, re-confirmed after the
+      `ncoeff_` fix above. (2) an ephemeral debug hook (reverted before
+      commit) confirmed the coarsest level's `psi0`/`Ahat0^2`/`alpha0*psi0`
+      match a hand-evaluated `cfc::TrumpetBackground` call at that level's
+      own cell coordinates to full precision. (3) a quantitative before/after
+      comparison of the lapse solve's own V-cycle defect trajectory on the
+      existing near-vacuum puncture fixtures found small, real, expected
+      differences (5th-6th significant digit) but no dramatic
+      iteration-count win -- both builds plateau at the same 40-iteration
+      cap for a reason evidently unrelated to coarse-level background-channel
+      accuracy at these fixtures' modest resolutions; an honest finding, not
+      a red flag (item 4's own original psi-side commit made no quantitative
+      claim either, only a mechanism/regression case). (4) dynamical
+      stability reruns of `cfc_puncture_offcenter_tov.athinput`/
+      `cfc_puncture_offcenter_tov_vpert.athinput` (local and cluster) remain
+      stable (smooth `rho-max` relaxation/pulsation-damping, flat
+      `alpha-min`), consistent with pre-fix behavior. (5) a 16-node/32-rank
+      cluster regression on `cfc_bu8_stability.athinput`
+      (`puncture_enabled=false`, real AMR, `xns_rotstar` pgen, `nlim=1`
+      forcing one real evolved cycle through the actual per-stage solve
+      pipeline) came back **exactly bit-for-bit identical** to the
+      pre-this-item baseline after the `ncoeff_` fix -- confirms both the
+      fix for the bug above and that this item's own new code is a true
+      no-op when `puncture_enabled=false`, matching item 45's own strict bar
+      for this same fixture.

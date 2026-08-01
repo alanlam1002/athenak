@@ -50,12 +50,25 @@
 //! the pre-regularization formula -- the "Newton" step is still an exact one-step
 //! Gauss-Seidel solve.
 //!
-//! K(x) and S are each precomputed ONCE, at the finest level, from
-//! psi/Ahat^2/psi0/Ahat0^2/Utilde+2*Stilde (LoadReactionCoefficient below); only
-//! the two combined scalars are then carried through coeff_/RestrictCoefficients()
-//! to coarser levels (ncoeff_=2) -- restricting the raw ingredients separately and
-//! recombining at each level would be FAS-inconsistent (restrict(f(a,b)) !=
-//! f(restrict(a), restrict(b)) for K(x)/S's nonlinear psi^-2/psi^-8 combinations).
+//! CFC_PUNCTURE_TDE_PLAN.md Sec 3.8/Sec 5 Phase A item 4 (lapse-side follow-up,
+//! closed here): K(x)/S were originally precomputed ONCE, at the finest level, as
+//! two fused scalars, with only those two combined values then restricted to
+//! coarser levels -- fine for the equation's own linearity in u, but the fused
+//! scalars themselves inherit psi0/Ahat0^2's sharp near-puncture profile, and
+//! plain 8-cell-averaging that fused profile down to coarse levels is exactly the
+//! accuracy loss item 4 already fixed for the psi solver's own coeff_ channels.
+//! An earlier version of this comment argued recombining raw ingredients at each
+//! level would be "FAS-inconsistent" -- reconsidered: MGCFCConformalFactor already
+//! does precisely this (restrict Utilde/DeltaAhat^2/psi0/Ahat0^2 separately,
+//! recombine via ConformalFactorRHS() fresh at every level) for an equation that
+//! IS genuinely nonlinear in its own unknown, so the same pattern applied here
+//! (to an equation merely affine in u) cannot introduce a NEW inconsistency.
+//! K(x)/S are now recombined fresh, per point, per level, by LapseReactionRHS()
+//! from six separate coeff_ channels (ncoeff_=6): matter-derived Utilde+2*Stilde/
+//! delta_psi/DeltaAhat^2 (channels 0-2, restrict normally) and analytic-background
+//! psi0/Ahat0^2/alpha0*psi0 (channels 3-5, overwritten per level by
+//! FillPunctureCoefficients() below when <cfc> puncture_enabled, exactly mirroring
+//! MGCFCConformalFactor::FillPunctureCoefficients).
 //!
 //! NOTE: bit-for-bit reduction to the pre-regularization code is NOT expected in
 //! the puncture_enabled=false case, even though S reduces to exactly K(x) there --
@@ -70,6 +83,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -79,6 +93,7 @@
 #include "mesh/mesh.hpp"
 #include "parameter_input.hpp"
 #include "multigrid/multigrid.hpp"
+#include "cfc_puncture.hpp"
 #include "mg_cfc_lapse.hpp"
 
 namespace {
@@ -91,6 +106,38 @@ Real LapseReactionCoeff(Real u_plus_2s_tilde, Real psi_known, Real ahat_sq) {
   Real psi_inv2 = 1.0 / (psi_known * psi_known);
   Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
   return 2.0*M_PI*u_plus_2s_tilde*psi_inv2 + 0.875*ahat_sq*psi_inv8;
+}
+
+// K(x)/S combine, from the six per-point coeff_ channel values (Sec 3.8/Sec 5
+// Phase A item 4 lapse-side follow-up) -- reconstructs psi_known = delta_psi+psi0
+// and the total ahat_sq = delta_a_sq+a0_sq, then runs the exact same
+// LapseReactionCoeff() call plus the Sec 3.7 cancellation-safe reg8(x) S-formula
+// this file's header comment derives, previously computed once at load time
+// (LoadReactionCoefficient), now called fresh per point per level so it can use
+// that level's own analytically-refreshed psi0/a0_sq/v0 (see
+// MGCFCLapse::FillPunctureCoefficients). Shared by SmoothPack/CalculateDefectPack/
+// CalculateFASRHSPack and their Octet counterparts -- exactly the role
+// ConformalFactorRHS() plays for MGCFCConformalFactor's analogous kernels.
+KOKKOS_INLINE_FUNCTION
+void LapseReactionRHS(Real u2s, Real delta_psi, Real delta_a_sq, Real psi0,
+                       Real a0_sq, Real v0, Real *kx, Real *s) {
+  Real psi_known = delta_psi + psi0;
+  Real ahat_sq = delta_a_sq + a0_sq;
+  *kx = LapseReactionCoeff(u2s, psi_known, ahat_sq);
+
+  Real psi_inv2 = 1.0 / (psi_known * psi_known);
+  Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
+  Real psi0_inv = 1.0 / psi0;
+  Real x = delta_psi * psi0_inv;
+  Real onepx_inv = psi0 * (1.0 / psi_known);   // = 1/(1+x) = psi0/psi
+  Real onepx_inv2 = onepx_inv * onepx_inv;
+  Real onepx_inv8 = onepx_inv2*onepx_inv2*onepx_inv2*onepx_inv2;
+  Real psi0_inv2 = psi0_inv * psi0_inv;
+  Real psi0_inv8 = psi0_inv2*psi0_inv2*psi0_inv2*psi0_inv2;
+  Real p8 = 8.0 + x*(28.0 + x*(56.0 + x*(70.0 + x*(56.0 + x*(28.0 +
+                x*(8.0 + x))))));
+  Real reg8 = psi0_inv8 * x * p8 * onepx_inv8;
+  *s = v0 * (2.0*M_PI*u2s*psi_inv2 + 0.875*delta_a_sq*psi_inv8 - 0.875*a0_sq*reg8);
 }
 
 template <typename ViewType>
@@ -117,9 +164,14 @@ MGCFCLapse::MGCFCLapse(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
     : Multigrid(pmd, pmbp, nghost, on_host) {
   // See MGCFCConformalFactor's ctor -- coeff_/ncoeff_ are never allocated by the
   // base Multigrid ctor, so we do it ourselves.
-  ncoeff_ = 2;  // channel 0 = K(x), channel 1 = S (Sec 3.7 puncture
-                // regularization source term), both precomputed at the
-                // finest level
+  //
+  // channel 0 = Utilde+2*Stilde, channel 1 = delta_psi, channel 2 = DeltaAhat^2
+  // (matter-derived, restrict normally); channel 3 = psi0, channel 4 = Ahat0^2,
+  // channel 5 = alpha0*psi0 (analytic background, overwritten per level by
+  // FillPunctureCoefficients() when puncture_enabled -- Sec 3.8/Sec 5 Phase A
+  // item 4 lapse-side follow-up). K(x)/S are no longer standing channels of their
+  // own -- LapseReactionRHS() recombines these six fresh, per point, per level.
+  ncoeff_ = 6;
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     int ncx = (indcs_.nx1>>ll)+2*ngh_;
@@ -153,8 +205,10 @@ void MGCFCLapse::SmoothPack(int color) {
     Real dx2 = dx * dx;
     const int c = (c0 + k + j) & 1;
     for (int i = is + c; i <= ie; i += 2) {
-      Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
-      Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
+      Real kx, s;
+      LapseReactionRHS(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i),
+                        coeff(m,3,k,j,i), coeff(m,4,k,j,i), coeff(m,5,k,j,i),
+                        &kx, &s);
       Real lap = LapseLap(u, m, k, j, i);
       Real u_old = u(m,0,k,j,i);
       Real fval = lap + dx2*(kx*u_old + s) - dx2*src(m,0,k,j,i);
@@ -186,8 +240,10 @@ void MGCFCLapse::CalculateDefectPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
-    Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
+    Real kx, s;
+    LapseReactionRHS(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i),
+                      coeff(m,3,k,j,i), coeff(m,4,k,j,i), coeff(m,5,k,j,i),
+                      &kx, &s);
     Real lap = LapseLap(u, m, k, j, i);
     // def = (RHS(u) + src) - lap(u)*idx2, RHS(u) = -(kx*u+s)
     // (F(u) = lap(u) - dx^2*(RHS(u) + src)).
@@ -212,24 +268,131 @@ void MGCFCLapse::CalculateFASRHSPack() {
     Real dx = (rlev <= 0) ? brdx(m) * static_cast<Real>(1<<(-rlev))
                           : brdx(m) / static_cast<Real>(1<<rlev);
     Real idx2 = 1.0 / (dx*dx);
-    Real kx = coeff(m,0,k,j,i);  // K(x), precomputed at load time
-    Real s = coeff(m,1,k,j,i);   // S, Sec 3.7 regularization source term
+    Real kx, s;
+    LapseReactionRHS(coeff(m,0,k,j,i), coeff(m,1,k,j,i), coeff(m,2,k,j,i),
+                      coeff(m,3,k,j,i), coeff(m,4,k,j,i), coeff(m,5,k,j,i),
+                      &kx, &s);
     Real lap = LapseLap(u, m, k, j, i);
     // src += lap(u)*idx2 - RHS(u) = lap(u)*idx2 + (kx*u+s).
     src(m,0,k,j,i) += lap*idx2 + (kx*u(m,0,k,j,i) + s);
   });
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void MGCFCLapse::FillPunctureCoefficients(Real m_bh)
+//! \brief overwrite coeff_ channels 3 (psi0)/4 (Ahat0^2)/5 (alpha0*psi0) at every
+//! internal level with a fresh analytic trumpet-background evaluation -- see this
+//! file's header comment and this method's own doc comment in mg_cfc_lapse.hpp.
+//! Near-identical to MGCFCConformalFactor::FillPunctureCoefficients, except this
+//! version also keeps alpha0 (which the psi-side version discards) to build
+//! channel 5.
+
+void MGCFCLapse::FillPunctureCoefficients(Real m_bh) {
+  int is = ngh_, js = ngh_, ks = ngh_;
+  int nmmb = nmmb_;
+
+  // See MGCFCConformalFactor::FillPunctureCoefficients's identical comment: build
+  // a tiny per-"m" physical-extent array so the per-cell loop below can read
+  // uniformly from blk_size regardless of whether this is a Pack or root object.
+  DualArray1D<RegionSize> blk_size;
+  Kokkos::realloc(blk_size, nmmb);
+  if (pmy_pack_ != nullptr) {
+    auto &mb_size = pmy_pack_->pmb->mb_size;
+    for (int m = 0; m < nmmb; ++m) { blk_size.h_view(m) = mb_size.h_view(m); }
+  } else {
+    blk_size.h_view(0) = pmy_mesh_->mesh_size;
+  }
+  blk_size.template modify<HostExeSpace>();
+  blk_size.template sync<DevExeSpace>();
+
+  for (int lev = 0; lev < nlevel_; ++lev) {
+    int ll = nlevel_ - 1 - lev;
+    int ncx = (indcs_.nx1 >> ll), ncy = (indcs_.nx2 >> ll), ncz = (indcs_.nx3 >> ll);
+    int ie = is + ncx - 1, je = js + ncy - 1, ke = ks + ncz - 1;
+    if (on_host_) {
+      auto cm_h = coeff_[lev].h_view;
+      auto blk_h = blk_size.h_view;
+      par_for("MGCFCLapse::FillPunctureCoefficients", HostExeSpace(),
+              0, nmmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        Real dx1 = (blk_h(m).x1max-blk_h(m).x1min)/static_cast<Real>(ncx);
+        Real dx2 = (blk_h(m).x2max-blk_h(m).x2min)/static_cast<Real>(ncy);
+        Real dx3 = (blk_h(m).x3max-blk_h(m).x3min)/static_cast<Real>(ncz);
+        Real x1v = blk_h(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
+        Real x2v = blk_h(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
+        Real x3v = blk_h(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+        Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
+        Real psi0, alpha0, beta0[3], aij0[6], a2;
+        cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
+                               beta0, aij0, &a2);
+        cm_h(m,3,k,j,i) = psi0;
+        cm_h(m,4,k,j,i) = a2;
+        cm_h(m,5,k,j,i) = alpha0*psi0;
+      });
+    } else {
+      auto cm_d = coeff_[lev].d_view;
+      auto blk_d = blk_size.d_view;
+      par_for("MGCFCLapse::FillPunctureCoefficients", DevExeSpace(),
+              0, nmmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        Real dx1 = (blk_d(m).x1max-blk_d(m).x1min)/static_cast<Real>(ncx);
+        Real dx2 = (blk_d(m).x2max-blk_d(m).x2min)/static_cast<Real>(ncy);
+        Real dx3 = (blk_d(m).x3max-blk_d(m).x3min)/static_cast<Real>(ncz);
+        Real x1v = blk_d(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
+        Real x2v = blk_d(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
+        Real x3v = blk_d(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+        Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
+        Real psi0, alpha0, beta0[3], aij0[6], a2;
+        cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
+                               beta0, aij0, &a2);
+        cm_d(m,3,k,j,i) = psi0;
+        cm_d(m,4,k,j,i) = a2;
+        cm_d(m,5,k,j,i) = alpha0*psi0;
+      });
+    }
+  }
+
+  if (std::getenv("CFC_DEBUG_LAPSE_PUNCTURE")) {
+    // Ephemeral mechanism check (Sec 5 Phase A item 4 lapse-side follow-up):
+    // confirm the coarsest level's psi0/Ahat0^2/alpha0*psi0 match a hand-evaluated
+    // cfc::TrumpetBackground call at that level's own cell-0 coordinates, to full
+    // precision -- proves the plumbing itself is correct, independent of any
+    // convergence-quality argument. Reverted before commit.
+    auto cm = Kokkos::create_mirror_view_and_copy(HostMemSpace(), coeff_[0].d_view);
+    int ll = nlevel_ - 1;
+    int ncx = (indcs_.nx1 >> ll), ncy = (indcs_.nx2 >> ll), ncz = (indcs_.nx3 >> ll);
+    auto blk_h = blk_size.h_view;
+    Real dx1 = (blk_h(0).x1max-blk_h(0).x1min)/static_cast<Real>(ncx);
+    Real dx2 = (blk_h(0).x2max-blk_h(0).x2min)/static_cast<Real>(ncy);
+    Real dx3 = (blk_h(0).x3max-blk_h(0).x3min)/static_cast<Real>(ncz);
+    Real x1v = blk_h(0).x1min + 0.5*dx1;
+    Real x2v = blk_h(0).x2min + 0.5*dx2;
+    Real x3v = blk_h(0).x3min + 0.5*dx3;
+    Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+    Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
+    Real psi0, alpha0, beta0[3], aij0[6], a2;
+    cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0, beta0, aij0, &a2);
+    printf("CFC debug lapse: coarsest-level (x1,x2,x3)=(%.6e,%.6e,%.6e) "
+           "coeff psi0=%.17e a0_sq=%.17e v0=%.17e | hand psi0=%.17e a0_sq=%.17e "
+           "v0=%.17e\n", x1v, x2v, x3v,
+           cm(0,3,ks,js,is), cm(0,4,ks,js,is), cm(0,5,ks,js,is),
+           psi0, a2, alpha0*psi0);
+  }
+}
+
 
 //----------------------------------------------------------------------------------------
 //! \fn MGCFCLapseDriver::MGCFCLapseDriver(...)
-//! \brief nvar_ = 1, ncoeff_ = 2 (K(x), S -- both precomputed at the finest level,
-//! see this file's header comment); mg_robin boundary conditions by default (Gmunu
-//! eq. 78, isolated/asymptotically-flat falloff).
+//! \brief nvar_ = 1, ncoeff_ = 6 (matter-derived Utilde+2*Stilde/delta_psi/
+//! DeltaAhat^2 at channels 0-2, analytic-background psi0/Ahat0^2/alpha0*psi0 at
+//! channels 3-5 -- see this file's header comment); mg_robin boundary conditions
+//! by default (Gmunu eq. 78, isolated/asymptotically-flat falloff).
 
 MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
-  ncoeff_ = 2;
+  ncoeff_ = 6;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
@@ -238,6 +401,11 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   // more smoothing per level than the base-class default of 1.
   npresmooth_ = pin->GetOrAddInteger("cfc", "mg_npresmooth", npresmooth_);
   npostsmooth_ = pin->GetOrAddInteger("cfc", "mg_npostsmooth", npostsmooth_);
+
+  // Sec 3.8/Sec 5 Phase A item 4 (lapse-side follow-up): same <cfc> keys
+  // MGCFCConformalFactorDriver's own constructor reads.
+  puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
+  puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
 
   // Outer (non-periodic, non-reflecting) faces default to BoundaryFlag::mg_robin --
   // see mg_cfc_conformal_factor.cpp's constructor comment for the full rationale
@@ -300,7 +468,8 @@ MGCFCLapseDriver::~MGCFCLapseDriver() {
 //----------------------------------------------------------------------------------------
 //! \fn void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt)
 //! \brief run the V-cycle solve for delta_(alpha*psi). Assumes
-//! LoadReactionCoefficient() was already called for this stage.
+//! LoadMatterCoefficients()/LoadPunctureCoefficients() were already called for
+//! this stage.
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
@@ -310,6 +479,20 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // MGCFCConformalFactorDriver::Solve.
   RestrictCoeffOctets();
   mgroot_->RestrictCoefficients();
+
+  // Sec 3.8/Sec 5 Phase A item 4 (lapse-side follow-up): overwrite psi0/Ahat0^2/
+  // alpha0*psi0 (coeff_ channels 3-5) at every internal level of mglevels_/
+  // mgroot_ with a fresh analytic evaluation, replacing the plain-averaged value
+  // RestrictCoefficients() just wrote there -- see MGCFCLapse::
+  // FillPunctureCoefficients's doc comment. Octets are NOT touched, matching
+  // MGCFCConformalFactorDriver::Solve's identical Phase C deferral. Skipped
+  // entirely when disabled: channels 3-5 are already exactly
+  // psi0=1/Ahat0^2=0/alpha0*psi0=1 there (restriction of a uniform field is a
+  // no-op).
+  if (puncture_enabled_) {
+    static_cast<MGCFCLapse*>(mglevels_)->FillPunctureCoefficients(puncture_mass_);
+    static_cast<MGCFCLapse*>(mgroot_)->FillPunctureCoefficients(puncture_mass_);
+  }
 
   SetupMultigrid(dt, false);
 
@@ -325,17 +508,18 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   return;
 }
 
-// Evaluates K(x) = LapseReactionCoeff(...) and the Sec 3.7 regularization source
-// term S = v0*(K(x)-K0) once per point, at the finest level, and writes both values
-// into coeff_ (see this file's header comment for the full derivation).
-// u_plus_2s_tilde/delta_psi/a_sq/u_psi0/a0_sq/u_alpha0_psi0 are padded to depth ngh
-// (mesh-NGHOST, per cfc.cpp). delta_psi stores psi - psi0 (cfc::CFC::delta_psi,
-// cfc.hpp); the physical psi LapseReactionCoeff needs is reconstructed (+u_psi0, 1.0
-// everywhere unless <cfc> puncture_enabled).
-void MGCFCLapseDriver::LoadReactionCoefficient(
+// Load the matter-derived ingredients of K(x)/S -- Utilde+2*Stilde (channel 0),
+// delta_psi (channel 1), and DeltaAhat^2 = Ahat^2_total - Ahat0^2 (channel 2,
+// subtracted here at the finest grid, mirroring
+// MGCFCConformalFactorDriver::LoadNonlinearCoefficient's identical reasoning) --
+// at the finest level only; these restrict normally to coarser levels. Split out
+// from the old fused LoadReactionCoefficient (Sec 3.8/Sec 5 Phase A item 4
+// lapse-side follow-up) -- see this file's header comment.
+// u_plus_2s_tilde/delta_psi/a_sq/a0_sq are padded to depth ngh (mesh-NGHOST, per
+// cfc.cpp). delta_psi stores psi - psi0 (cfc::CFC::delta_psi, cfc.hpp).
+void MGCFCLapseDriver::LoadMatterCoefficients(
     const DvceArray5D<Real> &u_plus_2s_tilde, const DvceArray5D<Real> &delta_psi,
-    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a_sq,
-    const DvceArray5D<Real> &a0_sq, const DvceArray5D<Real> &u_alpha0_psi0, int ngh) {
+    const DvceArray5D<Real> &a_sq, const DvceArray5D<Real> &a0_sq, int ngh) {
   // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment.
   mglevels_->ReallocateForAMR();
   auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
@@ -347,39 +531,41 @@ void MGCFCLapseDriver::LoadReactionCoefficient(
   const int off = ngh - lngh;
   auto cm_d = cm.d_view;
   int nmmb = pmy_pack_->nmb_thispack;
-  par_for("MGCFCLapseDriver::LoadReactionCoefficient", DevExeSpace(),
+  par_for("MGCFCLapseDriver::LoadMatterCoefficients", DevExeSpace(),
           0, nmmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
-    Real u2s = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
-    Real dpsi = delta_psi(m, 0, mk+off, mj+off, mi+off);
-    Real psi0 = u_psi0(m, 0, mk+off, mj+off, mi+off);
-    Real psi_known = dpsi + psi0;
-    Real ahat_sq = a_sq(m, 0, mk+off, mj+off, mi+off);
-    Real a0sq = a0_sq(m, 0, mk+off, mj+off, mi+off);
-    Real v0 = u_alpha0_psi0(m, 0, mk+off, mj+off, mi+off);
-    cm_d(m, 0, mk, mj, mi) = LapseReactionCoeff(u2s, psi_known, ahat_sq);
+    cm_d(m, 0, mk, mj, mi) = u_plus_2s_tilde(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 1, mk, mj, mi) = delta_psi(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 2, mk, mj, mi) = a_sq(m, 0, mk+off, mj+off, mi+off)
+                             - a0_sq(m, 0, mk+off, mj+off, mi+off);
+  });
+}
 
-    // Sec 3.7 regularization source term S = v0*(K(x)-K0), built via the safe
-    // reg8(x) factoring -- see this file's header comment. delta_a_sq is a safe
-    // direct subtraction (Ahat0^2 bounded/O(1), unlike psi0 doesn't diverge at the
-    // puncture); reg8(x) is the cancellation-free replacement for
-    // (psi^-8 - psi0^-8).
-    Real delta_a_sq = ahat_sq - a0sq;
-    Real psi_inv2 = 1.0 / (psi_known * psi_known);
-    Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
-    Real psi0_inv = 1.0 / psi0;
-    Real x = dpsi * psi0_inv;
-    Real onepx_inv = psi0 * (1.0 / psi_known);   // = 1/(1+x) = psi0/psi
-    Real onepx_inv2 = onepx_inv * onepx_inv;
-    Real onepx_inv8 = onepx_inv2*onepx_inv2*onepx_inv2*onepx_inv2;
-    Real psi0_inv2 = psi0_inv * psi0_inv;
-    Real psi0_inv8 = psi0_inv2*psi0_inv2*psi0_inv2*psi0_inv2;
-    Real p8 = 8.0 + x*(28.0 + x*(56.0 + x*(70.0 + x*(56.0 + x*(28.0 +
-                  x*(8.0 + x))))));
-    Real reg8 = psi0_inv8 * x * p8 * onepx_inv8;
-    cm_d(m, 1, mk, mj, mi) = v0 * (2.0*M_PI*u2s*psi_inv2
-                                    + 0.875*delta_a_sq*psi_inv8
-                                    - 0.875*a0sq*reg8);
+// Load the analytic trumpet background's psi0 (channel 3), Ahat0^2 (channel 4),
+// and alpha0*psi0 (channel 5, u_alpha0_psi0 already *is* this product) -- at the
+// finest level only, mirroring MGCFCConformalFactorDriver::
+// LoadPunctureCoefficients exactly. Zero-cost/inert when <cfc> puncture_enabled
+// is false (psi0=1, Ahat0^2=0, alpha0*psi0=1 everywhere, cfc.cpp's ctor).
+void MGCFCLapseDriver::LoadPunctureCoefficients(
+    const DvceArray5D<Real> &u_psi0, const DvceArray5D<Real> &a0_sq,
+    const DvceArray5D<Real> &u_alpha0_psi0, int ngh) {
+  // See MGCFCConformalFactorDriver::LoadMatterSource's identical comment.
+  mglevels_->ReallocateForAMR();
+  auto &cm = mglevels_->CoeffAtLevel(mglevels_->GetNumberOfLevels()-1);
+  int lngh = mglevels_->GetGhostCells();
+  auto &indcs = pmy_pack_->pmesh->mb_indcs;
+  int is = 0, ie = indcs.nx1 + 2*lngh - 1;
+  int js = 0, je = indcs.nx2 + 2*lngh - 1;
+  int ks = 0, ke = indcs.nx3 + 2*lngh - 1;
+  const int off = ngh - lngh;
+  auto cm_d = cm.d_view;
+  int nmmb = pmy_pack_->nmb_thispack;
+  par_for("MGCFCLapseDriver::LoadPunctureCoefficients", DevExeSpace(),
+          0, nmmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int mk, const int mj, const int mi) {
+    cm_d(m, 3, mk, mj, mi) = u_psi0(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 4, mk, mj, mi) = a0_sq(m, 0, mk+off, mj+off, mi+off);
+    cm_d(m, 5, mk, mj, mi) = u_alpha0_psi0(m, 0, mk+off, mj+off, mi+off);
   });
 }
 
@@ -471,10 +657,14 @@ void MGCFCLapseDriver::TransferCoeffToRoot() {
 
 // Octet-scale exact one-step Gauss-Seidel (this equation is affine in u once
 // psi/Ahat^2 are fixed, unlike the conformal factor's genuine Newton iteration),
-// exactly the same math as MGCFCLapse::SmoothPack (per-level) above. K(x) is read
-// directly from Coeff(0,...) (already fully evaluated by LoadReactionCoefficient
-// at load time) -- LapseReactionCoeff itself is never called here, same as the
-// per-level Pack methods.
+// exactly the same math as MGCFCLapse::SmoothPack (per-level) above. K(x)/S are
+// recombined fresh via LapseReactionRHS() from the six Coeff() channels, mirroring
+// MGCFCConformalFactorDriver::SmoothOctetImpl's identical pattern -- NOT given a
+// per-octet analytic refresh (FillPunctureCoefficients is not called on octets,
+// Sec 3.8's own explicit Phase C deferral), so channels 3-5 here are whatever the
+// generic RestrictCoeffOctets()/TransferCoeffToRoot() plain-averaged in -- the
+// same accuracy octets already had before this item, not improved, but no longer
+// silently wrong now that channels 0/1 no longer mean "precomputed K(x)/S".
 void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
   int ngh = mgroot_->GetGhostCells();
   Real root_dx = mgroot_->GetRootDx();
@@ -484,8 +674,10 @@ void MGCFCLapseDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
   for (int k = ngh; k <= ngh+1; ++k) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh + ((c^k^j)&1); i <= ngh+1; i += 2) {
-        Real kx = oct.Coeff(0,k,j,i);
-        Real s = oct.Coeff(1,k,j,i);
+        Real kx, s;
+        LapseReactionRHS(oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i), oct.Coeff(2,k,j,i),
+                          oct.Coeff(3,k,j,i), oct.Coeff(4,k,j,i), oct.Coeff(5,k,j,i),
+                          &kx, &s);
         Real lap = OctLapseLap(oct, k, j, i);
         Real u_old = oct.U(0,k,j,i);
         Real fval = lap + dx2*(kx*u_old + s) - dx2*oct.Src(0,k,j,i);
@@ -504,8 +696,10 @@ void MGCFCLapseDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
   for (int k = ngh; k <= ngh+1; ++k) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
-        Real kx = oct.Coeff(0,k,j,i);
-        Real s = oct.Coeff(1,k,j,i);
+        Real kx, s;
+        LapseReactionRHS(oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i), oct.Coeff(2,k,j,i),
+                          oct.Coeff(3,k,j,i), oct.Coeff(4,k,j,i), oct.Coeff(5,k,j,i),
+                          &kx, &s);
         Real lap = OctLapseLap(oct, k, j, i);
         oct.Def(0,k,j,i) = (-(kx*oct.U(0,k,j,i) + s) + oct.Src(0,k,j,i)) - lap*idx2;
       }
@@ -521,8 +715,10 @@ void MGCFCLapseDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
   for (int k = ngh; k <= ngh+1; ++k) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
-        Real kx = oct.Coeff(0,k,j,i);
-        Real s = oct.Coeff(1,k,j,i);
+        Real kx, s;
+        LapseReactionRHS(oct.Coeff(0,k,j,i), oct.Coeff(1,k,j,i), oct.Coeff(2,k,j,i),
+                          oct.Coeff(3,k,j,i), oct.Coeff(4,k,j,i), oct.Coeff(5,k,j,i),
+                          &kx, &s);
         Real lap = OctLapseLap(oct, k, j, i);
         oct.Src(0,k,j,i) += lap*idx2 + (kx*oct.U(0,k,j,i) + s);
       }

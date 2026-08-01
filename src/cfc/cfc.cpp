@@ -1705,8 +1705,8 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     pmgd_alpha->SeedInitialGuess(delta_alpha_psi, indcs.ng);
   }
 
-  pmgd_alpha->LoadReactionCoefficient(u_plus_2s, delta_psi, u_psi0, a_sq, a0_sq,
-                                       u_alpha0_psi0, indcs.ng);
+  pmgd_alpha->LoadMatterCoefficients(u_plus_2s, delta_psi, a_sq, a0_sq, indcs.ng);
+  pmgd_alpha->LoadPunctureCoefficients(u_psi0, a0_sq, u_alpha0_psi0, indcs.ng);
   if (puncture_enabled_) {
     // Reuses this stage's r_com_mass_ (set by SolveConformalFactor(), which always
     // runs first -- u0 is unchanged in between, see ComputeMassCentroid()'s own doc

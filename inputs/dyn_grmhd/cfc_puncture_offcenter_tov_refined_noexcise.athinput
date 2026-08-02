@@ -1,0 +1,135 @@
+# Athena++ (Kokkos version) input file: resolution-matched control for
+# cfc_puncture_offcenter_tov_excision.athinput (CFC_PUNCTURE_TDE_PLAN.md Sec 5 Phase B
+# item 9). Identical to that fixture -- including the same <mesh_refinement> block
+# refining near the puncture -- except <coord> excise=false. This isolates excision as
+# the single variable in the comparison: differences between this fixture's and the
+# excision fixture's own diagnostics are attributable to excision alone, not to the
+# added resolution (which is common to both).
+#
+# Also serves a second, independent check: comparing this fixture against item 46's
+# original unrefined baseline (cfc_puncture_offcenter_tov.athinput) isolates whether
+# adding the refined region near the puncture changes the star's own evolution at all,
+# separately from any excision question.
+
+<comment>
+problem  = Resolution-matched (refined, excise=false) control for excision validation (Sec 5 Phase B item 9)
+
+<job>
+basename = cfc_puncture_offcenter_tov_refined_noexcise
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 80       # 5 MeshBlocks in x1-direction (root level), dx=1.6
+x1min  = -25.6    # minimum x1 -- BH puncture at x=0 sits one MeshBlock in from here
+x1max  = 102.4    # maximum x1 -- star surface (~71.8) has ~19 cells of buffer before here
+ix1_bc = diode    # inner boundary -- NOT reflect (star is off-center, no mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 32       # 2 MeshBlocks in x2-direction (root level), dx=1.6
+x2min  = -25.6    # minimum x2
+x2max  = 25.6     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 32       # 2 MeshBlocks in x3-direction (root level), dx=1.6
+x3min  = -25.6    # minimum x3
+x3max  = 25.6     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = static
+max_nmb_per_rank    = 200
+num_levels          = 3
+refinement_interval = 1
+
+<refined_region1>
+level = 2        # finest level; dx = 1.6/2^2 = 0.4 -- matches the excision fixture's
+                  # own resolution near the puncture exactly (see that fixture's own
+                  # header comment for why level=2, not level=4, was chosen)
+x1min = -3.2     # straddles the origin symmetrically -- x=0 sits on a root-MeshBlock
+x1max = 3.2      # corner (x1/x2/x3 all split there), not inside a single block
+x2min = -3.2
+x2max = 3.2
+x3min = -3.2
+x3max = 3.2
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 100        # matches item 46's own baseline run length
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false     # the one difference vs. cfc_puncture_offcenter_tov_excision.athinput
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method (matches cfc_puncture_vacuum*)
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-10    # floor on density rho (matches cfc_puncture_vacuum*)
+tfloor      = 1.0e-8
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10  # matches cfc_bu8_stability's genuine-dynamical-run setting
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH, fixed at the coordinate origin x=0
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 1.28e-4   # matches cfc_puncture_vacuum_small.athinput -- gives
+                         # isotropic radius R_iso~11.82 for this kappa/gamma
+kappa       = 100.0     # P = kappa*rho^gamma
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 1e-2      # radial step for TOV calculation
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0    # ~5x R_iso -- the star's actual center, away from the BH
+star_center_x2 = 0.0     # puncture (always fixed at x=0)
+star_center_x3 = 0.0
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- inspect psi/alpha near the puncture and star
+variable    = adm
+dcycle      = 25
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- inspect density near the star for stability
+variable    = mhd_w_bcc
+dcycle      = 25
+slice_x3    = 0.0
+id = prim_xy

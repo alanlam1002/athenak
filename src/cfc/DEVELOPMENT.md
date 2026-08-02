@@ -7214,3 +7214,103 @@ src/cfc/
       sensitive" (non-deterministic) characterization of this same
       pre-existing bug. Not re-investigated further, per that established
       precedent.
+
+52. **(2026-08-02) Puncture excision validated (`CFC_PUNCTURE_TDE_PLAN.md`
+    Sec 5 Phase B item 9) -- `excision_scheme=lapse` genuinely masks cells
+    near the puncture and has zero measurable effect on a real star's own
+    diagnostics, confirmed locally and on the cluster.** Per user's
+    explicit request, this stage was done *before* the TDE initial-data
+    pgen (item 10), since every existing `puncture_enabled=true` fixture
+    had run with `<coord> excise=false` and this combination had never
+    been exercised.
+    - **First attempt was vacuous, not a real test.** Cloned item 46's
+      off-center TOV fixture (`cfc_puncture_offcenter_tov.athinput`,
+      `puncture_mass=1.0`, `star_center_x1=60`), adding
+      `excision_scheme=lapse, excise_lapse=0.25` (the plan doc's own
+      recommended default). Ran cleanly, bit-for-bit identical `.hst` vs.
+      the `excise=false` baseline over 5 cycles -- but checking *why*
+      (dumping the initial `adm_alpha` slice) showed **zero grid cells
+      anywhere have `alpha<0.25`** at this fixture's root `dx=1.6`: the
+      nearest actual cell center to the origin sits at `r=(dx/2)*sqrt(3)
+      ≈1.386`, where `alpha≈0.499`, and the excision sphere
+      (`r_iso≈0.59 M_BH`) is smaller than the grid can resolve. The "no
+      difference" result reflected excision never activating, not
+      excision behaving correctly around real matter.
+    - **Fix: static mesh refinement near the puncture**, per user's
+      explicit choice (over the cheaper alternative of just raising
+      `excise_lapse` for the test). Reused the exact
+      `<mesh_refinement>`/`<refined_region1>` pattern
+      `cfc_bu8_offcenter.athinput` (items 50-51) already validated for
+      `puncture_enabled=true`, but centered on the origin instead of the
+      star. One geometric wrinkle: `x=0` sits exactly on the corner where
+      this fixture's root MeshBlocks meet (x1/x2/x3 all split there), so
+      the refined region (`x1min=-3.2` to `x1max=3.2`, same for x2/x3)
+      must straddle that corner rather than sit inside one block. A first
+      attempt at `level=4` (matching `cfc_bu8_offcenter.athinput`'s own
+      choice for resolving the star) produced 1084 MeshBlocks via
+      proper-nesting buffer growth and was too slow for a local smoke test
+      (timed out at 5 minutes). Solving `(dx_root/2^(L+1))*sqrt(3)<0.59`
+      for the minimal sufficient depth gives `L=2`; using `level=2`
+      (`dx=0.4`, `num_levels=3`) instead gave a much cheaper 132
+      MeshBlocks while still guaranteeing excised cells.
+    - **Confirmed genuinely active this time**: with the refined mesh, the
+      initial `adm_alpha` dump shows `alpha_min≈0.137` and real cells
+      flagged `alpha<0.25` near the origin (vs. zero before).
+    - **Two new fixtures, single-variable comparison at matching
+      resolution** (neither modifies item 46's own fixture):
+      `cfc_puncture_offcenter_tov_excision.athinput` (`excise=true`,
+      `excision_scheme=lapse`, `excise_lapse=0.25`, `dexcise=1e-10`/
+      `texcise=1e-8` matching this fixture's own `dfloor`/`tfloor`) and
+      `cfc_puncture_offcenter_tov_refined_noexcise.athinput` (identical,
+      including the same refined region, but `excise=false`) -- the
+      resolution-matched control.
+    - **Result: bit-for-bit identical `.hst` between excise-on and
+      excise-off**, confirmed twice -- locally (Serial, 5 cycles) and on
+      the cluster (4 MPI ranks, 30 cycles, fresh MPI build
+      `build_mpi_tov` configured for the `dyngr_tov` pgen). Excision, even
+      while actually masking real cells, has zero measurable effect on the
+      star's own `mass`/momentum/`rho-max`/`alpha-min` diagnostics at this
+      separation (`star_center_x1=60`, `R_iso≈11.82`). This is the
+      concrete test of the plan doc's own flagged-but-unverified
+      assumption that excision-floor values contribute negligibly to the
+      COM integrals by construction of the floor -- confirmed, not merely
+      assumed. (One self-inflicted wrinkle during the cluster run: an
+      accidental duplicate `sbatch` submission briefly wrote a second
+      process's output into the same directory, corrupting one `.hst`
+      file with duplicate/interleaved rows; reran into a clean directory
+      and got a normal file -- not a code bug, just an operational
+      mistake, noted here only so the anomaly doesn't look like an
+      unexplained artifact if this file is ever revisited.)
+    - **Secondary check: refinement alone (independent of excision)
+      changes some diagnostics as physically expected, not a bug.**
+      Comparing the refined-`noexcise` control against item 46's original
+      *unrefined* baseline: `alpha-min` drops sharply (`0.4994→0.1373`,
+      since finer resolution now resolves genuinely closer to the throat
+      that the coarse grid couldn't see), `dt` shrinks (`4.66→1.36`, the
+      new finest cells are more CFL-restrictive), and `mass` shifts by
+      `~0.06%` (ordinary discretization-order difference from a different
+      grid, not drift). None of these are excision effects -- confirmed by
+      their total absence from the excise-on/off comparison above, which
+      used the same refined grid on both sides.
+    - **The `nlim`-truncation guard (item 51) is doing its job here too.**
+      Both refined runs hit "Failed to converge after 40 iterations"
+      repeatedly, once per RK3 sub-stage per cycle (a harder-to-converge
+      configuration than item 46's own unrefined run, plausibly from the
+      steeper gradients the refined region now resolves near the
+      puncture) -- and both still reached their full configured cycle
+      count cleanly (`Terminating on cycle limit`), exactly as item 51's
+      fix intends.
+    - **The `Multigrid::~Multigrid` teardown Bus error (items 46/48/51,
+      already out of scope) reappeared, exactly as expected**: both
+      cluster jobs' `run.err` show `Bus error` on all ranks, but only
+      *after* `Terminating on cycle limit` had already printed -- i.e.
+      after the real simulation work was done, consistent with this being
+      a teardown-time issue unrelated to this stage's own subject matter.
+      Not re-investigated, per established precedent.
+    - **Conclusion**: Phase B item 9 (puncture excision) is validated for
+      the combination of `puncture_enabled=true` and local static
+      refinement near the puncture, both locally and under MPI. The TDE
+      initial-data pgen (item 10) -- the 10 `M_sun` BH / `K=100`,
+      `Gamma=2`, `rhoc=1.2e-3` TOV star / `x=100` (5 `R_s`) / at-rest setup
+      discussed but explicitly postponed this session -- is the natural
+      next stage.

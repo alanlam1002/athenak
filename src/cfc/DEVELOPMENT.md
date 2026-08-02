@@ -5437,8 +5437,8 @@ src/cfc/
       `padm != nullptr`** (a same-day follow-up correction, prompted by the
       user asking whether this transfer is actually needed when z4c is
       active). Read `Driver::InitBoundaryValuesAndPrimitives`
-      (`driver.cpp:603-687`) directly to check -- it contains, at lines
-      662-669:
+      (`driver.cpp:617-708`) directly to check -- it contains, at lines
+      677-690:
       ```cpp
       if (pdyngr == nullptr) {
         (void) pmhd->ConToPrim(this, 0);
@@ -5579,7 +5579,7 @@ src/cfc/
       (`driver.cpp:316`, unchanged) and passed `true` at the regrid call site
       (`mesh_refinement.cpp`).
     - **Implementation**: `driver.cpp`'s MHD/dyn_grmhd dispatch
-      (`driver.cpp:662-669` before this item) restructured to
+      (`driver.cpp:677-690` before this item) restructured to
       `if (pz4c != nullptr) {...} else if ((pcfc != nullptr) &&
       is_amr_regrid) { pcfc->ReinitializeMetricForAMR(this); } else {
       pdyngr->ConToPrim(this, 0); }` -- the final `else` covers both
@@ -7111,3 +7111,106 @@ src/cfc/
       **do not rerun large multi-thousand-MeshBlock fixtures in bare Serial
       on a shared node** -- use a distributed cluster job even for a quick
       regression check.
+
+51. **(2026-08-02) Off-center BU8 mechanism check + stability check (item
+    50's own follow-up), and a real, previously-unknown bug found/fixed:
+    the main evolution loop's per-cycle solves had no protection against
+    `MultigridDriver::SolveIterative`'s own graceful-truncation safety
+    valve.**
+    - **Mechanism check**: logged `r_com_mass_`/`r_com_X_`/`r_com_beta_`
+      every stage on a 32-rank cluster run of `cfc_bu8_offcenter.athinput`
+      (temporary debug print, removed after use). All three track the
+      star's actual position (`r_com_X_≈(60.0,~1e-6,~3e-7)`,
+      `r_com_mass_≈(59.99,~1e-6,~4e-7)`, `r_com_beta_≈(58.9-58.95,~3e-4,
+      ~1e-6)`), not the puncture at `x=0` -- confirms items 45/47's outer-BC
+      recentering works correctly here too. `r_com_beta_` sits ~1 unit off
+      from `r_com_X_`/`r_com_mass_`, a small, real divergence consistent
+      with the plan doc's own flagged caveat that the two need not agree
+      once the puncture's own Ahat-gradient term becomes non-negligible
+      (more likely here than in the TOV tests, since `puncture_mass=1.0` is
+      *less* than BU8's own Komar mass).
+    - **Stability check first hit a wall**: the same cluster run stopped
+      after only ~1 cycle (`time=0.157` of `tlim=20`), printing
+      `Terminating on wall clock limit` despite `nlim=-1`/no `-t` flag
+      (so `wall_time=0`, and `driver.cpp`'s loop condition
+      `elapsed_time < wall_time` should stay perpetually true). `run.err`
+      showed `Bus error` on all 32 ranks, initially assumed to be the
+      already-documented, out-of-scope `Multigrid::~Multigrid` teardown bug
+      (items 46/48) manifesting sooner because the run was shorter.
+    - **That assumption was wrong, and the real mechanism is a genuine,
+      previously-unknown bug, unrelated to AMR/octets.** A temporary
+      per-cycle diagnostic print in `driver.cpp` (`time`/`tlim`/`ncycle`/
+      `nlim`/`elapsed_time`/`wall_time` at the top of each loop iteration)
+      showed `nlim` reading correctly as configured at cycle 0's entry, but
+      the loop never printed a second entry for cycle 1 even though
+      `OutputCycleDiagnostics` clearly did -- and the final summary showed
+      `nlim=0`. Traced to `MultigridDriver::SolveIterative`
+      (`multigrid_driver.cpp:822-829`): **any** single V-cycle solve that
+      exceeds its 40-iteration cap sets `pdriver->nlim = pmy_mesh_->ncycle`,
+      a deliberate "gracefully truncate the main evolution loop" safety
+      valve. `driver.cpp:322-334` already saves/restores `nlim` around the
+      *initial* `InitializeMetric()` call specifically because its own
+      Picard-loop retries routinely trip this same line (the existing
+      comment there explains exactly why) -- but there was **no equivalent
+      protection around the main evolution loop's own per-cycle CFC
+      solves**, so the first "Failed to converge" during real evolution
+      (a message that appears routinely and is normally just tolerated)
+      permanently capped `nlim` at whatever cycle it fired on, silently
+      truncating the rest of the run. **Confirmed as the true mechanism,
+      not a memory-corruption/AMR bug**, by reproducing it in a pure local
+      Serial run (no MPI at all) of a reduced-depth repro pushed through
+      `nlim=5` real cycles: identical "stops after ~1 cycle, `nlim` prints
+      as 0" behavior, with a clean exit code and zero crash.
+    - **Blast-radius check before fixing** (per explicit user request, to
+      understand whether this had silently limited any prior "successful"
+      validation claim): pushed `cfc_puncture_offcenter_tov.athinput`
+      (item 46, claimed 47 cycles to `tlim=100`) and
+      `cfc_puncture_offcenter_tov_vpert.athinput` (item 48) through
+      `nlim=20` locally, and the centered `cfc_bu8_stability.athinput`
+      through `nlim=20` on the cluster. **All three came back clean**: zero
+      "Failed to converge" during evolution for both TOV fixtures (ran
+      their full configured cycle counts untouched); the centered BU8
+      fixture showed exactly one instance, during the *protected* initial
+      setup only, then zero during its own 19+ cycles of evolution. None of
+      these prior validation claims were ever at risk -- the missing guard
+      is narrow, specific to fixtures whose per-cycle convergence is
+      chronically marginal (this new off-center BU8 fixture), not a
+      widespread problem.
+    - **Fix** (per user's chosen approach: remove the truncation for this
+      case rather than adding a consecutive-failure counter or tuning
+      `mg_threshold`): `driver.cpp`'s main evolution loop now saves `nlim`
+      right after entering the loop body and restores it right after
+      `ExecuteTaskList(pmesh, "after_timeintegrator", 1)`, mirroring
+      `InitializeMetric()`'s own existing pattern exactly. A single
+      marginally-slow V-cycle (confirmed via `r_com_*`/`delta_psi` staying
+      well-behaved throughout) no longer silently ends the whole remaining
+      simulation over one iteration-count timeout; the existing "Failed to
+      converge" print itself remains the visible signal, unconditionally.
+      Provably a no-op for any fixture that never trips the safety valve
+      during evolution (save-immediately/restore-immediately around code
+      that doesn't touch `nlim` in between is definitionally inert) --
+      confirmed empirically too: the blast-radius runs above used the
+      *unfixed* binary and never triggered the condition at all.
+    - **Stability check, completed after the fix**: a 32-rank cluster run
+      of the real, unmodified `cfc_bu8_offcenter.athinput` went from
+      crashing at cycle 1 to running 91 real cycles cleanly (`time=0` to
+      `time≈7.98`), stopped only by the job's own 1-hour SLURM walltime
+      limit -- no crash, no truncation. Diagnostics over that stretch:
+      `rho-max` rises smoothly `+2.9%` with a decelerating rate (relaxation,
+      not instability, matching item 46/48's own established signature),
+      `alpha-min` and `ang-mom` both essentially flat, total mass conserved
+      to `~1e-6` relative, x-momentum grows smoothly toward the puncture
+      (physically-expected gravitational infall, comparable order of
+      magnitude to item 46's own TOV result), transverse momenta negligible.
+    - **The Bus-error/`Multigrid::~Multigrid`-family crash is confirmed
+      separate, and remains out of scope.** A spot-check pushing the
+      *centered* `cfc_bu8_stability.athinput` (previously only ever
+      validated at `nlim=1`) to `nlim=20` on the cluster **did** hit the
+      same `Bus error` on all ranks, around cycle 19-20 -- proving this
+      crash is a general property of long real-AMR+MPI runs, not specific
+      to off-center geometry or `puncture_enabled=true` as first suspected.
+      The 91-cycle off-center run above did not hit it at all in the same
+      hour, consistent with items 46/48's own "build/memory-layout-
+      sensitive" (non-deterministic) characterization of this same
+      pre-existing bug. Not re-investigated further, per that established
+      precedent.

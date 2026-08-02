@@ -425,6 +425,19 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
            (elapsed_time < wall_time)) {
       pmesh->ClearMeshUpdated();
       if (global_variable::my_rank == 0) {OutputCycleDiagnostics(pmesh);}
+      // Per-stage multigrid solves (CFC, gravity) can hit MultigridDriver::
+      // SolveIterative's own soft-failure path (exceeding its internal 40-
+      // iteration cap without reaching mg_threshold -- already printed as its
+      // own "Failed to converge" FATAL ERROR there) which sets this->nlim =
+      // pmesh->ncycle to gracefully truncate the run. That's the right call
+      // for a solve that is genuinely diverging, but a single marginally-slow
+      // V-cycle on an otherwise-healthy solution (confirmed via CFC's own
+      // r_com_*/delta_psi diagnostics staying well-behaved) shouldn't
+      // silently end the entire remaining simulation over one iteration-count
+      // timeout. Saved/restored here the same way InitializeMetric() already
+      // is (see the save/restore above), so a per-cycle solve's own soft
+      // failure can't affect nlim's value seen by this loop's own check.
+      int saved_nlim = nlim;
       // Execute TaskLists
       // Work before time integrator indicated by "0" in stage
       ExecuteTaskList(pmesh, "before_timeintegrator", 0);
@@ -446,6 +459,7 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 
       // Work after time integrator indicated by "1" in stage
       ExecuteTaskList(pmesh, "after_timeintegrator", 1);
+      nlim = saved_nlim;
       // Work outside of TaskLists:
       // increment time, ncycle, etc.
       pmesh->time = pmesh->time + pmesh->dt;

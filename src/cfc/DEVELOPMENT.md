@@ -7314,3 +7314,86 @@ src/cfc/
       `Gamma=2`, `rhoc=1.2e-3` TOV star / `x=100` (5 `R_s`) / at-rest setup
       discussed but explicitly postponed this session -- is the natural
       next stage.
+
+53. **(2026-08-02) TDE initial data (item 10) redesigned for a realistic
+    SMBH mass ratio -- surfaced a genuine deep-AMR MeshBlock-count blowup
+    and its fix, then validated 8-level static refinement in isolation.**
+    The target changed from the earlier toy setup (10 `M_sun` BH,
+    comparable-size star) to realistic: a `1e5 M_sun` BH with a `0.7
+    M_sun`/`~1e4 km` WD-like TOV star (`K=2.66e3`, `Gamma=5/3`,
+    `rhoc=3.24e-12`), placed at `x=20 r_g` from rest, atmosphere
+    `dfloor<=1e-24`.
+    - **Verified the EOS parameters via a Newtonian n=1.5 Lane-Emden
+      check** (standalone Python, not the C++ TOV integrator): `K=2.66e3`,
+      `rhoc=3.24e-12` in standard `G=c=M_sun=1` units gives `M≈0.747
+      M_sun`, `R≈1.02e4 km` -- matches the stated target, confirming these
+      numbers are meant in the standard (`M_sun=1`) convention, not the
+      BH-mass-normalized one.
+    - **Derived the code-unit conversion** into this project's established
+      convention (`puncture_mass=1.0`, i.e. 1 code unit = `M_BH`, so
+      `r_g=GM_BH/c^2` = 1 code unit exactly and `star_center_x1=20.0` needs
+      no further conversion). Under `G=c=1` mass rescaling by
+      `lambda=M_BH/M_sun=1e5`: `rho_unit ~ M^-2` and `K_unit ~
+      M^(2(Gamma-1))`, giving `rhoc = 3.24e-12*lambda^2 = 3.24e-2` and
+      `kappa = 2.66e3*lambda^(-4/3) ≈ 5.731e-4`.
+    - **This conversion revealed the real design problem**: the star's own
+      radius comes out to `R≈0.0691` code units -- smaller than the
+      puncture's own horizon scale (`r_iso≈0.78 M_BH`) and ~289x smaller
+      than its 20 `r_g` separation. Resolving the star with ~16-32 cells
+      across its diameter needs local `dx~0.004-0.007` while the domain
+      spans well past 20 `r_g`, requiring ~7-9 levels of static
+      refinement -- beyond the 5 levels ever validated before (item
+      12/45-51). Per user's explicit choice, validated this in isolation
+      (vacuum/puncture-only, no real star yet) before building the actual
+      combined fixture, mirroring how excision (item 9 above) was isolated
+      before being combined with new physics.
+    - **First attempt at the isolated test produced a 280290-MeshBlock
+      blowup, not a crash.** New fixture
+      `cfc_puncture_deep_amr_check.athinput`: full (non-octant-symmetric)
+      domain, diode BCs (avoiding both the reflecting-boundary corner-read
+      gap and the origin-corner MeshBlock explosion item 51 already hit),
+      root `dx=1.0` laid out so `x1=20` sits at the center of one root
+      MeshBlock (not at any boundary), single `<refined_region1>` at
+      `level=8` (`dx=0.0039`) sized `+/-2` around that point. `athena -m`
+      (cheap, quits after `BuildTreeFromScratch`) reported 280290 total
+      MeshBlocks, 262144 at the finest level alone. **Root cause**: each
+      AMR level's MeshBlock covers `16*dx` physical units, which *shrinks*
+      by 2x per level -- so covering a *fixed physical-size* region
+      requires 2x more MeshBlocks per level down, and 8 levels of that
+      compounding is what produced the blowup (`4/0.0039≈1024` finest-level
+      cells per axis `= 64` MeshBlocks per axis `= 64^3=262144`, exactly
+      matching the reported count).
+    - **Fix**: shrink the finest-level region to just contain the star
+      plus modest buffer, not a fixed "generous" size -- `+/-0.1` (width
+      0.2, ~1.5x the star's own diameter of 0.138) instead of `+/-2`.
+      Rerunning `athena -m` gave **626 total MeshBlocks**, with a *constant*
+      ~56 MeshBlocks at every intermediate level (consistent with a
+      roughly fixed proper-nesting buffer size in MeshBlocks once the
+      target region is small enough that the buffer dominates, not the
+      target region itself) -- confirms the lesson: for deep static
+      refinement, size the finest-level region tightly around the actual
+      feature, not generously, since generosity costs a full extra factor
+      of 2 in MeshBlock count per level.
+    - **Validated clean, both locally and on the cluster**, with `nlim=0`
+      (checking initial-data construction/`CFC::InitializeMetric`'s own
+      solve, not real evolution): identical convergence sequence both
+      times (`max|delta psi|`: `0.0525→2.72e-8→1.29e-11`), `Terminating on
+      cycle limit` printed cleanly both times, and the finest MeshBlocks
+      confirmed (via the raw per-MeshBlock geometry in the `adm_xy` bin
+      dump, not the athdf-upsampling helper -- that helper tries to
+      materialize a uniform array at the finest resolution across the
+      whole domain and hangs/is impractical at this depth) to actually
+      reach `width=0.0625` (`dx=0.0625/16=0.00390625`) right at the target
+      point, matching the requested `level=8` exactly. Both runs then hit
+      the already-documented, out-of-scope `Multigrid::~Multigrid`
+      teardown Bus error (items 46/48/51) -- but only *after*
+      `Terminating on cycle limit` had already printed, i.e. after the
+      real work was done, consistent with that bug's established
+      characterization. No new bug found at this depth.
+    - **Conclusion / carried-forward numbers for the follow-up (combined)
+      stage**: 8-level static refinement with `puncture_enabled=true` is
+      validated, provided the finest-level region is sized tightly. The
+      actual TDE initial-data fixture (real off-center TOV star + this
+      validated AMR depth + `puncture_mass=1.0`, `star_center_x1=20.0`,
+      `kappa≈5.731e-4`, `rhoc=3.24e-2`, `gamma=5/3`, `dfloor<=1e-24`) is
+      the next, still-unstarted stage.

@@ -1,0 +1,123 @@
+<comment>
+problem = grey photon M1 single zone Compton+backreaction test at the SAME
+  deliberately STIFF cfl_number as
+  rad_m1_photon_compton_backreaction_stiff_{frozen,implicit}.athinput, with
+  matter_implicit=true AND theta_limiter=false (unlike stiff_implicit.athinput,
+  which keeps theta_limiter=true/source_limiter=0.9999 for a like-for-like
+  comparison against stiff_frozen). This is Stage 6's actual proof point: the
+  quartic pre-solve's own energy-conserving J_new is now used directly to
+  correct Enew after source_update() (radiation_m1_update.cpp), which
+  structurally bounds the per-step energy transfer to at most the gas's
+  entire internal energy -- so this run is expected to reach the same
+  correct joint equilibrium as stiff_implicit.athinput WITHOUT any external
+  limiter, proving the fix works at the solver level, not just because the
+  limiter workaround is still doing the work.
+
+<job>
+basename = photon_compton_backreaction_stiff_implicit_nolimiter  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 1.0      # STIFF -- dtau*sigma_c = O(10), see comment above
+nlim       = 10       # cycle limit -- few large steps, the stiff regime
+tlim       = 5.0      # time limit
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 5         # Number of zones in X1-direction
+x1min  = -2.5      # minimum value of X1
+x1max  = 2.5       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 5          # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here
+
+<units>
+bhmass_msun = 1.0   # sets the GM/c^2 length unit; only overall normalization matters here
+density_cgs = 1.0   # density unit (cgs)
+mu          = 1.0   # mean molecular weight
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 2.0       # ratio of specific heats Gamma
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = eddington
+src_update = implicit
+opacity_type = photons
+
+gr_sources = false     # default: true
+matter_sources = true  # default: true
+backreact = true       # let gas temperature respond -- the only change from
+                       # rad_m1_photon_compton_singlezone.athinput
+
+theta_limiter = false  # OFF -- the point of this test: matter_implicit's own
+                       # J_new correction (radiation_m1_update.cpp) should
+                       # bound the per-step energy transfer on its own, with
+                       # no external safety net needed.
+
+<photons>
+kappa_s = 1.0          # scattering opacity [code units]
+kappa_a = 0.0          # Rosseland absorption opacity [code units]
+kappa_p = 0.0          # Planck absorption/emission opacity [code units] -- off,
+                       # to isolate Compton as the only exchange channel (so
+                       # the joint equilibrium has a single, unambiguous
+                       # closed-form target -- see the check script)
+power_opacity = false  # constant (non-Kramers) opacities
+compton = true         # enable Compton energy exchange (requires <units>, above)
+matter_implicit = true   # STIFF regime, closed-form quartic pre-solve, J_new
+                         # used directly to correct Enew (see comment above)
+# arad is not set here: with <units> present, RadiationM1 derives it from
+# rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
+
+<problem>
+pgen_name = rad_m1_photon_singlezonetest
+rho = 1.0     # initial density [code]
+temp = 1.5e-3 # initial temperature [code]; same calibration as the existing
+              # Compton-only test (kappa_s*4*T*inv_t_electron ~ O(10))
+vx = 0.0    # x velocity
+vy = 0.0    # y velocity
+vz = 0.0    # z velocity
+
+<output1>
+file_type   = tab         # Binary data dump
+variable    = mhd_w       # Primitive variables
+dcycle      = 1
+
+<output2>
+file_type   = tab        # output format
+variable    = rad_m1_E    # choice of variables to output
+dcycle      = 1

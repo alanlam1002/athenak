@@ -1,0 +1,156 @@
+<comment>
+problem = Stage 3 radiation-on validation of dyngr_bhstar.cpp: the same Bondi
+  hydro/metric setup as dyngr_bhstar_hydro.athinput, plus the grey M1 LTE
+  radiation IC (enable_radiation=true, the default).
+
+  dyngr_bhstar.cpp's radiation IC is an ad hoc thick/thin optical-depth blend
+  (E held at a constant LTE value E_lte=arad*T_photosphere^4 everywhere; only
+  the flux is interpolated between LTE-diffusive and free-streaming via
+  f_tau=(1-exp(-tau))/(1+tau)) -- NOT a self-consistent closed-form solution.
+  There is nothing exact to check this against, so validation
+  (check_dyngr_bhstar_radiation.py) is physical sanity: no NaNs, |F/E|
+  trending toward more free-streaming behavior outward (not a hard thick/thin
+  threshold -- see that script's docstring for why), density/velocity profile
+  staying in the right ballpark of the free-fall IC, and outer-boundary flux
+  roughly consistent with the input luminosity.
+
+  Optical depth at this bondi_rs=8, kappa_s=1900 (see below) works out to
+  tau(r=0.5)~2.35 down to tau(r=10, the domain edge)~1.0 -- a modest but
+  genuine thick-to-thin trend, not a dramatic separation (tau ~ 1/sqrt(rsch)
+  falls off very slowly, so a much larger domain would be needed for a sharp
+  thin regime at the outer edge -- not attempted here, see DEVELOPMENT.md).
+
+  IMPORTANT LIMITATION, found while validating the hydro-only counterpart
+  (dyngr_bhstar_hydro.athinput): this pgen has no custom inflow boundary
+  condition and no runtime horizon masking, so density grows without bound
+  over long integrations under plain outflow BCs (confirmed ~27x at the
+  outer edge by t=30). tlim is kept short here for the same reason -- see
+  dyngr_bhstar_hydro.athinput's comment and DEVELOPMENT.md for the full story.
+
+  No pgen_name is set below: this pgen is compiled via '-D PROBLEM=
+  dyngr_bhstar' (USER_PROBLEM_ENABLED), which calls ProblemGenerator::
+  UserProblem() directly regardless of <problem>/pgen_name.
+
+<job>
+basename = dyngr_bhstar_radiation  # name of run
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 32        # Number of zones in X1-direction
+x1min  = -10.0     # minimum value of X1
+x1max  = 10.0      # maximum value of X1
+ix1_bc = outflow   # inner-X1 boundary flag -- no user BC registered by this pgen
+ox1_bc = outflow   # outer-X1 boundary flag
+
+nx2    = 32        # Number of zones in X2-direction
+x2min  = -10.0     # minimum value of X2
+x2max  = 10.0      # maximum value of X2
+ix2_bc = outflow   # inner-X2 boundary flag
+ox2_bc = outflow   # outer-X2 boundary flag
+
+nx3    = 32        # Number of zones in X3-direction
+x3min  = -10.0     # minimum value of X3
+x3max  = 10.0      # maximum value of X3
+ix3_bc = outflow   # inner-X3 boundary flag
+ox3_bc = outflow   # outer-X3 boundary flag
+
+<meshblock>
+nx1 = 8            # Number of cells in each MeshBlock, X1-dir
+nx2 = 8            # Number of cells in each MeshBlock, X2-dir
+nx3 = 8            # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here (dyngr_bhstar.cpp requires <adm> to be present)
+
+<mhd>
+eos         = ideal              # EOS type
+gamma       = 1.6666666666667    # ratio of specific heats Gamma (5/3) -- must
+                                  # match <problem>/gamma below
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc          # spatial reconstruction method
+rsolver     = hlle        # Riemann solver to be used
+dfloor      = 1.0e-10     # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0       # BH mass (metric hardcodes M=1 directly in the pgen)
+a           = 0.0       # non-spinning
+excise      = false     # pgen manages its own horizon cutoff, not <coord>
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.3      # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1       # cycle limit
+tlim       = 3.0      # time limit [M] -- short window, see IMPORTANT
+                      # LIMITATION note above
+
+<radiation_m1>
+closure_fun = minerbo  # general-purpose closure (this flow has genuine
+                       # radial anisotropy from the free-streaming component,
+                       # unlike the flat LTE single-zone tests)
+src_update = implicit
+opacity_type = photons
+
+gr_sources = true      # genuinely curved (isotropic-Schwarzschild) spacetime
+                       # here, unlike the flat-space single-zone/beam tests
+matter_sources = true  # default: true
+backreact = true       # default: true -- let gas and radiation exchange
+                       # energy, since this is meant to be a realistic
+                       # coupled accretion scenario, not an isolated unit test
+
+rad_eps = 0.01         # loosen the causality-bound margin from the default
+                       # 1e-14 (matches the beam test's precedent) -- the
+                       # free-streaming component of the flux can plausibly
+                       # approach the causal limit far from the BH
+
+theta_limiter = false  # default: false
+
+<photons>
+kappa_s = 1900.0      # scattering opacity [code units] -- see comment above
+                      # for the resulting tau(r) range
+kappa_a = 0.0         # zero absorption/emission -- matches the beam test's
+kappa_p = 0.0         # precedent (avoids the LTE-emission confound found
+                      # there: nonzero kappa_p would drive its own local
+                      # emission via the standard M1 source terms, on top of
+                      # the ad hoc E_lte already set by the IC)
+power_opacity = false # constant (non-Kramers) opacities
+compton = false       # no <units> block, so Compton is unavailable
+arad = 1.0            # radiation constant [code units] -- the pgen's E_lte
+                      # IC reads this same value directly from the M1 module
+                      # (photon_op_params.arad), so there is only one arad
+                      # to set, not a separate <problem>/arad copy
+
+<problem>
+eosk             = 1.0               # polytropic constant K, p=eosk*rho^gamma
+gamma            = 1.6666666666667   # polytropic index (must match <mhd>/gamma)
+bondi_rs         = 8.0               # Bondi scale radius [M]
+b_norm           = 0.0               # disable the magnetic field (see hydro
+                                      # athinput's comment)
+enable_radiation = true              # default -- included here for clarity
+T_photosphere    = 0.01              # fixed photospheric temperature [code
+                                      # units] -- E_lte = arad*T_photosphere^4
+
+<output1>
+file_type   = tab       # Formatted table (ASCII) output
+variable    = mhd_w     # Primitive variables
+slice_x2    = 0.0        # 1D radial slice along the x1-axis
+slice_x3    = 0.0
+dt          = 0.25
+
+<output2>
+file_type   = tab        # Formatted table (ASCII) output
+variable    = rad_m1_E   # radiation energy density
+slice_x2    = 0.0
+slice_x3    = 0.0
+dt          = 0.25
+
+<output3>
+file_type   = tab        # Formatted table (ASCII) output
+variable    = rad_m1_F   # radiation flux (Fx:0, Fy:0, Fz:0)
+slice_x2    = 0.0
+slice_x3    = 0.0
+dt          = 0.25

@@ -1,0 +1,114 @@
+<comment>
+problem = grey photon M1 optically-thick diffusion test, ADVECTED variant
+  (Stage 9, arXiv:2302.04283 Section 3.7's moving-fluid diffusion sub-case).
+  Companion to the DO module's own pre-existing advected diffusion test,
+  inputs/radiation/rad_diffusion.athinput (v1=0.1, kappa_s=100, nu=4,
+  already-existing/unmodified in this repo, per Stage 2's diffusion
+  cross-check) -- same physical parameters here, so the pulse should advect
+  at v1=0.1 and diffuse at D=1/(3*kappa_s) in BOTH codes, checked directly
+  against each other (not against a shared exact analytic IC -- see the
+  IC-approximation caveat in rad_m1_diffusiontest.cpp and DEVELOPMENT.md
+  Stage 9: M1's moving IC uses a v1=0-simplified diffusive-flux correction
+  on top of a lab-frame-Gaussian E(x), not the DO module's fully boosted
+  self-similar solution, so the two ICs are close but not identical at
+  t=0 -- the comparison instead tracks each code's own pulse peak position
+  (advection speed) and width growth (diffusion rate) over time).
+
+<job>
+basename = photon_diffusion_advected  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.4      # matches the static M1 diffusion test's convention
+nlim       = 6000     # cycle limit (safety margin; tlim below is the real limit)
+tlim       = 5.0      # time limit -- matches the DO advected test
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 256       # matches the DO advected test's resolution
+x1min  = -1.0      # matches the DO advected test's domain
+x1max  = 2.0
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction (1D test)
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction (1D test)
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 256        # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 2.0       # ratio of specific heats Gamma
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method (fluid state is uniform,
+                      # so reconstruction order doesn't matter for the gas)
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = eddington
+src_update = implicit
+opacity_type = photons
+
+gr_sources = false     # default: true
+matter_sources = true  # default: true
+backreact = false      # keep gas at fixed v1=0.1 for this test, matching DO
+                       # (DO side: fixed_fluid=true, affect_fluid=false)
+
+theta_limiter = false  # default: false
+
+<photons>
+kappa_s = 100.0       # scattering opacity [code units] -- matches the DO
+                      # advected test; the only nonzero opacity (abs_1=0
+                      # exactly), so the only physics is pure diffusion,
+                      # D = 1/(3*kappa_s*rho), plus advection at v1
+kappa_a = 0.0         # Rosseland absorption opacity [code units]
+kappa_p = 0.0         # Planck absorption/emission opacity [code units]
+power_opacity = false # constant (non-Kramers) opacities
+compton = false        # no <units> block, so Compton is unavailable
+arad = 1.0             # radiation constant [code units] -- unused here since
+                      # kappa_p=0 means no emission/absorption channel at all
+
+<problem>
+pgen_name = rad_m1_diffusiontest
+initial_data = gaussian  # E(x) = exp(-nu^2*x^2)
+nu = 4.0                 # matches the DO advected test's Gaussian width
+fluid_velocity = 0.1     # matches the DO advected test's v1
+rho = 1.0   # initial density [code], uniform in space
+temp = 1.0  # initial temperature [code], uniform in space (irrelevant: kappa_p=0)
+
+<output1>
+file_type   = tab         # Binary data dump
+variable    = rad_m1_E    # choice of variables to output
+dt          = 0.5         # time increment between outputs
+
+<output2>
+file_type   = tab        # Binary data dump
+variable    = rad_m1_F   # flux -- needed to track advection/momentum
+dt          = 0.5        # time increment between outputs

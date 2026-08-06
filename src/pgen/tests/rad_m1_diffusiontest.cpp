@@ -13,6 +13,8 @@
 
 #include "athena.hpp"
 #include "coordinates/adm.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/eos.hpp"
 #include "mesh/mesh.hpp"
 #include "parameter_input.hpp"
 #include "pgen/pgen.hpp"
@@ -50,11 +52,34 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
     exit(EXIT_FAILURE);
   }
 
-  if (pmbp->pradm1->params.src_update == radiationm1::Explicit) {
-    pmbp->pradm1->toy_opacity_fn = radiationm1::ToyOpacity{radiationm1::ToyOpacityModel::DiffusionExplicit};
+  if (pmbp->pradm1->params.opacity_type == radiationm1::Toy) {
+    if (pmbp->pradm1->params.src_update == radiationm1::Explicit) {
+      pmbp->pradm1->toy_opacity_fn = radiationm1::ToyOpacity{radiationm1::ToyOpacityModel::DiffusionExplicit};
+    }
+    if (pmbp->pradm1->params.src_update == radiationm1::Implicit) {
+      pmbp->pradm1->toy_opacity_fn = radiationm1::ToyOpacity{radiationm1::ToyOpacityModel::DiffusionImplicit};
+    }
   }
-  if (pmbp->pradm1->params.src_update == radiationm1::Implicit) {
-    pmbp->pradm1->toy_opacity_fn = radiationm1::ToyOpacity{radiationm1::ToyOpacityModel::DiffusionImplicit};
+
+  // opacity_type=photons needs real density/pressure to compute opacities from
+  // (CalcOpacityPhotons_IdealGas_ reads w0_(IDN)/w0_(IEN)), so it uses the real
+  // <mhd> fluid instead of the placeholder pradm1->w0 the toy model gets by with.
+  bool use_mhd = (pmbp->pradm1->params.opacity_type == radiationm1::Photons);
+  dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *ptest_ideal = nullptr;
+  Real mb = 1.0;
+  if (use_mhd) {
+    ptest_ideal =
+        dynamic_cast<dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *>(
+            pmbp->pdyngr);
+    if (ptest_ideal == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "The diffusion test problem generator requires <mhd> "
+                   "dyn_eos = ideal when opacity_type = photons"
+                << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    mb = ptest_ideal->eos.ps.GetEOSMutable().GetBaryonMass();
   }
 
   // capture variables for kernel
@@ -74,14 +99,39 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
   int ksg = (indcs.nx3 > 1) ? ks - indcs.ng : ks;
   int keg = (indcs.nx3 > 1) ? ke + indcs.ng : ke;
   int nmb = pmbp->nmb_thispack;
-  auto &w0_ = pmbp->pradm1->w0;
+  DvceArray5D<Real> w0_ = pmbp->pradm1->w0;
+  if (use_mhd) {
+    w0_ = pmbp->pmhd->w0;
+  }
   auto &u0_ = pmbp->pradm1->u0;
   adm::ADM::ADM_vars &adm = pmbp->padm->adm;
   auto &params_ = pmbp->pradm1->params;
 
-  bool erf = pin->GetOrAddString("problem", "initial_data", "gaussian") == "gaussian";
+  auto initial_data = pin->GetOrAddString("problem", "initial_data", "gaussian");
+  if (initial_data != "gaussian" && initial_data != "step") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "Unknown problem/initial_data: " << initial_data
+              << " (expected gaussian or step)" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  bool erf = (initial_data == "gaussian");
   auto vx = pin->GetOrAddReal("problem", "fluid_velocity", 0.0);
   auto lorentz_w = 1. / Kokkos::sqrt(1. - vx * vx);
+  Real rho = pin->GetOrAddReal("problem", "rho", 1.0);
+  Real temp = pin->GetOrAddReal("problem", "temp", 1.0);
+  Real nb = rho / mb;
+
+  // Diffusion coefficient for the Gaussian IC's flux, below (photon path only;
+  // the toy path prescribes scat_1 directly, not through photon_op_params).
+  Real dd = 0.0;
+  if (use_mhd) {
+    dd = 1.0 / (3.0 * pmbp->pradm1->photon_op_params.kappa_s * rho);
+  }
+  // Gaussian width parameter, matching rad_diffusion.cpp's <problem>/nu
+  // convention (E(x,0)=exp(-nu^2 x^2)). Default nu=3 (nusq=9) preserves the
+  // exact previously-hardcoded IC for every existing test.
+  Real nusq_diag = SQR(pin->GetOrAddReal("problem", "nu", 3.0));
 
   // set metric to minkowski, initialize velocity to zero
   par_for(
@@ -107,13 +157,31 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
 
         Real E{};
         if (erf) {
-          E = Kokkos::exp(-9. * x1 * x1);
+          E = Kokkos::exp(-nusq_diag * x1 * x1);
         } else {
           E = (x1 < 0);
         }
 
         Real J = 3. * E / (4. * lorentz_w * lorentz_w - 1.);
         Real Fx = (4. / 3.) * J * lorentz_w * lorentz_w * vx;
+        if (erf && use_mhd) {
+          // Add the static diffusive flux F = -D*dE/dx = D*2*nu^2*x*E, i.e.
+          // the flux consistent with the exact solution of the diffusion
+          // equation at t=0 (see src/pgen/rad_diffusion.cpp's `fr`,
+          // simplified to v1=0). Without this, the M1 solver starts from a
+          // "non-equilibrated" F=0 IC and needs a spin-up transient
+          // (~1/kscat) before flux and gradient are correctly related,
+          // which contaminates early-time measurements of the spreading
+          // rate (found via a cross-check against the discrete-ordinate
+          // rad_diffusion.cpp module). This is a v1=0-simplified flux
+          // correction -- NOT the full boosted self-similar solution
+          // rad_diffusion.cpp uses for v1!=0 (which additionally shears
+          // the Gaussian in time via boosted coordinates tp,xp) -- a
+          // deliberately cheaper approximation for the moving case, valid
+          // as a smooth IC but not an exact match to the DO module's own
+          // advected analytic solution (see Stage 9, DEVELOPMENT.md).
+          Fx += dd * 2. * nusq_diag * x1 * E;
+        }
 
         AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
         for (int a = 0; a < 4; ++a) {
@@ -134,5 +202,23 @@ void ProblemGenerator::RadiationM1DiffusionTest(ParameterInput *pin, const bool 
         u0_(m, M1_FY_IDX, k, j, i) = F_d(M1_FY_IDX);
         u0_(m, M1_FZ_IDX, k, j, i) = F_d(M1_FZ_IDX);
       });
+
+  // opacity_type=photons: fill in the uniform density/pressure CalcOpacityPhotons_
+  // needs, and convert to MHD conserved variables. Kept as a second kernel (rather
+  // than folded into the one above) so the EOS object -- only obtainable once
+  // ptest_ideal is known non-null -- is never captured by a Kokkos lambda unless
+  // it's actually valid to do so.
+  if (use_mhd) {
+    Primitive::EOS<Primitive::IdealGas, Primitive::ResetFloor> &eos =
+        ptest_ideal->eos.ps.GetEOSMutable();
+    par_for(
+        "pgen_diffusiontest_mhd_state", DevExeSpace(), 0, nmb - 1, ksg, keg, jsg, jeg,
+        isg, ieg, KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          Real dummy_y{};
+          w0_(m, IDN, k, j, i) = rho;
+          w0_(m, IPR, k, j, i) = eos.GetPressure(nb, temp, &dummy_y);
+        });
+    pmbp->pdyngr->PrimToConInit(0, (indcs.nx1 + 2 * indcs.ng - 1), jsg, jeg, ksg, keg);
+  }
   return;
 }

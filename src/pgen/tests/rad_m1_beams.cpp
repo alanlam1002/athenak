@@ -72,26 +72,33 @@ void ProblemGenerator::RadiationM1BeamTest(ParameterInput *pin,
 
   Real adm_mass = pin->GetOrAddReal("adm", "bh_mass", 1.);
   auto metric = pin->GetOrAddString("adm", "metric", "minkowski");
+  if (metric != "minkowski" && metric != "isotropic" && metric != "kerr-schild") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "Unknown adm/metric: " << metric
+              << " (expected minkowski, isotropic, or kerr-schild)"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
   // opacity_type=photons needs real density/pressure to compute opacities
-  // from (CalcOpacityPhotons_ reads w0_(IDN)/w0_(IPR)), so it uses
+  // from (CalcOpacityPhotons_IdealGas_ reads w0_(IDN)/w0_(IEN)), so it uses
   // the real <mhd> fluid instead of the placeholder pradm1->w0 the toy/
-  // neutrino models get by with. Only wired up for the 1D Minkowski beam so
-  // far -- the 2D isotropic/Kerr-Schild BH branches are a curved-spacetime
-  // beam-bending test that's a different, more complex problem.
+  // neutrino models get by with. [Stage 10] Previously only wired up for the
+  // 1D Minkowski beam -- un-guarded after tracing that nothing downstream
+  // actually depends on dimensionality here: the density/pressure-fill
+  // kernel below is already dimension-agnostic, and the 2D BH boundary
+  // condition (ApplyBeamSourcesBlackHole, radiation_m1_beams.cpp) computes
+  // its injected (E,F) directly from the local metric at each ghost cell,
+  // independent of opacity_type/use_mhd entirely. Both the isotropic and
+  // Kerr-Schild metric branches below are Schwarzschild-only (no spin
+  // parameter read) -- a spinning BH beam is a separate, real extension,
+  // not covered by this un-guard.
   bool use_mhd = (pmbp->pradm1->params.opacity_type == radiationm1::Photons);
   dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *ptest_ideal =
       nullptr;
   Real mb = 1.0;
   if (use_mhd) {
-    if (!pmbp->pmesh->one_d) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl
-                << "opacity_type = photons is only wired up for the 1D "
-                   "Minkowski beam test so far, not the 2D isotropic/"
-                   "Kerr-Schild BH beam" << std::endl;
-      exit(EXIT_FAILURE);
-    }
     ptest_ideal =
         dynamic_cast<dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *>(
             pmbp->pdyngr);
@@ -260,12 +267,17 @@ void ProblemGenerator::RadiationM1BeamTest(ParameterInput *pin,
   HostArray1D<Real> beam_vals_host;
   Kokkos::realloc(beam_vals_host, 4);
   if (pmbp->pmesh->one_d) {
-    Real E = 1;
+    // [Stage 11] wall_E/wall_flux_factor let the same injected-ghost-cell
+    // mechanism drive a hohlraum wall (isotropic emission, flux factor 1/2)
+    // instead of only a pencil beam -- defaults (E=1, ff=1 -> Fx=E) exactly
+    // reproduce the original hardcoded pencil-beam values, zero regression.
+    Real E = pin->GetOrAddReal("problem", "wall_E", 1.0);
+    Real flux_factor = pin->GetOrAddReal("problem", "wall_flux_factor", 1.0);
     AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> F_d{};
     AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> g_uu{};
     g_uu(0, 0) = -1;
     g_uu(1, 1) = g_uu(2, 2) = g_uu(3, 3) = 1;
-    Real Fx = E;
+    Real Fx = flux_factor * E;
     Real Fy = 0;
     Real Fz = 0;
     pack_F_d(0, 0, 0, Fx, Fy, Fz, F_d);

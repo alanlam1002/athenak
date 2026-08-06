@@ -11,9 +11,11 @@
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/eos.hpp"
 #include "globals.hpp"
 #include "radiation_m1.hpp"
 #include "radiation_m1_calc_closure.hpp"
+#include "radiation_m1_compton_implicit.hpp"
 #include "radiation_m1_helpers.hpp"
 #include "radiation_m1_nurates.hpp"
 #include "radiation_m1_sources.hpp"
@@ -67,23 +69,27 @@ TaskStatus RadiationM1::TimeUpdate(Driver *pdrive, int stage) {
     }
   }
 
-  auto *ptest_ideal =
-      dynamic_cast<dyngr::DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor> *>(pmy_pack->pdyngr);
-  if (ptest_ideal != nullptr) {
+  if (!ismhd && !ishydro) {
     switch (indcs.ng) {
       case 2:
-        return TimeUpdate_<Primitive::IdealGas, Primitive::ResetFloor, 2>(pdrive, stage);
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 2>(pdrive, stage);
         break;
       case 3:
-        return TimeUpdate_<Primitive::IdealGas, Primitive::ResetFloor, 3>(pdrive, stage);
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 3>(pdrive, stage);
         break;
       case 4:
-        return TimeUpdate_<Primitive::IdealGas, Primitive::ResetFloor, 4>(pdrive, stage);
+        return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                           Primitive::ResetFloor, 4>(pdrive, stage);
         break;
     }
   }
 
-  if (!ismhd && !ishydro) {
+  // Fallthrough for ideal gas or any non-EOSCompOSE EOS.
+  // The EOS cast inside TimeUpdate_ is guarded by (nspecies > 1), so for
+  // photons (nspecies == 1) the cast is never reached and any EOSPolicy works.
+  if (ismhd || ishydro) {
     switch (indcs.ng) {
       case 2:
         return TimeUpdate_<Primitive::EOSCompOSE<Primitive::NQTLogs>,
@@ -137,7 +143,6 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto &nvars_ = nvars;
   auto &nspecies_ = nspecies;
-  auto &radiation_mask_ = radiation_mask;
 
   bool &multi_d = pmy_pack->pmesh->multi_d;
   bool &three_d = pmy_pack->pmesh->three_d;
@@ -150,11 +155,20 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
     umhd0_ = pmy_pack->pmhd->u0;
   }
 
+  auto &photon_op_params_ = pmy_pack->pradm1->photon_op_params;
+  Real gm1_{};
+  if (ismhd && params_.opacity_type == Photons &&
+      photon_op_params_.is_matter_implicit) {
+    gm1_ = pmy_pack->pmhd->peos->eos_data.gamma - 1.0;
+  }
+
   auto &BrentFunc_ = pmy_pack->pradm1->BrentFunc;
   auto &HybridsjFunc_ = pmy_pack->pradm1->HybridsjFunc;
 
+  // mb is only used for lepton tracking (nspecies > 1).
+  // For photons (nspecies == 1) the EOS cast is skipped entirely.
   Real mb{};
-  if (ismhd || ishydro) {
+  if ((ismhd || ishydro) && nspecies > 1) {
     Primitive::EOS<EOSPolicy, ErrorPolicy> &eos =
         static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy> *>(
             pmy_pack->pdyngr)
@@ -173,22 +187,6 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
   par_for(
       "radiation_m1_update", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-        // Excised cells: keep radiation fields pinned at zero and skip the flux
-        // divergence, geometric, and matter-source updates (mirrors THC's
-        // thc_M1_calc_update mask handling).
-        if (radiation_mask_(m, k, j, i)) {
-          for (int nuidx = 0; nuidx < nspecies_; ++nuidx) {
-            u0_(m, CombinedIdx(nuidx, M1_E_IDX, nvars_), k, j, i) = 0;
-            u0_(m, CombinedIdx(nuidx, M1_FX_IDX, nvars_), k, j, i) = 0;
-            u0_(m, CombinedIdx(nuidx, M1_FY_IDX, nvars_), k, j, i) = 0;
-            u0_(m, CombinedIdx(nuidx, M1_FZ_IDX, nvars_), k, j, i) = 0;
-            if (nspecies_ > 1) {
-              u0_(m, CombinedIdx(nuidx, M1_N_IDX, nvars_), k, j, i) = 0;
-            }
-          }
-          return;
-        }
-
         // [A] Compute gr quantities: metric, shift, extrinsic curvature, etc.
         Real garr_dd[16];
         Real garr_uu[16];
@@ -475,13 +473,68 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
 
               // Estimate interaction with matter
               const Real dtau = beta_dt * (adm.alpha(m, k, j, i) / w_lorentz);
-              Real Jnew = (Jstar + dtau * eta_1_(m, nuidx, k, j, i) * volform) /
-                          (1. + dtau * abs_1_(m, nuidx, k, j, i));
+
+              // [matter-implicit] Replace the frozen-opacity eta_1_/abs_1_
+              // for this cell with a closed-form Planck+Compton quartic
+              // pre-solve, self-consistent in T_gas/J at this cell's
+              // pre-coupling ("star") state -- see
+              // radiation_m1_compton_implicit.hpp and DEVELOPMENT.md's
+              // Stage 6 section. Assumes Primitive::IdealGas (safe:
+              // EOSCompOSE already hard-errors at opacity-parse time,
+              // before this can run). Falls back to the existing
+              // frozen-opacity arrays on failure or when the feature is
+              // off -- zero behavior change for every currently-validated
+              // test.
+              //
+              // The quartic's own (T_new, J_new) pair is energy-conserving
+              // by construction (Etot_star = J_new + (rho/gm1)*T_new, with
+              // T_new>=0 enforced), so J_new can never imply more energy
+              // transfer than the gas actually holds. J_new is captured
+              // here and used *after* source_update() below to correct
+              // Enew directly -- not just to refine the opacity target fed
+              // into that (gas-energy-blind) solve, which is only
+              // guaranteed to reproduce J_new in the flat/static/no-flux
+              // limit (see DEVELOPMENT.md Stage 6).
+              Real eta_local = eta_1_(m, nuidx, k, j, i);
+              Real abs_local = abs_1_(m, nuidx, k, j, i);
+              Real J_new{};
+              bool matter_implicit_ok = false;
+              if (params_.opacity_type == Photons &&
+                  photon_op_params_.is_matter_implicit) {
+                const Real rho_gas = w0_(m, IDN, k, j, i);
+                const Real T_star = w0_(m, IEN, k, j, i) / rho_gas;
+                // Gate kappa_s by is_compton, matching the frozen-opacity
+                // kernel (radiation_m1_calc_opacities_photons.cpp:94,201):
+                // kappa_s alone doesn't disable the Compton channel --
+                // compton=false must zero it out even if kappa_s is left
+                // nonzero in the athinput.
+                const Real kappa_s_gated =
+                    photon_op_params_.is_compton ? photon_op_params_.kappa_s : 0.0;
+                Real T_new{};
+                if (SolveComptonQuartic(
+                        rho_gas, T_star, Jstar, gm1_,
+                        kappa_s_gated, photon_op_params_.kappa_p,
+                        photon_op_params_.arad,
+                        photon_op_params_.inv_t_electron, dtau, volform,
+                        T_new, J_new)) {
+                  matter_implicit_ok = true;
+                  // Rate stays frozen at T_star (matching the quartic's own
+                  // linearization); only the emission target moves to T_new.
+                  const Real sigma_c_star = kappa_s_gated * rho_gas * 4.0 *
+                                            T_star *
+                                            photon_op_params_.inv_t_electron;
+                  abs_local = sigma_c_star + rho_gas * photon_op_params_.kappa_p;
+                  eta_local = abs_local * photon_op_params_.arad *
+                              SQR(SQR(T_new));
+                }
+              }
+
+              Real Jnew = (Jstar + dtau * eta_local * volform) /
+                          (1. + dtau * abs_local);
 
               // Only three components of H^a are independent H^0 is found by
               // requiring H^a u_a = 0
-              const Real khat =
-                  (abs_1_(m, nuidx, k, j, i) + scat_1_(m, nuidx, k, j, i));
+              const Real khat = (abs_local + scat_1_(m, nuidx, k, j, i));
               AthenaPointTensor<Real, TensorSymm::NONE, 4, 1> Hnew_d{};
               for (int a = 1; a < 4; ++a) {
                 Hnew_d(a) = Hstar_d(a) / (1. + dtau * khat);
@@ -520,8 +573,8 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                   BrentFunc_, HybridsjFunc_, beta_dt, adm.alpha(m, k, j, i),
                   g_dd, g_uu, n_d, n_u, gamma_ud, u_d, u_u, v_d, v_u, proj_ud,
                   w_lorentz, Estar, Fstar_d, Estar, Fstar_d,
-                  volform * eta_1_(m, nuidx, k, j, i),
-                  abs_1_(m, nuidx, k, j, i), scat_1_(m, nuidx, k, j, i),
+                  volform * eta_local,
+                  abs_local, scat_1_(m, nuidx, k, j, i),
                   chi_(m, nuidx, k, j, i), Enew, Fnew_d, params_,
                   params_.closure_type);
               apply_floor(g_uu, Enew, Fnew_d, params_);
@@ -534,6 +587,25 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
               AthenaPointTensor<Real, TensorSymm::SYM2, 4, 2> T_dd{};
               assemble_rT(n_d, Enew, Fnew_d, P_dd, T_dd);
               Jnew = calc_J_from_rT(T_dd, u_u);
+
+              // [matter-implicit] Make Enew authoritative from the quartic's
+              // energy-conserving J_new (see comment above the quartic
+              // call), instead of whatever the gas-energy-blind Newton/
+              // explicit solve above produced. calc_J_from_rT(assemble_rT(
+              // n_d,E,F_d,P_dd),u_u) is exactly linear in E alone (holding
+              // F_d, P_dd, n_d, u_u fixed), with dJ/dE = w_lorentz^2 (from
+              // n_d.u_u = -w_lorentz) -- so nudging E to move J from Jnew to
+              // J_new is this one closed-form correction, not a full
+              // reassembly. Fnew_d (momentum/flux) is left exactly as
+              // solved -- the quartic has no flux term to correct against.
+              // Re-floor afterward: the last apply_floor before this point
+              // is at the source_update() call above, so the nudged Enew
+              // has not yet been floor/causality-checked.
+              if (matter_implicit_ok) {
+                Enew += (J_new - Jnew) / SQR(w_lorentz);
+                apply_floor(g_uu, Enew, Fnew_d, params_);
+                Jnew = J_new;
+              }
 
               // Compute changes in radiation energy and momentum
               DrEFN[nuidx][M1_E_IDX] = Enew - Estar;
@@ -590,7 +662,10 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
           if (params_.theta_limiter && params_.source_limiter >= 0) {
             const Real tau = (ismhd_ || ishydro_) ? umhd0_(m, IEN, k, j, i) : 0.;
             const Real dens = (ismhd_ || ishydro_) ? w0_(m, IDN, k, j, i) : 0.;
-            const Real Y_e = (ismhd_ || ishydro_) ? w0_(m, IYF, k, j, i) : 0.;
+            // IYF=5 only exists when nscalars>=1 (e.g. EOSCompOSE with Ye).
+            // For photons (nspecies==1) Y_e is never used, so skip the read.
+            const Real Y_e = ((ismhd_ || ishydro_) && nspecies_ > 1)
+                                 ? w0_(m, IYF, k, j, i) : 0.;
 
             theta = 1.0;
             Real DTau_sum = 0.0;
@@ -602,14 +677,14 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                 theta = Kokkos::fmin(-params_.source_limiter *
                                               Kokkos::fmax(Estar, 0.0) /
                                               DrEFN[nuidx][M1_E_IDX],
-                                     theta);
+                                          theta);
               }
               DTau_sum -= DrEFN[nuidx][M1_E_IDX];
             }
             if (DTau_sum < 0) {
               theta = Kokkos::fmin(-params_.source_limiter *
                                       Kokkos::fmax(tau, 0.0) / DTau_sum,
-                                   theta);
+                                  theta);
             }
 
             if (nspecies_ > 1) {
@@ -622,7 +697,7 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                   theta = Kokkos::fmin(-params_.source_limiter *
                                           Kokkos::fmax(Nstar, 0.0) /
                                           DrEFN[nuidx][M1_N_IDX],
-                                       theta);
+                                      theta);
                 }
                 DDxp_sum += DDxp[nuidx];
               }

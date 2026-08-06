@@ -70,17 +70,22 @@ class ProblemGenerator {
   void OrszagTang(ParameterInput *pin, const bool restart);
   void ShockTube(ParameterInput *pin, const bool restart);
   void Shwave(ParameterInput *pin, const bool restart);
+  void SphericalCollapse(ParameterInput *pin, const bool restart);
   void RadiationLinearWave(ParameterInput *pin, const bool restart);
   void RadiationBeam(ParameterInput *pin, const bool restart);
+  void RadiationCrossingBeams(ParameterInput *pin, const bool restart);
   void Z4cBoostedPuncture(ParameterInput *pin, const bool restart);
   void Z4cLinearWave(ParameterInput *pin, const bool restart);
   void RadiationM1BeamTest(ParameterInput *pin, const bool restart);
   void RadiationM1BrentTest(ParameterInput *pin, const bool restart);
   void RadiationM1HybridsjTest(ParameterInput *pin, const bool restart);
   void RadiationM1SphereTest(ParameterInput *pin, const bool restart);
+  void RadiationM1PhotonSingleZoneTest(ParameterInput *pin, const bool restart);
   void RadiationM1LatticeTest(ParameterInput *pin, const bool restart);
   void RadiationM1DiffusionTest(ParameterInput *pin, const bool restart);
   void RadiationM1VelocityJumpTest(ParameterInput *pin, const bool restart);
+  void RadiationM1CrossingBeams(ParameterInput *pin, const bool restart);
+  void RadiationM1LinearWave(ParameterInput *pin, const bool restart);
   void RadiationM1SingleZoneTest(ParameterInput *pin, const bool restart);
   template <class EOSPolicy, class ErrorPolicy>
   void RadiationM1SingleZoneTest_(ParameterInput *pin, const bool restart);

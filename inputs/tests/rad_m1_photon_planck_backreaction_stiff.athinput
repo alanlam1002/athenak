@@ -1,0 +1,122 @@
+<comment>
+problem = grey photon M1 single zone Planck-only (compton=false) relaxation
+  test WITH radiation-pressure backreaction (backreact=true), at a
+  deliberately STIFF cfl_number (dtau*sigma_p = O(10)) -- the Planck-channel
+  analogue of rad_m1_photon_compton_backreaction_stiff_implicit_nolimiter.athinput.
+  Stage 6's generalization claim: the matter_implicit quartic pre-solve
+  (radiation_m1_compton_implicit.hpp::SolveComptonQuartic) was extended to
+  solve with the COMBINED Planck+Compton rate (sigma_tot = kappa_s*rho*4*T*
+  inv_t_electron + rho*kappa_p), not just Compton -- so it should correctly
+  handle this compton=false, kappa_p>0 case too, with matter_implicit=true
+  and theta_limiter=false. Same physical calibration (rho, T0, gamma, arad
+  via <units>) as the Compton stiff tests, so it targets the exact same
+  independently-solved joint equilibrium -- see
+  check_rad_m1_photon_planck_backreaction_stiff.py.
+
+<job>
+basename = photon_planck_backreaction_stiff  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 1.0      # STIFF -- dtau*sigma_p = O(10), see comment above
+nlim       = 10       # cycle limit -- few large steps, the stiff regime
+tlim       = 5.0      # time limit
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 5         # Number of zones in X1-direction
+x1min  = -2.5      # minimum value of X1
+x1max  = 2.5       # maximum value of X1
+ix1_bc = periodic  # inner-X1 boundary flag
+ox1_bc = periodic  # outer-X1 boundary flag
+
+nx2    = 1         # Number of zones in X2-direction
+x2min  = -0.5      # minimum value of X2
+x2max  = 0.5       # maximum value of X2
+ix2_bc = periodic  # inner-X2 boundary flag
+ox2_bc = periodic  # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 5          # Number of cells in each MeshBlock, X1-dir
+nx2       = 1          # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here
+
+<units>
+bhmass_msun = 1.0   # sets the GM/c^2 length unit; only overall normalization matters here
+density_cgs = 1.0   # density unit (cgs)
+mu          = 1.0   # mean molecular weight
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 2.0       # ratio of specific heats Gamma
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<radiation_m1>
+closure_fun = eddington
+src_update = implicit
+opacity_type = photons
+
+gr_sources = false     # default: true
+matter_sources = true  # default: true
+backreact = true       # let gas temperature respond
+
+theta_limiter = false  # OFF -- proves the matter_implicit correction alone
+                       # (radiation_m1_update.cpp) suffices for the
+                       # Planck-only channel too, not just Compton.
+
+<photons>
+kappa_s = 0.0          # NO Compton -- isolate the Planck channel
+kappa_a = 0.0          # Rosseland absorption opacity [code units]
+kappa_p = 10.0         # Planck absorption/emission opacity [code units] --
+                       # chosen so dtau*sigma_p = cfl*rho*kappa_p ~ O(10) at
+                       # this cfl_number, matching the Compton tests' stiffness
+power_opacity = false  # constant (non-Kramers) opacities
+compton = false        # Planck-only -- the generalization this test checks
+matter_implicit = true   # quartic pre-solve now uses the combined
+                         # Compton+Planck rate (sigma_tot = sigma_c + rho*kappa_p);
+                         # with kappa_s=0 this degenerates to sigma_tot=rho*kappa_p
+                         # exactly (see radiation_m1_compton_implicit.hpp)
+# arad is not set here: with <units> present, RadiationM1 derives it from
+# rad_constant_cgs * temperature_cgs()^4 / pressure_cgs() automatically.
+
+<problem>
+pgen_name = rad_m1_photon_singlezonetest
+rho = 1.0     # initial density [code]
+temp = 1.5e-3 # initial temperature [code]; same calibration as the Compton
+              # stiff tests, so the joint equilibrium target is identical
+vx = 0.0    # x velocity
+vy = 0.0    # y velocity
+vz = 0.0    # z velocity
+
+<output1>
+file_type   = tab         # Binary data dump
+variable    = mhd_w       # Primitive variables
+dcycle      = 1
+
+<output2>
+file_type   = tab        # output format
+variable    = rad_m1_E    # choice of variables to output
+dcycle      = 1

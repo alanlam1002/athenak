@@ -7,6 +7,7 @@
 //  \brief thermal relaxation test
 
 // C++ headers
+#include <string>
 
 // Athena++ headers
 #include "athena.hpp"
@@ -47,6 +48,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   Real temp = pin->GetReal("problem", "temp");
   Real v1 = pin->GetOrAddReal("problem", "v1", 0.0);
   Real lf = 1.0/sqrt(1.0-(SQR(v1)));
+  // rad_frame selects which frame the initial radiation field is isotropic in:
+  // "fluid" (default, original behavior) boosts the isotropic-in-fluid-frame
+  // intensity into the tetrad frame using the fluid's own velocity, so there
+  // is no initial momentum mismatch to relax away. "coordinate" instead keeps
+  // the intensity isotropic in the static/coordinate frame regardless of v1,
+  // matching arXiv:2302.04283 Section 3.6's moving equilibration test, which
+  // explicitly starts from a coordinate-frame-isotropic field so that matter
+  // and radiation must relax to both thermal AND momentum equilibrium.
+  std::string rad_frame = pin->GetOrAddString("problem", "rad_frame", "fluid");
+  bool isotropic_in_coord_frame = (rad_frame.compare("coordinate") == 0);
 
   // set primitive variables
   auto &w0 = pmbp->phydro->w0;
@@ -93,15 +104,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       Real un_t =  (u_tet_[1]*nh_c_.d_view(n,1) + u_tet_[2]*nh_c_.d_view(n,2) +
                     u_tet_[3]*nh_c_.d_view(n,3));
 
-      Real n0_f =  u_tet_[0]*nh_c_.d_view(n,0) - un_t;
-      Real n1_f = (-u_tet_[1]*nh_c_.d_view(n,0) + u_tet_[1]/(u_tet_[0] + 1.0)*un_t +
-                   nh_c_.d_view(n,1));
-      Real n2_f = (-u_tet_[2]*nh_c_.d_view(n,0) + u_tet_[2]/(u_tet_[0] + 1.0)*un_t +
-                   nh_c_.d_view(n,2));
-      Real n3_f = (-u_tet_[3]*nh_c_.d_view(n,0) + u_tet_[3]/(u_tet_[0] + 1.0)*un_t +
-                   nh_c_.d_view(n,3));
+      // n0_f is the boost/redshift factor between the tetrad (static,
+      // coordinate-comoving) frame and the fluid frame along this ray.
+      // isotropic_in_coord_frame=false (default): boost an intensity that is
+      // constant in the FLUID frame into the tetrad frame -- n0_f enters as
+      // in the original formula. isotropic_in_coord_frame=true: keep the
+      // intensity constant in the TETRAD/coordinate frame instead, i.e. use
+      // the trivial (unboosted) n0_f=1 regardless of the fluid's velocity.
+      Real n0_f = isotropic_in_coord_frame ? 1.0 : (u_tet_[0]*nh_c_.d_view(n,0) - un_t);
 
-      // Calculate intensity in fluid frame
+      // Calculate intensity in the frame selected by rad_frame
       Real ii_f =  erad/(4.0*M_PI);
 
       // Calculate intensity in tetrad frame

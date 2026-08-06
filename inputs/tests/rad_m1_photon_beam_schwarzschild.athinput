@@ -1,0 +1,131 @@
+<comment>
+problem = grey photon M1 free-streaming beam test around a NONSPINNING
+  (Schwarzschild) black hole (Stage 10, arXiv:2302.04283 Section 3.3's
+  equatorial beam test, nonspinning case). Companion DO-side test:
+  rad_beam_bh_schwarzschild.athinput -- both use identical Cartesian
+  Kerr-Schild coordinates (M1's <adm>/metric=kerr-schild branch uses the
+  same textbook Kerr-Schild-Schwarzschild embedding as AthenaK's own
+  <coord> block at a=0, so no isotropic-radius conversion is needed between
+  the two codes -- confirmed by inspection of coordinates/cartesian_ks.hpp
+  vs rad_m1_beams.cpp's manual metric formula).
+
+  Setup: M=1 Schwarzschild BH at the origin, domain x,y in [-6,6] (2D).
+  Beam enters from the x1min face at impact parameter b=5.5 (just above the
+  critical capture parameter b_crit=3*sqrt(3)*M=5.196 for a photon grazing
+  the r=3M photon sphere -- see DEVELOPMENT.md Stage 10), moving in +x.
+  Should visibly bend toward the BH (gravitational lensing) while escaping
+  the domain, not plunge in. First-ever run of this M1 code path (Stage 10
+  un-guarded opacity_type=photons for the 2D isotropic/Kerr-Schild branches
+  in rad_m1_beams.cpp -- previously only the 1D Minkowski beam was wired up).
+
+<job>
+basename = photon_beam_schwarzschild  # name of run
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.4      # ordinary CFL -- a real transport test
+nlim       = 8000     # cycle limit (safety margin; tlim below is the real limit)
+tlim       = 14.0     # time limit -- enough for the beam to cross x=-6 to x=6
+                      # at coordinate speed ~1, plus deflection
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 120       # Number of zones in X1-direction
+x1min  = -6.0      # minimum value of X1
+x1max  = 6.0       # maximum value of X1
+ix1_bc = vacuum    # inner-X1 boundary flag -- required for
+                   # ApplyBeamSourcesBlackHole (radiation_m1_beams.cpp) to
+                   # inject the beam; matches its case BoundaryFlag::vacuum
+ox1_bc = outflow   # outer-X1 boundary flag -- lets the beam exit cleanly
+
+nx2    = 120       # Number of zones in X2-direction (2D test)
+x2min  = -6.0      # minimum value of X2
+x2max  = 6.0       # maximum value of X2
+ix2_bc = outflow   # inner-X2 boundary flag
+ox2_bc = outflow   # outer-X2 boundary flag
+
+nx3    = 1         # Number of zones in X3-direction (2D test)
+x3min  = -0.5      # minimum value of X3
+x3max  = 0.5       # maximum value of X3
+ix3_bc = periodic  # inner-X3 boundary flag
+ox3_bc = periodic  # outer-X3 boundary flag
+
+<meshblock>
+nx1       = 120        # Number of cells in each MeshBlock, X1-dir
+nx2       = 120        # Number of cells in each MeshBlock, X2-dir
+nx3       = 1          # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+metric  = kerr-schild  # nonspinning (Schwarzschild-in-Kerr-Schild-coords) --
+                       # the pgen's kerr-schild branch reads no spin
+                       # parameter, so this is a=0 by construction
+bh_mass = 1.0
+
+<mhd>
+eos         = ideal     # EOS type
+gamma       = 2.0       # ratio of specific heats Gamma
+
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc      # spatial reconstruction method (fluid state is uniform,
+                      # so reconstruction order doesn't matter for the gas)
+rsolver     = hlle      # Riemann solver to be used
+dfloor      = 1.0e-16   # floor on density rho
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity -- required for adm.alpha/beta_u
+                        # etc. to actually be used by the fluid/EOS machinery
+m           = 1.0       # BH mass, matches <adm>/bh_mass
+a           = 0.0       # nonspinning -- matches the pgen's spin-less
+                        # kerr-schild branch
+excise      = false     # the pgen's kerr-schild branch does not itself
+                        # excise -- domain kept well outside the horizon
+                        # (r=2M) via the beam's impact parameter instead
+
+<radiation_m1>
+closure_fun = minerbo  # NOT eddington: eddington pins chi=1/3 (isotropic),
+                      # cannot represent a directed beam
+src_update = implicit
+opacity_type = photons
+
+gr_sources = true      # curved spacetime -- unlike the flat 1D beam test,
+                       # GR source terms matter here for geodesic bending
+matter_sources = true  # exercise the real photon-opacity source term
+backreact = false      # keep gas static/uniform for this test
+
+rad_E_floor = 0.0      # keep the pre-beam-front region at exactly zero
+rad_eps = 0.01         # loosen the causality-bound margin, matches the
+                      # existing 1D beam test's convention
+
+theta_limiter = false  # default: false
+
+<photons>
+kappa_a = 0.0          # zero absorption/emission, matches the 1D beam test
+kappa_p = 0.0
+kappa_s = 1.0e-3       # small but nonzero scattering opacity [code units]
+power_opacity = false  # constant (non-Kramers) opacities
+compton = false        # no <units> block, so Compton is unavailable
+arad = 1.0             # radiation constant [code units] -- unused (kappa_p=0)
+
+<problem>
+pgen_name  = rad_m1_beamtest
+rho        = 1.0    # initial density [code], uniform in space
+temp       = 1.0    # initial temperature [code], uniform in space
+beam_ymin  = 5.4     # beam band in x2 -- impact parameter b~5.5, just above
+beam_ymax  = 5.6     # the critical capture value b_crit=3*sqrt(3)~5.196
+
+<output1>
+file_type   = bin         # AthenaK native binary dump -- 2D field, "tab"
+                          # (used by every earlier 1D M1 test this session)
+                          # only supports 1D slices; read with
+                          # vis/python/bin_convert.py's read_binary()
+variable    = rad_m1_E    # choice of variables to output
+dt          = 1.0         # time increment between outputs
+
+<output2>
+file_type   = bin         # AthenaK native binary dump
+variable    = rad_m1_F    # choice of variables to output (Fx:0, Fy:0, Fz:0)
+dt          = 1.0         # time increment between outputs

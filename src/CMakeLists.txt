@@ -112,6 +112,7 @@ add_executable(
 
         pgen/pgen.cpp
         pgen/tests/advection.cpp
+        pgen/tests/collapse.cpp
         pgen/tests/cpaw.cpp
         pgen/tests/cshock.cpp
         pgen/tests/divb_amr.cpp
@@ -171,7 +172,7 @@ add_executable(
 
         z4c/compact_object_tracker.cpp
         z4c/fastflow.cpp
-	    z4c/horizon_dump.cpp
+        z4c/horizon_dump.cpp
         z4c/tmunu.cpp
         z4c/z4c.cpp
         z4c/z4c_adm.cpp
@@ -203,10 +204,12 @@ add_executable(
         radiation_m1/radiation_m1_calc_opacities_toy.cpp
         pgen/tests/rad_m1_latticetest.cpp
         pgen/tests/rad_m1_spheretest.cpp
+        pgen/tests/rad_m1_photon_singlezone.cpp
         pgen/tests/rad_m1_hybridsj.cpp
+        pgen/tests/rad_m1_colliding_beams.cpp
+        pgen/tests/rad_m1_linear_wave.cpp
         radiation_m1/radiation_m1_toy.hpp
         radiation_m1/radiation_m1_calc_opacities_photons.cpp
-        radiation_m1/radiation_m1_compton.cpp
         pgen/tests/rad_m1_photon_thermalization.cpp
         pgen/tests/rad_m1_photon_diffusion.cpp
 )

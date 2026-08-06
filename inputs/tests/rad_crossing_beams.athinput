@@ -1,0 +1,116 @@
+<comment>
+problem = Discrete-ordinate (DO) colliding-beams test (Stage 12,
+  arXiv:2302.04283 Section 3.1). Two noninteracting beams cross in flat
+  spacetime, injected near the left edge of the domain. Companion M1-side
+  test: inputs/tests/rad_m1_photon_colliding_beams.athinput -- the paper's
+  own point: "Two beams crossing in vacuum will merge into a single beam
+  pointing in the average direction... when using M1... this test is
+  failed by M1 and commonly employed closure methods" -- while this
+  angular-grid discretization resolves both simultaneously. Uses
+  ProblemGenerator::RadiationCrossingBeams (src/pgen/tests/rad_beam.cpp),
+  ported from ~/athenak_IAS in Stage 12 (that file's own DO pgen suite is
+  richer than what athenak_m1 shipped with).
+
+  Geometry matches the paper's own numbers exactly: beams sourced at
+  x0=2/15, y=1/2+-11/30 (i.e. y_lower=2/15, y_upper=13/15), each aimed at
+  central angle -+pi/6 relative to +x (computed here via beam_x_cross/
+  beam_y_cross, the point at which both rays meet: x_cross=2/15+
+  (11/30)/tan(pi/6)=0.768419, y_cross=1/2 -- solving for this angle
+  algebraically rather than taking it as a direct input, since that's how
+  RadiationCrossingBeams parametrizes beam direction). Domain
+  [0,1.6]x[0,1], 96x60 cells, all matching the paper's Figure 4 setup.
+  beam_sigma (the ported code's Gaussian perpendicular-width parameter)
+  and beam_flux_fraction are kept at their ~athenak_IAS defaults -- the
+  paper instead uses a hard-edged radius-1/10 disk + pi/12 angular wedge,
+  a different (but qualitatively equivalent) parametrization not ported
+  here; only the source positions/directions are matched exactly.
+
+  Real bug found and fixed while porting: the as-ported mechanism only (a)
+  fills the whole downstream ray pattern once, at t=0, as an initial
+  condition, and (b) refreshes the x1min *ghost* zone every step
+  (CrossingBeamBoundary) -- (b) is a geometric no-op for this test's
+  interior source (x0=2/15 > x1min=0: a ghost cell at x<x1min is always
+  "behind" the source, so CrossingBeamProfile's along<0 check zeroes it
+  regardless). Without genuine continuous re-emission, the t=0 pattern
+  simply free-streamed out through the outflow boundaries with nothing
+  replacing it (domain-integrated R^tt measured falling from 1648 at t=0 to
+  1.3e-3 by t=2.5 in a diagnostic run) -- not remotely a steady state.
+  Fixed in src/pgen/tests/rad_beam.cpp: FillCrossingBeams's per-step call
+  now also re-asserts the analytic profile every step within
+  beam_source_radius of either source point (matching the paper's own
+  "radius of 1/10" -- a genuine continuous point source, not just an IC).
+
+<job>
+basename = crossing_beams_do
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 2.5      # matches the paper's t=5/2 ("sufficient for the beams
+                      # to leave the grid and for the problem to be in
+                      # steady state")
+
+<mesh>
+nghost = 2
+nx1    = 96        # matches the paper's 96x60 spatial grid exactly
+x1min  = 0.0
+x1max  = 1.6
+ix1_bc = user      # required: RadiationCrossingBeams's boundary hook
+                   # (CrossingBeamBoundary) only fires where mb_bcs==user
+ox1_bc = outflow   # lets both beams exit the domain cleanly to the right
+
+nx2    = 60
+x2min  = 0.0
+x2max  = 1.0
+ix2_bc = outflow   # no source here -- both beams only enter from x1min
+ox2_bc = outflow
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 96
+nx2 = 60
+nx3 = 1
+
+<coord>
+general_rel = true
+minkowski   = true    # flat spacetime, matching the paper's setup and the
+                      # M1-side companion test
+
+<radiation>
+nlevel         = 5      # geodesic mesh, Nang=10*5^2+2=252 -- resolved
+                        # enough to show two distinct angular peaks at the
+                        # crossing point, not a formal convergence study
+                        # (paper's own Figure 4 compares two resolutions;
+                        # not repeated here, this stage's point is the
+                        # qualitative M1-vs-DO contrast, not a convergence
+                        # scan)
+rotate_geo     = false
+angular_fluxes = false  # flat spacetime, no curvature effects on transport
+
+<problem>
+pgen_name       = rad_crossing_beams
+beam_amp        = 1.0
+beam_sigma      = 0.055
+beam_flux_fraction = 0.995
+beam_x0         = 0.13333333333333333   # = 2/15, matches the paper exactly
+beam_y_lower    = 0.13333333333333333   # = 2/15 = 1/2 - 11/30
+beam_y_upper    = 0.8666666666666667    # = 13/15 = 1/2 + 11/30
+beam_x_cross    = 0.7684186294419217    # solved so the beam direction is
+                                        # exactly +-pi/6 off +x (see header)
+beam_y_cross    = 0.5
+beam_source_radius = 0.1                # matches the paper's own "radius of
+                                        # 1/10" -- see header for why this
+                                        # is required (continuous re-
+                                        # emission, not just an IC)
+
+<output1>
+file_type = bin       # genuinely 2D field -- tab only supports 1D slices
+variable  = rad_coord
+dt        = 0.25

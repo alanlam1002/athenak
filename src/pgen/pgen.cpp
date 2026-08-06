@@ -989,10 +989,14 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     RadiationLinearWave(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_beam") == 0) {
     RadiationBeam(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_crossing_beams") == 0) {
+    RadiationCrossingBeams(pin, is_restart);
   } else if (pgen_fun_name.compare("shock_tube") == 0) {
     ShockTube(pin, is_restart);
   } else if (pgen_fun_name.compare("shwave") == 0) {
     Shwave(pin, is_restart);
+  } else if (pgen_fun_name.compare("spherical_collapse") == 0) {
+    SphericalCollapse(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_boosted_puncture") == 0) {
     Z4cBoostedPuncture(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_linear_wave") == 0) {
@@ -1009,6 +1013,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     RadiationM1HybridsjTest(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_m1_spheretest") == 0) {
     RadiationM1SphereTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_m1_photon_singlezonetest") == 0) {
+    RadiationM1PhotonSingleZoneTest(pin, is_restart);
 #if ENABLE_NURATES
   } else if (pgen_fun_name.compare("rad_m1_singlezonetest") == 0) {
     RadiationM1SingleZoneTest(pin, is_restart);
@@ -1017,6 +1023,10 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     RadiationM1DiffusionTest(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_m1_veljumptest") == 0) {
     RadiationM1VelocityJumpTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_m1_crossing_beams") == 0) {
+    RadiationM1CrossingBeams(pin, is_restart);
+  } else if (pgen_fun_name.compare("rad_m1_linear_wave") == 0) {
+    RadiationM1LinearWave(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_m1_photon_thermalization") == 0) {
     RadiationM1PhotonThermalization(pin, is_restart);
   } else if (pgen_fun_name.compare("rad_m1_photon_diffusion") == 0) {

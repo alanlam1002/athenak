@@ -1,0 +1,143 @@
+<comment>
+problem = grey photon M1 radiation-hydrodynamic linear wave test (Stage 13,
+  arXiv:2302.04283 Section 3.9), gas-dominated "H1" case (p_rad/p_gas=
+  1/10). Companion DO-side test: inputs/tests/rad_linwave_uniform.athinput
+  -- same background state and complex eigenvalue/eigenvector, read
+  verbatim (bit-identical <problem> values) from the same source (the
+  paper's own Appendix A Table 1/2 "H1" case). New pgen:
+  RadiationM1LinearWave (src/pgen/tests/rad_m1_linear_wave.cpp) -- unlike
+  every M1 test before this one, this is the single stage in this project
+  where the analytic reference solution's own derivation assumes exactly
+  M1's native closure (Eddington, chi=1/3 in the fluid frame -- paper's
+  Appendix A Eq. A6) rather than probing a closure limitation, so this
+  test may show M1 agreeing well with DO rather than diverging from it.
+
+  closure_fun=eddington is REQUIRED here, not a free choice -- the
+  analytic eigenvector was derived assuming it; any other closure would
+  be solving a different (undocumented) problem instead.
+
+  NOTE: <time>/tlim is a MULTIPLIER of the wave's damping time in DO's own
+  pgen (rad_linear_wave.cpp:181-184), matching the paper's own
+  prescription ("run for a time of -log(2)/Im(omega)"). This M1 pgen only
+  sets the t=0 initial condition (no internal final-time recomputation),
+  so tlim here is applied literally by the driver -- to match DO's
+  rescaled t=1.0*ln(2)/|omega_imag|=26.4623..., set tlim to that same
+  actual number directly rather than relying on any internal rescaling.
+
+<job>
+basename = photon_linwave
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 26.462418385756703   # = 1.0 * ln(2) / 2.6190006385782953e-02,
+                                  # matches the DO-side companion's actual
+                                  # (rescaled) run time exactly
+
+<mesh>
+nghost = 4         # wenoz reconstruction requires at least 3 ghost zones
+nx1    = 64        # overridden to 32 for the low-resolution run
+x1min  = 0.0
+x1max  = 1.0
+ix1_bc = periodic
+ox1_bc = periodic
+
+nx2    = 1
+x2min  = 0.0
+x2max  = 1.0
+ix2_bc = periodic
+ox2_bc = periodic
+
+nx3    = 1
+x3min  = 0.0
+x3max  = 1.0
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 64           # overridden to 32 for the low-resolution run
+nx2 = 1
+nx3 = 1
+
+<adm>
+# metric defaults to minkowski -- this needs to be here
+
+<coord>
+general_rel = true
+m           = 0.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos             = ideal
+gamma           = 1.6666666666666667  # Gamma_gas = 5/3, matches the paper
+
+dyn_eos         = ideal
+dyn_error       = reset_floor
+reconstruct     = wenoz    # matches the DO-side companion's <hydro>/reconstruct
+rsolver         = hlle
+dfloor          = 1.0e-16
+fofc            = false
+enforce_maximum = false
+
+<radiation_m1>
+closure_fun    = eddington  # REQUIRED -- see header comment
+src_update     = implicit
+opacity_type   = photons    # real fluid needed for the coupled background
+
+gr_sources     = false      # flat spacetime
+matter_sources = true       # genuinely two-way coupled test (unlike the
+                            # free-streaming beam/hohlraum tests)
+backreact      = true
+theta_limiter  = false
+
+rad_E_floor = 0.0
+rad_eps     = 0.01
+
+<photons>
+kappa_a         = 10.0      # matches the paper's alpha_bar_a = 10 (and the
+                            # DO-side companion's <radiation>/kappa_a),
+                            # playing double duty for both the true-
+                            # absorption and Planck-emission channels --
+                            # DO's own <radiation> block has only one such
+                            # parameter too
+kappa_p         = 10.0
+kappa_s         = 10.0      # matches the paper's alpha_bar_s = 10
+power_opacity   = false
+compton         = false
+arad            = 19.253382731290966   # Table 1 "H1" arad value, matches
+                                       # the DO-side companion exactly
+matter_implicit = true                 # stiff (kappa ~ 10)
+
+<problem>
+pgen_name   = rad_m1_linear_wave
+rho         = 1.0
+pgas        = 2.497687326549491e-01     # Table 1 "H1"
+erad        = 7.493061979648474e-02     # Table 1 "H1"
+delta       = 1.0e-4                    # matches the DO-side companion
+drho_real   =  8.3877889167048014e-01
+dpgas_real  =  3.2084488925731219e-01
+dpgas_imag  = -9.9134535607493107e-03
+dux_real    =  4.2035369927276667e-01
+dux_imag    = -3.4962560317943620e-03
+derad_real  =  1.2904189937790903e-01
+derad_imag  =  1.5203926879094193e-03
+dfxrad_real =  1.3260665610966586e-03
+dfxrad_imag = -6.7017329068802516e-03
+
+<output1>
+file_type = tab
+variable  = mhd_w
+dt        = 100.0    # only need the final snapshot
+
+<output2>
+file_type = tab
+variable  = rad_m1_E
+dt        = 100.0
+
+<output3>
+file_type = tab
+variable  = rad_m1_F
+dt        = 100.0

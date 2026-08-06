@@ -1,0 +1,111 @@
+<comment>
+problem = Stage 3 hydro-only validation of dyngr_bhstar.cpp's own (approximate,
+  Newtonian-free-fall) Bondi profile. enable_radiation=false skips the M1
+  radiation IC entirely -- exercises only the metric + hydro setup.
+
+  This is deliberately NOT the same solution as gr_bondi.cpp (the exact
+  Hawley-Smarr-Wilson 1984 GR Bondi solution, already validated in CI via
+  tst/test_suite/gr/test_gr_bondi_mpicpu.py) -- dyngr_bhstar.cpp uses a
+  simpler free-fall approximation. This run validates that THIS pgen's own
+  IC/metric setup runs cleanly and stays qualitatively sane (density/velocity
+  profile shape), compared only qualitatively against gr_bondi.cpp's exact
+  solution at matching radii.
+
+  IMPORTANT LIMITATION, found while validating: unlike gr_bondi.cpp (which
+  registers a FixedBondiInflow boundary condition re-imposing the analytic
+  solution at the domain edge every step) and unlike a true excised horizon,
+  dyngr_bhstar.cpp has no custom boundary condition and no runtime horizon
+  masking -- the IC only zeroes rho/p inside r<=0.5 once, at t=0. With plain
+  outflow BCs on a domain where the physical flow is supersonically
+  infalling, and nothing absorbing matter at the center, density grows
+  without bound over long integrations (confirmed: ~27x at the outer edge by
+  t=30) instead of reaching a steady accretion state. tlim is therefore kept
+  short here (a few M) to check the profile stays close to the free-fall IC
+  before this boundary/horizon artifact dominates -- this is a real,
+  documented limitation of the pgen as it stands (see DEVELOPMENT.md), not
+  something this short tlim is hiding.
+
+  No pgen_name is set below: this pgen is compiled via '-D PROBLEM=
+  dyngr_bhstar' (USER_PROBLEM_ENABLED), which calls ProblemGenerator::
+  UserProblem() directly regardless of <problem>/pgen_name -- unlike every
+  other M1 test this session, which used the built-in pgen_name dispatch.
+
+<job>
+basename = dyngr_bhstar_hydro  # name of run
+
+<mesh>
+nghost = 2         # Number of ghost cells
+nx1    = 32        # Number of zones in X1-direction
+x1min  = -10.0     # minimum value of X1
+x1max  = 10.0      # maximum value of X1
+ix1_bc = outflow   # inner-X1 boundary flag -- no user BC registered by this pgen
+ox1_bc = outflow   # outer-X1 boundary flag
+
+nx2    = 32        # Number of zones in X2-direction
+x2min  = -10.0     # minimum value of X2
+x2max  = 10.0      # maximum value of X2
+ix2_bc = outflow   # inner-X2 boundary flag
+ox2_bc = outflow   # outer-X2 boundary flag
+
+nx3    = 32        # Number of zones in X3-direction
+x3min  = -10.0     # minimum value of X3
+x3max  = 10.0      # maximum value of X3
+ix3_bc = outflow   # inner-X3 boundary flag
+ox3_bc = outflow   # outer-X3 boundary flag
+
+<meshblock>
+nx1 = 8            # Number of cells in each MeshBlock, X1-dir
+nx2 = 8            # Number of cells in each MeshBlock, X2-dir
+nx3 = 8            # Number of cells in each MeshBlock, X3-dir
+
+<adm>
+# This needs to be here (dyngr_bhstar.cpp requires <adm> to be present)
+
+<mhd>
+eos         = ideal              # EOS type
+gamma       = 1.6666666666667    # ratio of specific heats Gamma (5/3) -- must
+                                  # match <problem>/gamma below (the pgen's own
+                                  # polytrope uses <problem>/gamma directly)
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = dc          # spatial reconstruction method
+rsolver     = hlle        # Riemann solver to be used
+dfloor      = 1.0e-10     # floor on density rho (well below the ~1e-4 to
+                          # 1e-5 physical density range at this bondi_rs)
+fofc        = false
+enforce_maximum = false
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0       # BH mass (the pgen's own metric hardcodes M=1 directly;
+                         # this value is not otherwise read by dyngr_bhstar.cpp)
+a           = 0.0       # non-spinning (this pgen has no spin parameter at all)
+excise      = false     # the pgen manages its own horizon cutoff (r_iso<=0.5
+                         # gets rho=p=0 directly in the IC), not via <coord>
+                         # excision
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.3      # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = -1       # cycle limit
+tlim       = 3.0      # time limit [M] -- short window, see IMPORTANT
+                      # LIMITATION note above
+
+<problem>
+eosk             = 1.0               # polytropic constant K, p=eosk*rho^gamma
+gamma            = 1.6666666666667   # polytropic index (must match <mhd>/gamma)
+bondi_rs         = 8.0               # Bondi scale radius [M] -- matches
+                                      # gr_bondi.athinput's r_crit=8 for a
+                                      # qualitative side-by-side comparison
+b_norm           = 0.0               # disable the magnetic field entirely for
+                                      # this validation pass (Stage 3 is about
+                                      # the Bondi+radiation profile, not MHD)
+enable_radiation = false             # hydro-only: skip the M1 radiation IC
+
+<output1>
+file_type   = tab       # Formatted table (ASCII) output
+variable    = mhd_w     # Primitive variables (dens, velx, vely, velz, press)
+slice_x2    = 0.0        # 1D radial slice along the x1-axis (spherically
+slice_x3    = 0.0        # symmetric IC, so x2=x3=0 gives a valid r=|x1| cut)
+dt          = 0.25

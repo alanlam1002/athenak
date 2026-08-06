@@ -1,0 +1,117 @@
+<comment>
+problem = Discrete-ordinate (DO) free-streaming beam test around a
+  NONSPINNING (Schwarzschild) black hole (Stage 10, arXiv:2302.04283
+  Section 3.3's equatorial beam test, nonspinning case). Companion M1-side
+  test: inputs/tests/rad_m1_photon_beam_schwarzschild.athinput -- both use
+  identical Cartesian Kerr-Schild coordinates at a=0 (AthenaK's standard
+  <coord> block IS Cartesian Kerr-Schild -- coordinates/cartesian_ks.hpp --
+  matching M1's own manual kerr-schild metric branch exactly at zero spin),
+  so both codes describe literally the same spacetime in the same
+  coordinates: no isotropic-radius conversion needed, domain/impact
+  parameter chosen identically on both sides.
+
+  Setup: M=1 Schwarzschild BH at the origin, domain x,y in [-6,6] (2D).
+  Beam source near the x1min edge at impact parameter b~5.5 (just above the
+  critical capture parameter b_crit=3*sqrt(3)*M=5.196 for a photon grazing
+  the r=3M photon sphere), direction +x. Modeled on the existing, already-
+  validated flat-space do_beam_1d.athinput (see
+  m1_photon_report/parfiles/do_crosscheck/do_beam_1d.athinput) -- same
+  <rad_srcterms>-based point-source beam mechanism, now with a curved
+  background and angular_fluxes=true (needed for geodesic bending in this
+  discretization -- the flat-space test didn't need it).
+
+<job>
+basename = beam_schwarzschild
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 14.0
+
+<mesh>
+nghost = 2
+nx1    = 120
+x1min  = -6.0
+x1max  = 6.0
+ix1_bc = outflow
+ox1_bc = outflow
+
+nx2    = 120
+x2min  = -6.0
+x2max  = 6.0
+ix2_bc = outflow
+ox2_bc = outflow
+
+nx3    = 1
+x3min  = -0.5
+x3max  = 0.5
+ix3_bc = periodic
+ox3_bc = periodic
+
+<meshblock>
+nx1 = 120
+nx2 = 120
+nx3 = 1
+
+<coord>
+general_rel = true
+minkowski   = false   # Cartesian Kerr-Schild (default when not minkowski)
+m           = 1.0     # BH mass, matches the M1 side's <adm>/bh_mass
+a           = 0.0     # nonspinning -- matches the M1 side's spin-less
+                      # kerr-schild branch
+excise      = true    # exclude the region inside/near the horizon (r=2M);
+                      # domain kept well outside via the beam's impact
+                      # parameter regardless
+dexcise     = -1.0    # excision density fill value (unused -- no <mhd>/
+                      # dynamical fluid here, but excise=true requires this
+                      # key to be present, matching bh_beam.athinput)
+pexcise     = -1.0    # excision pressure fill value (same as above)
+
+<hydro>
+eos         = ideal   # minimal fixed background fluid -- this module's
+gamma       = 2.0     # radiation solver needs a fluid frame/tetrad defined
+                      # even when the fluid itself is trivial
+reconstruct = plm     # spatial reconstruction method
+rsolver     = hlle    # Riemann solver to be used
+
+<radiation>
+nlevel         = 10     # geodesic mesh level, matches the existing
+                        # flat-space do_beam_1d.athinput
+rotate_geo     = false
+angular_fluxes = true   # REQUIRED here (unlike the flat 1D test): this is
+                        # the mechanism representing gravity's effect on
+                        # null geodesics in this discretization -- without
+                        # it, no beam bending is possible
+kappa_s        = 1.0e-3 # matches the M1 side's <photons>/kappa_s -- required
+                        # once a <hydro> fluid is present (unlike the
+                        # fluid-less flat do_beam_1d.athinput)
+kappa_a        = 0.0
+kappa_p        = 0.0
+
+<rad_srcterms>
+rad_beam = true
+dii_dt   = 1.0     # injected I per unit time -- unscaled/uncalibrated,
+                   # only front position/trajectory are compared to M1
+pos_1    = -5.9    # near the x1min edge -- compact emitter refreshed every
+                   # step (this module has no true boundary-injected beam)
+pos_2    = 5.5     # impact parameter b~5.5, matches the M1 side's
+                   # beam_ymin/beam_ymax band
+pos_3    = 0.0
+dir_1    = 1.0     # propagate in +x, matching the M1 side
+dir_2    = 0.0
+dir_3    = 0.0
+width    = 0.3     # compact source region (~a few cells)
+spread   = 10.0    # full spread of beam in direction, in degrees
+
+<problem>
+pgen_name = rad_beam
+
+<output1>
+file_type = bin         # AthenaK native binary dump -- "tab" only supports
+                        # 1D slices (this mesh is genuinely 2D, x3 already
+                        # trivial with nx3=1); read with
+                        # vis/python/bin_convert.py's read_binary()
+variable  = rad_coord
+dt        = 1.0

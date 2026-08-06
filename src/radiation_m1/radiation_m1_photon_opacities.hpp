@@ -23,7 +23,14 @@ struct PhotonOpacityParams {
   Real kappa_p;           // Planck - Rosseland mean coefficient
   bool is_power_opacity;  // flag to enable Kramer's law opacity for kappa_a
   bool is_compton;        // flag to enable/disable compton
-  Real inv_t_electron;    // 1 / (electron rest-mass temperature) in code units
+  bool is_matter_implicit;  // flag to enable the per-substep implicit
+                            // matter/radiation (Planck+Compton) quartic
+                            // pre-solve, whose energy-conserving result is
+                            // used directly for the energy moment -- works
+                            // with either or both of kappa_p/compton active
+  Real inv_t_electron;    // k_B*temperature_scale/(m_e*c^2), single source of
+                          // truth (previously computed locally inside
+                          // CalcOpacityPhotons_IdealGas_)
 };
 
 }  // namespace radiationm1

@@ -47,7 +47,16 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
     // @TODO phydro are only partially implemented
     exit(EXIT_FAILURE);
   }
-  
+
+  if (ishydro && !ismhd) {
+    std::cerr << "Error: radiation_m1 with a <hydro> block and no <mhd> "
+      "block is not supported yet. Only CalcOpacityPhotons has a genuine "
+      "hydro-only path; the closure, flux, Tmunu-backreaction, and "
+      "bns-nurates-opacity code all assume <mhd> is present. Add an <mhd> "
+      "block, or track hydro-only support as future work." << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
   nspecies = M1_TOTAL_NUM_SPECIES;
 
   params.gr_sources = pin->GetOrAddBoolean("radiation_m1", "gr_sources", true);
@@ -55,8 +64,12 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
   params.backreact = pin->GetOrAddBoolean("radiation_m1", "backreact", true);
   params.backreact_tmunu = pin->GetOrAddBoolean("radiation_m1", "backreact_tmunu", true);
   params.theta_limiter = pin->GetOrAddBoolean("radiation_m1", "theta_limiter", false);
-  params.closure_epsilon = pin->GetOrAddReal("radiation_m1", "closure_epsilon", 1e-5);
-  params.closure_maxiter = pin->GetOrAddInteger("radiation_m1", "closure_maxiter", 64);
+  params.closure_epsilon = pin->GetOrAddReal("radiation_m1", "closure_epsilon", 1e-14);
+  params.closure_maxiter = pin->GetOrAddInteger("radiation_m1", "closure_maxiter", 164);
+  params.inv_closure_epsilon =
+      pin->GetOrAddReal("radiation_m1", "inv_closure_epsilon", 1e-15);
+  params.inv_closure_maxiter =
+      pin->GetOrAddInteger("radiation_m1", "inv_closure_maxiter", 64);
   params.rad_N_floor = pin->GetOrAddReal("radiation_m1", "rad_N_floor", 1e-77);
   params.rad_E_floor = pin->GetOrAddReal("radiation_m1", "rad_E_floor", 1e-30);
   params.rad_eps = pin->GetOrAddReal("radiation_m1", "rad_eps", 1e-14);
@@ -217,16 +230,24 @@ RadiationM1::RadiationM1(MeshBlockPack *ppack, ParameterInput *pin)
                 << "For photon opacities, you need kappa_s >= 0, kappa_a >= 0 and kappa_a + kappa_p >= 0" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    photon_op_params.is_matter_implicit =
+        pin->GetOrAddBoolean("photons", "matter_implicit", false);
+    if (photon_op_params.is_matter_implicit && params.src_update != Implicit) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl
+                << "matter_implicit requires src_update = implicit" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     if (isunits) {
       photon_op_params.arad = (pmy_pack->punit->rad_constant_cgs *
                                SQR(SQR(pmy_pack->punit->temperature_cgs())) /
                                pmy_pack->punit->pressure_cgs());
-
-      // inverse electron rest-mass temperature in code units
-      photon_op_params.inv_t_electron = pmy_pack->punit->temperature_cgs() / pmy_pack->punit->electron_rest_mass_energy_cgs;
+      photon_op_params.inv_t_electron =
+          pmy_pack->punit->temperature_cgs() /
+          pmy_pack->punit->electron_rest_mass_energy_cgs;
     } else {
       photon_op_params.arad = pin->GetReal("photons", "arad");
-      photon_op_params.inv_t_electron = 0.0;  // disable Compton without units
+      photon_op_params.inv_t_electron = 0.0;
     }
   } else if (opacity_type == "none") {
     params.opacity_type = None;

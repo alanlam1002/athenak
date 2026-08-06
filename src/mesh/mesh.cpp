@@ -26,6 +26,7 @@
 #include "diffusion/resistivity.hpp"
 #include "diffusion/conduction.hpp"
 #include "radiation/radiation.hpp"
+#include "dyn_radiation/dyn_radiation.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "particles/particles.hpp"
 #include "srcterms/srcterms.hpp"
@@ -338,7 +339,9 @@ Mesh::Mesh(ParameterInput *pin) :
 // destructor
 
 Mesh::~Mesh() {
-  if (pmb_pack->ppart != nullptr) {delete [] nprtcl_eachrank;}
+  if (pmb_pack->ppart != nullptr) {
+    delete[] nprtcl_eachrank;
+  }
   if (multilevel) {
     delete pmr;
   }
@@ -627,6 +630,9 @@ void Mesh::NewTimeStep(const Real tlim) {
   if (pmb_pack->prad != nullptr) {
     dt = std::min(dt, (cfl_no)*(pmb_pack->prad->dtnew) );
   }
+  if (pmb_pack->pdynrad != nullptr) {
+    dt = std::min(dt, (cfl_no)*(pmb_pack->pdynrad->dtnew) );
+  }
   // Particles timestep
   if (pmb_pack->ppart != nullptr) {
     dt = std::min(dt, (pmb_pack->ppart->dtnew) );
@@ -642,7 +648,9 @@ void Mesh::NewTimeStep(const Real tlim) {
 #endif
 
   // limit last time step to stop at tlim *exactly*
-  if ( (time < tlim) && ((time + dt) > tlim) ) {dt = tlim - time;}
+  if ((time < tlim) && ((time + dt) > tlim)) {
+    dt = tlim - time;
+  }
 
   return;
 }

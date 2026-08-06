@@ -27,6 +27,7 @@
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
 #include "radiation/radiation.hpp"
+#include "dyn_radiation/dyn_radiation.hpp"
 #include "radiation_m1/radiation_m1.hpp"
 #include "srcterms/turb_driver.hpp"
 #include "particles/particles.hpp"
@@ -57,16 +58,25 @@ MeshBlockPack::MeshBlockPack(Mesh *pm, int igids, int igide) :
 // MeshBlock destructor
 
 MeshBlockPack::~MeshBlockPack() {
-  if (ppart  != nullptr) {delete ppart;}
-  if (phydro != nullptr) {delete phydro;}
-  if (pmhd   != nullptr) {delete pmhd;}
-  if (padm   != nullptr) {delete padm;}
-  if (ptmunu != nullptr) {delete ptmunu;}
-  if (prad   != nullptr) {delete prad;}
-  if (pradm1 != nullptr) {delete pradm1;}
-  if (pdyngr != nullptr) {delete pdyngr;}
-  if (pnr    != nullptr) {delete pnr;}
-  if (pz4c   != nullptr) {
+  if (ppart != nullptr) {
+    delete ppart;
+  }
+  if (pnr != nullptr) {
+    delete pnr;
+  }
+  if (pdynrad != nullptr) {
+    delete pdynrad;
+  }
+  if (pdyngr != nullptr) {
+    delete pdyngr;
+  }
+  if (ptmunu != nullptr) {
+    delete ptmunu;
+  }
+  if (padm != nullptr) {
+    delete padm;
+  }
+  if (pz4c != nullptr) {
     delete pz4c;
     // cce dump
     for (auto cce : pz4c_cce) {
@@ -74,9 +84,26 @@ MeshBlockPack::~MeshBlockPack() {
     }
     pz4c_cce.resize(0);
   }
-  if (pturb  != nullptr) {delete pturb;}
-  if (punit  != nullptr) {delete punit;}
+  if (pturb != nullptr) {
+    delete pturb;
+  }
+  if (prad != nullptr) {
+    delete prad;
+  }
+  if (pradm1 != nullptr) {
+    delete pradm1;
+  }
+  if (pmhd != nullptr) {
+    delete pmhd;
+  }
+  if (phydro != nullptr) {
+    delete phydro;
+  }
+  if (punit != nullptr) {
+    delete punit;
+  }
   delete pcoord;
+  // must be last, since BoundaryValues destructors use pmy_pack->pmb->nnghbr
   delete pmb;
 }
 
@@ -133,6 +160,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     phydro = new hydro::Hydro(this, pin);
     nphysics++;
     if (!(pin->DoesBlockExist("mhd")) && !(pin->DoesBlockExist("radiation")) &&
+        !(pin->DoesBlockExist("dyn_radiation")) &&
         !(pin->DoesBlockExist("adm")) && !(pin->DoesBlockExist("z4c")) ) {
       phydro->AssembleHydroTasks(tl_map);
     }
@@ -146,6 +174,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     pmhd = new mhd::MHD(this, pin);
     nphysics++;
     if (!(pin->DoesBlockExist("hydro")) && !(pin->DoesBlockExist("radiation")) &&
+        !(pin->DoesBlockExist("dyn_radiation")) &&
         !(pin->DoesBlockExist("adm")) && !(pin->DoesBlockExist("z4c")) ) {
       pmhd->AssembleMHDTasks(tl_map);
     }
@@ -181,6 +210,20 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
 
   // (5) RADIATION
   // Create radiation physics module.  Create tasklist.
+  if (pin->DoesBlockExist("radiation") && pin->DoesBlockExist("dyn_radiation")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<radiation> and <dyn_radiation> are separate solvers; "
+              << "enable only one in a run." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (pin->DoesBlockExist("radiation") &&
+      (pin->DoesBlockExist("adm") || pin->DoesBlockExist("z4c"))) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Legacy <radiation> cannot be combined with ADM/Z4c "
+              << "backgrounds; use <dyn_radiation> for ADM radiation transport."
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   if (pin->DoesBlockExist("radiation")) {
     prad = new radiation::Radiation(this, pin);
     nphysics++;
@@ -240,9 +283,21 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     ptmunu = new Tmunu(this, pin);
   }
 
+  // (8b) DYNAMICAL-METRIC RADIATION
+  // Construct after ADM/Z4c so ADM geometry is available, and before the NR task graph
+  // so its tasks can be ordered with Z4c/DynGRMHD tasks.
+  if (pin->DoesBlockExist("dyn_radiation")) {
+    pdynrad = new dyn_radiation::DynRadiation(this, pin);
+    nphysics++;
+  } else {
+    pdynrad = nullptr;
+  }
+
   if (pz4c != nullptr || padm != nullptr) {
     pnr = new numrel::NumericalRelativity(this, pin);
     pnr->AssembleNumericalRelativityTasks(tl_map);
+  } else if (pdynrad != nullptr) {
+    pdynrad->AssembleRadTasks(tl_map);
   }
 
   // (9) PARTICLES

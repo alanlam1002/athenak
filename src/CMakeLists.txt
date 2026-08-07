@@ -131,6 +131,7 @@ add_executable(
         pgen/tests/advection.cpp
         pgen/tests/cpaw.cpp
         pgen/tests/cshock.cpp
+        pgen/tests/divb_amr.cpp
         pgen/tests/diffusion.cpp
         pgen/tests/gr_bondi.cpp
         pgen/tests/gr_monopole.cpp

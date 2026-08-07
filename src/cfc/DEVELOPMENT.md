@@ -6715,3 +6715,99 @@ src/cfc/
       clean merged state) and the temporary worktree (`git worktree
       remove --force`) after use. No permanent code changes from this
       investigation.
+
+48. **(2026-08-07) Second origin/main merge: upstream's own multigrid rewrite
+    (PR #776) plus 5 smaller commits.** `origin/main`'s history had been
+    rewritten since item 46/47's merge (`f4e0fb35`) -- that merge commit is
+    no longer an ancestor of current `origin/main`. The dominant change is
+    `8a6a8efa` "Feature/multigrid (#776)": a squashed merge of the *same*
+    multigrid feature-branch work `cfc` already has as ~88 individual,
+    non-squashed commits (both lineages share a `multigrid`/`origin/multigrid`
+    branch) -- so despite the alarming raw diffstat against the true
+    merge-base (`39e432f8`, before `src/multigrid/` existed on either side),
+    the actual `cfc`-vs-`origin/main` diff per multigrid file was modest
+    (33-1059 changed lines), not a rewrite. A `git rebase origin/main` was
+    tried first (per an explicit request) and abandoned after the very first
+    replayed commit produced 17 simultaneous conflicts spanning far more than
+    multigrid (gravity, bvals, driver, athena.hpp, parameter_input.cpp,
+    pgen.cpp/hpp, CMakeLists.txt) -- a full 87-commit rebase was judged not
+    resolvable with confidence; a plain merge (11 conflicting files, resolved
+    once) was used instead.
+    - **Conflict resolution pattern**: the 6 non-multigrid files
+      (`bvals.hpp`, `driver.cpp`, `dyn_grmhd.cpp`, `mesh_refinement.cpp`,
+      `meshblock_pack.cpp/.hpp`) were the same familiar CFC-adds/main-empty
+      shape as item 46's merge. The 5 multigrid files were mostly the same
+      shape too (CFC's `ncoeff_`/`coeff_` octet machinery, `CorrectionOmega`
+      damping, Robin BCs, multi-channel multipole moments -- all additions
+      main lacks), but three genuine two-sided differences needed judgment
+      rather than "keep ours":
+      - `multigrid_bvals.cpp`'s `FillCoarseMG_faces`: `origin/main` fixed a
+        real bug (writing a face-average to only 1 coarse ghost cell instead
+        of all `ngh` of them, silently wrong for `ngh>1` -- this repo's CFC
+        runs use `nghost=4`) -- adopted main's fix.
+      - `mesh_refinement.cpp`'s `AdaptiveMeshRefinement`: main added a
+        genuinely new fix, `RepairAMRFC` (PR #739, deep-AMR face-centered
+        divB preservation), calling `InitBoundaryValuesAndPrimitives` a
+        second time after it -- adopted main's fix, dropping its redundant
+        `MeshBlockPack* pmbp` redeclaration (already in scope from this
+        item's own earlier `is_amr_regrid=true` call).
+      - `SetMGTaskListFMGProlongate`'s signature: main widened it with a
+        `flag=0` default (matching the sibling `SetMGTaskListToFiner`,
+        already identical on both sides) to skip inter-block boundary comm
+        the first time on meshblock levels, right after `SetFromRootGrid`
+        (comm would be invalid at the 1-cell level anyway) -- adopted main's
+        wider signature; confirmed required by call sites already present in
+        `cfc`'s own `FMGProlongate`.
+    - **A subtle correctness trap avoided**: `mesh_refinement.cpp`'s
+      "Step 5" block (`hydro::Hydro* phydro = ...` through `adm::ADM* padm =
+      ...`, this item's own kept CFC content) turned out to **duplicate**
+      declarations main's own (unconflicted, cleanly auto-merged) code had
+      already introduced earlier in the same function for its `RestrictFC`
+      call -- caught only at compile time (`redefinition of 'phydro'` etc.);
+      fixed by deleting the item's now-redundant re-declarations, keeping
+      only its genuinely-new `cfc::CFC* pcfc` line and the `padm_needs_transfer`
+      logic. A reminder that "the conflict resolved cleanly" and "the file
+      compiles" are not the same claim when other, unconflicted hunks share
+      variable names.
+    - **A tool-use near-miss, caught before it could corrupt anything real**:
+      an early attempt to bulk-resolve several `HEAD`-only conflicts in
+      `driver.cpp` via a single Python regex (`<<<<<<< HEAD\n(.*?)\n=======\n
+      .*?\n>>>>>>> origin/main\n`) silently matched across *two separate*
+      conflicts when the first one's `origin/main` side was completely empty
+      (no blank line between `=======` and `>>>>>>>`) -- the regex's `.*?\n`
+      component had nothing to match at the intended boundary and backtracked
+      all the way to the next conflict's own closing marker, deleting
+      everything in between (283 lines survived out of an expected 706).
+      Caught immediately via a line-count sanity check; recovered losslessly
+      with `git checkout --conflict=merge -- <file>` (regenerates fresh
+      conflict markers from the same merge state) and re-resolved by hand.
+      For the largest multigrid conflicts afterward, exact `grep -n`-derived
+      line ranges plus `sed -i '<start>,<end>d'` (deleting the `origin/main`
+      side and the lone marker line explicitly, never a pattern spanning
+      both) replaced free-form regex substitution.
+    - **Found, not fixed (flagged instead)**: three `#ifdef MPI_PARALLEL`
+      occurrences in `multigrid_driver.cpp` (should read
+      `#if MPI_PARALLEL_ENABLED` -- confirmed via `config.hpp.in` that
+      `MPI_PARALLEL` is never defined anywhere in this codebase, so the
+      guarded `MPI_Allreduce` calls silently never execute under multi-rank
+      MPI). One occurrence was a direct, isolated one-line conflict against
+      main's correct macro (`CalculateCenterOfMass`) -- adopted main's fix
+      there, at zero risk. The other two are embedded inside `cfc`-only
+      multi-channel blocks main has no equivalent line for
+      (`CalculateMultipoleCoefficients`, and its own multipole-coefficient
+      normalization) -- left as-is rather than silently patched mid-merge;
+      the identical dead pattern also pre-exists, untouched by this merge, in
+      `bvals.hpp:313`, `z4c_wave_extr.cpp:21`, `cce.cpp:19`. Not yet
+      practically consequential (CFC's own multigrid solvers use
+      `mg_zerofixed`/`mg_robin`, not `mg_multipole`, in every current test
+      input), but worth an explicit follow-up if multipole BCs are ever
+      exercised in an actual multi-rank run.
+    - **Verified**: `build_cfc` (`dyn_grmhd/dyngr_tov`) and `build_cfc_xns`
+      (`dyn_grmhd/xns_rotstar`) both rebuilt cleanly after the `phydro`
+      redefinition fix. The 1-rank/8-rank CFC dynamic-AMR regression check
+      (`cfc_merge2_1rank`/`cfc_merge2_8rank`, jobs 252596/252597) reproduced
+      the exact known-good baseline: `max|delta psi - initial guess| =
+      9.844341e-02` (1-rank) and `5.261418e-02` (8-rank), byte-identical to
+      every prior verification round referenced in items 37-38 -- confirms
+      this merge changed nothing observable in CFC's own AMR/multigrid
+      solve path.

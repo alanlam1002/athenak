@@ -313,27 +313,34 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
     // ever evaluated, fed by a composition Y that is itself interpolated (via eval_at_n,
     // linear in log2 n) from the table -- independently of how P/E are interpolated.
     // This checks whether ColdPressure/ColdEnergy(n, Y_interp(n)) still agrees with the
-    // table's own (log-log-linear) interpolation of P/E at the same off-grid n, using
-    // eval_at_n itself so this exercises the exact same interpolation code used
-    // elsewhere (e.g. by the GetXFromRho accessors used to set up TOV/BNS initial data).
-    // Note: eval_at_n reads m_table/m_log_nb directly, so this assumes a host-accessible
-    // execution space (true for this project's current CPU-only OpenMP/Serial Kokkos
-    // build; would need a parallel_for wrapper on a GPU build).
+    // table's own (log-log-linear) interpolation of P/E at the same off-grid n. It uses
+    // eval_at_n_host below (a host-side copy of eval_at_n/weight_idx_ln's math run
+    // against host_table/host_log_nb) rather than eval_at_n itself, since eval_at_n reads
+    // the device-space m_table/m_log_nb directly and is only safe inside a parallel_for
+    // (device execution spaces such as SYCL are not host-accessible).
     if (global_variable::my_rank == 0) {
     {
+      auto eval_at_n_host = [&](int vi, Real n) -> Real {
+        Real log_n = log2_(n);
+        int i = static_cast<int>((log_n - host_log_nb(0))*m_id_log_nb);
+        i = (i < 0) ? 0 : ((i > static_cast<int>(m_nn)-2) ? static_cast<int>(m_nn)-2 : i);
+        Real w1 = (log_n - host_log_nb(i))*m_id_log_nb;
+        Real w0 = 1.0 - w1;
+        return w0 * host_table(vi, i+0) + w1 * host_table(vi, i+1);
+      };
       for (size_t in=0; in+1<m_nn; ++in) {
         for (Real t : {0.25, 0.5, 0.75}) {
           Real log_nb_test = (1.0-t)*host_log_nb(in) + t*host_log_nb(in+1);
           Real n_test = exp2_(log_nb_test);
 
-          Real f   = eval_at_n(ECFVOL, n_test);
-          Real yn  = eval_at_n(ECYN,   n_test);
-          Real yln = eval_at_n(ECYLN,  n_test);
-          Real ylq = eval_at_n(ECYLQ,  n_test);
+          Real f   = eval_at_n_host(ECFVOL, n_test);
+          Real yn  = eval_at_n_host(ECYN,   n_test);
+          Real yln = eval_at_n_host(ECYLN,  n_test);
+          Real ylq = eval_at_n_host(ECYLQ,  n_test);
           Real y[4] = {f, yn, yn*yln, (1.0-yn)*ylq};
 
-          Real p_tab = exp2_(eval_at_n(ECLOGP, n_test));
-          Real e_tab = exp2_(eval_at_n(ECLOGE, n_test));
+          Real p_tab = exp2_(eval_at_n_host(ECLOGP, n_test));
+          Real e_tab = exp2_(eval_at_n_host(ECLOGE, n_test));
 
           Real p_cold = ColdPressure(n_test, y);
           Real e_cold = ColdEnergy(n_test, y);

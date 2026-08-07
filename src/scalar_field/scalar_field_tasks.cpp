@@ -7,9 +7,17 @@
 //! \brief functions that control scalar-field tasks in the NumericalRelativity task list
 //!
 //! Task graph (start -> run -> end): InitRecv -> CopyU -> RescaleTmunu -> CalcRHS ->
-//! SomBC -> ExpRKUpdate -> RestrictU -> SendU -> RecvU -> ApplyPhysicalBCs -> Prolongate
-//! -> ClearSend -> ClearRecv. RescaleTmunu (Phase 3) rescales the fluid's Tmunu by
-//! 1/A(sphi); SomBC (Phase 4) applies the Yukawa Sommerfeld outer BC. The mass term
+//! SomBC -> ExpRKUpdate -> RestrictU -> SendU -> RecvU -> Prolongate -> ApplyPhysicalBCs
+//! -> ClearSend -> ClearRecv. Prolongate/ApplyPhysicalBCs run in that order (matching
+//! Z4c's own Z4c_Prolong -> Z4c_BCS ordering) because each is now split into a
+//! coarse-array step and a fine-array step: Prolongate first fills the coarse array's
+//! own physical-boundary ghost zones (ScalarFieldBCsCoarse) so the prolongation stencil
+//! reads valid data there, then prolongates; ApplyPhysicalBCs then fills the fine
+//! array's physical-boundary ghost zones (ScalarFieldBCs) so that corner ghost zones
+//! between a coarse neighbor and a physical boundary -- freshly overwritten by
+//! prolongation -- end up correct rather than stale. RescaleTmunu (Phase 3) rescales
+//! the fluid's Tmunu by 1/A(sphi); SomBC (Phase 4) applies the Yukawa Sommerfeld outer
+//! BC. The mass term
 //! itself is explicit (added directly in CalcRHS, see scalar_field_calcrhs.cpp) -- no
 //! implicit/IMEX update was needed, see PLAN.md's "Mass-term treatment" section.
 
@@ -77,10 +85,10 @@ void ScalarField::QueueScalarFieldTasks() {
                  Task_Run, {SF_RestU});
   pnr->QueueTask(&ScalarField::RecvU, this, SF_RecvU, "SF_RecvU",
                  Task_Run, {SF_SendU});
-  pnr->QueueTask(&ScalarField::ApplyPhysicalBCs, this, SF_BCS, "SF_BCS",
-                 Task_Run, {SF_RecvU});
   pnr->QueueTask(&ScalarField::Prolongate, this, SF_Prolong, "SF_Prolong",
-                 Task_Run, {SF_BCS});
+                 Task_Run, {SF_RecvU});
+  pnr->QueueTask(&ScalarField::ApplyPhysicalBCs, this, SF_BCS, "SF_BCS",
+                 Task_Run, {SF_Prolong});
 
   // End task list
   pnr->QueueTask(&ScalarField::ClearSend, this, SF_ClearS, "SF_ClearS", Task_End);

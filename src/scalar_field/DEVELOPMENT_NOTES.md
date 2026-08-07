@@ -1,9 +1,11 @@
 # Scalar-Tensor Extension: Development Notes
 
-Status: **Phases 0-7 done.** Scalarized-star initial data (Phase 5, an external-reader
+Status: **Phases 0-8 done.** Scalarized-star initial data (Phase 5, an external-reader
 pgen rather than the in-repo shooting solve originally planned), physical-boundary
-ghost-zone filling (Phase 6), and dynamic-AMR regridding support (Phase 7, refine-side
-verified, derefine-side not independently exercised -- see below) are all built. Still
+ghost-zone filling (Phase 6), dynamic-AMR regridding support (Phase 7, refine-side
+verified, derefine-side not independently exercised -- see below), and a post-rebase
+task-ordering correctness fix (Phase 8, after `main` reworked every module's BC
+machinery into coarse/fine steps) are all built. Still
 open: whether the MPA1 star's evolution instability (Phase 5) is a genuine physical
 instability of that configuration or a numerical/coupling issue (unresolved even after
 Phase 6's fix, see below); the new, similarly unexplained monotonic density drift seen
@@ -765,6 +767,71 @@ that's a puzzle in its own right, independent of `ScalarField`.
 Regression: `rns_st_gam2k100.athinput` (unchanged, still `refinement=static`) reran
 clean, zero NaNs -- confirms none of this new (adaptive-only-gated) code affects the
 already-working static-AMR configuration.
+
+## Phase 8 -- Post-rebase correctness fix: ScalarField's Prolongate/ApplyPhysicalBCs
+task ordering was backwards
+
+Context: the STT branch was rebased onto an updated `main` that reworked the
+boundary-condition machinery across *every* module (not Z4c-specific) into a
+coarse-array step + fine-array step: `<Module>BCsCoarse` (fills coarse-array physical-
+boundary ghost zones, called from `Prolongate` *before* `ProlongateCC`, so the
+prolongation stencil reads valid coarse-side data) and `<Module>BCs` (fills fine-array
+physical-boundary ghost zones, called from `ApplyPhysicalBCs` *after* prolongation, so
+corner ghost zones between a coarse neighbor and a physical boundary -- freshly
+overwritten by prolongation -- end up correct rather than stale). Rebasing produced a
+merge conflict in `scalar_field_bcs.cpp`/`scalar_field_tasks.cpp`/`bvals.hpp`, resolved
+in another session (not this one) by splitting `ScalarFieldBCs` into
+`ScalarFieldBCs`/`ScalarFieldBCsCoarse` and updating `Prolongate`/`ApplyPhysicalBCs`'s
+*internal* calls to match -- correctly, as it turned out -- but flagged explicitly as
+"not a deliberate fix-first pass, verify/redo properly rather than trust it blindly."
+
+Verifying it properly (not trusting it) found a real, separate bug the other session's
+fix missed: **the task-graph dependency ordering in `QueueScalarFieldTasks()`
+(`scalar_field_tasks.cpp`) was never flipped to match.** It still had
+`SF_BCS` (`ApplyPhysicalBCs`) depending on `SF_RecvU`, with `SF_Prolong`
+(`Prolongate`) depending on `SF_BCS` -- i.e. runtime order `RecvU -> ApplyPhysicalBCs
+-> Prolongate`, the *old* order, correct only for the pre-split single-function design.
+Confirmed by direct comparison against the current (post-rebase) codebase that this
+is backwards: `z4c_tasks.cpp`'s `Z4c_Prolong`/`Z4c_BCS` queueing has `Z4c_BCS` depend on
+`Z4c_Prolong` (i.e. `RecvU -> Prolongate -> ApplyPhysicalBCs`), and `mhd_tasks.cpp`'s
+older task-list mechanism shows the identical ordering (`id.bcs` depends on `id.prol`)
+-- this new ordering is a codebase-wide convention now, not a Z4c-specific quirk, and
+`ScalarField` was the only module left using the old one. Practical consequence: the
+fine-array `ScalarFieldBCs` fill was running *before* prolongation rather than after,
+then getting silently overwritten by prolongation immediately afterward -- exactly the
+staleness hazard the new ordering exists to prevent, for coarse-fine boundaries that
+sit at a physical boundary corner.
+
+Fixed by swapping the two `QueueTask` dependency edges (now `SF_Prolong` depends on
+`{SF_RecvU}`, `SF_BCS` depends on `{SF_Prolong}`) and correcting the file's own stale
+task-graph docstring comment, which still described the old order.
+
+Everything else the other session touched was checked directly and found correct, not
+assumed: `ScalarFieldBCs`/`ScalarFieldBCsCoarse`'s signatures match
+`Z4cBCs`/`Z4cBCsCoarse`'s exactly; the `bvals.hpp` declarations are consistent; the
+`var_choice`/`basetype_output.cpp` scalarfield output-variable ranges (`151-154`) are
+untouched and correctly unaffected by upstream main's new `grav_phi` entry (inserted
+right after, at `154`, with `Particles` correctly shifted to `155-156`); the
+`CMakeLists.txt` entry for `scalar_field_bcs.cpp` survived the rebase; and Phase 7's
+`mesh_refinement.cpp`/`load_balance.cpp` `pscalarfield` wiring survived the rebase
+intact and unaffected (the new `Gravity`/`pgrav` module uses a completely different
+multigrid-solve mechanism and isn't wired into those same dispatch chains either,
+confirming this isn't a pattern `ScalarField` also missed).
+
+**Verification**: fresh full rebuild (serial, `build_rns_st_serial_check`) after the
+rebase compiles clean. Reran both existing regression tests:
+`rns_st_gam2k100.athinput` (`multilevel=false`, doesn't exercise this code path at all)
+still clean, zero NaNs. `rns_st_gam2k100_adaptive.athinput` (`multilevel=true`, does
+exercise it) also clean, zero NaNs, same `56` MeshBlocks created/`0` deleted as before
+the rebase, and -- checked directly, not assumed -- `sf_sphi`/`sf_pi` values and the
+`rho-max` time series are numerically identical (matching digit-for-digit) to the
+pre-rebase run recorded in Phase 7. Honestly: this means the fix didn't demonstrably
+change this particular test's output, so it doesn't independently prove the bug was
+being triggered by this specific configuration's corner geometry -- the fix is
+correct by direct comparison against the rest of the codebase's now-universal
+convention, not by observing a before/after numerical difference here. Worth
+revisiting if a future AMR test shows unexpected values right at a reflect/diode
+domain corner that also happens to be a coarse-fine interface.
 
 ## Sample input block
 

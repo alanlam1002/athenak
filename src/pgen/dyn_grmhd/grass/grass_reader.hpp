@@ -54,10 +54,14 @@
 //  Grid is a half-domain in theta (mu=cos(theta) in [0,1], equator->pole -- confirmed
 //  via grid_mod.f90 for all three of GRASS's angular-collocation options). Reused
 //  directly from the sibling rns_st_reader.hpp's own existing idiom for its own
-//  half-domain angular array: query at mu'=|cos(theta)|=|z|/r (always in-bounds, no
-//  ghost padding needed there), and flip the sign of the theta-derivative-dependent
-//  extrinsic-curvature components for z<0 (chain rule: theta'=arccos(|cos(theta)|),
-//  dtheta'/dtheta=-1 for z<0).
+//  half-domain angular array: query at mu'=|cos(theta)|=|z|/r (always in-bounds --
+//  the QUERY itself never goes negative), and flip the sign of the theta-derivative-
+//  dependent extrinsic-curvature components for z<0 (chain rule:
+//  theta'=arccos(|cos(theta)|), dtheta'/dtheta=-1 for z<0). Note this does NOT mean
+//  the Lagrange stencil itself stays in-bounds near the equator -- it still needs
+//  ghost-padded storage at negative angular indices whenever the nearest real grid
+//  index is within n_order of mu=0 (routine, since GRASS's mu grid clusters points
+//  near the equator); see the equatorial mirror in Load() below.
 
 #include <algorithm>
 #include <cmath>
@@ -124,23 +128,35 @@ class GrassData {
   Real r_e_internal_ = 0.0;       // GRASS-internal units (header_meta[0])
   Real r_e_code_ = 0.0;           // AthenaK code units
 
-  // Flat storage, ghost-padded: s in [-n_order, sdiv_-1], mu in [0, mdiv_-1+n_order].
-  // (No ghost needed at the mu=0/equator end -- handled by the |z| query trick.)
+  // Flat storage, ghost-padded: s in [-n_order, sdiv_-1], mu in [-n_order, mdiv_-1+n_order].
+  // Ghost IS needed at the mu=0/equator end, despite the query itself (|z|/r) never
+  // going negative: the Lagrange stencil is centered on the nearest grid index `im`
+  // and always spans [im-n_order, im+n_order] regardless of where the query sits, so
+  // any query with `im < n_order` (routine near the equator, since GRASS's mu grid
+  // clusters points there -- confirmed this session: mu[1..3] ~ 0.002-0.016 for a
+  // representative restart) needs negative-index storage. Originally missing here,
+  // causing silent reads into adjacent/out-of-bounds memory (NaN/Inf propagating into
+  // rho0, then into tov::TabulatedEOS's bisection -- a Kokkos::View OOB abort) for any
+  // query point close enough to the equatorial plane. Fixed the same way as the
+  // pre-existing pole (mu=1) ghost below: even reflection, since physical fields are
+  // even functions of cos(theta) and this is exactly the mu=0 counterpart of that
+  // same symmetry.
   std::vector<Real> s_gp_;        // size sdiv_ + n_order
-  std::vector<Real> mu_;          // size mdiv_ + n_order
-  std::vector<Real> field_;       // size kNumFields * (sdiv_+n_order) * (mdiv_+n_order)
+  std::vector<Real> mu_;          // size mdiv_ + 2*n_order
+  std::vector<Real> field_;       // size kNumFields * (sdiv_+n_order) * (mdiv_+2*n_order)
 
   int SOff() const { return n_order; }               // index of s_gp[0] in s_gp_
+  int MOff() const { return n_order; }               // index of mu[0] in mu_
   int SSpan() const { return sdiv_ + n_order; }
-  int MSpan() const { return mdiv_ + n_order; }
+  int MSpan() const { return mdiv_ + 2*n_order; }
 
   Real &S(int i) { return s_gp_[i + SOff()]; }
   Real S(int i) const { return s_gp_[i + SOff()]; }
-  Real &Mu(int j) { return mu_[j]; }                 // mu ghost only extends past mdiv_-1
-  Real Mu(int j) const { return mu_[j]; }
+  Real &Mu(int j) { return mu_[j + MOff()]; }
+  Real Mu(int j) const { return mu_[j + MOff()]; }
 
   int FOff(int field, int i, int j) const {
-    return field*SSpan()*MSpan() + (i + SOff())*MSpan() + j;
+    return field*SSpan()*MSpan() + (i + SOff())*MSpan() + (j + MOff());
   }
   Real &Field(int field, int i, int j) { return field_[FOff(field, i, j)]; }
   Real Field(int field, int i, int j) const { return field_[FOff(field, i, j)]; }
@@ -247,7 +263,7 @@ inline void GrassData::Load(const std::string &fname) {
 
   // Allocate ghost-padded storage and copy the real (non-ghost) data in.
   s_gp_.assign(SSpan(), 0.0);
-  mu_.assign(mdiv_ + n_order, 0.0);
+  mu_.assign(mdiv_ + 2*n_order, 0.0);
   field_.assign(static_cast<size_t>(kNumFields)*SSpan()*MSpan(), 0.0);
   for (int i = 0; i < sdiv_; ++i) { S(i) = s_raw[i]; }
   for (int j = 0; j < mdiv_; ++j) { Mu(j) = mu_raw[j]; }
@@ -266,6 +282,17 @@ inline void GrassData::Load(const std::string &fname) {
     S(-i) = -S(i);
     for (int j = 0; j < mdiv_; ++j) {
       for (int f = 0; f < kNumFields; ++f) { Field(f, -i, j) = Field(f, i, j); }
+    }
+  }
+  // Equatorial ghost padding: mirror through the equator (mu=0 boundary), even
+  // reflection -- same reasoning/idiom as the pole block just below, just at the
+  // other end (see the class-level storage comment for why this is needed at all).
+  for (int j = 1; j <= n_order; ++j) {
+    Mu(-j) = 2.0*Mu(0) - Mu(j);
+    for (int i = -n_order; i < sdiv_; ++i) {
+      for (int f = 0; f < kNumFields; ++f) {
+        Field(f, i, -j) = Field(f, i, j);
+      }
     }
   }
   // Polar ghost padding: mirror through the pole (mu=1 boundary), even reflection --
@@ -439,6 +466,18 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
     v2 = std::min(std::max(v2, 0.0), 1.0 - 1.0e-12);
     Real utilde_phi = (omg_code - ww_code) / (N * std::sqrt(1.0 - v2));
     vu[0] = y*utilde_phi; vu[1] = -x*utilde_phi; vu[2] = 0.0;
+    // Floor energy_internal to a tiny positive value before the EOS-table log()
+    // lookup. `inside_star` is based on the (separately-interpolated) enthalpy
+    // field crossing its own threshold -- it does NOT guarantee energy_internal
+    // itself is positive right at the stellar surface, where the Lagrange
+    // stencil can ring (Gibbs phenomenon) across the sharp density
+    // discontinuity and briefly undershoot to zero/negative just inside the
+    // enthalpy-based boundary. N0FromE()'s std::log() of that is NaN, which
+    // previously reached slice_eos.GetYeFromRho() below BEFORE the isfinite
+    // guard could catch it, crashing inside TabulatedEOS's own bisection
+    // (Kokkos::View OOB with an undefined int-cast-of-NaN index) instead of
+    // this file's own controlled fatal error.
+    energy_internal = std::max(energy_internal, 1.0e-300);
     rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;  // g/cm^3
   }
 
@@ -463,12 +502,12 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   out->rho0 = units_.RestMassDensityCgsToCode(rho0_cgs);
   out->pres = units_.PressureToCode(pressure_internal);
 
-  // Seed Yq from the 1D slice table at this point's OWN rho0 -- GetYeFromRho already
-  // degrades gracefully to its own atmosphere default (ye_atmosphere, <mhd>
-  // s0_atmosphere) whenever rho0 is zero/below the slice table's floor, so no separate
-  // inside_star gate is needed here (out->rho0 is already 0 outside the star).
-  out->Yq = slice_eos.GetYeFromRho<tov::LocationTag::Host>(out->rho0);
-
+  // Check finiteness BEFORE calling into slice_eos.GetYeFromRho() below --
+  // GetYeFromRho does its own log(rho) internally and only guards against
+  // *small* rho (its own lrho<lrho_min check), not NaN (NaN compares false
+  // against everything, so a NaN rho0 silently skips that guard and reaches
+  // an undefined int-cast further in, previously surfacing as a Kokkos::View
+  // out-of-bounds abort instead of this file's own controlled error).
   if (!std::isfinite(out->alpha) || !std::isfinite(out->rho0) ||
       !std::isfinite(out->pres)) {
     std::stringstream msg;
@@ -477,6 +516,13 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
         << z << ")" << std::endl;
     throw std::runtime_error(msg.str());
   }
+
+  // Seed Yq from the 1D slice table at this point's OWN rho0 -- GetYeFromRho already
+  // degrades gracefully to its own atmosphere default (ye_atmosphere, <mhd>
+  // s0_atmosphere) whenever rho0 is zero/below the slice table's floor, so no separate
+  // inside_star gate is needed here (out->rho0 is already 0 outside the star) -- and by
+  // this point out->rho0 is guaranteed finite (see the isfinite check just above).
+  out->Yq = slice_eos.GetYeFromRho<tov::LocationTag::Host>(out->rho0);
 }
 
 }  // namespace grass

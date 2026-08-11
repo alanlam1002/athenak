@@ -1,0 +1,114 @@
+# AthenaK input file: full magnetic-web + dipole smoke test for dyngr_grass, per
+# magnetic_web_id_athenak.md fiducial parameter set. rho_lo/rho_hi chosen well within
+# this star's rho_max=1.14091e-03 (code units) and well above dfloor=2.8e-15.
+# web_kmax=0.4 satisfies the resolution guard (2*pi/kmax=15.7 >= 8*dx_finest=12,
+# dx_finest=1.5 at this test's uniform 32^3 resolution, no AMR).
+
+<comment>
+problem   = GRASS-initial-data neutron star (full magnetic-web + dipole smoke test)
+
+<job>
+basename  = grass_web_smoke
+
+<mesh>
+nghost     = 3
+nx1        = 96
+x1min      = -24
+x1max      =  24
+ix1_bc     = outflow
+ox1_bc     = outflow
+
+nx2        = 96
+x2min      = -24
+x2max      =  24
+ix2_bc     = outflow
+ox2_bc     = outflow
+
+nx3        = 96
+x3min      = -24
+x3max      =  24
+ix3_bc     = outflow
+ox3_bc     = outflow
+
+<meshblock>
+nx1        = 96
+nx2        = 96
+nx3        = 96
+
+<time>
+evolution  = dynamic
+integrator = rk3
+cfl_number = 0.25
+nlim       = 0
+tlim       = 1000
+ndiag      = 1
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+dyn_eos     = compose
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 2.8e-15
+tfloor      = 1.0e-3
+pfloor      = 1.0e-20
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+table       = /u/tlam/GRASS/eos/DD2_hot_trapped_3d.athtab
+nscalars    = 1
+
+<adm>
+
+<z4c>
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_eta       = 0.3
+shift_advect    = 1.0
+diss            = 0.5
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+id_file         = /sakura/ptmp/tlam/athenak_run/pgen_grass_smoke/res_default_r085_lam128072.rst
+grass_eos_table = /u/tlam/GRASS/eos/DD2_hot_equal_pinned.dat
+table           = /u/tlam/GRASS/eos/DD2_hot_slice.athtab
+user_hist       = true
+
+web_enable       = 1
+web_rho_lo       = 1.0e-8
+web_rho_hi       = 1.1e-3
+web_nmodes       = 32
+web_kmin         = 1.2
+web_kmax         = 1.5
+web_alpha        = 1.0
+web_mu_star      = 2.0
+web_seed         = 20260808
+web_bmax_gauss   = 1.0e16
+web_tor_pol      = 1.0
+
+dipole_enable    = 1
+dipole_bmax_gauss = 1.0e16
+dipole_r0        = 5.0
+dipole_confine   = 0
+
+<output1>
+file_type   = hst
+dt          = 1.0
+
+<output2>
+file_type   = bin
+variable    = mhd_w_bcc
+dt          = 1000.0
+slice_x3    = 0.0

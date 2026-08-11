@@ -113,6 +113,22 @@ class GrassData {
   void Interpolate(Real x, Real y, Real z, const GrassEosTable &eos_table,
                     const tov::TabulatedEOS &slice_eos, Point *out) const;
 
+  // Rho-only variant of Interpolate(), for the magnetic-web vector-potential
+  // builder (grass_magnetic_web.hpp / dyngr_grass.cpp's BuildMagneticField),
+  // which needs h(rho0) at many more points than the ADM/hydro fill loop
+  // (three separate edge-staggered grids, each built at least twice for the
+  // web's poloidal/toroidal decomposition, again for an optionally-confined
+  // dipole) -- skips the metric/Jacobian/velocity construction entirely,
+  // evaluating only the two fields (energy, enthalpy) actually needed to
+  // recover rho0. Shares the stencil-LOCATION logic with Interpolate() via
+  // LocateStencil() below (that logic is exactly where this session's two
+  // real bugs lived -- keeping it in one place matters); duplicates only the
+  // much simpler 2-field stencil SUM itself, to avoid threading a variable-
+  // length field list through Interpolate()'s existing, already-validated
+  // 8-field loop. Returns rho0 in AthenaK code units (0.0 outside the star),
+  // same convention as Point::rho0.
+  Real InterpolateRho(Real x, Real y, Real z, const GrassEosTable &eos_table) const;
+
  private:
   static constexpr int n_order = 3;         // Lagrange stencil half-width, matches
                                              // the sibling rns_st_reader.hpp's choice
@@ -163,6 +179,21 @@ class GrassData {
 
   void Load(const std::string &fname);
   void BuildLengthScales() { r_e_code_ = units_.LengthToCode(r_e_internal_); }
+
+  // Locates the Lagrange-stencil base indices (is,im) for a query point, i.e.
+  // the exact index-clamping logic shared by Interpolate() and
+  // InterpolateRho() (see the latter's comment for why this is factored out
+  // rather than duplicated).
+  void LocateStencil(Real s_query, Real mu_query, int *is_out, int *im_out) const {
+    int is = 0;
+    for (int ii = 1; ii < sdiv_; ++ii) { if (S(ii) > s_query) { is = ii; break; } is = ii; }
+    is = std::min(sdiv_ - 1 - n_order, std::max(n_order, is));
+    int im = 0;
+    for (int jj = 1; jj < mdiv_; ++jj) { if (Mu(jj) > mu_query) { im = jj; break; } im = jj; }
+    im = std::min(mdiv_ - 1 - n_order, std::max(0, im));
+    *is_out = is;
+    *im_out = im;
+  }
 
   // r(s) = r_e * (s/(1-s))^s_pwr, GRASS-internal units.
   Real RadiusOfS(Real s) const {
@@ -335,12 +366,8 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   // Locate and clamp Lagrange-stencil base indices so [base-n_order, base+n_order]
   // stays within the (ghost-padded) stored arrays. Linear scan is adequate at GRASS's
   // grid sizes (SDIV~O(1e3)); replace with a binary search if profiling ever demands it.
-  int is = 0;
-  for (int ii = 1; ii < sdiv_; ++ii) { if (S(ii) > s_query) { is = ii; break; } is = ii; }
-  is = std::min(sdiv_ - 1 - n_order, std::max(n_order, is));
-  int im = 0;
-  for (int jj = 1; jj < mdiv_; ++jj) { if (Mu(jj) > mu_query) { im = jj; break; } im = jj; }
-  im = std::min(mdiv_ - 1 - n_order, std::max(0, im));
+  int is, im;
+  LocateStencil(s_query, mu_query, &is, &im);
 
   // Point values of the 8 fields we need directly, plus d/ds and d/dmu of ww (F_WW).
   // F_ENTHALPY is included solely as GRASS's own inside-star/vacuum indicator (h>1
@@ -523,6 +550,60 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   // inside_star gate is needed here (out->rho0 is already 0 outside the star) -- and by
   // this point out->rho0 is guaranteed finite (see the isfinite check just above).
   out->Yq = slice_eos.GetYeFromRho<tov::LocationTag::Host>(out->rho0);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real GrassData::InterpolateRho
+//! \brief Cartesian point -> rest-mass density only, AthenaK code units. See the
+//  declaration's comment for why this exists separately from Interpolate().
+
+inline Real GrassData::InterpolateRho(Real x, Real y, Real z,
+                                       const GrassEosTable &eos_table) const {
+  Real r_code = std::sqrt(x*x + y*y + z*z);
+  Real costh = (r_code < 1.0e-30) ? 1.0 : z / r_code;
+  Real mu_query = std::abs(costh);
+
+  Real r_internal = r_code / std::max(units_.LengthToCode(1.0), 1.0e-300);
+  Real s_query = SOfRadius(r_internal);
+
+  int is, im;
+  LocateStencil(s_query, mu_query, &is, &im);
+
+  // Same field selection/ordering rationale as Interpolate()'s F_ENTHALPY note --
+  // enthalpy gates inside-star, energy feeds the EOS-table rho0 lookup. No
+  // derivatives needed here (unlike F_WW in Interpolate()), so fr/fp are hoisted
+  // out of the inner loop rather than recomputed per (di,dj) pair -- a pure
+  // efficiency simplification versus Interpolate()'s loop shape (which computes
+  // fdr/fdp cross terms this function doesn't need), not a behavioral difference.
+  Real val[2] = {0.0, 0.0};   // {energy, enthalpy}
+  static constexpr int kUse[2] = {F_ENERGY, F_ENTHALPY};
+  for (int di = -n_order; di <= n_order; ++di) {
+    Real fr = 1.0;
+    for (int dk = -n_order; dk <= n_order; ++dk) {
+      if (dk == di) { continue; }
+      fr *= (s_query - S(is + dk)) / (S(is + di) - S(is + dk));
+    }
+    for (int dj = -n_order; dj <= n_order; ++dj) {
+      Real fp = 1.0;
+      for (int dk = -n_order; dk <= n_order; ++dk) {
+        if (dk == dj) { continue; }
+        fp *= (mu_query - Mu(im + dk)) / (Mu(im + dj) - Mu(im + dk));
+      }
+      for (int c = 0; c < 2; ++c) {
+        val[c] += fr*fp*Field(kUse[c], is + di, im + dj);
+      }
+    }
+  }
+  Real energy_internal = val[0], enthalpy_pot = val[1];
+  bool inside_star = (enthalpy_pot > 1.0e-6);   // same criterion as Interpolate()
+  if (!inside_star) { return 0.0; }
+
+  // Same energy floor as Interpolate() -- see that function's comment for why
+  // (Lagrange ringing near the stellar surface can undershoot energy to
+  // zero/negative just inside the enthalpy-based boundary).
+  energy_internal = std::max(energy_internal, 1.0e-300);
+  Real rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;
+  return units_.RestMassDensityCgsToCode(rho0_cgs);
 }
 
 }  // namespace grass

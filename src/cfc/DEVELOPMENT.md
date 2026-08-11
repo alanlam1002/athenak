@@ -7092,3 +7092,154 @@ src/cfc/
         `co_0_*`, went unused -- a harmless warning, not a fatal error, since
         no AMR was configured to consume them; not investigated further as
         it doesn't affect the actual verification.)
+
+51. **(2026-08-11) Ported `dyngr_grass.cpp` (GRASS restart-binary NS reader)
+    from `~/athenak`'s `pgen/grass` branch, made dual-mode (z4c/CFC) from the
+    start** -- reusing the exact pattern items 49/50 established, plus one
+    genuinely new physics wrinkle GRASS introduces that Celephais/KADATH
+    never did.
+    - **Source**: `~/athenak` branch `pgen/grass` (commit `3810b88a`),
+      `src/pgen/dyn_grmhd/dyngr_grass.cpp` (269 lines) + three standalone
+      helper headers (`grass/grass_reader.hpp`, `grass_eos_table.hpp`,
+      `grass_units.hpp` -- pure host-side restart-binary reader/
+      interpolator, zero z4c/CFC dependency, confirmed by direct read and
+      ported verbatim). GRASS is an RNS-family (Cook-Shapiro-Teukolsky)
+      rotating-NS equilibrium code; unlike Celephais/KADATH it reuses its
+      own (pressure, energy) pair directly rather than dispatching through
+      an AthenaK EOS template. No CMakeLists.txt changes needed (plain
+      C++/istream code, no external library) -- one build script
+      (`grass_sakura.sh`, `BUILD_DIR=build_grass`,
+      `-DPROBLEM=dyn_grmhd/dyngr_grass`) serves both runtime modes from the
+      same binary, same toolchain as `cfc_celephais_ns_sakura.sh`.
+    - **The new wrinkle**: GRASS's own metric is the CST stationary-
+      axisymmetric form -- **not conformally flat in general**
+      (`g_phph = e^{gama-rho} r^2 sin^2(theta)` only coincides with
+      conformal flatness's required `e^{2alpha} r^2 sin^2(theta)` if
+      `gama-rho = 2*alpha`, not true for a rotating star). Celephais/KADATH
+      and XNS, by contrast, both emit genuinely-conformally-flat solutions
+      already (XCFC-family codes), so `xns_rotstar.cpp`/`dyngr_tov.cpp`
+      simply reuse their source's own `g_dd`/`psi4` unchanged -- that
+      shortcut doesn't exist here.
+    - **Resolved by reading `src/cfc/cfc.cpp` (`AssembleConformalMetric`)
+      and `xns_rotstar.cpp` itself**: CFC unconditionally overwrites `g_dd`
+      as `psi4*delta_ij` from its own solved conformal factor on every
+      solve pass, and *every* existing CFC pgen already zeros `vK_dd` as a
+      pure initial guess (`xns_rotstar.cpp`'s own comment: "always
+      overwritten by CFC::InitializeMetric()'s own solve" -- true even
+      though XNS itself HAS a self-consistent `K_ij`, thrown away anyway).
+      So the CFC-mode initial guess only needs to be *reasonable*, not
+      exact. Landed on: isotropize GRASS's per-point metric into
+      `psi4_guess = cbrt(det(g_dd))` (matches the true metric's local
+      volume element), `g_dd = psi4_guess*delta_ij` (diagonal, discarding
+      the anisotropic part CFC can't represent anyway), `vK_dd = 0`
+      (matching every other CFC pgen's convention). `alpha`/`beta_u` are
+      used as-is from GRASS's own point values in both modes. z4c mode
+      uses GRASS's true (anisotropic) `g_dd`/`K_dd` unchanged, since z4c
+      evolves a general metric natively -- this branch is untouched from
+      the upstream source.
+    - **Structural changes**, same pattern as items 49/50: `is_z4c =
+      (pmbp->pz4c != nullptr)` gates a conditional `host_u_z4c` mirror +
+      `alpha`/`beta_u` slice source; `g_dd`/`vK_dd`/`psi4` always slice from
+      `host_u_adm`; per-point fill branches only the metric/K-tensor write
+      (fluid primitives identical in both modes); tail `ADMToZ4c`/
+      `ADMConstraints` gated on `is_z4c`; `UserProblem`'s entry check
+      replaced with the generic `!pmbp->pcoord->is_dynamical_relativistic`.
+      Unlike the Celephais pgens, the original `dyngr_grass.cpp` never
+      registered a `user_ref_func` (no AMR refinement condition) or
+      `SetADMVariables` callback, so there was nothing to gate for those --
+      one less moving part than the Celephais port needed.
+    - **`<cfc> init_freeze_conserved=true`** set per the user's own
+      standing fix for `CFC::InitializeMetric()`'s outer-Picard-iteration
+      instability on compact stars (established on the Celephais NS port,
+      item 49) -- applied here proactively rather than waiting to hit the
+      same failure mode.
+    - **Gotcha carried over from upstream, not a new bug**: `SetupGrass`
+      unconditionally constructs `tov::TabulatedEOS slice_eos(pin)` (for
+      the optional Y[e] passive-scalar seed) regardless of `<mhd>
+      nscalars`, and `TabulatedEOS`'s constructor calls
+      `pin->GetString("problem", "table")` with no default -- a FATAL
+      "Parameter name 'table' not found" if omitted, even when
+      `nscalars=0` and the table is never actually used. Both new athinput
+      files set `table = /u/tlam/GRASS/eos/DD2_hot_slice.athtab`
+      unconditionally to satisfy this.
+    - **Verified**: built `build_grass` cleanly (zero errors from the new
+      file). Ran both smoke tests against the persisted, non-rotating
+      GRASS restart `/sakura/ptmp/tlam/athenak_run/pgen_grass_smoke/
+      res_default_TOV.rst` (`DD2_hot_equal_pinned.dat` EOS table), 32^3
+      single MeshBlock, `nlim=10`:
+      - **CFC** (`inputs/dyn_grmhd/cfc_grass_ns.athinput`, jobs 252947→
+        252949 after the `table` fix): `init_freeze_conserved=true`
+        correctly forced `init_use_psi5_source=false` as designed;
+        one-shot solve converged with `max|delta psi - initial guess| =
+        0.0123593`; ran 10 cycles clean, `rho-max` ~1.09e-3, `alpha-min`
+        ~0.594, both stable across cycles.
+      - **z4c** (`inputs/dyn_grmhd/z4c_grass_ns.athinput`, jobs 252948→
+        252950): reached `AssembleZ4cTasks`, ran 10 cycles clean,
+        `rho-max` ~1.14e-3, `alpha-min` ~0.60-0.61 -- same order of
+        magnitude as the CFC run (same underlying star), as expected given
+        CFC only approximates the true metric conformally-flat.
+      - Zero NaN/`NANS_IN_CONS` in either run.
+
+52. **(2026-08-11) Merged `~/athenak`'s `pgen/grass` branch update
+    (`6d39c812`, "Add magnetic-web + dipole initial field to dyngr_grass")
+    into the already-dual-mode `dyngr_grass.cpp` from item 51.** Adds a
+    prescribed, density-confined "magnetic web" (Skoutnev & Beloborodov
+    2025, arXiv:2504.07223) plus a superimposed dipole as GRASS-pgen initial
+    B-field options, both exactly divergence-free by construction (curl of
+    a vector potential).
+    - **Ported unchanged**: `grass_reader.hpp` (added `InterpolateRho()` +
+      a shared `LocateStencil()` helper -- pure refactor/addition, zero
+      z4c/CFC dependency), new `grass_magnetic_web.hpp` (pure field math:
+      envelope function, random-mode Psi_P/Psi_T tables, dipole current-loop
+      potential -- self-contained, only includes `athena.hpp`/
+      `parameter_input.hpp`), `NOTES.md`/`VALIDATION.md` (upstream's design/
+      validation writeups, copied for reference).
+    - **`dyngr_grass.cpp` changes, also ported unchanged**: new
+      `BuildMagneticField()` function (replaces `SetupGrass`'s old
+      unconditional B-field-zeroing tail with a call to it), extended
+      `GrassHistory` with `E_mag`/`E_tor`/`E_pol`/`Bmax`/`divBmax`.
+      `<problem> web_enable`/`dipole_enable` both default to 0, so existing
+      input files are unaffected.
+    - **Confirmed by direct read before porting, not assumed**: the entire
+      new feature touches only `padm->adm` (specifically `g_dd`, via
+      `adm::SpatialDet` for volume elements in the six-integral reduction
+      and the E_mag/div(B) diagnostics) and `pmhd->w0`/`b0`/`bcc0`, plus
+      generic mesh/AMR geometry (`mb_size`, `nghbr`, `mb_lev`) for the a1/
+      a2/a3 fine-coarse vector-potential correction (ported verbatim from
+      `lorene_bns.cpp`'s own already-proven AMR-correction logic, plus a
+      new a3 term this feature needed that `lorene_bns.cpp` never did,
+      since its own dipole has a3=0). **Zero references to `pz4c`/`pcfc`
+      anywhere in the new code** -- `padm->adm.g_dd` is mode-agnostic by
+      construction (item 51's own dual-mode design: g_dd always lives in
+      `u_adm` regardless of backend). This meant the merge required no
+      CFC-specific adaptation at all -- a straight port.
+    - **Verified**:
+      - **Regression** (feature off by default): reran the existing
+        `cfc_grass_ns.athinput`/`z4c_grass_ns.athinput` smoke tests (jobs
+        252961/252962) -- `rho-max`/`alpha-min` bit-identical to item 51's
+        recorded values in both modes, new `E_mag`/`E_tor`/`E_pol`/`Bmax`/
+        `divBmax` history columns all correctly report exactly 0.
+      - **Dipole-only, z4c vs CFC** (`dyngr_grass_dipole_test.athinput`
+        ported as-is; a new CFC counterpart written matching this branch's
+        established `<adm>+<cfc> init_freeze_conserved=true` convention,
+        jobs 252963 z4c / 252964 CFC): both modes produced **bit-identical**
+        magnetic diagnostics (`E_mag=2.6383e-06`,
+        `max|div(B)|*dx/|B|=5.32173e-16`, dipole scale factor `1.38477`) --
+        direct empirical confirmation that `BuildMagneticField` is
+        genuinely mode-agnostic, not just structurally plausible. CFC mode
+        additionally converged cleanly (`max|delta psi|=0.00415068`) and
+        evolved 5 cycles with no NaN.
+      - **Full web+dipole** (`dyngr_grass_web_test.athinput`, z4c, job
+        252965, 96^3 single MeshBlock): `achieved E_tor/E_pol=1` exactly
+        matching the `web_tor_pol=1.0` target (the same modest-target
+        configuration upstream's own `VALIDATION.md` reports as working
+        exactly on every trial, after finding the literature target 4.0 has
+        no valid quadratic solution), `max|div(B)|*dx/|B|=4.79641e-15` --
+        matching upstream's own reported `4.8e-15` for this configuration.
+        Not yet re-verified under CFC or under genuine AMR on this branch
+        (upstream's own AMR validation, `dyngr_grass_web_amr_test.athinput`,
+        also ported but not rerun here) -- both are natural next steps if
+        this feature sees real use on this branch, not required for the
+        merge itself given the dipole test already empirically proved mode-
+        agnosticism and the AMR correction logic is verbatim-identical to
+        upstream's own already-AMR-validated code.

@@ -1,0 +1,102 @@
+# AthenaK input file: dipole-only smoke test for the magnetic-web/dipole feature in
+# dyngr_grass (web_enable=0, dipole_enable=1, dipole_confine=0 -- unconfined current-loop
+# dipole, same A1/A2 as lorene_bns.cpp). Verifies the ported dipole + curl + AMR-correction
+# pipeline in isolation before testing the full web+dipole combination.
+
+<comment>
+problem   = GRASS-initial-data neutron star (dipole-only magnetic field smoke test)
+
+<job>
+basename  = grass_dipole_smoke
+
+<mesh>
+nghost     = 3
+nx1        = 32
+x1min      = -24
+x1max      =  24
+ix1_bc     = outflow
+ox1_bc     = outflow
+
+nx2        = 32
+x2min      = -24
+x2max      =  24
+ix2_bc     = outflow
+ox2_bc     = outflow
+
+nx3        = 32
+x3min      = -24
+x3max      =  24
+ix3_bc     = outflow
+ox3_bc     = outflow
+
+<meshblock>
+nx1        = 32
+nx2        = 32
+nx3        = 32
+
+<time>
+evolution  = dynamic
+integrator = rk3
+cfl_number = 0.25
+nlim       = 0
+tlim       = 1000
+ndiag      = 1
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+dyn_eos     = compose
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 2.8e-15
+tfloor      = 1.0e-3
+pfloor      = 1.0e-20
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+table       = /u/tlam/GRASS/eos/DD2_hot_trapped_3d.athtab
+nscalars    = 1
+
+<adm>
+
+<z4c>
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_eta       = 0.3
+shift_advect    = 1.0
+diss            = 0.5
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+id_file         = /sakura/ptmp/tlam/athenak_run/pgen_grass_smoke/res_default_r085_lam128072.rst
+grass_eos_table = /u/tlam/GRASS/eos/DD2_hot_equal_pinned.dat
+table           = /u/tlam/GRASS/eos/DD2_hot_slice.athtab
+user_hist       = true
+
+web_enable       = 0
+dipole_enable    = 1
+dipole_bmax_gauss = 1.0e16
+dipole_r0        = 5.0
+dipole_confine   = 0
+
+<output1>
+file_type   = hst
+dt          = 1.0
+
+<output2>
+file_type   = bin
+variable    = mhd_w_bcc
+dt          = 1000.0
+slice_x3    = 0.0

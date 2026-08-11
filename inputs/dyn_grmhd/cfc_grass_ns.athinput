@@ -1,0 +1,116 @@
+# AthenaK input file for GRASS single NS initial data with the CFC metric solver.
+# All coordinates and times are in geometric units (G = c = 1, M_sun = 1).
+#
+# First smoke test for src/pgen/dyn_grmhd/dyngr_grass.cpp's CFC variant: fixed
+# mesh (no AMR -- CFC+AMR is a separate, still-open gap, see
+# src/cfc/DEVELOPMENT.md items 38/39), single MeshBlock, deliberately crude
+# resolution. Meant to confirm the pgen runs and CFC::InitializeMetric()
+# converges to something sane -- not to resolve the star physically.
+#
+# GRASS's own metric (CST stationary-axisymmetric form) is not conformally
+# flat in general, so under this <cfc> block the pgen isotropizes it into a
+# conformal-factor guess psi4=cbrt(det g_dd) and zeros the extrinsic
+# curvature -- see dyngr_grass.cpp's file header. <cfc> init_freeze_conserved
+# is set per the standing fix (established on the Celephais NS port,
+# src/cfc/DEVELOPMENT.md) for CFC::InitializeMetric()'s outer Picard
+# iteration instability on compact stars -- a one-shot solve sidesteps it.
+
+<comment>
+problem   = GRASS NS initial data with CFC metric solve
+
+<job>
+basename  = cfc_grass_ns
+
+<mesh>
+nghost     = 4        # Number of ghost cells
+nx1        = 32       # Number of zones in X1-direction (CFC's Multigrid requires
+                       # a power-of-two MeshBlock size)
+x1min      = -24.0    # minimum value of X1
+x1max      =  24.0    # maximum value of X1
+ix1_bc     = diode    # Inner-X1 boundary condition
+ox1_bc     = diode    # Outer-X1 boundary condition
+
+nx2        = 32       # Number of zones in X2-direction
+x2min      = -24.0    # minimum value of X2
+x2max      =  24.0    # maximum value of X2
+ix2_bc     = diode    # Inner-X2 boundary condition
+ox2_bc     = diode    # Outer-X2 boundary condition
+
+nx3        = 32       # Number of zones in X3-direction
+x3min      = -24.0    # minimum value of X3
+x3max      =  24.0    # maximum value of X3
+ix3_bc     = diode    # Inner-X3 boundary condition
+ox3_bc     = diode    # Outer-X3 boundary condition
+
+<meshblock>
+nx1        = 32       # Number of cells in each MeshBlock, X1-dir (single MeshBlock)
+nx2        = 32       # Number of cells in each MeshBlock, X2-dir
+nx3        = 32       # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk3      # time integration algorithm
+cfl_number = 0.25     # CFL number
+nlim       = 10       # small first smoke test -- raise once this looks right
+tlim       = 1000     # time limit [M_sun]
+ndiag      = 1        # cycles between diagnostic output
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+dyn_eos     = ideal          # GRASS's own (pressure, energy) pair is reused
+                              # directly -- no runtime EOS call needed for the ID
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 1.0e-13
+tfloor      = 1.0e-10
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_freeze_conserved = true  # REQUIRED: see file header note above -- the
+                         # outer Picard iteration is unstable for compact
+                         # stars (established on the Celephais NS port); the
+                         # one-shot freeze-conserved solve sidesteps it.
+
+<problem>
+id_file         = /sakura/ptmp/tlam/athenak_run/pgen_grass_smoke/res_default_TOV.rst
+grass_eos_table = /u/tlam/GRASS/eos/DD2_hot_equal_pinned.dat
+# tov::TabulatedEOS is constructed unconditionally in SetupGrass regardless of
+# nscalars (only used for Y[e] seeding if nscalars>0) -- must point somewhere
+# valid even though nscalars=0 here.
+table           = /u/tlam/GRASS/eos/DD2_hot_slice.athtab
+user_hist       = true
+
+<output1>
+file_type   = hst      # History output (rho-max, alpha-min)
+dt          = 1.0
+data_format = %24.17e
+
+<output2>
+file_type   = bin      # Binary data dump
+variable    = mhd_w
+dcycle      = 1
+slice_x3    = 0.0
+
+<output3>
+file_type   = bin      # Binary data dump
+variable    = adm
+dcycle      = 1
+slice_x3    = 0.0
+
+<output4>
+file_type   = rst      # Restart dump
+dt          = 1000.0

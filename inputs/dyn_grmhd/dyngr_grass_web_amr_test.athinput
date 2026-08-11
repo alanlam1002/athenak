@@ -1,0 +1,131 @@
+# AthenaK input file: magnetic-web + dipole smoke test UNDER static AMR (one refined
+# region), specifically to exercise the a3 fine/coarse vector-potential correction
+# derived this session (does not exist in lorene_bns.cpp, whose dipole has a3=0) --
+# a uniform-grid test can never touch this code path since it only fires at
+# MeshBlock-level refinement-boundary faces/edges. Same web/dipole parameters as
+# dyngr_grass_web_test.athinput's working (target ratio=1) configuration, kept
+# resolution-compatible: dx_finest=0.5 here too (base dx=1.0, one level of
+# refinement -> dx=0.5), so the same web_kmin/web_kmax remain valid.
+
+<comment>
+problem   = GRASS-initial-data neutron star (magnetic-web + dipole under static AMR)
+
+<job>
+basename  = grass_web_amr_smoke
+
+<mesh>
+nghost     = 4
+nx1        = 48
+x1min      = -24
+x1max      =  24
+ix1_bc     = outflow
+ox1_bc     = outflow
+
+nx2        = 48
+x2min      = -24
+x2max      =  24
+ix2_bc     = outflow
+ox2_bc     = outflow
+
+nx3        = 48
+x3min      = -24
+x3max      =  24
+ix3_bc     = outflow
+ox3_bc     = outflow
+
+<meshblock>
+nx1        = 16
+nx2        = 16
+nx3        = 16
+
+<mesh_refinement>
+refinement          = static
+max_nmb_per_rank    = 100
+num_levels          = 2
+refinement_interval = 1
+
+<amr_criterion0>
+method = user
+
+<z4c_amr>
+
+<refined_region1>
+level = 1
+x1min = -12.0
+x1max =  12.0
+x2min = -12.0
+x2max =  12.0
+x3min = -12.0
+x3max =  12.0
+
+<time>
+evolution  = dynamic
+integrator = rk3
+cfl_number = 0.25
+nlim       = 0
+tlim       = 1000
+ndiag      = 1
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal
+gamma       = 2.0
+dyn_eos     = compose
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 2.8e-15
+tfloor      = 1.0e-3
+pfloor      = 1.0e-20
+dthreshold  = 1.02
+dyn_scratch = 1
+fofc        = false
+enforce_maximum = false
+table       = /u/tlam/GRASS/eos/DD2_hot_trapped_3d.athtab
+nscalars    = 1
+
+<adm>
+
+<z4c>
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_eta       = 0.3
+shift_advect    = 1.0
+diss            = 0.5
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+id_file         = /sakura/ptmp/tlam/athenak_run/pgen_grass_smoke/res_default_r085_lam128072.rst
+grass_eos_table = /u/tlam/GRASS/eos/DD2_hot_equal_pinned.dat
+table           = /u/tlam/GRASS/eos/DD2_hot_slice.athtab
+user_hist       = true
+
+web_enable       = 1
+web_rho_lo       = 1.0e-8
+web_rho_hi       = 1.1e-3
+web_nmodes       = 32
+web_kmin         = 1.2
+web_kmax         = 1.5
+web_alpha        = 1.0
+web_mu_star      = 2.0
+web_seed         = 20260808
+web_bmax_gauss   = 1.0e16
+web_tor_pol      = 1.0
+
+dipole_enable    = 1
+dipole_bmax_gauss = 1.0e16
+dipole_r0        = 5.0
+dipole_confine   = 0
+
+<output1>
+file_type   = hst
+dt          = 1.0

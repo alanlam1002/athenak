@@ -146,89 +146,100 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   host_adm.vK_dd.InitWithShallowSlice(host_u_adm,
       adm::ADM::I_ADM_KXX, adm::ADM::I_ADM_KZZ);
 
-  for (int m = 0; m < nmb; ++m) {
-    Real &x1min = size.h_view(m).x1min;
-    Real &x1max = size.h_view(m).x1max;
-    Real &x2min = size.h_view(m).x2min;
-    Real &x2max = size.h_view(m).x2max;
-    Real &x3min = size.h_view(m).x3min;
-    Real &x3max = size.h_view(m).x3max;
-    for (int k = 0; k < n3; ++k) {
-      Real x3v = CellCenterX(k - indcs.ks, indcs.nx3, x3min, x3max);
-      for (int j = 0; j < n2; ++j) {
-        Real x2v = CellCenterX(j - indcs.js, indcs.nx2, x2min, x2max);
-        for (int i = 0; i < n1; ++i) {
-          Real x1v = CellCenterX(i - indcs.is, indcs.nx1, x1min, x1max);
+  // Templated on IsZ4c so the metric-write branch below is resolved once, at the
+  // FillLoop.template operator()<...>() call site, instead of being re-evaluated on
+  // every grid point -- the two bodies write disjoint field sets (true CST g_dd/vK_dd
+  // vs. an isotropized psi4_guess), so there is no runtime cost to eliminate.
+  auto FillLoop = [&]<bool IsZ4c>() {
+    for (int m = 0; m < nmb; ++m) {
+      Real &x1min = size.h_view(m).x1min;
+      Real &x1max = size.h_view(m).x1max;
+      Real &x2min = size.h_view(m).x2min;
+      Real &x2max = size.h_view(m).x2max;
+      Real &x3min = size.h_view(m).x3min;
+      Real &x3max = size.h_view(m).x3max;
+      for (int k = 0; k < n3; ++k) {
+        Real x3v = CellCenterX(k - indcs.ks, indcs.nx3, x3min, x3max);
+        for (int j = 0; j < n2; ++j) {
+          Real x2v = CellCenterX(j - indcs.js, indcs.nx2, x2min, x2max);
+          for (int i = 0; i < n1; ++i) {
+            Real x1v = CellCenterX(i - indcs.is, indcs.nx1, x1min, x1max);
 
-          grass::GrassData::Point pt;
-          data.Interpolate(x1v, x2v, x3v, eos_table, slice_eos, &pt);
+            grass::GrassData::Point pt;
+            data.Interpolate(x1v, x2v, x3v, eos_table, slice_eos, &pt);
 
-          host_adm.alpha(m, k, j, i) = pt.alpha;
-          host_adm.beta_u(m, 0, k, j, i) = pt.beta_u[0];
-          host_adm.beta_u(m, 1, k, j, i) = pt.beta_u[1];
-          host_adm.beta_u(m, 2, k, j, i) = pt.beta_u[2];
+            host_adm.alpha(m, k, j, i) = pt.alpha;
+            host_adm.beta_u(m, 0, k, j, i) = pt.beta_u[0];
+            host_adm.beta_u(m, 1, k, j, i) = pt.beta_u[1];
+            host_adm.beta_u(m, 2, k, j, i) = pt.beta_u[2];
 
-          if (is_z4c) {
-            // True (generally non-conformally-flat) CST metric/extrinsic curvature --
-            // z4c evolves a general metric natively, no isotropization needed.
-            host_adm.g_dd(m, 0, 0, k, j, i) = pt.g_dd[0];
-            host_adm.g_dd(m, 0, 1, k, j, i) = pt.g_dd[1];
-            host_adm.g_dd(m, 0, 2, k, j, i) = pt.g_dd[2];
-            host_adm.g_dd(m, 1, 1, k, j, i) = pt.g_dd[3];
-            host_adm.g_dd(m, 1, 2, k, j, i) = pt.g_dd[4];
-            host_adm.g_dd(m, 2, 2, k, j, i) = pt.g_dd[5];
+            if constexpr (IsZ4c) {
+              // True (generally non-conformally-flat) CST metric/extrinsic curvature --
+              // z4c evolves a general metric natively, no isotropization needed.
+              host_adm.g_dd(m, 0, 0, k, j, i) = pt.g_dd[0];
+              host_adm.g_dd(m, 0, 1, k, j, i) = pt.g_dd[1];
+              host_adm.g_dd(m, 0, 2, k, j, i) = pt.g_dd[2];
+              host_adm.g_dd(m, 1, 1, k, j, i) = pt.g_dd[3];
+              host_adm.g_dd(m, 1, 2, k, j, i) = pt.g_dd[4];
+              host_adm.g_dd(m, 2, 2, k, j, i) = pt.g_dd[5];
 
-            host_adm.vK_dd(m, 0, 0, k, j, i) = pt.K_dd[0];
-            host_adm.vK_dd(m, 0, 1, k, j, i) = pt.K_dd[1];
-            host_adm.vK_dd(m, 0, 2, k, j, i) = pt.K_dd[2];
-            host_adm.vK_dd(m, 1, 1, k, j, i) = pt.K_dd[3];
-            host_adm.vK_dd(m, 1, 2, k, j, i) = pt.K_dd[4];
-            host_adm.vK_dd(m, 2, 2, k, j, i) = pt.K_dd[5];
-          } else {
-            // CFC can only represent a conformally-flat 3-metric; isotropize GRASS's
-            // true (anisotropic) metric into a conformal-factor guess that matches its
-            // local volume element (det g_dd). vK_dd is zeroed -- CFC::InitializeMetric()
-            // always overwrites both from its own elliptic solve (see file header).
-            Real gxx = pt.g_dd[0], gxy = pt.g_dd[1], gxz = pt.g_dd[2];
-            Real gyy = pt.g_dd[3], gyz = pt.g_dd[4], gzz = pt.g_dd[5];
-            Real det_g = gxx*(gyy*gzz - gyz*gyz) - gxy*(gxy*gzz - gyz*gxz)
-                         + gxz*(gxy*gyz - gyy*gxz);
-            Real psi4_guess = std::cbrt(std::max(det_g, 1.0e-300));
+              host_adm.vK_dd(m, 0, 0, k, j, i) = pt.K_dd[0];
+              host_adm.vK_dd(m, 0, 1, k, j, i) = pt.K_dd[1];
+              host_adm.vK_dd(m, 0, 2, k, j, i) = pt.K_dd[2];
+              host_adm.vK_dd(m, 1, 1, k, j, i) = pt.K_dd[3];
+              host_adm.vK_dd(m, 1, 2, k, j, i) = pt.K_dd[4];
+              host_adm.vK_dd(m, 2, 2, k, j, i) = pt.K_dd[5];
+            } else {
+              // CFC can only represent a conformally-flat 3-metric; isotropize GRASS's
+              // true (anisotropic) metric into a conformal-factor guess that matches its
+              // local volume element (det g_dd). vK_dd is zeroed -- CFC::InitializeMetric()
+              // always overwrites both from its own elliptic solve (see file header).
+              Real gxx = pt.g_dd[0], gxy = pt.g_dd[1], gxz = pt.g_dd[2];
+              Real gyy = pt.g_dd[3], gyz = pt.g_dd[4], gzz = pt.g_dd[5];
+              Real det_g = gxx*(gyy*gzz - gyz*gyz) - gxy*(gxy*gzz - gyz*gxz)
+                           + gxz*(gxy*gyz - gyy*gxz);
+              Real psi4_guess = std::cbrt(std::max(det_g, 1.0e-300));
 
-            host_adm.g_dd(m, 0, 0, k, j, i) = psi4_guess;
-            host_adm.g_dd(m, 0, 1, k, j, i) = 0.0;
-            host_adm.g_dd(m, 0, 2, k, j, i) = 0.0;
-            host_adm.g_dd(m, 1, 1, k, j, i) = psi4_guess;
-            host_adm.g_dd(m, 1, 2, k, j, i) = 0.0;
-            host_adm.g_dd(m, 2, 2, k, j, i) = psi4_guess;
-            host_adm.psi4(m, k, j, i) = psi4_guess;
+              host_adm.g_dd(m, 0, 0, k, j, i) = psi4_guess;
+              host_adm.g_dd(m, 0, 1, k, j, i) = 0.0;
+              host_adm.g_dd(m, 0, 2, k, j, i) = 0.0;
+              host_adm.g_dd(m, 1, 1, k, j, i) = psi4_guess;
+              host_adm.g_dd(m, 1, 2, k, j, i) = 0.0;
+              host_adm.g_dd(m, 2, 2, k, j, i) = psi4_guess;
+              host_adm.psi4(m, k, j, i) = psi4_guess;
 
-            host_adm.vK_dd(m, 0, 0, k, j, i) = 0.0;
-            host_adm.vK_dd(m, 0, 1, k, j, i) = 0.0;
-            host_adm.vK_dd(m, 0, 2, k, j, i) = 0.0;
-            host_adm.vK_dd(m, 1, 1, k, j, i) = 0.0;
-            host_adm.vK_dd(m, 1, 2, k, j, i) = 0.0;
-            host_adm.vK_dd(m, 2, 2, k, j, i) = 0.0;
-          }
+              host_adm.vK_dd(m, 0, 0, k, j, i) = 0.0;
+              host_adm.vK_dd(m, 0, 1, k, j, i) = 0.0;
+              host_adm.vK_dd(m, 0, 2, k, j, i) = 0.0;
+              host_adm.vK_dd(m, 1, 1, k, j, i) = 0.0;
+              host_adm.vK_dd(m, 1, 2, k, j, i) = 0.0;
+              host_adm.vK_dd(m, 2, 2, k, j, i) = 0.0;
+            }
 
-          Real rho = (pt.rho0 > 0.0) ? pt.rho0 : 0.0;
-          Real pres = (pt.rho0 > 0.0) ? pt.pres : 0.0;
-          Real vu[3] = {0.0, 0.0, 0.0};
-          if (pt.rho0 > 0.0) {
-            vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
-          }
+            Real rho = (pt.rho0 > 0.0) ? pt.rho0 : 0.0;
+            Real pres = (pt.rho0 > 0.0) ? pt.pres : 0.0;
+            Real vu[3] = {0.0, 0.0, 0.0};
+            if (pt.rho0 > 0.0) {
+              vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
+            }
 
-          host_w0(m, IDN, k, j, i) = rho;
-          host_w0(m, IPR, k, j, i) = pres;
-          host_w0(m, IVX, k, j, i) = vu[0];
-          host_w0(m, IVY, k, j, i) = vu[1];
-          host_w0(m, IVZ, k, j, i) = vu[2];
-          if (read_ye) {
-            host_w0(m, IYF, k, j, i) = pt.Yq;
+            host_w0(m, IDN, k, j, i) = rho;
+            host_w0(m, IPR, k, j, i) = pres;
+            host_w0(m, IVX, k, j, i) = vu[0];
+            host_w0(m, IVY, k, j, i) = vu[1];
+            host_w0(m, IVZ, k, j, i) = vu[2];
+            if (read_ye) {
+              host_w0(m, IYF, k, j, i) = pt.Yq;
+            }
           }
         }
       }
     }
+  };
+  if (is_z4c) {
+    FillLoop.template operator()<true>();
+  } else {
+    FillLoop.template operator()<false>();
   }
 
   Kokkos::deep_copy(u_adm, host_u_adm);

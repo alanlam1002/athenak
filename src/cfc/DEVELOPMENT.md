@@ -7243,3 +7243,43 @@ src/cfc/
         merge itself given the dipole test already empirically proved mode-
         agnosticism and the AMR correction logic is verbatim-identical to
         upstream's own already-AMR-validated code.
+
+53. **(2026-08-11) Templated `dyngr_grass.cpp`'s `SetupGrass` fill loop on
+    `IsZ4c` instead of branching on a runtime `is_z4c` bool inside it** --
+    user request, so the per-point metric-write branch is resolved once (at
+    the dispatch call site) rather than re-checked on every grid point.
+    - **Scoped by first checking all three dual-mode pgens
+      (`grep -n is_z4c`), not assumed**: `celephais_bns.cpp`/
+      `celephais_ns.cpp`'s per-point `Kokkos::parallel_for("kadath_fill",
+      ...)` loops have ZERO `is_z4c` branching inside them already -- KADATH
+      data is inherently conformally flat, so both files write the same
+      `g_dd = psi4*delta_ij` unconditionally regardless of mode; every
+      `is_z4c` check in those two files sits outside the loop (mirror
+      setup, post-loop `deep_copy`, post-loop `ADMToZ4c` dispatch), each
+      already executing exactly once. **Only `dyngr_grass.cpp` had a real
+      per-point branch to eliminate** (GRASS's non-conformally-flat CST
+      metric genuinely differs between the true-metric z4c write and the
+      isotropized-guess CFC write).
+    - **Mechanism**: wrapped the existing triple-nested per-point loop in a
+      C++20 templated lambda (`auto FillLoop = [&]<bool IsZ4c>() { ... };`,
+      project already targets C++20 per `CMakeLists.txt:15`), capturing all
+      needed local state (`host_adm`, `host_w0`, `nmb`, `indcs`, `size`,
+      `data`, `eos_table`, `slice_eos`, `read_ye`) by reference rather than
+      threading a long parameter list through a separate named function for
+      a block used at exactly one call site. The runtime `is_z4c` bool
+      (unchanged) now only selects which instantiation to call --
+      `FillLoop.template operator()<true>()` or `<false>()` -- once, before
+      the loop even starts; inside, `if (is_z4c)` became `if constexpr
+      (IsZ4c)`, so each instantiation's compiled body contains only its own
+      branch. The mirror-setup `if (is_z4c)` and post-loop `deep_copy(pz4c->
+      u0, ...)` immediately surrounding the loop were left as plain runtime
+      `if`s, unchanged -- both already execute exactly once per `SetupGrass`
+      call, so templating them would only inflate the diff for no benefit.
+    - **Verified**: rebuilt `build_grass` cleanly (no errors from the new
+      templated-lambda syntax). Reran the CFC/z4c NS smoke tests (jobs
+      252966/252967) and the dipole z4c/CFC smoke tests (jobs 252968/
+      252969, exercising `BuildMagneticField`'s read of the fields this
+      loop fills) -- all four reproduced their pre-refactor values bit-
+      identically (`rho-max`/`alpha-min`/`E_mag`/`max|div(B)|*dx/|B|`/CFC's
+      `max|delta psi|` all unchanged), confirming the restructuring is
+      purely compile-time and behavior-preserving.

@@ -146,11 +146,16 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   host_adm.vK_dd.InitWithShallowSlice(host_u_adm,
       adm::ADM::I_ADM_KXX, adm::ADM::I_ADM_KZZ);
 
-  // Templated on IsZ4c so the metric-write branch below is resolved once, at the
-  // FillLoop.template operator()<...>() call site, instead of being re-evaluated on
-  // every grid point -- the two bodies write disjoint field sets (true CST g_dd/vK_dd
-  // vs. an isotropized psi4_guess), so there is no runtime cost to eliminate.
-  auto FillLoop = [&]<bool IsZ4c>() {
+  // Templated on IsZ4c/UseYe so the metric-write and Y[e]-write branches below are
+  // resolved once, at the FillLoop.template operator()<...>() call site, instead of
+  // being re-evaluated on every grid point. UseYe mirrors dyngr_tov.cpp's own use_ye,
+  // except it can't be a SFINAE trait on an EOS template type the way dyngr_tov.cpp's
+  // is (SetupGrass has no EOS template parameter -- GRASS reuses its own (pressure,
+  // energy) pair directly, see file header) -- it's sourced from the same runtime
+  // <mhd> nscalars check as read_ye always was. That check is a genuine bounds guard,
+  // not just a perf one: host_w0's allocated width is nmhd+nscalars, so writing IYF
+  // when nscalars==0 would write past the MeshBlock's actual variable count.
+  auto FillLoop = [&]<bool IsZ4c, bool UseYe>() {
     for (int m = 0; m < nmb; ++m) {
       Real &x1min = size.h_view(m).x1min;
       Real &x1max = size.h_view(m).x1max;
@@ -228,7 +233,7 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
             host_w0(m, IVX, k, j, i) = vu[0];
             host_w0(m, IVY, k, j, i) = vu[1];
             host_w0(m, IVZ, k, j, i) = vu[2];
-            if (read_ye) {
+            if constexpr (UseYe) {
               host_w0(m, IYF, k, j, i) = pt.Yq;
             }
           }
@@ -237,9 +242,17 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
     }
   };
   if (is_z4c) {
-    FillLoop.template operator()<true>();
+    if (read_ye) {
+      FillLoop.template operator()<true, true>();
+    } else {
+      FillLoop.template operator()<true, false>();
+    }
   } else {
-    FillLoop.template operator()<false>();
+    if (read_ye) {
+      FillLoop.template operator()<false, true>();
+    } else {
+      FillLoop.template operator()<false, false>();
+    }
   }
 
   Kokkos::deep_copy(u_adm, host_u_adm);

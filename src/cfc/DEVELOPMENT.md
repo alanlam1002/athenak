@@ -7283,3 +7283,50 @@ src/cfc/
       identically (`rho-max`/`alpha-min`/`E_mag`/`max|div(B)|*dx/|B|`/CFC's
       `max|delta psi|` all unchanged), confirming the restructuring is
       purely compile-time and behavior-preserving.
+
+54. **(2026-08-12) Templated `SetupGrass`'s `read_ye` the same way as item
+    53's `IsZ4c`, naming it `UseYe` to match `dyngr_tov.cpp`'s own
+    `use_ye`** -- user request, follow-up to item 53.
+    - **Checked `dyngr_tov.cpp`'s actual mechanism before assuming it
+      transfers directly**: its `constexpr bool use_ye =
+      tov::UsesYe<TOVEOS>;` (`dyngr_tov.cpp:98`) is a SFINAE trait on the
+      `TOVEOS` template type (`src/utils/tov/tov_utils.hpp:24-42`) --
+      `SetupTOV` is already templated on `TOVEOS` for EOS-policy dispatch,
+      so `use_ye` falls out for free. **This doesn't transfer as-is**:
+      `SetupGrass` has no EOS template parameter at all (GRASS reuses its
+      own (pressure, energy) pair directly, per the file's own header) --
+      there's no type to hang a trait off of. `read_ye` here is, and must
+      remain, a genuinely runtime fact (`<mhd> nscalars` from the
+      `.athinput`). What DOES transfer is the general idiom just applied
+      for `IsZ4c`: dispatch the runtime bool to a template argument once,
+      before the loop, instead of branching on it inside.
+    - **This guard is a bounds guard, not just a perf one** --
+      `host_w0`'s allocated width is `nmhd+nscalars`; writing `IYF` (enum
+      value 5) when `nscalars==0` would write past the MeshBlock's actual
+      variable count. Confirmed this is why the guard existed at all (not
+      dropped or weakened by the refactor).
+    - **Mechanism**: extended item 53's `FillLoop` lambda with a second
+      template parameter, `<bool IsZ4c, bool UseYe>`; the `if (read_ye)`
+      around the `host_w0(IYF)` write became `if constexpr (UseYe)`; the
+      call site became a 2x2 dispatch (`if (is_z4c) { if (read_ye) {
+      FillLoop.template operator()<true, true>(); } else { ...<true,
+      false>(); } } else { ... }`). `pt.Yq` itself is still computed
+      unconditionally inside `data.Interpolate()` regardless of `UseYe`
+      (unlike `dyngr_tov.cpp`'s device-side `GetYeFromRho` call, which
+      `if constexpr (use_ye)` also skips calling) -- GRASS bundles it into
+      the same single per-point call already made for the metric/hydro
+      fields, so there's no separate expensive call to gate; only the
+      *write* is templated, matching the original code's actual behavior.
+    - **Verified**: rebuilt `build_grass` cleanly. Reran all four smoke
+      tests again (CFC/z4c NS at `nscalars=0` -> `UseYe=false` path,
+      dipole z4c/CFC at `nscalars=1` -> `UseYe=true` path, jobs 252971-
+      252974) -- all four reproduced bit-identical `rho-max`/`alpha-min`/
+      `E_mag`/`max|div(B)|*dx/|B|`. Additionally checked the actual
+      passive-scalar write directly (not just inferred from unrelated
+      diagnostics matching, per this item's own verification plan): the
+      dipole tests' `.mhd.hst` `scal-0` column (`int(rho*Y[e]) dV`) reads
+      `6.79164e-07` in BOTH the z4c and CFC runs -- confirms `UseYe=true`
+      still writes Y[e] correctly in both mode combinations. The
+      `nscalars=0` NS smoke tests completed cleanly under this build's
+      `Kokkos_ENABLE_DEBUG_BOUNDS_CHECK=ON` -- confirms `UseYe=false`
+      correctly skips the write with no out-of-bounds violation.

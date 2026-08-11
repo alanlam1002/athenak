@@ -1,0 +1,120 @@
+# AthenaK input file for Celephais BNS initial data with the CFC metric solver.
+# All coordinates and times are in geometric units (G = c = 1, M_sun = 1).
+#
+# First smoke test for src/pgen/dyn_grmhd/celephais/celephais_bns.cpp's CFC
+# variant: fixed mesh (no AMR -- CFC+AMR is a separate, still-open gap, see
+# src/cfc/DEVELOPMENT.md items 38/39), single MeshBlock, deliberately crude
+# resolution (dx=2.0, only a few cells across each NS radius). This is meant to
+# confirm the pgen runs and CFC::InitializeMetric() converges to something sane
+# -- not to resolve the binary physically. Adapted from the working z4c parfile
+# at /sakura/ptmp/tlam/athenak_run/kadath/test/parfile.par (same Celephais solution,
+# same EOS/table), which uses 9 AMR levels via a z4c NS tracker -- not applicable
+# here.
+#
+# <cfc> init_freeze_conserved=true: the default outer Picard iteration also
+# converges cleanly for this binary (verified separately), but the one-shot
+# freeze-conserved solve is simpler/faster and was verified to work equally
+# well here (max|delta psi - initial guess| = 0.00232, zero NaN) -- kept on
+# for consistency with celephais_ns.athinput, which requires it. See
+# src/cfc/DEVELOPMENT.md.
+
+<comment>
+problem   = Celephais BNS initial data with CFC metric solve
+
+<job>
+basename  = cfc_celephais_bns
+
+<mesh>
+nghost     = 4        # Number of ghost cells
+nx1        = 64       # Number of zones in X1-direction (CFC's Multigrid requires
+                       # a power-of-two MeshBlock size)
+x1min      = -64.0    # minimum value of X1
+x1max      =  64.0    # maximum value of X1
+ix1_bc     = diode    # Inner-X1 boundary condition -- no reflection symmetry
+ox1_bc     = diode    # Outer-X1 boundary condition
+
+nx2        = 64       # Number of zones in X2-direction
+x2min      = -64.0    # minimum value of X2
+x2max      =  64.0    # maximum value of X2
+ix2_bc     = diode    # Inner-X2 boundary condition
+ox2_bc     = diode    # Outer-X2 boundary condition
+
+nx3        = 64       # Number of zones in X3-direction
+x3min      = -64.0    # minimum value of X3
+x3max      =  64.0    # maximum value of X3
+ix3_bc     = diode    # Inner-X3 boundary condition
+ox3_bc     = diode    # Outer-X3 boundary condition
+
+<meshblock>
+nx1        = 64       # Number of cells in each MeshBlock, X1-dir (single MeshBlock)
+nx2        = 64       # Number of cells in each MeshBlock, X2-dir
+nx3        = 64       # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk3      # time integration algorithm
+cfl_number = 0.25     # CFL number
+nlim       = 10       # small first smoke test -- raise once this looks right
+tlim       = 10000    # time limit [M_sun]
+ndiag      = 1        # cycles between diagnostic output
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal          # placeholder (unused, required by parser)
+gamma       = 2.0            # placeholder (unused, required by parser)
+
+dyn_eos     = hybrid         # PrimitiveSolver EOSPolicy -- must match Kadath EOS
+dyn_error   = reset_floor    # PrimitiveSolver ErrorPolicy
+reconstruct = wenoz          # spatial reconstruction method
+rsolver     = hlle           # Riemann solver
+enforce_maximum = false
+dmp_M       = 1.2
+nscalars    = 0
+dfloor      = 3.e-15         # density floor [geometric units]
+fofc        = true
+c2p_tol     = 2.49e-13
+gamma_max   = 20.025         # Lorentz factor ceiling
+use_NQT     = false
+
+table = /sakura/ptmp/tlam/PyCompOSE/examples/DD2/DD2_T0.1_beta_m931.athtab
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_freeze_conserved = true
+
+<problem>
+# Path to the Kadath .toml config file (same solution the working z4c test at
+# /sakura/ptmp/tlam/athenak_run/kadath/test used). The .dat space file must be
+# in the same directory with the same base name.
+initial_data_file = /sakura/ptmp/tlam/Kadath_release/apps/BNS_nosym/sbatch_outputs/converged_BNS_NOSYM_ECC_RED.dd2.35.0.3.z30.0.z0.2.8.q1.0.0.0.11.toml
+kadath_symmetry   = nosym
+user_hist         = true
+table             = /sakura/ptmp/tlam/PyCompOSE/examples/DD2/DD2_T0.1_beta_m931.athtab
+
+<output1>
+file_type   = hst      # History output (rho-max, alpha-min)
+dt          = 0.375
+data_format = %24.17e
+
+<output2>
+file_type   = bin      # Binary data dump
+variable    = mhd_w
+dcycle      = 1
+slice_x3    = 0.0
+
+<output3>
+file_type   = bin      # Binary data dump
+variable    = adm
+dcycle      = 1
+slice_x3    = 0.0
+
+<output4>
+file_type   = rst      # Restart dump
+dt          = 1000.0

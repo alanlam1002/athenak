@@ -6811,3 +6811,284 @@ src/cfc/
       every prior verification round referenced in items 37-38 -- confirms
       this merge changed nothing observable in CFC's own AMR/multigrid
       solve path.
+
+49. **(2026-08-11) Kadath_AEI renamed to Celephais upstream; re-ported the CFC
+    BNS pgen under the new name and added a new CFC single-NS pgen;
+    discovered a genuine `InitializeMetric()` Picard-iteration instability
+    for one specific compact star, resolved via `init_freeze_conserved`; also
+    fixed four unrelated, pre-existing `EOSCompOSE`/`EOSHybrid` bugs.**
+    - **Motivation**: `Kadath_release` (the AEI's Kadath fork used for BNS/NS
+      initial data) renamed itself to "Celephais" upstream -- new library
+      name (`libcelephais.a`), new CMake cache variable
+      (`CELEPHAIS_EXTRA_LIBS`). This branch's own `kadath_aei`-named CFC BNS
+      port (item 107-113 in the task list, not otherwise documented here)
+      needed the same mechanical rename `athenak_kadath_aei`/`proj/g-mode`
+      already went through, plus several small accumulated build/EOS fixes
+      from that lineage; the user additionally asked for a brand-new
+      CFC-adapted single-NS pgen (`celephais_ns.cpp`), following
+      `celephais_bns.cpp`'s exact z4c->CFC adaptation pattern (ADM-only host
+      mirror incl. explicit `psi4`, no `ADMToZ4c`, `pcfc==nullptr` fatal
+      check, no `user_ref_func`/`SetADMVariables` registration).
+    - **Rename** (`CMakeLists.txt`, symlink, pgen dir, build scripts,
+      athinputs): `dyn_grmhd/kadath_aei/kadath_aei_bns.cpp` ->
+      `dyn_grmhd/celephais/celephais_bns.cpp`, `kadath_aei` symlink ->
+      `celephais` (same target, `/sakura/ptmp/tlam/Kadath_release`, which now
+      hosts both `libkadath.a` and `libcelephais.a`), `PROBLEM` regex
+      `^dyn_grmhd/kadath_aei/` -> `^dyn_grmhd/celephais/`. Also carried over
+      from the upstream rename commit: `CMAKE_CXX_STANDARD` 17->20 (required
+      by newer Celephais headers), FFTW3 linked before `CELEPHAIS_EXTRA_LIBS`
+      (MKL's FFTW-compat wrapper otherwise risks shadowing real FFTW3), and
+      removal of three confirmed-dead deps (`GSL`, `LAPACK`,
+      an OpenMP-linking fallback copy-pasted from an unrelated fix).
+      Content-identical mechanical rename only (comments/strings), confirmed
+      by diffing the pre- and post-rename upstream commits directly.
+    - **New bug fix carried over, unrelated to the rename itself**:
+      `EOSHybrid::weight_idx_ln` (`src/eos/primitive-solver/eos_hybrid.hpp`)
+      had the same unclamped-density-index bug `EOSCompOSE`'s equivalent
+      helper was already fixed for -- a density outside the table's range
+      produced an unclamped index and an out-of-bounds `Kokkos::View` read.
+      Clamped to `[0, m_nn-2]`, matching `EOSCompOSE::weight_idx_ln`'s
+      existing pattern.
+    - **`celephais_bns.cpp` verified working end-to-end**: real smoke test
+      against `/sakura/ptmp/tlam/Kadath_release/apps/BNS_nosym/
+      sbatch_outputs/converged_BNS_NOSYM_ECC_RED...toml` (same DD2 solution
+      used throughout items 84-113), 10 cycles, zero `NANS_IN_CONS`/C2P
+      errors, clean `Terminating on cycle limit` (jobs 252880/252881/252935).
+    - **`celephais_ns.cpp` initially diverged** against a real single-NS
+      solution (`/sakura/ptmp/tlam/celephais_testdata/ns_res11/
+      converged_NS_UNIROT.sly4.1.6.0.11.0.11.toml`, SLy4 EOS via
+      piecewise-poly, `madm=1.6`, `chi=0.11`, res=11):
+      `CFC::InitializeMetric()`'s very first internal `PrimToCons` pass
+      produced `NANS_IN_CONS`. Extensively debugged with temporary
+      `printf`/`Kokkos::printf` instrumentation (fully reverted before
+      committing) at four points: the per-point Kadath-read site (confirmed
+      `PSI`/`ALP`/`BETX`/`BETY`/`BETZ`/`AXX`/`H`/`UX` all finite and
+      physically sane), immediately after the `host_adm.*` writes (finite),
+      immediately after `Kokkos::deep_copy(u_adm, host_u_adm)` via a
+      device->host readback (finite), and inside
+      `PrimitiveSolverHydro::PrimToCons`'s own `g3d[]` read from `adm.g_dd`
+      (`src/eos/primitive_solver_hyd.hpp:239-244`): **the first two calls at
+      a given grid point returned the exact same finite values the pgen
+      wrote; a third call at that same point returned `alpha` still correct
+      but `psi4`/`g_dd` NaN.** This proved the pgen's own read/write/
+      deep_copy path is fully correct and isolated the divergence to inside
+      `CFC::InitializeMetric()`'s own solve, consistent with the third call
+      being a post-metric-solve `PrimToCons` refresh using the now-NaN
+      converged psi4.
+    - **Root cause, confirmed empirically**: `CFC::InitializeMetric()`'s
+      default outer Picard iteration (see item 27/28's `psi^5`-formulation
+      write-up for the general mechanism) is genuinely unstable for this
+      specific star, in a way that survives every documented mitigation:
+      - `init_use_psi5_source=false` (item 27/28's documented fix): the
+        iteration now *runs* (no longer NaNs within the first pass) and
+        genuinely decreases for the first ~4 iterations
+        (`max|delta psi|`: 0.26 -> 0.0105), but then reverses and diverges
+        exponentially from iteration ~9 onward (0.0107 -> ... -> 111.8 ->
+        7.4e44 -> `-1.79769e+308`/NaN by iteration ~23).
+      - `+ init_omega=0.5` (matching `cfc_tov_migration.athinput`'s combined
+        fix for its own, more extreme-compactness star): pushes the
+        divergence onset later and to a lower minimum
+        (`max|delta psi|` bottoms at 0.0052 by iteration ~20 instead of
+        0.0105 by iteration ~4) but does not eliminate it -- still diverges.
+      - `omega=0.2`: eliminates the *short-term* divergence (smooth,
+        monotonic decrease to ~0.0021 by iteration ~56), but resuming the
+        iteration to 400 total steps shows it plateau then also eventually
+        diverge, by iteration ~130-139 (`inf`/NaN).
+      - **Resolution independence, empirically ruled out as the cause**: a
+        4x finer mesh (dx=0.5, box shrunk to stay centered on the star,
+        64^3 single MeshBlock, vs. the original dx=2.0/32^3) reproduces the
+        *exact same* divergence, at essentially the same iteration count
+        (~131-139) as the coarse mesh (~130-132) -- if this were a
+        discretization/truncation-error artifact, finer resolution should
+        have pushed the divergence out or eliminated it. It did neither,
+        proving the instability is intrinsic to the fixed-point iteration
+        for this star, not a resolution artifact.
+      - **Milder-star cross-check, confirms the pgen and general pipeline
+        are correct**: a different, genuinely milder star (M=1.35,
+        non-rotating, `ZLA_a20_B160_g10` tabulated EOS,
+        `/sakura/ptmp/tlam/Kadath_release/apps/NS/sbatch_outputs/
+        converged_NS_NOROT.ZLA_a20_B160_g10.1.35.0.0.13.toml`) converges
+        **cleanly with bare `<cfc>` defaults** (`init_use_psi5_source=true`
+        included) in just 2 outer iterations (`iteration 0: max|delta psi| =
+        0.154164`, `iteration 1: 0`), zero NaN, full 10-cycle run, using
+        `dyn_eos=hybrid`. Confirms `celephais_ns.cpp` and the general
+        Kadath-import pipeline are entirely correct; the divergence is
+        specific to the M=1.6 SLy4 star's compactness, in the same general
+        failure family as items 27/28 but a distinct manifestation
+        (persists even with the documented `psi5=false` workaround).
+        (The first attempt at this cross-check used `dyn_eos=compose`
+        instead, which the user pointed out afterward is the wrong EOS
+        policy for this table -- see below.)
+    - **Actual fix, suggested by the user**: `<cfc> init_freeze_conserved =
+      true` -- the one-shot mode (`RunXPsiSolvePass()` called exactly once,
+      no outer Picard loop at all; automatically forces
+      `init_use_psi5_source` off, per `cfc.cpp:253-258`'s existing
+      incompatibility guard). Since the instability lives entirely in the
+      *iteration*, skipping it sidesteps the problem completely rather than
+      trying to tame it. Verified on **both** pgens: the M=1.6 SLy4 NS
+      (`max|delta psi - initial guess| = 0.0152092`, zero NaN, clean 10-cycle
+      run, jobs 252931/252933) and the BNS (`max|delta psi - initial guess| =
+      0.00232378`, zero NaN, clean 10-cycle run, jobs 252932/252935) -- both
+      now ship with `init_freeze_conserved=true` in their `<cfc>` block
+      (BNS didn't strictly need it, since its default iterative mode already
+      converged cleanly, but it's kept for consistency and because it's
+      simpler/faster: one solve pass instead of up to 50).
+    - **`dyn_eos=compose` vs `dyn_eos=hybrid` for a 1D cold table**: the
+      milder-star cross-check's first attempt used `dyn_eos=compose`, which
+      immediately hit a wall of `EOSCompOSE` crashes (below) -- the user
+      then pointed out `dyn_eos=hybrid` is the correct policy for this
+      table, not `compose`. Confirmed: `ZLA_a20_B160_g10.athtab` is a
+      density-only table (`yq=1`, `t=1` in its header -- no real
+      composition/temperature dependence), and `EOSHybrid`'s table
+      representation (`m_table` is 2D: `[field, density]` only, `src/eos/
+      primitive-solver/eos_hybrid.hpp:53`) has no `yq`/`t` axes to *be*
+      degenerate in the first place, unlike `EOSCompOSE`'s inherently-3D
+      `[field, n, yq, t]` table, which merely tolerates a size-1 axis rather
+      than being designed for one. Re-running with `dyn_eos=hybrid` (same
+      `table=` path, everything else unchanged) converges cleanly without
+      needing any of the four `EOSCompOSE` fixes below. The BNS test
+      (`cfc_celephais_bns.athinput`, DD2 table) already correctly used
+      `dyn_eos=hybrid`, which is why it never hit this class of bug.
+    - **Four additional, genuinely unrelated `EOSCompOSE` bugs found and
+      fixed** while chasing the (initially mis-configured) milder-star
+      cross-check (that test's chosen table, `ZLA_a20_B160_g10.athtab`, is a
+      "cold" EOS with degenerate single-point `yq`/`t` axes -- an edge case
+      nothing in this repo's existing test suite exercised, and not the
+      semantically-correct EOS policy for this table anyway, per above --
+      but the bugs themselves are real and independent of that mistake:
+      `EOSCompOSE` should not crash on a degenerate axis regardless of
+      whether `EOSHybrid` would have been the better choice):
+      1. `EOSCompOSE::ReadTableFromFile` (`eos_compose.cpp`) unconditionally
+         read `host_yq(1)`/`host_log_t(1)` to compute `m_id_yq`/`m_id_log_t`
+         spacing, out-of-bounds for a size-1 axis. Guarded: `0.0` when the
+         axis has only one point (no spacing is meaningful there anyway).
+      2. `EOSCompOSE::weight_idx_yq`/`weight_idx_lt` (`eos_compose.hpp`): the
+         existing index clamp (`iy > m_ny-2`) computes a *negative* upper
+         bound when `m_ny<=1` (`1-2=-1`), clamping into another
+         out-of-bounds read. Special-cased `m_ny<=1`/`m_nt<=1`: return
+         `iy=0`/`it=0`, `w0=1`, `w1=0` directly (no interpolation possible on
+         a single point).
+      3. `EOSCompOSE::eval_at_lnty`/`temperature_from_var`: even with (2)
+         fixed, both unconditionally *read* `m_table(...,iy+1,...)`/
+         `m_table(...,it+1)` regardless of the (now correctly zeroed) weight
+         -- a zero weight only zeroes the value's *contribution* to the sum,
+         not the array access itself, which Kokkos's bounds checking still
+         flags. Introduced clamped neighbor indices (`iy1`/`it1`, equal to
+         the base index when the axis is degenerate) and used those instead
+         of the raw `+1` everywhere in both functions' formulas.
+      4. `EOSCompOSE::temperature_from_var`'s bracket-expansion loop
+         (`ilo=0; ihi=m_nt-1; while(flo*fhi>0) { ...; ilo+=1; ... }`)
+         assumes `ihi>=1`; for `m_nt<=1` (`ihi=0`), `ilo` grows past `ihi`
+         with nothing to stop it, reading `m_table(...,it=1)` directly (this
+         was the actual final crash site, found only after (1)-(3) were
+         already fixed and the crash persisted). Added an early return
+         (`return min_T`) for `m_nt<=1` before the bracket search even
+         starts -- a single-point temperature axis has no meaningful
+         temperature dependence to bisect for.
+    - **Also fixed, found via independent code review (not the debugging
+      session above)**: `celephais_ns.cpp` never wrote `vK_dd(2,2)` from the
+      computed `qv[AZZ]` (present in `celephais_bns.cpp:428`, missing here) --
+      left `K_zz=0` from `Kokkos::realloc`'s zero-initialization instead of
+      the correct value. Unlikely to have been the NaN's cause
+      (`InitializeMetric()`'s own solve fully overwrites `vK_dd` before any
+      hydro evolution reads it), but a real, silent initial-guess bug for a
+      rotating star, now fixed as a one-line addition mirroring
+      `celephais_bns.cpp`.
+
+50. **(2026-08-11) Made `celephais_bns.cpp`/`celephais_ns.cpp` dual-mode:
+    they now run under EITHER z4c or CFC at runtime, selected by which block
+    is present in the `.athinput` file, instead of CFC-only.**
+    - **Motivation**: the user asked whether these two pgens could support
+      both backends, plus whether `<z4c>`/`<cfc>` coexisting in one input
+      file was already guarded against.
+    - **The mutual-exclusion check already existed**, confirmed by direct
+      code read, `src/mesh/meshblock_pack.cpp:237-243`: if `<cfc>` is
+      present alongside `<z4c>`, the run FATAL-ERRORs with "The `<cfc>` and
+      `<z4c>` blocks are mutually exclusive" before `pcfc` is ever
+      constructed. No new code needed for this half of the request.
+    - **Dual-mode support turned out to be a well-precedented, low-risk
+      change**, confirmed by direct reads of `src/coordinates/adm.cpp`,
+      `src/pgen/dyn_grmhd/dyngr_tov.cpp`, and `src/pgen/dyn_grmhd/lorene/
+      lorene_bns.cpp`, plus a research agent that grepped every pgen in the
+      tree for `pz4c`/`pcfc` null checks:
+      - `adm::ADM`'s own constructor (`adm.cpp:42-55`) already makes the
+        backend distinction transparent to pgen code: if `pz4c == nullptr`
+        at construction time, `adm.alpha`/`adm.beta_u` alias into `u_adm`
+        itself; if `pz4c != nullptr`, they alias into `pz4c->u0` instead.
+        `adm.g_dd`/`adm.psi4`/`adm.vK_dd` **always** alias into `u_adm`
+        regardless (`I_ADM_PSI4=12` sits before `I_ADM_ALPHA=13..
+        I_ADM_BETAZ=16` in the enum, `adm.hpp:30-35`, specifically so
+        z4c mode reserving 4 fewer channels in `u_adm` never invalidates
+        the earlier ones). This decision is made once, at `MeshBlockPack`
+        construction, and never revisited.
+      - `dyngr_tov.cpp` already relies on exactly this and is the only
+        existing pgen that's genuinely solver-agnostic end-to-end: it fills
+        `pmbp->padm->adm` unconditionally (device-side, no host mirror
+        needed since TOV is analytic) and has exactly one `pz4c`-conditional
+        branch, at the very end of `UserProblem`, deciding whether to
+        additionally call `ADMToZ4c<ng>`/`ADMConstraints<ng>`.
+      - `lorene_bns.cpp` (host-mirror-based, like the Kadath pgens, since
+        Lorene is also CPU-only) already has almost exactly the pattern
+        needed for a host-mirror pgen (`lorene_bns.cpp:174-189`: conditional
+        `host_u_z4c` mirror + alpha/beta_u slice, unconditional g_dd/vK_dd
+        slice from `host_u_adm`) and the matching `ADMToZ4c` tail call. It
+        was NOT safe to copy wholesale, though: it unconditionally
+        dereferences `pmbp->pz4c->ptracker` (line 63) and its refinement
+        callback unconditionally dereferences `pmbp->pz4c->pamr` (line 605)
+        elsewhere in the same file, and registers `user_ref_func`
+        unconditionally (line 509) -- all three would segfault under CFC.
+        Avoided this by gating every `pz4c`-touching piece, not just the
+        host-mirror slice.
+      - The research agent confirmed no other pgen in the tree checks both
+        `pz4c` and `pcfc` together for a genuine either-or dispatch.
+    - **Changes applied identically to both files** (`celephais_bns.cpp`,
+      `celephais_ns.cpp`):
+      1. Re-added `z4c/z4c.hpp`/`z4c/z4c_amr.hpp` includes (dropped during
+         the original CFC-only adaptation).
+      2. Host-mirror setup: `const bool is_z4c = (pmbp->pz4c != nullptr);`
+         gates a conditional `host_u_z4c` mirror + `alpha`/`beta_u` slice
+         (from `host_u_z4c` if z4c, else `host_u_adm`), matching
+         `adm.cpp`'s own constructor logic; `g_dd`/`vK_dd`/`psi4` slice from
+         `host_u_adm` unconditionally as before (`psi4` is harmless-but-
+         unused under z4c, required under CFC). The per-point Kadath fill
+         loop itself needed zero changes -- it already only ever writes
+         through the shared `host_adm` struct.
+      3. Device copy-back: added `if (is_z4c) { Kokkos::deep_copy(pmbp->
+         pz4c->u0, host_u_z4c); }` alongside the existing unconditional
+         `u_adm`/`w0` copies.
+      4. Tail: added `if (is_z4c) { switch(ng) { ADMToZ4c<2/3/4>(...); } }`
+         after `PrimToConInit`, matching `dyngr_tov.cpp`/`lorene_bns.cpp`
+         (no `ADMConstraints` call -- that's TOV-specific diagnostic).
+      5. `UserProblem`'s entry gate: replaced the CFC-specific
+         `pmbp->pcfc == nullptr` fatal check with the generic
+         `!pmbp->pcoord->is_dynamical_relativistic` (true for either
+         `<adm>` or `<z4c>`), matching `dyngr_tov.cpp`/`lorene_bns.cpp`.
+      6. Restored the original z4c reference's AMR refinement condition
+         (`KadathBNSRefinementCondition`/`KadathNSRefinementCondition`,
+         delegating to `pmbp->pz4c->pamr->Refine(pmbp)`), but -- unlike
+         `lorene_bns.cpp`'s unconditional (unsafe-under-CFC) registration --
+         registered it only `if (pmbp->pz4c != nullptr)`. Under CFC,
+         `user_ref_func` stays unset, exactly as before this change.
+      7. `KadathBNSHistory`/`KadathNSHistory`: no changes needed -- already
+         read `padm->adm.alpha` directly, mode-agnostic by construction.
+    - **Verified end-to-end, both directions, both files**:
+      - **CFC regression** (proves the refactor changed nothing observable
+        under the already-verified CFC path): rebuilt both
+        `build_cfc_celephais_bns`/`build_cfc_celephais_ns`, reran the
+        existing CFC smoke tests -- `max|delta psi - initial guess|`
+        reproduced byte-identical to the pre-refactor baselines from item 49
+        (BNS: `0.00232378`, NS: `0.0152092`), zero NaN, clean 10-cycle
+        completion, both jobs (252937/252938).
+      - **z4c smoke tests** (new): wrote fixed-mesh (no AMR/tracker/wave-
+        extraction -- matching this session's own smoke-test convention,
+        not the full production setup at `/sakura/ptmp/tlam/athenak_run/
+        kadath/test/parfile.par`) `<z4c>`-block parfiles for both BNS and
+        NS, pointed at the same real Celephais solutions already used for
+        the CFC tests, run against the SAME rebuilt binaries. Both reached
+        `AssembleZ4cTasks`, ran 10 cycles with zero `NANS_IN_CONS`, and
+        terminated cleanly (jobs 252939 BNS, 252940 NS) -- proving the z4c
+        branch is genuinely functional, not just structurally plausible.
+        (The NS z4c test parfile's `<z4c>` tracker parameters, `nco`/
+        `co_0_*`, went unused -- a harmless warning, not a fatal error, since
+        no AMR was configured to consume them; not investigated further as
+        it doesn't affect the actual verification.)

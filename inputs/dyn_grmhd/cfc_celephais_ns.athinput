@@ -1,0 +1,139 @@
+# AthenaK input file for Celephais single NS initial data with the CFC metric solver.
+# All coordinates and times are in geometric units (G = c = 1, M_sun = 1).
+#
+# First smoke test for src/pgen/dyn_grmhd/celephais/celephais_ns.cpp's CFC
+# variant: fixed mesh (no AMR -- CFC+AMR is a separate, still-open gap, see
+# src/cfc/DEVELOPMENT.md items 38/39), single MeshBlock, deliberately crude
+# resolution. Meant to confirm the pgen runs and CFC::InitializeMetric()
+# converges to something sane -- not to resolve the star physically. EOS
+# (piecewise-polytrope SLy4) and pwp_* parameters copied from the reference
+# z4c parfile (inputs/dyn_grmhd/celephais_ns.athinput on pgen/celephais),
+# which was built against the same res=11 SLy4 solution used here.
+#
+# NOTE on <cfc> init_freeze_conserved: this star's compactness makes
+# InitializeMetric()'s default outer Picard iteration genuinely unstable --
+# confirmed independent of mesh resolution (tested dx=2.0 and dx=0.5) and of
+# under-relaxation strength (omega=1.0/0.5/0.2 all eventually diverge, just
+# at different iteration counts). init_freeze_conserved=true (one-shot
+# RunXPsiSolvePass, no outer loop) sidesteps the instability entirely and
+# converges cleanly. See src/cfc/DEVELOPMENT.md for the full investigation.
+
+<comment>
+problem   = Celephais NS initial data with CFC metric solve
+
+<job>
+basename  = cfc_celephais_ns
+
+<mesh>
+nghost     = 4        # Number of ghost cells
+nx1        = 32       # Number of zones in X1-direction (CFC's Multigrid requires
+                       # a power-of-two MeshBlock size)
+x1min      = -32.0    # minimum value of X1
+x1max      =  32.0    # maximum value of X1
+ix1_bc     = diode    # Inner-X1 boundary condition
+ox1_bc     = diode    # Outer-X1 boundary condition
+
+nx2        = 32       # Number of zones in X2-direction
+x2min      = -32.0    # minimum value of X2
+x2max      =  32.0    # maximum value of X2
+ix2_bc     = diode    # Inner-X2 boundary condition
+ox2_bc     = diode    # Outer-X2 boundary condition
+
+nx3        = 32       # Number of zones in X3-direction
+x3min      = -32.0    # minimum value of X3
+x3max      =  32.0    # maximum value of X3
+ix3_bc     = diode    # Inner-X3 boundary condition
+ox3_bc     = diode    # Outer-X3 boundary condition
+
+<meshblock>
+nx1        = 32       # Number of cells in each MeshBlock, X1-dir (single MeshBlock)
+nx2        = 32       # Number of cells in each MeshBlock, X2-dir
+nx3        = 32       # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk3      # time integration algorithm
+cfl_number = 0.25     # CFL number
+nlim       = 10       # small first smoke test -- raise once this looks right
+tlim       = 10000    # time limit [M_sun]
+ndiag      = 1        # cycles between diagnostic output
+
+<coord>
+general_rel = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal          # placeholder (unused, required by parser)
+gamma       = 2.0            # placeholder (unused, required by parser)
+
+dyn_eos     = piecewise_poly # PrimitiveSolver EOSPolicy -- must match Kadath EOS
+dyn_error   = reset_floor    # PrimitiveSolver ErrorPolicy
+reconstruct = wenoz          # spatial reconstruction method
+rsolver     = llf            # Riemann solver
+dfloor      = 1.0e-10        # density floor [geometric units] -- this repo's
+                              # other CFC pgens use 1e-10..1e-16; the z4c
+                              # reference's 1.28e-21 is far more extreme and
+                              # made CFC::InitializeMetric()'s Poisson solve
+                              # produce NaN psi4 (traced via debug instrumentation)
+tfloor      = 1.58255e-19    # temperature floor
+dthreshold  = 1.0
+dyn_scratch = 0
+fofc        = false
+c2p_tol     = 2.49e-13
+gamma_max   = 20.025         # Lorentz factor ceiling
+
+# Piecewise-polytrope EOS parameters (SLy4 -- same EOS as the res=11 test
+# data at /sakura/ptmp/tlam/celephais_testdata/ns_res11, eosfile=sly4.polytrope).
+# These MUST match the EOS used to build the Kadath initial data.
+pwp_poly_rmd         = 6.172164329750898e+18
+pwp_density_pieces_0 = 0.000000000000000e+00
+pwp_density_pieces_1 = 1.136499842827129e+17
+pwp_density_pieces_2 = 5.011872336272714e+17
+pwp_density_pieces_3 = 9.999999999999999e+17
+pwp_gamma_pieces_0   = 2.000000000000000e+00
+pwp_gamma_pieces_1   = 2.000000000000000e+00
+pwp_gamma_pieces_2   = 2.000000000000000e+00
+pwp_gamma_pieces_3   = 2.000000000000000e+00
+pwp_gamma_thermal    = 1.7
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_freeze_conserved = true  # REQUIRED: see the NOTE at the top of this
+                         # file -- the outer Picard iteration is unstable for
+                         # this star regardless of resolution/damping; the
+                         # one-shot freeze-conserved solve sidesteps it and
+                         # converges cleanly (max|delta psi - initial guess|
+                         # = 0.0152, zero NaN, verified end-to-end).
+
+<problem>
+# Path to the Kadath .toml config file (res=11 SLy4 single-NS solution,
+# uniform rotation, chi=0.11). The .dat space file must be in the same
+# directory with the same base name.
+initial_data_file = /sakura/ptmp/tlam/celephais_testdata/ns_res11/converged_NS_UNIROT.sly4.1.6.0.11.0.11.toml
+kadath_symmetry   = sym
+user_hist         = true
+
+<output1>
+file_type   = hst      # History output (rho-max, alpha-min)
+dt          = 0.375
+data_format = %24.17e
+
+<output2>
+file_type   = bin      # Binary data dump
+variable    = mhd_w
+dcycle      = 1
+slice_x3    = 0.0
+
+<output3>
+file_type   = bin      # Binary data dump
+variable    = adm
+dcycle      = 1
+slice_x3    = 0.0
+
+<output4>
+file_type   = rst      # Restart dump
+dt          = 1000.0

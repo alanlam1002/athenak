@@ -7456,3 +7456,114 @@ src/cfc/
       quadratic solve, not just the simpler dipole-only path) -- all
       reproduced their pre-refactor values bit-identically, including
       `achieved E_tor/E_pol=1` exactly matching target in the web test.
+
+58. **(2026-08-12) Added total angular momentum (`ang-mom`) to `GrassHistory`**
+    -- user request, generalized across both z4c and CFC via ADM quantities.
+    - **Reused `xns_rotstar.cpp`'s `XNSRotStarHistory` formula verbatim**:
+      `J_z = integral of vol*(x*u0(IM2) - y*u0(IM1))`, `vol = dx1*dx2*dx3`,
+      **no** `sqrt(gamma)` factor -- `u0(IM1+a)` is already the densitized
+      ADM momentum density `sqrt(gamma)*S_a` (proven generically in
+      `dyn_grmhd.cpp`'s `SetTmunu`, no z4c/CFC branch there), unlike the
+      raw `bcc0` fields `GrassHistory`'s existing `E_mag`/`E_tor`/`E_pol`
+      block needs `adm::SpatialDet`-based `dV` for. This is what makes the
+      formula mode-agnostic: it never reads `adm.g_dd`/`vK_dd` directly, so
+      it needs no `if constexpr`/runtime branch on `IsZ4c` at all.
+      `xns_rotstar.cpp`'s own history function had already validated this
+      formula to 0.019% against XNS's reference rotating-star `J`, and to
+      `1.32e-5` relative conservation during evolution -- reused, not
+      re-derived.
+    - Implementation: added `u0_` capture; folded a fifth `Kokkos::Sum<Real>`
+      output (`ang_mom`) into the existing `"GrassHistMag"` reduction (which
+      already computes per-cell `x1v`/`x2v` for `E_tor`/`E_pol`), reusing
+      those rather than a new kernel. `nhist` 7->8, new `"ang-mom"` label/
+      `hdata[7]`. No manual `MPI_Reduce` needed -- `ang_mom` is a genuine
+      per-rank partial sum; the framework's generic `MPI_SUM` over `hdata`
+      combines ranks correctly, same treatment `XNSRotStarHistory` already
+      uses (left deliberately out of the existing MAX/MIN manual-reduce
+      block, unlike `e_mag`/`e_tor`/`e_pol`, which redundantly duplicate
+      the framework's sum there -- harmless either way, but no reason to
+      add more redundant code).
+    - Updated the doc comment above `GrassHistory` and `grass/VALIDATION.md`'s
+      "Known gaps" bullet: `J` is no longer a scope cut (helicity `H` still
+      is -- needs the vector potential, not retained after
+      `BuildMagneticField` returns).
+    - **Verified**: rebuilt `build_grass` cleanly; cpplint shows zero new
+      findings (same 36 pre-existing findings as before, none on any line
+      this change touched). Reran all five smoke tests (CFC/z4c NS, dipole
+      z4c/CFC, full web+dipole z4c): the two NS tests' `rho-max`/`alpha-min`
+      (from the untouched first reduction kernel) reproduced bit-identically;
+      `ang-mom` is ~1e-18 (round-off-level, i.e. correctly ~0) for the
+      non-rotating NS tests and O(1) (`~-1.41`) for the dipole/web tests,
+      consistent with those using a rotating progenitor. The dipole z4c vs.
+      CFC pair's `ang-mom(t=0)` agree to 0.066% (`-1.41301` vs. `-1.41395`),
+      confirming the formula is genuinely mode-agnostic, not just by code
+      inspection. The dipole/web tests' pre-existing `E_mag`/`E_tor`/
+      `divBmax` columns shifted at the ~1e-5 relative level from their
+      pre-change baseline (not bit-identical, unlike the NS tests) --
+      traced this to **pre-existing CFC solver run-to-run nondeterminism**
+      (its multigrid Poisson solve uses OpenMP-threaded reductions), not
+      to this change: reran the new binary's CFC dipole test a second time
+      and it reproduced the first new-binary run bit-identically, while the
+      CFC dipole `.user.hst`'s own restart-chain history already showed the
+      same ~1e-5-level drift between *prior* runs of the pre-change code.
+      The z4c dipole test (no elliptic solve, more deterministic) matched
+      its pre-change baseline bit-identically, consistent with this
+      explanation.
+
+59. **(2026-08-12) `SetupGrass`'s CFC branch: rescale velocity by a single
+    scalar (exact Lorentz factor) instead of per-component (diagonal-only)**
+    -- user-authored fix, revised at user's request after review.
+    - **The problem being fixed**: isotropizing GRASS's true (generally
+      anisotropic) 3-metric into CFC's conformally-flat `psi4_guess*delta_ij`
+      changes `gamma_ij v^i v^j` (hence the Lorentz factor `W`) if `vu` is
+      copied unchanged, since AthenaK computes `W` from the *full* metric
+      contraction including off-diagonal terms (`SquareVector`,
+      `primitive-solver/geom_math.hpp`) and GRASS's `pt.vu` is exactly this
+      same `W*v^i` quantity in the true metric's Cartesian basis
+      (`grass_reader.hpp:98`). No prior pgen in this tree faced this --
+      `celephais_bns/ns.cpp`'s KADATH source is already conformally flat in
+      both modes; `xns_rotstar.cpp`/`dyngr_tov.cpp` are CFC-only;
+      `lorene_bns.cpp` is z4c-only -- so there was no established pattern.
+    - **First attempt (diagonal-only)**: `vu[i] *= sqrt(g_ii/psi4_guess)`
+      per component. Reviewed and found to only be exact when the true
+      metric's off-diagonal terms vanish. Worked out the exact residual
+      analytically for GRASS's pure-azimuthal rotation profile: at the
+      equator, writing `A=gam_rr`, `B=gam_phph/r^2` (conformal flatness
+      <=> `A=B`), the true `v^2` reduces exactly to `B*u~_phi^2` (the
+      off-diagonal `gxy` term is *required* to get this clean cancellation),
+      while the diagonal-only rescale instead gives
+      `v^2_true*(1 + 2 sin^2(phi)cos^2(phi)*(A/B - 1))` -- exact on-axis
+      (`phi=0,90 deg`), with error peaking at 45 deg off-axis, scaled by
+      how far `A/B` departs from 1 (i.e. by the actual local violation of
+      conformal flatness). Not a bug, but an approximation whose accuracy
+      isn't uniform in angle -- worth fixing since a cleaner alternative
+      exists with barely more code.
+    - **Adopted fix**: rescale the *entire* velocity vector by one scalar,
+      `vscale = sqrt(v2_true / (psi4_guess*v2_iso))`, where `v2_true` is the
+      FULL anisotropic contraction (`gxx*vx^2+...+2*(gxy*vx*vy+...)`, cross
+      terms included -- `gxy`/`gxz`/`gyz` were already in scope, just
+      previously unused) and `v2_iso = vx^2+vy^2+vz^2`. This makes the new
+      `W` exactly equal the true `W` everywhere (not just on-axis), trading
+      exact per-component matching for exact total-magnitude matching --
+      the tighter match to the stated goal ("keep the Lorentz factor
+      unchanged"), since `W` is the one physical scalar that actually needs
+      preserving. `v2_iso > 0.0` guards the one division (outside the star,
+      `vu` is already zero and this branch is skipped entirely via the
+      pre-existing `pt.rho0 > 0.0` gate, so no edge case there).
+    - **Verified**: rebuilt `build_grass` cleanly; cpplint zero new findings
+      (still the same 36 pre-existing, none touched). Reran all five smoke
+      tests: NS tests unaffected (no velocity there in the field-free
+      sense... rather, `ang-mom` for those is still ~1e-18, round-off-level,
+      unchanged in character). Dipole z4c vs. CFC `ang-mom(t=0)` agreement
+      improved from 0.066% (diagonal-only, item 58) to 0.047% (`-1.41368`
+      vs. `-1.41301`) -- the expected direction and rough magnitude of
+      improvement for a genuinely tighter velocity match, though not zero,
+      since z4c and CFC still differ in the underlying metric solve itself,
+      not just the velocity initialization. CFC dipole's `alpha-min` shifted
+      at the ~1e-6 relative level from item 58's value -- expected, since
+      `alpha` there is CFC's *solved* lapse (`CFC::InitializeMetric()`
+      overwrites the GRASS-read value from its own elliptic solve, per this
+      function's existing header comment), and the elliptic solve's matter
+      source depends on velocity via the stress-energy tensor, so a changed
+      `vu` naturally perturbs the solved `alpha` slightly. No NaN/inf, no
+      other regressions.

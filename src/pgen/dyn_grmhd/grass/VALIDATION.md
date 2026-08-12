@@ -136,12 +136,12 @@ instruction), not a crash.
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside
   `[rho_lo,rho_hi]`) was scoped out for time.
-- **Helicity `H`** and **total angular momentum `J`** are not computed in
-  `GrassHistory` — helicity would need the vector potential `A`, which isn't
-  retained after `BuildMagneticField` returns (would need either re-running
-  `GenerateWebModeTable` with the same seed, or persisting `final_a1/2/3`);
-  `J` needs a separate integral not otherwise used by this pgen. Both are
-  explicit scope cuts for this implementation pass.
+- **Helicity `H`** is not computed in `GrassHistory` — it would need the
+  vector potential `A`, which isn't retained after `BuildMagneticField`
+  returns (would need either re-running `GenerateWebModeTable` with the same
+  seed, or persisting `final_a1/2/3`). Explicit scope cut, not an oversight.
+  (Total angular momentum `J` *is* now computed — see `GrassHistory`'s
+  `ang-mom` column, reusing `xns_rotstar.cpp`'s validated formula.)
 - **Maxwell stress** (`integral(b_R*b_phi) dV`) is likewise not implemented.
 - **The `web_tor_pol=4.0` unreachability** (above) is an open finding, not a
   closed issue — worth a follow-up investigation (larger `web_nmodes`, a

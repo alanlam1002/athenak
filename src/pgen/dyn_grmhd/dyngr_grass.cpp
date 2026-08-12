@@ -186,6 +186,7 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
           host_adm.beta_u(m, 1, k, j, i) = pt.beta_u[1];
           host_adm.beta_u(m, 2, k, j, i) = pt.beta_u[2];
 
+          Real vu[3] = {0.0, 0.0, 0.0};
           if constexpr (IsZ4c) {
             // True (generally non-conformally-flat) CST metric/extrinsic curvature --
             // z4c evolves a general metric natively, no isotropization needed.
@@ -202,6 +203,10 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
             host_adm.vK_dd(m, 1, 1, k, j, i) = pt.K_dd[3];
             host_adm.vK_dd(m, 1, 2, k, j, i) = pt.K_dd[4];
             host_adm.vK_dd(m, 2, 2, k, j, i) = pt.K_dd[5];
+
+            if (pt.rho0 > 0.0) {
+              vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
+            }
           } else {
             // CFC can only represent a conformally-flat 3-metric; isotropize GRASS's
             // true (anisotropic) metric into a conformal-factor guess that matches its
@@ -227,14 +232,26 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
             host_adm.vK_dd(m, 1, 1, k, j, i) = 0.0;
             host_adm.vK_dd(m, 1, 2, k, j, i) = 0.0;
             host_adm.vK_dd(m, 2, 2, k, j, i) = 0.0;
+
+            if (pt.rho0 > 0.0) {
+              Real vx = pt.vu[0], vy = pt.vu[1], vz = pt.vu[2];
+              // Preserve the true Lorentz factor exactly: rescale the whole velocity
+              // vector by one scalar so gamma_iso*(s*v)^2 matches the true, full
+              // (cross-term-including) v^2 = gamma_true_ij*v^i*v^j -- tighter than
+              // rescaling each component independently, which only matches the
+              // diagonal contributions and silently drops the off-diagonal terms
+              // an isotropized metric can't represent anyway.
+              Real v2_true = gxx*vx*vx + gyy*vy*vy + gzz*vz*vz
+                             + 2.0*(gxy*vx*vy + gxz*vx*vz + gyz*vy*vz);
+              Real v2_iso = vx*vx + vy*vy + vz*vz;
+              Real vscale = (v2_iso > 0.0) ?
+                  Kokkos::sqrt(Kokkos::max(v2_true, 0.0) / (psi4_guess*v2_iso)) : 0.0;
+              vu[0] = vx*vscale; vu[1] = vy*vscale; vu[2] = vz*vscale;
+            }
           }
 
           Real rho = (pt.rho0 > 0.0) ? pt.rho0 : 0.0;
           Real pres = (pt.rho0 > 0.0) ? pt.pres : 0.0;
-          Real vu[3] = {0.0, 0.0, 0.0};
-          if (pt.rho0 > 0.0) {
-            vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
-          }
 
           host_w0(m, IDN, k, j, i) = rho;
           host_w0(m, IPR, k, j, i) = pres;
@@ -1059,14 +1076,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 // E_tor, E_pol (WHOLE-domain, not restricted to the initial rho_lo shell -- unlike the
 // one-time normalization pass in BuildMagneticField, restricting an ONGOING diagnostic
 // to the field's initial confinement boundary would become physically meaningless once
-// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|. Helicity and total
-// angular momentum J are NOT implemented here (see grass/VALIDATION.md) -- helicity
-// would need the vector potential A, which isn't retained after BuildMagneticField
-// returns, and J needs a separate integral not otherwise used by this pgen; both are
-// scoped out of this first implementation pass, not silently forgotten.
+// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|, and total angular
+// momentum ang-mom (J_z = integral of vol*(x*S_y - y*S_x), reusing xns_rotstar.cpp's
+// XNSRotStarHistory formula verbatim -- mode-agnostic since it only reads the
+// pre-densitized conserved momentum u0(IM1/IM2), not adm.g_dd/vK_dd directly). Helicity
+// is NOT implemented here (see grass/VALIDATION.md) -- it would need the vector
+// potential A, which isn't retained after BuildMagneticField returns; scoped out of
+// this implementation pass, not silently forgotten.
 
 void GrassHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 7;
+  pdata->nhist = 8;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "E_mag";
@@ -1074,8 +1093,10 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[4] = "E_pol";
   pdata->label[5] = "Bmax";
   pdata->label[6] = "divBmax";
+  pdata->label[7] = "ang-mom";
 
   auto &w0_ = pm->pmb_pack->pmhd->w0;
+  auto &u0_ = pm->pmb_pack->pmhd->u0;
   auto &adm = pm->pmb_pack->padm->adm;
   auto &bcc0_ = pm->pmb_pack->pmhd->bcc0;
   auto &b0_ = pm->pmb_pack->pmhd->b0;
@@ -1107,9 +1128,9 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     mb_bmax = fmax(mb_bmax, sqrt(bsq));
   }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(bmax));
 
-  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0;
+  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0, ang_mom = 0.0;
   Kokkos::parallel_reduce("GrassHistMag", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm) {
+  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm, Real &jz) {
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
     int j = (idx - m*nkji - k*nji)/nx1;
@@ -1123,6 +1144,11 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     Real dV = sqrt(fmax(detg, 0.0)) * dx1*dx2*dx3;
     Real x1v = CellCenterX(i-is, nx1, size_.d_view(m).x1min, size_.d_view(m).x1max);
     Real x2v = CellCenterX(j-js, nx2, size_.d_view(m).x2min, size_.d_view(m).x2max);
+    // J_z = integral of vol*(x*S_y - y*S_x); u0(IM1/IM2) is already the densitized
+    // ADM momentum density sqrt(gamma)*S_a (see dyn_grmhd.cpp's SetTmunu), so plain
+    // vol=dx1*dx2*dx3 is correct here -- no extra sqrt(gamma)/dV factor, unlike the
+    // undensitized bcc0 fields used for em/etor/epol above.
+    jz += dx1*dx2*dx3*(x1v*u0_(m,IM2,k,j,i) - x2v*u0_(m,IM1,k,j,i));
     Real rcyl = sqrt(x1v*x1v + x2v*x2v);
     Real bx = bcc0_(m,IBX,k,j,i), by = bcc0_(m,IBY,k,j,i), bz = bcc0_(m,IBZ,k,j,i);
     em += 0.5*(bx*bx + by*by + bz*bz)*dV;
@@ -1140,7 +1166,7 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     Real dx_local = cbrt(dx1*dx2*dx3);
     dbm = fmax(dbm, (bmag > 1.0e-300) ? fabs(divb)*dx_local/bmag : 0.0);
   }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(e_tor), Kokkos::Sum<Real>(e_pol),
-     Kokkos::Max<Real>(divb_max));
+     Kokkos::Max<Real>(divb_max), Kokkos::Sum<Real>(ang_mom));
 
 #if MPI_PARALLEL_ENABLED
   if (global_variable::my_rank == 0) {
@@ -1168,6 +1194,11 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     e_pol = 0.;
   }
 #endif
+  // ang_mom is left out of the manual reduction above: it's a genuine per-rank
+  // partial volume-integral sum, and the framework's generic MPI_SUM reduction
+  // over hdata (HistoryOutput::WriteOutputFile) combines per-rank partial sums
+  // into the correct global total with no manual reduction needed here --
+  // matches xns_rotstar.cpp's XNSRotStarHistory treatment of the same quantity.
 
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
@@ -1176,4 +1207,5 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[4] = e_pol;
   pdata->hdata[5] = bmax;
   pdata->hdata[6] = divb_max;
+  pdata->hdata[7] = ang_mom;
 }

@@ -77,22 +77,42 @@ void GrassHistory(HistoryData *pdata, Mesh *pm);
 void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                          const grass::GrassData &data, const grass::GrassEosTable &eos_table);
 
-// Gauss -> AthenaK code-unit (<mhd> units=geometric_solar) conversion constant,
-// reused as-is from src/pgen/dyn_grmhd/lorene/lorene_bns.cpp (its athenaB/1e9
-// derivation) -- GrassUnits::code is ALSO Primitive::MakeGeometricSolar(), the
-// same G=c=Msun=1 system Lorene's own athenaL/athenaM construction targets, so
-// this carries over directly (see grass/NOTES.md for the sub-permille caveat).
-static constexpr Real kGaussToCode = 1.0 / 8.3519664583273e+19;
+// Gauss -> AthenaK code-unit conversion factor, honoring <mhd> units (same key/
+// options as PrimitiveSolverHydro::SetPolicyParams). B^2/2 is the code's energy
+// density (Heaviside-Lorentz convention, no 4*pi -- see cfc.cpp's own bsq usage);
+// Gaussian-cgs B^2/(8*pi) is the cgs energy density, so
+// B_code = B_cgs * sqrt(EnergyDensityConversion / (4*pi)).
+Real GaussToCode(ParameterInput *pin) {
+  std::string units_str = pin->GetOrAddString("mhd", "units", "geometric_solar");
+  Primitive::UnitSystem code_units;
+  if (units_str == "geometric_solar") {
+    code_units = Primitive::MakeGeometricSolar();
+  } else if (units_str == "geometric_kilometer") {
+    code_units = Primitive::MakeGeometricKilometer();
+  } else if (units_str == "nuclear") {
+    code_units = Primitive::MakeNuclear();
+  } else if (units_str == "cgs") {
+    code_units = Primitive::MakeCGS();
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown <mhd> units '" << units_str << "' requested." << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  Real ed_conv = Primitive::MakeCGS().EnergyDensityConversion(code_units);
+  return Kokkos::sqrt(ed_conv / (4.0*M_PI));
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn void SetupGrass
 //  \brief Loads a GRASS restart binary and fills ADM/(Z4c or CFC)/hydro initial data.
-//  Host-only: the reader's interpolation (grass::GrassData) is plain-CPU code, so this
-//  mirrors the host-fill-then-deep_copy pattern used by the other external-ID pgens
-//  (elliptica/lorene/sgrid/celephais/rns_st), not dyngr_tov.cpp's device-side par_for
-//  (which works directly from a closed-form/ODE solution instead). Non-templated (unlike
-//  the TOV-family pgens' Setup<EOS>) -- see file header, no AthenaK EOS call is needed.
+//  Host-only, mirrors the host-fill-then-deep_copy pattern used by the other
+//  external-ID pgens (elliptica/lorene/sgrid/celephais/rns_st). Templated on
+//  IsZ4c/UseYe so the per-point metric-write and Y[e]-write branches are resolved
+//  once per instantiation instead of per grid point; dispatched in UserProblem from
+//  a runtime pz4c/nscalars check. UseYe's guard is also a bounds guard: host_w0's
+//  width is nmhd+nscalars, so writing IYF when nscalars==0 would be out of bounds.
 
+template<bool IsZ4c, bool UseYe>
 void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
@@ -106,7 +126,6 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   // <problem> table = ... , same input key tov::TabulatedEOS's other callers
   // (dyngr_tov.cpp, celephais_bns.cpp) already use.
   tov::TabulatedEOS slice_eos(pin);
-  const bool read_ye = pin->GetOrAddInteger("mhd", "nscalars", 0) > 0;
 
   auto &indcs = pmy_mesh_->mb_indcs;
   int &ng = indcs.ng;
@@ -118,7 +137,6 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
 
   auto &u_adm = pmbp->padm->u_adm;
   auto &w0 = pmbp->pmhd->w0;
-  const bool is_z4c = (pmbp->pz4c != nullptr);
 
   // Host-side fill, then move to device -- see file header.
   HostArray5D<Real>::HostMirror host_u_adm = Kokkos::create_mirror_view(u_adm);
@@ -130,7 +148,7 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   // gauge), but in u_adm itself under <cfc>/bare <adm> -- matches adm::ADM's own
   // constructor logic (adm.cpp). g_dd/vK_dd/psi4 always live in u_adm regardless.
   adm::ADM::ADMhost_vars host_adm;
-  if (is_z4c) {
+  if constexpr (IsZ4c) {
     host_u_z4c = Kokkos::create_mirror_view(pmbp->pz4c->u0);
     host_adm.alpha.InitWithShallowSlice(host_u_z4c, z4c::Z4c::I_Z4C_ALPHA);
     host_adm.beta_u.InitWithShallowSlice(host_u_z4c,
@@ -146,118 +164,94 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   host_adm.vK_dd.InitWithShallowSlice(host_u_adm,
       adm::ADM::I_ADM_KXX, adm::ADM::I_ADM_KZZ);
 
-  // Templated on IsZ4c/UseYe so the metric-write and Y[e]-write branches below are
-  // resolved once, at the FillLoop.template operator()<...>() call site, instead of
-  // being re-evaluated on every grid point. UseYe mirrors dyngr_tov.cpp's own use_ye,
-  // except it can't be a SFINAE trait on an EOS template type the way dyngr_tov.cpp's
-  // is (SetupGrass has no EOS template parameter -- GRASS reuses its own (pressure,
-  // energy) pair directly, see file header) -- it's sourced from the same runtime
-  // <mhd> nscalars check as read_ye always was. That check is a genuine bounds guard,
-  // not just a perf one: host_w0's allocated width is nmhd+nscalars, so writing IYF
-  // when nscalars==0 would write past the MeshBlock's actual variable count.
-  auto FillLoop = [&]<bool IsZ4c, bool UseYe>() {
-    for (int m = 0; m < nmb; ++m) {
-      Real &x1min = size.h_view(m).x1min;
-      Real &x1max = size.h_view(m).x1max;
-      Real &x2min = size.h_view(m).x2min;
-      Real &x2max = size.h_view(m).x2max;
-      Real &x3min = size.h_view(m).x3min;
-      Real &x3max = size.h_view(m).x3max;
-      for (int k = 0; k < n3; ++k) {
-        Real x3v = CellCenterX(k - indcs.ks, indcs.nx3, x3min, x3max);
-        for (int j = 0; j < n2; ++j) {
-          Real x2v = CellCenterX(j - indcs.js, indcs.nx2, x2min, x2max);
-          for (int i = 0; i < n1; ++i) {
-            Real x1v = CellCenterX(i - indcs.is, indcs.nx1, x1min, x1max);
+  for (int m = 0; m < nmb; ++m) {
+    Real &x1min = size.h_view(m).x1min;
+    Real &x1max = size.h_view(m).x1max;
+    Real &x2min = size.h_view(m).x2min;
+    Real &x2max = size.h_view(m).x2max;
+    Real &x3min = size.h_view(m).x3min;
+    Real &x3max = size.h_view(m).x3max;
+    for (int k = 0; k < n3; ++k) {
+      Real x3v = CellCenterX(k - indcs.ks, indcs.nx3, x3min, x3max);
+      for (int j = 0; j < n2; ++j) {
+        Real x2v = CellCenterX(j - indcs.js, indcs.nx2, x2min, x2max);
+        for (int i = 0; i < n1; ++i) {
+          Real x1v = CellCenterX(i - indcs.is, indcs.nx1, x1min, x1max);
 
-            grass::GrassData::Point pt;
-            data.Interpolate(x1v, x2v, x3v, eos_table, slice_eos, &pt);
+          grass::GrassData::Point pt;
+          data.Interpolate(x1v, x2v, x3v, eos_table, slice_eos, &pt);
 
-            host_adm.alpha(m, k, j, i) = pt.alpha;
-            host_adm.beta_u(m, 0, k, j, i) = pt.beta_u[0];
-            host_adm.beta_u(m, 1, k, j, i) = pt.beta_u[1];
-            host_adm.beta_u(m, 2, k, j, i) = pt.beta_u[2];
+          host_adm.alpha(m, k, j, i) = pt.alpha;
+          host_adm.beta_u(m, 0, k, j, i) = pt.beta_u[0];
+          host_adm.beta_u(m, 1, k, j, i) = pt.beta_u[1];
+          host_adm.beta_u(m, 2, k, j, i) = pt.beta_u[2];
 
-            if constexpr (IsZ4c) {
-              // True (generally non-conformally-flat) CST metric/extrinsic curvature --
-              // z4c evolves a general metric natively, no isotropization needed.
-              host_adm.g_dd(m, 0, 0, k, j, i) = pt.g_dd[0];
-              host_adm.g_dd(m, 0, 1, k, j, i) = pt.g_dd[1];
-              host_adm.g_dd(m, 0, 2, k, j, i) = pt.g_dd[2];
-              host_adm.g_dd(m, 1, 1, k, j, i) = pt.g_dd[3];
-              host_adm.g_dd(m, 1, 2, k, j, i) = pt.g_dd[4];
-              host_adm.g_dd(m, 2, 2, k, j, i) = pt.g_dd[5];
+          if constexpr (IsZ4c) {
+            // True (generally non-conformally-flat) CST metric/extrinsic curvature --
+            // z4c evolves a general metric natively, no isotropization needed.
+            host_adm.g_dd(m, 0, 0, k, j, i) = pt.g_dd[0];
+            host_adm.g_dd(m, 0, 1, k, j, i) = pt.g_dd[1];
+            host_adm.g_dd(m, 0, 2, k, j, i) = pt.g_dd[2];
+            host_adm.g_dd(m, 1, 1, k, j, i) = pt.g_dd[3];
+            host_adm.g_dd(m, 1, 2, k, j, i) = pt.g_dd[4];
+            host_adm.g_dd(m, 2, 2, k, j, i) = pt.g_dd[5];
 
-              host_adm.vK_dd(m, 0, 0, k, j, i) = pt.K_dd[0];
-              host_adm.vK_dd(m, 0, 1, k, j, i) = pt.K_dd[1];
-              host_adm.vK_dd(m, 0, 2, k, j, i) = pt.K_dd[2];
-              host_adm.vK_dd(m, 1, 1, k, j, i) = pt.K_dd[3];
-              host_adm.vK_dd(m, 1, 2, k, j, i) = pt.K_dd[4];
-              host_adm.vK_dd(m, 2, 2, k, j, i) = pt.K_dd[5];
-            } else {
-              // CFC can only represent a conformally-flat 3-metric; isotropize GRASS's
-              // true (anisotropic) metric into a conformal-factor guess that matches its
-              // local volume element (det g_dd). vK_dd is zeroed -- CFC::InitializeMetric()
-              // always overwrites both from its own elliptic solve (see file header).
-              Real gxx = pt.g_dd[0], gxy = pt.g_dd[1], gxz = pt.g_dd[2];
-              Real gyy = pt.g_dd[3], gyz = pt.g_dd[4], gzz = pt.g_dd[5];
-              Real det_g = gxx*(gyy*gzz - gyz*gyz) - gxy*(gxy*gzz - gyz*gxz)
-                           + gxz*(gxy*gyz - gyy*gxz);
-              Real psi4_guess = std::cbrt(std::max(det_g, 1.0e-300));
+            host_adm.vK_dd(m, 0, 0, k, j, i) = pt.K_dd[0];
+            host_adm.vK_dd(m, 0, 1, k, j, i) = pt.K_dd[1];
+            host_adm.vK_dd(m, 0, 2, k, j, i) = pt.K_dd[2];
+            host_adm.vK_dd(m, 1, 1, k, j, i) = pt.K_dd[3];
+            host_adm.vK_dd(m, 1, 2, k, j, i) = pt.K_dd[4];
+            host_adm.vK_dd(m, 2, 2, k, j, i) = pt.K_dd[5];
+          } else {
+            // CFC can only represent a conformally-flat 3-metric; isotropize GRASS's
+            // true (anisotropic) metric into a conformal-factor guess that matches its
+            // local volume element (det g_dd). vK_dd is zeroed -- CFC::InitializeMetric()
+            // always overwrites both from its own elliptic solve (see file header).
+            Real gxx = pt.g_dd[0], gxy = pt.g_dd[1], gxz = pt.g_dd[2];
+            Real gyy = pt.g_dd[3], gyz = pt.g_dd[4], gzz = pt.g_dd[5];
+            Real det_g = gxx*(gyy*gzz - gyz*gyz) - gxy*(gxy*gzz - gyz*gxz)
+                         + gxz*(gxy*gyz - gyy*gxz);
+            Real psi4_guess = Kokkos::cbrt(Kokkos::max(det_g, 1.0e-300));
 
-              host_adm.g_dd(m, 0, 0, k, j, i) = psi4_guess;
-              host_adm.g_dd(m, 0, 1, k, j, i) = 0.0;
-              host_adm.g_dd(m, 0, 2, k, j, i) = 0.0;
-              host_adm.g_dd(m, 1, 1, k, j, i) = psi4_guess;
-              host_adm.g_dd(m, 1, 2, k, j, i) = 0.0;
-              host_adm.g_dd(m, 2, 2, k, j, i) = psi4_guess;
-              host_adm.psi4(m, k, j, i) = psi4_guess;
+            host_adm.g_dd(m, 0, 0, k, j, i) = psi4_guess;
+            host_adm.g_dd(m, 0, 1, k, j, i) = 0.0;
+            host_adm.g_dd(m, 0, 2, k, j, i) = 0.0;
+            host_adm.g_dd(m, 1, 1, k, j, i) = psi4_guess;
+            host_adm.g_dd(m, 1, 2, k, j, i) = 0.0;
+            host_adm.g_dd(m, 2, 2, k, j, i) = psi4_guess;
+            host_adm.psi4(m, k, j, i) = psi4_guess;
 
-              host_adm.vK_dd(m, 0, 0, k, j, i) = 0.0;
-              host_adm.vK_dd(m, 0, 1, k, j, i) = 0.0;
-              host_adm.vK_dd(m, 0, 2, k, j, i) = 0.0;
-              host_adm.vK_dd(m, 1, 1, k, j, i) = 0.0;
-              host_adm.vK_dd(m, 1, 2, k, j, i) = 0.0;
-              host_adm.vK_dd(m, 2, 2, k, j, i) = 0.0;
-            }
+            host_adm.vK_dd(m, 0, 0, k, j, i) = 0.0;
+            host_adm.vK_dd(m, 0, 1, k, j, i) = 0.0;
+            host_adm.vK_dd(m, 0, 2, k, j, i) = 0.0;
+            host_adm.vK_dd(m, 1, 1, k, j, i) = 0.0;
+            host_adm.vK_dd(m, 1, 2, k, j, i) = 0.0;
+            host_adm.vK_dd(m, 2, 2, k, j, i) = 0.0;
+          }
 
-            Real rho = (pt.rho0 > 0.0) ? pt.rho0 : 0.0;
-            Real pres = (pt.rho0 > 0.0) ? pt.pres : 0.0;
-            Real vu[3] = {0.0, 0.0, 0.0};
-            if (pt.rho0 > 0.0) {
-              vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
-            }
+          Real rho = (pt.rho0 > 0.0) ? pt.rho0 : 0.0;
+          Real pres = (pt.rho0 > 0.0) ? pt.pres : 0.0;
+          Real vu[3] = {0.0, 0.0, 0.0};
+          if (pt.rho0 > 0.0) {
+            vu[0] = pt.vu[0]; vu[1] = pt.vu[1]; vu[2] = pt.vu[2];
+          }
 
-            host_w0(m, IDN, k, j, i) = rho;
-            host_w0(m, IPR, k, j, i) = pres;
-            host_w0(m, IVX, k, j, i) = vu[0];
-            host_w0(m, IVY, k, j, i) = vu[1];
-            host_w0(m, IVZ, k, j, i) = vu[2];
-            if constexpr (UseYe) {
-              host_w0(m, IYF, k, j, i) = pt.Yq;
-            }
+          host_w0(m, IDN, k, j, i) = rho;
+          host_w0(m, IPR, k, j, i) = pres;
+          host_w0(m, IVX, k, j, i) = vu[0];
+          host_w0(m, IVY, k, j, i) = vu[1];
+          host_w0(m, IVZ, k, j, i) = vu[2];
+          if constexpr (UseYe) {
+            host_w0(m, IYF, k, j, i) = pt.Yq;
           }
         }
       }
-    }
-  };
-  if (is_z4c) {
-    if (read_ye) {
-      FillLoop.template operator()<true, true>();
-    } else {
-      FillLoop.template operator()<true, false>();
-    }
-  } else {
-    if (read_ye) {
-      FillLoop.template operator()<false, true>();
-    } else {
-      FillLoop.template operator()<false, false>();
     }
   }
 
   Kokkos::deep_copy(u_adm, host_u_adm);
   Kokkos::deep_copy(w0, host_w0);
-  if (is_z4c) {
+  if constexpr (IsZ4c) {
     Kokkos::deep_copy(pmbp->pz4c->u0, host_u_z4c);
   }
 
@@ -310,6 +304,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     return;
   }
 
+  const Real gauss_to_code = GaussToCode(pin);
+
   // ---- <problem> keys ---------------------------------------------------------------
   bool dipole_confine = pin->GetOrAddInteger("problem", "dipole_confine", 0) != 0;
   bool need_h = web_enable || (dipole_enable && dipole_confine);
@@ -321,21 +317,21 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   Real mu_star = 2.0, web_bmax_code = 0.0, web_tor_pol = 4.0, web_kmin = 0.0, web_kmax = 0.0;
   if (web_enable) {
     mu_star = pin->GetOrAddReal("problem", "web_mu_star", 2.0);
-    web_bmax_code = pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16) * kGaussToCode;
+    web_bmax_code = pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16) * gauss_to_code;
     web_tor_pol = pin->GetOrAddReal("problem", "web_tor_pol", 4.0);
     web_kmin = pin->GetReal("problem", "web_kmin");
     web_kmax = pin->GetReal("problem", "web_kmax");
   }
   Real dipole_bmax_code = 0.0, dipole_r0 = 5.0;
   if (dipole_enable) {
-    dipole_bmax_code = pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16) * kGaussToCode;
+    dipole_bmax_code = pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16) * gauss_to_code;
     dipole_r0 = pin->GetOrAddReal("problem", "dipole_r0", 5.0);
   }
 
   // ---- Resolution guard (web only): 2*pi/k_max must resolve on >=8 finest cells -----
   if (web_enable) {
     Real dx_finest = pmy_mesh_->mesh_size.dx1 /
-                      std::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
+                      Kokkos::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
     if (2.0*M_PI/web_kmax < 8.0*dx_finest) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "web_kmax=" << web_kmax << " under-resolved: 2*pi/web_kmax="
@@ -725,16 +721,16 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Real qA = sc - web_tor_pol*sf, qB = sb - web_tor_pol*se, qC = sa - web_tor_pol*sd;
     Real lam_T = 0.0;
     bool have_root = false;
-    if (std::abs(qA) < 1.0e-12*std::max({std::abs(qB), std::abs(qC), 1.0})) {
-      if (std::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
+    if (Kokkos::abs(qA) < 1.0e-12*Kokkos::max({Kokkos::abs(qB), Kokkos::abs(qC), 1.0})) {
+      if (Kokkos::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
     } else {
       Real disc = qB*qB - 4.0*qA*qC;
       if (disc >= 0.0) {
-        Real sq = std::sqrt(disc);
+        Real sq = Kokkos::sqrt(disc);
         Real x1r = (-qB+sq)/(2.0*qA), x2r = (-qB-sq)/(2.0*qA);
         bool p1 = x1r > 0.0, p2 = x2r > 0.0;
         if (p1 && p2) {
-          lam_T = (std::abs(x1r-mu_star) < std::abs(x2r-mu_star)) ? x1r : x2r;
+          lam_T = (Kokkos::abs(x1r-mu_star) < Kokkos::abs(x2r-mu_star)) ? x1r : x2r;
           have_root = true;
         } else if (p1) {
           lam_T = x1r; have_root = true;
@@ -752,7 +748,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     }
     if (global_variable::my_rank == 0) {
       Real achieved = (sa + sb*lam_T + sc*lam_T*lam_T) /
-                       std::max(sd + se*lam_T + sf*lam_T*lam_T, 1.0e-300);
+                       Kokkos::max(sd + se*lam_T + sf*lam_T*lam_T, 1.0e-300);
       std::cout << "GRASS magnetic web: lambda_P=1, lambda_T=" << lam_T
                 << ", achieved E_tor/E_pol=" << achieved << " (target=" << web_tor_pol << ")"
                 << std::endl;
@@ -965,8 +961,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                   (b0.x3f(m,k+1,j,i)-b0.x3f(m,k,j,i))/dx3;
       Real bmag = sqrt(bcc0(m,IBX,k,j,i)*bcc0(m,IBX,k,j,i) + bcc0(m,IBY,k,j,i)*bcc0(m,IBY,k,j,i) +
                         bcc0(m,IBZ,k,j,i)*bcc0(m,IBZ,k,j,i));
-      Real dx_local = std::cbrt(dx1*dx2*dx3);
-      dm = fmax(dm, (bmag > 1.0e-300) ? std::abs(divb)*dx_local/bmag : 0.0);
+      Real dx_local = Kokkos::cbrt(dx1*dx2*dx3);
+      dm = fmax(dm, (bmag > 1.0e-300) ? Kokkos::abs(divb)*dx_local/bmag : 0.0);
     }, Kokkos::Max<Real>(divb_max));
 
 #if MPI_PARALLEL_ENABLED
@@ -1016,9 +1012,21 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // dynamical run (same reasoning as dyngr_rns_st.cpp).
   if (restart) { return; }
 
-  // Note: GRASS's own (pressure, energy) pair is reused directly -- no eos_policy
-  // dispatch/template parameter is needed here, unlike the TOV-family pgens.
-  SetupGrass(pin, pmy_mesh_);
+  // Dispatch pz4c/nscalars to SetupGrass's IsZ4c/UseYe template args once, here.
+  const bool read_ye = pin->GetOrAddInteger("mhd", "nscalars", 0) > 0;
+  if (pmbp->pz4c != nullptr) {
+    if (read_ye) {
+      SetupGrass<true, true>(pin, pmy_mesh_);
+    } else {
+      SetupGrass<true, false>(pin, pmy_mesh_);
+    }
+  } else {
+    if (read_ye) {
+      SetupGrass<false, true>(pin, pmy_mesh_);
+    } else {
+      SetupGrass<false, false>(pin, pmy_mesh_);
+    }
+  }
 
   auto &indcs = pmy_mesh_->mb_indcs;
   int &ng = indcs.ng;

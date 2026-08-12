@@ -104,15 +104,16 @@ Reused/extended:
   `x_center ± 0.25*dx` on the correction axis, gated by neighbor-level checks
   via `nghbr`/`mb_lev`) — reused for `a1`/`a2` (same neighbor-index blocks),
   extended (new, this session) for `a3`.
-- The Gauss-to-code-unit conversion constant `8.3519664583273e+19` — reused
-  as-is (`kGaussToCode` in `dyngr_grass.cpp`); `GrassUnits::code` is *also*
-  `Primitive::MakeGeometricSolar()`, the same `G=c=Msun=1` system Lorene's own
-  `athenaL`/`athenaM` construction targets, so the constant carries over
-  directly. One negligible, worth-recording discrepancy: `lorene_bns.cpp`
-  derives it from Lorene's own SI constants, which differ at the sub-permille
-  level from `Primitive::UnitSystem`'s CGS constants (different `G`/`Msun`
-  literals) — irrelevant next to the order-of-magnitude physics scan
-  (`1e15`-`1e16` G).
+- The Gauss-to-code-unit conversion: initially reused `lorene_bns.cpp`'s
+  hardcoded `8.3519664583273e+19` constant, which silently assumed `<mhd>
+  units=geometric_solar`. Replaced (2026-08-12, user request) with
+  `GaussToCode(pin)` in `dyngr_grass.cpp`, derived from
+  `Primitive::UnitSystem::EnergyDensityConversion` and honoring the actual
+  `<mhd> units` setting, the same key/options `PrimitiveSolverHydro::
+  SetPolicyParams` already reads. Matches the old constant to ~4-5
+  significant figures under the default `geometric_solar` (the sub-permille
+  residual is `lorene_bns.cpp`'s own SI constants vs. this codebase's CGS
+  ones, not a bug).
 
 **Not reused**: `lorene_bns.cpp`'s current-loop `A1`/`A2` functions themselves
 *were* ported verbatim into `grass_magnetic_web.hpp` as `DipoleA1`/`DipoleA2`

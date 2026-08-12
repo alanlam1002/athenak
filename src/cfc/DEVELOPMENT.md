@@ -7330,3 +7330,129 @@ src/cfc/
       `nscalars=0` NS smoke tests completed cleanly under this build's
       `Kokkos_ENABLE_DEBUG_BOUNDS_CHECK=ON` -- confirms `UseYe=false`
       correctly skips the write with no out-of-bounds violation.
+
+55. **(2026-08-12) Rewrote items 53/54's `IsZ4c`/`UseYe` templating to be
+    C++17-compatible** -- user request: this codebase's actual baseline is
+    C++17, not the C++20 the previous two items relied on for lambda
+    template-parameter-list syntax.
+    - **Confirmed the C++20 dependency was real, not incidental**: `git log
+      -p` on `CMakeLists.txt`'s `CMAKE_CXX_STANDARD` line shows it was `17`
+      (bumped from `14`) until *this session's* Celephais port bumped it to
+      `20` for KADATH-AEI/Celephais's own build needs (item 49). No other
+      template in this tree uses C++20 templated-lambda syntax --
+      `celephais_bns.cpp`/`celephais_ns.cpp`'s `template<class KadathSpace,
+      class TOVEOS>`, `dyngr_tov.cpp`'s `template<class TOVEOS>` are all
+      ordinary C++11-style function templates (`if constexpr` itself is
+      C++17, kept as-is). This task doesn't touch `CMakeLists.txt` -- only
+      removes `dyngr_grass.cpp`'s own reliance on the C++20-only syntax.
+    - **Rewrite**: turned `SetupGrass` itself into `template<bool IsZ4c,
+      bool UseYe> void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_)`
+      (whole-function template, matching `SetupBNS<KadathSpace, TOVEOS>`'s
+      own shape exactly, rather than inventing a new "extract the inner
+      loop into a free helper with a long parameter list" pattern not
+      otherwise used in this tree -- `SetupBNS`/`SetupNS` already accept
+      templating an entire setup function even though most of its logic
+      doesn't depend on the template parameters either, dispatched via
+      nested runtime `if`s in `DispatchBNSEOS<KadathSpace>`). Removed the
+      `FillLoop` lambda wrapper entirely -- the loop body is ordinary
+      inlined code again. Every `is_z4c`/`read_ye` check in the function
+      (mirror setup, per-point metric write, Y[e] write, AND the post-loop
+      `deep_copy(pz4c->u0, ...)` tail) is now `if constexpr (IsZ4c)`/
+      `if constexpr (UseYe)` -- the last of these wasn't templated in the
+      C++20 version (only the loop itself was templated then); now that
+      the whole function is templated, converting it too is free and more
+      consistent. `UserProblem`'s call site became a 2x2 runtime dispatch
+      (`if (pmbp->pz4c != nullptr) { if (read_ye) { SetupGrass<true,
+      true>(...); } else {...} } else {...}`), the same nested-if shape
+      `DispatchBNSEOS()` already uses. Fixed two now-stale doc comments
+      that had claimed `SetupGrass` was "non-templated" / needed "no ...
+      template parameter" (true before this work, false now that it's
+      templated on `IsZ4c`/`UseYe`, even though still not on an EOS
+      policy).
+    - **Verified against the repo's own lint**: fetched `cpplint.py` fresh
+      per `tst/test_suite/style/check_athena_cpp_style.sh`'s own method and
+      ran it against `dyngr_grass.cpp` with `CPPLINT.cfg`'s exact filters.
+      35 findings total, ALL pre-existing (line-length/`<iostream>`
+      warnings from item 52's magnetic-web merge, verbatim upstream code
+      never touched this item) -- zero findings anywhere in the lines this
+      item actually changed (confirmed both via the cpplint run and a
+      direct manual line-length/tab/trailing-whitespace/brace-style sweep
+      restricted to the edited ranges). Rebuilt `build_grass` cleanly.
+    - **Regression**: reran all four smoke tests used for items 53/54
+      (CFC/z4c NS at `nscalars=0`, dipole z4c/CFC at `nscalars=1`) --
+      `rho-max`/`alpha-min`/`E_mag`/`max|div(B)|*dx/|B|`/CFC's `max|delta
+      psi|`/the dipole tests' `scal-0` (Y[e]) column all reproduced
+      bit-identically to items 53/54's recorded values, confirming the
+      syntax-level rewrite changed no behavior.
+
+56. **(2026-08-12) Replaced `kGaussToCode`'s hardcoded magic constant
+    (`1.0 / 8.3519664583273e+19`) with `GaussToCode(pin)`, derived from
+    `Primitive::UnitSystem` and honoring `<mhd> units`** -- user request.
+    - **The old constant silently assumed `<mhd> units=geometric_solar`**,
+      confirmed by finding the exact same unexplained literal hardcoded in
+      TWO other pgens (`lorene_bns.cpp:95`, `elliptica.cpp:128`, both
+      `gauss_cgs_to_geo`/inline) -- neither reads `<mhd> units` either.
+      Left those two untouched (out of scope -- this request named
+      `kGaussToCode` specifically), but worth knowing they share the same
+      latent assumption.
+    - **Derivation**: this code's magnetic pressure convention has no
+      `4*pi` (`b^2/2`, confirmed via `cfc.cpp`'s own `0.5*bsq` usage --
+      Heaviside-Lorentz-style, standard for NR codes), while Gaussian-cgs
+      magnetic pressure is `B^2/(8*pi)`. Equating the same physical energy
+      density in both systems gives `B_code = B_cgs *
+      sqrt(EnergyDensityConversion(cgs->code) / (4*pi))`. `GaussToCode(pin)`
+      reads `<mhd> units` (default `geometric_solar`) via the exact same
+      key/options/dispatch `PrimitiveSolverHydro::SetPolicyParams` already
+      uses (`geometric_solar`/`geometric_kilometer`/`nuclear`/`cgs`), builds
+      the matching `Primitive::UnitSystem`, and returns that square root.
+    - **Verified the derivation itself**, not just that it compiles: under
+      the default `geometric_solar`, the new value reproduces the old
+      constant to ~4-5 significant figures (`E_mag=2.63842e-06` vs. the
+      previous `2.6383e-06`, dipole scale factor identical `1.38477`) --
+      the small residual is exactly the sub-permille discrepancy
+      `grass/NOTES.md` already flagged (`lorene_bns.cpp` used Lorene's own
+      SI constants, slightly different from `Primitive::UnitSystem`'s CGS
+      ones) -- confirms the new derivation is correct and, if anything,
+      more self-consistent (uses this codebase's own constants throughout).
+      z4c/CFC dipole runs still match each other exactly.
+    - **Verified regression**: rebuilt `build_grass` cleanly; reran all
+      four smoke tests -- the two NS tests (`nscalars=0`, `web_enable`/
+      `dipole_enable` both unset -> `BuildMagneticField`'s early-return
+      zero-fill path, `GaussToCode` never even called) reproduced
+      `rho-max`/`alpha-min` bit-identically, confirming zero behavior
+      change for any run that doesn't use the magnetic-web/dipole feature.
+    - Updated `grass/NOTES.md`'s now-stale "reused as-is" caveat about this
+      constant to describe the new derivation instead.
+
+57. **(2026-08-12) Replaced `dyngr_grass.cpp`'s remaining `std::` math calls
+    with `Kokkos::` equivalents** -- user request, matching this codebase's
+    own convention (confirmed via `tov_polytrope.hpp`, `celephais_bns.cpp`,
+    `lorene_bns.cpp`, which already use `Kokkos::pow`/`Kokkos::exp`/
+    `Kokkos::sqrt` rather than `std::`).
+    - `std::sqrt`/`std::cbrt`/`std::pow`/`std::abs`/`std::max` (10 call
+      sites across `GaussToCode`, the fill loop's `psi4_guess` isotropizer,
+      the web resolution guard, the tor/pol quadratic solve, and the
+      `div(B)` diagnostic) -> `Kokkos::sqrt`/`Kokkos::cbrt`/`Kokkos::pow`/
+      `Kokkos::abs`/`Kokkos::max`. `Kokkos::max`'s `std::initializer_list`
+      overload (`kokkos/core/src/Kokkos_MinMax.hpp`) covers the 3-way
+      `std::max({...})` call in the quadratic-solve discriminant check
+      directly, confirmed present before relying on it.
+    - **Scope**: only explicit `std::`-prefixed calls were touched. Left
+      the file's many pre-existing *unqualified* `fmax`/`fmin`/`sqrt`
+      calls (inside `Kokkos::parallel_for`/`parallel_reduce` device
+      lambdas throughout `BuildMagneticField`/`GrassHistory`, all ported
+      verbatim from upstream's magnetic-web merge, item 52) as-is -- not
+      `std::`, so outside this request's literal scope, and already the
+      established pattern for bare math calls inside `KOKKOS_LAMBDA`
+      bodies elsewhere in this codebase.
+    - One line-length fix needed: `GaussToCode`'s return statement grew
+      past 90 columns with the longer `Kokkos::` prefix, split into a
+      named `ed_conv` local.
+    - **Verified**: rebuilt cleanly; reran cpplint (zero findings in any
+      touched line, same pre-existing unrelated findings as item 52).
+      Reran all five smoke tests (CFC/z4c NS, dipole z4c/CFC, and the full
+      web+dipole test -- the last exercises `Kokkos::max`'s
+      `initializer_list` overload and `Kokkos::abs` in the actual tor/pol
+      quadratic solve, not just the simpler dipole-only path) -- all
+      reproduced their pre-refactor values bit-identically, including
+      `achieved E_tor/E_pol=1` exactly matching target in the web test.

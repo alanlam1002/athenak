@@ -104,15 +104,15 @@ Reused/extended:
   `x_center ± 0.25*dx` on the correction axis, gated by neighbor-level checks
   via `nghbr`/`mb_lev`) — reused for `a1`/`a2` (same neighbor-index blocks),
   extended (new, this session) for `a3`.
-- The Gauss-to-code-unit conversion constant `8.3519664583273e+19` — reused
-  as-is (`kGaussToCode` in `dyngr_grass.cpp`); `GrassUnits::code` is *also*
-  `Primitive::MakeGeometricSolar()`, the same `G=c=Msun=1` system Lorene's own
-  `athenaL`/`athenaM` construction targets, so the constant carries over
-  directly. One negligible, worth-recording discrepancy: `lorene_bns.cpp`
-  derives it from Lorene's own SI constants, which differ at the sub-permille
-  level from `Primitive::UnitSystem`'s CGS constants (different `G`/`Msun`
-  literals) — irrelevant next to the order-of-magnitude physics scan
-  (`1e15`-`1e16` G).
+- The Gauss-to-code-unit conversion: initially reused `lorene_bns.cpp`'s
+  hardcoded `8.3519664583273e+19` constant, which silently assumed `<mhd>
+  units=geometric_solar`. Replaced with `GaussToCode(pin)` in
+  `dyngr_grass.cpp`, derived from `Primitive::UnitSystem::
+  EnergyDensityConversion` and honoring the actual `<mhd> units` setting, the
+  same key/options `PrimitiveSolverHydro::SetPolicyParams` already reads.
+  Matches the old constant to ~4-5 significant figures under the default
+  `geometric_solar` (the sub-permille residual is `lorene_bns.cpp`'s own SI
+  constants vs. this codebase's CGS ones, not a bug).
 
 **Not reused**: `lorene_bns.cpp`'s current-loop `A1`/`A2` functions themselves
 *were* ported verbatim into `grass_magnetic_web.hpp` as `DipoleA1`/`DipoleA2`
@@ -136,5 +136,23 @@ Reused/extended:
 - **`E_mag/|W|` uses a rest-mass-energy proxy** (`M_rest = integral(rho0) dV`),
   not a true gravitational binding-energy calculation — flagged explicitly in
   the startup print, not silently presented as the real thing.
-- **Helicity (`H`) and total angular momentum (`J`) are NOT implemented** in
-  `GrassHistory` — see `VALIDATION.md` for the explicit scope decision.
+- **Helicity (`H`) is NOT implemented** in `GrassHistory` — see
+  `VALIDATION.md` for the explicit scope decision.
+
+## Port from a parallel (CFC) development line
+
+`GaussToCode(pin)`'s `<mhd> units`-aware conversion, the `SetupGrass<UseYe>`
+compile-time dispatch, the `Kokkos::` (vs. `std::`) math swaps, and
+`GrassHistory`'s `ang-mom` (`J_z`) column were all developed on this repo's
+`cfc` branch (which extended this same pgen to *also* run under a CFC/`<adm>`
+metric solver) and ported back here. Only the CFC-agnostic pieces were
+ported — the `cfc` branch's actual dual z4c/CFC dispatch (metric
+isotropization, Lorentz-factor-preserving velocity rescale, the
+`is_dynamical_relativistic`-based guard) was deliberately **not** brought
+over: this branch has no `cfc` module compiled in, and `<z4c>` remains the
+only supported metric evolution here (`UserProblem`'s `pz4c==nullptr` guard
+is unchanged). The `Kokkos::` math swap inside `GrassHistory`'s/
+`BuildMagneticField`'s device `KOKKOS_LAMBDA` bodies (`max|div B|` reduction)
+is more than style — `std::cbrt`/`std::abs` are not device-callable under a
+GPU (CUDA/HIP) Kokkos backend, so the pre-port code had a latent GPU-build
+bug that never showed up under the CPU serial/OpenMP backends used so far.

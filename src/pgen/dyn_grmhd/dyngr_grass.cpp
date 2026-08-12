@@ -56,12 +56,32 @@ void GrassHistory(HistoryData *pdata, Mesh *pm);
 void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                          const grass::GrassData &data, const grass::GrassEosTable &eos_table);
 
-// Gauss -> AthenaK code-unit (<mhd> units=geometric_solar) conversion constant,
-// reused as-is from src/pgen/dyn_grmhd/lorene/lorene_bns.cpp (its athenaB/1e9
-// derivation) -- GrassUnits::code is ALSO Primitive::MakeGeometricSolar(), the
-// same G=c=Msun=1 system Lorene's own athenaL/athenaM construction targets, so
-// this carries over directly (see grass/NOTES.md for the sub-permille caveat).
-static constexpr Real kGaussToCode = 1.0 / 8.3519664583273e+19;
+// Gauss -> AthenaK code-unit conversion factor, honoring <mhd> units (same key/options
+// as PrimitiveSolverHydro::SetPolicyParams) rather than silently assuming
+// geometric_solar. B^2/2 is the code's energy density (Heaviside-Lorentz convention,
+// no 4*pi); Gaussian-cgs B^2/(8*pi) is the cgs energy density, so
+// B_code = B_cgs * sqrt(EnergyDensityConversion / (4*pi)) -- matches the old hardcoded
+// lorene_bns.cpp-derived constant to ~4-5 significant figures under the default
+// geometric_solar (see grass/NOTES.md for the residual sub-permille caveat).
+Real GaussToCode(ParameterInput *pin) {
+  std::string units_str = pin->GetOrAddString("mhd", "units", "geometric_solar");
+  Primitive::UnitSystem code_units;
+  if (units_str == "geometric_solar") {
+    code_units = Primitive::MakeGeometricSolar();
+  } else if (units_str == "geometric_kilometer") {
+    code_units = Primitive::MakeGeometricKilometer();
+  } else if (units_str == "nuclear") {
+    code_units = Primitive::MakeNuclear();
+  } else if (units_str == "cgs") {
+    code_units = Primitive::MakeCGS();
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Unknown <mhd> units '" << units_str << "' requested." << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  Real ed_conv = Primitive::MakeCGS().EnergyDensityConversion(code_units);
+  return Kokkos::sqrt(ed_conv / (4.0*M_PI));
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn void SetupGrass
@@ -69,9 +89,13 @@ static constexpr Real kGaussToCode = 1.0 / 8.3519664583273e+19;
 //  the reader's interpolation (grass::GrassData) is plain-CPU code, so this mirrors the
 //  host-fill-then-deep_copy pattern used by the other external-ID pgens (elliptica/
 //  lorene/sgrid/kadath/rns_st), not dyngr_tov.cpp's device-side par_for (which works
-//  directly from a closed-form/ODE solution instead). Non-templated (unlike the
-//  TOV-family pgens' Setup<EOS>) -- see file header, no AthenaK EOS call is needed here.
+//  directly from a closed-form/ODE solution instead). Templated on UseYe so the
+//  per-point Y[e]-write branch is resolved once per instantiation instead of per grid
+//  point; dispatched in UserProblem from a runtime nscalars check. The guard is also a
+//  bounds guard: host_w0's width is nmhd+nscalars, so writing IYF when nscalars==0
+//  would be out of bounds.
 
+template<bool UseYe>
 void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
@@ -85,7 +109,6 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
   // <problem> table = ... , same input key tov::TabulatedEOS's other callers
   // (dyngr_tov.cpp, kadath_bns.cpp) already use.
   tov::TabulatedEOS slice_eos(pin);
-  const bool read_ye = pin->GetOrAddInteger("mhd", "nscalars", 0) > 0;
 
   auto &indcs = pmy_mesh_->mb_indcs;
   int &ng = indcs.ng;
@@ -163,7 +186,7 @@ void SetupGrass(ParameterInput *pin, Mesh *pmy_mesh_) {
           host_w0(m, IVX, k, j, i) = vu[0];
           host_w0(m, IVY, k, j, i) = vu[1];
           host_w0(m, IVZ, k, j, i) = vu[2];
-          if (read_ye) {
+          if constexpr (UseYe) {
             host_w0(m, IYF, k, j, i) = pt.Yq;
           }
         }
@@ -224,6 +247,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     return;
   }
 
+  const Real gauss_to_code = GaussToCode(pin);
+
   // ---- <problem> keys ---------------------------------------------------------------
   bool dipole_confine = pin->GetOrAddInteger("problem", "dipole_confine", 0) != 0;
   bool need_h = web_enable || (dipole_enable && dipole_confine);
@@ -235,21 +260,21 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   Real mu_star = 2.0, web_bmax_code = 0.0, web_tor_pol = 4.0, web_kmin = 0.0, web_kmax = 0.0;
   if (web_enable) {
     mu_star = pin->GetOrAddReal("problem", "web_mu_star", 2.0);
-    web_bmax_code = pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16) * kGaussToCode;
+    web_bmax_code = pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16) * gauss_to_code;
     web_tor_pol = pin->GetOrAddReal("problem", "web_tor_pol", 4.0);
     web_kmin = pin->GetReal("problem", "web_kmin");
     web_kmax = pin->GetReal("problem", "web_kmax");
   }
   Real dipole_bmax_code = 0.0, dipole_r0 = 5.0;
   if (dipole_enable) {
-    dipole_bmax_code = pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16) * kGaussToCode;
+    dipole_bmax_code = pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16) * gauss_to_code;
     dipole_r0 = pin->GetOrAddReal("problem", "dipole_r0", 5.0);
   }
 
   // ---- Resolution guard (web only): 2*pi/k_max must resolve on >=8 finest cells -----
   if (web_enable) {
     Real dx_finest = pmy_mesh_->mesh_size.dx1 /
-                      std::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
+                      Kokkos::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
     if (2.0*M_PI/web_kmax < 8.0*dx_finest) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "web_kmax=" << web_kmax << " under-resolved: 2*pi/web_kmax="
@@ -639,16 +664,16 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Real qA = sc - web_tor_pol*sf, qB = sb - web_tor_pol*se, qC = sa - web_tor_pol*sd;
     Real lam_T = 0.0;
     bool have_root = false;
-    if (std::abs(qA) < 1.0e-12*std::max({std::abs(qB), std::abs(qC), 1.0})) {
-      if (std::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
+    if (Kokkos::abs(qA) < 1.0e-12*Kokkos::max({Kokkos::abs(qB), Kokkos::abs(qC), 1.0})) {
+      if (Kokkos::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
     } else {
       Real disc = qB*qB - 4.0*qA*qC;
       if (disc >= 0.0) {
-        Real sq = std::sqrt(disc);
+        Real sq = Kokkos::sqrt(disc);
         Real x1r = (-qB+sq)/(2.0*qA), x2r = (-qB-sq)/(2.0*qA);
         bool p1 = x1r > 0.0, p2 = x2r > 0.0;
         if (p1 && p2) {
-          lam_T = (std::abs(x1r-mu_star) < std::abs(x2r-mu_star)) ? x1r : x2r;
+          lam_T = (Kokkos::abs(x1r-mu_star) < Kokkos::abs(x2r-mu_star)) ? x1r : x2r;
           have_root = true;
         } else if (p1) {
           lam_T = x1r; have_root = true;
@@ -666,7 +691,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     }
     if (global_variable::my_rank == 0) {
       Real achieved = (sa + sb*lam_T + sc*lam_T*lam_T) /
-                       std::max(sd + se*lam_T + sf*lam_T*lam_T, 1.0e-300);
+                       Kokkos::max(sd + se*lam_T + sf*lam_T*lam_T, 1.0e-300);
       std::cout << "GRASS magnetic web: lambda_P=1, lambda_T=" << lam_T
                 << ", achieved E_tor/E_pol=" << achieved << " (target=" << web_tor_pol << ")"
                 << std::endl;
@@ -879,8 +904,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                   (b0.x3f(m,k+1,j,i)-b0.x3f(m,k,j,i))/dx3;
       Real bmag = sqrt(bcc0(m,IBX,k,j,i)*bcc0(m,IBX,k,j,i) + bcc0(m,IBY,k,j,i)*bcc0(m,IBY,k,j,i) +
                         bcc0(m,IBZ,k,j,i)*bcc0(m,IBZ,k,j,i));
-      Real dx_local = std::cbrt(dx1*dx2*dx3);
-      dm = fmax(dm, (bmag > 1.0e-300) ? std::abs(divb)*dx_local/bmag : 0.0);
+      Real dx_local = Kokkos::cbrt(dx1*dx2*dx3);
+      dm = fmax(dm, (bmag > 1.0e-300) ? Kokkos::abs(divb)*dx_local/bmag : 0.0);
     }, Kokkos::Max<Real>(divb_max));
 
 #if MPI_PARALLEL_ENABLED
@@ -931,8 +956,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) { return; }
 
   // Note: GRASS's own (pressure, energy) pair is reused directly -- no eos_policy
-  // dispatch/template parameter is needed here, unlike the TOV-family pgens.
-  SetupGrass(pin, pmy_mesh_);
+  // dispatch/template parameter is needed here, unlike the TOV-family pgens; SetupGrass
+  // is templated only on UseYe (see its own doc comment), dispatched from nscalars here.
+  if (pin->GetOrAddInteger("mhd", "nscalars", 0) > 0) {
+    SetupGrass<true>(pin, pmy_mesh_);
+  } else {
+    SetupGrass<false>(pin, pmy_mesh_);
+  }
 
   auto &indcs = pmy_mesh_->mb_indcs;
   int &ng = indcs.ng;
@@ -964,14 +994,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 // E_tor, E_pol (WHOLE-domain, not restricted to the initial rho_lo shell -- unlike the
 // one-time normalization pass in BuildMagneticField, restricting an ONGOING diagnostic
 // to the field's initial confinement boundary would become physically meaningless once
-// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|. Helicity and total
-// angular momentum J are NOT implemented here (see grass/VALIDATION.md) -- helicity
-// would need the vector potential A, which isn't retained after BuildMagneticField
-// returns, and J needs a separate integral not otherwise used by this pgen; both are
-// scoped out of this first implementation pass, not silently forgotten.
+// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|, and total angular
+// momentum ang-mom (J_z = integral of vol*(x*S_y - y*S_x), the same formula used
+// elsewhere in this codebase for rotating-star history output -- mode-agnostic since it
+// only reads the pre-densitized conserved momentum u0(IM1/IM2), not adm.g_dd/vK_dd
+// directly). Helicity is NOT implemented here (see grass/VALIDATION.md) -- it would need
+// the vector potential A, which isn't retained after BuildMagneticField returns; scoped
+// out of this implementation pass, not silently forgotten.
 
 void GrassHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 7;
+  pdata->nhist = 8;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "E_mag";
@@ -979,8 +1011,10 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[4] = "E_pol";
   pdata->label[5] = "Bmax";
   pdata->label[6] = "divBmax";
+  pdata->label[7] = "ang-mom";
 
   auto &w0_ = pm->pmb_pack->pmhd->w0;
+  auto &u0_ = pm->pmb_pack->pmhd->u0;
   auto &adm = pm->pmb_pack->padm->adm;
   auto &bcc0_ = pm->pmb_pack->pmhd->bcc0;
   auto &b0_ = pm->pmb_pack->pmhd->b0;
@@ -1012,9 +1046,9 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     mb_bmax = fmax(mb_bmax, sqrt(bsq));
   }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(bmax));
 
-  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0;
+  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0, ang_mom = 0.0;
   Kokkos::parallel_reduce("GrassHistMag", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm) {
+  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm, Real &jz) {
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
     int j = (idx - m*nkji - k*nji)/nx1;
@@ -1028,6 +1062,11 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     Real dV = sqrt(fmax(detg, 0.0)) * dx1*dx2*dx3;
     Real x1v = CellCenterX(i-is, nx1, size_.d_view(m).x1min, size_.d_view(m).x1max);
     Real x2v = CellCenterX(j-js, nx2, size_.d_view(m).x2min, size_.d_view(m).x2max);
+    // J_z = integral of vol*(x*S_y - y*S_x); u0(IM1/IM2) is already the densitized ADM
+    // momentum density sqrt(gamma)*S_a (see dyn_grmhd.cpp's SetTmunu), so plain
+    // vol=dx1*dx2*dx3 is correct here -- no extra sqrt(gamma)/dV factor, unlike the
+    // undensitized bcc0 fields used for em/etor/epol above.
+    jz += dx1*dx2*dx3*(x1v*u0_(m,IM2,k,j,i) - x2v*u0_(m,IM1,k,j,i));
     Real rcyl = sqrt(x1v*x1v + x2v*x2v);
     Real bx = bcc0_(m,IBX,k,j,i), by = bcc0_(m,IBY,k,j,i), bz = bcc0_(m,IBZ,k,j,i);
     em += 0.5*(bx*bx + by*by + bz*bz)*dV;
@@ -1045,7 +1084,7 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     Real dx_local = cbrt(dx1*dx2*dx3);
     dbm = fmax(dbm, (bmag > 1.0e-300) ? fabs(divb)*dx_local/bmag : 0.0);
   }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(e_tor), Kokkos::Sum<Real>(e_pol),
-     Kokkos::Max<Real>(divb_max));
+     Kokkos::Max<Real>(divb_max), Kokkos::Sum<Real>(ang_mom));
 
 #if MPI_PARALLEL_ENABLED
   if (global_variable::my_rank == 0) {
@@ -1073,6 +1112,10 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     e_pol = 0.;
   }
 #endif
+  // ang_mom is left out of the manual reduction above: it's a genuine per-rank partial
+  // volume-integral sum, and the framework's generic MPI_SUM reduction over hdata
+  // (HistoryOutput::WriteOutputFile) combines per-rank partial sums into the correct
+  // global total with no manual reduction needed here.
 
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
@@ -1081,4 +1124,5 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[4] = e_pol;
   pdata->hdata[5] = bmax;
   pdata->hdata[6] = divb_max;
+  pdata->hdata[7] = ang_mom;
 }

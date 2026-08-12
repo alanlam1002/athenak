@@ -1,16 +1,16 @@
-# AthenaK input file for Celephais (FUKa) BNS initial data
+# AthenaK input file for Celephais (FUKa) BHNS initial data
 # All coordinates and times are in geometric units (G = c = 1, M_sun = 1)
 
 <comment>
-problem   = Celephais BNS initial data
+problem   = Celephais BHNS initial data
 
 <job>
-basename  = bns
+basename  = bhns
 
 <mesh>
 nghost     = 4        # Number of ghost cells (4 recommended for Z4c + WENOZ)
 nx1        = 96      # Number of zones in X1-direction
-x1min      = -1024    # minimum value of X1 (~10 times the separation)
+x1min      = -1024    # minimum value of X1 (~25 times the separation)
 x1max      =  1024    # maximum value of X1
 ix1_bc     = diode  # Inner-X1 boundary condition
 ox1_bc     = diode  # Outer-X1 boundary condition
@@ -34,7 +34,7 @@ nx3        = 32       # Number of cells in each MeshBlock, X3-dir
 
 <mesh_refinement>
 refinement          = adaptive
-max_nmb_per_rank    = 16
+max_nmb_per_rank    = 300
 num_levels          = 7
 refinement_interval = 1
 
@@ -44,26 +44,33 @@ method = user
 <z4c_amr>
 method = tracker
 
-# Pre-refine regions around each NS at t=0.
-# Set x1min/x1max to ± (separation/2 ± NS_radius).
-# co_0_x / co_1_x below (in <z4c>) give the NS centers.
+# Pre-refine two regions at t=0: one around the NS, one (smaller/finer)
+# around the BH excision region. Positions are estimated from the converged
+# config's mass-weighted barycenter condition:
+#   m_NS*(x_NS-axis) + m_BH*(x_BH-axis) = 0, x_BH - x_NS ~= distance
+# using converged_BHNS_ECC_RED.dd2.40.0.0.2.4.q0.714286.0.0.09.toml's
+# com=4.2110, distance=40, madm(NS)=1.4, mch(BH)=1
+#   => x_NS ~= -12.5, x_BH ~= 27.5
+# These are approximate pre-refinement hints only (tracker_mode=walk below
+# homes in on the true density peak / horizon dynamically) -- retune from the
+# pgen's own startup diagnostics (it prints rbh) if resolution looks off.
 <refined_region1>
 level = 6
-x1min =   7.5    # co_0_x - NS_radius
-x1max =  27.5    # co_0_x + NS_radius
-x2min = -10.0
-x2max =  10.0
-x3min = -10.0
-x3max =  10.0
+x1min = -22.5    # NS center (~-12.5) - NS_radius (~11.6, rout of ns1)
+x1max =  -2.5    # NS center (~-12.5) + NS_radius
+x2min = -14.0
+x2max =  14.0
+x3min = -14.0
+x3max =  14.0
 
 <refined_region2>
-level = 6
-x1min = -27.5    # co_1_x - NS_radius
-x1max = - 7.5    # co_1_x + NS_radius
-x2min = -10.0
-x2max =  10.0
-x3min = -10.0
-x3max =  10.0
+level = 7
+x1min =  22.5    # BH center (~27.5) - margin (finer level: horizon is tiny)
+x1max =  32.5    # BH center (~27.5) + margin
+x2min =  -5.0
+x2max =   5.0
+x3min =  -5.0
+x3max =   5.0
 
 <time>
 evolution  = dynamic  # dynamic/kinematic/static
@@ -83,7 +90,7 @@ a           = 0.0
 eos         = ideal          # placeholder (unused, required by parser)
 gamma       = 2.0            # placeholder (unused, required by parser)
 
-dyn_eos     = hybrid         # PrimitiveSolver EOSPolicy — matches the DD2 data
+dyn_eos     = hybrid         # PrimitiveSolver EOSPolicy — must match Kadath EOS
 dyn_error   = reset_floor    # PrimitiveSolver ErrorPolicy
 reconstruct = wenoz          # spatial reconstruction method
 rsolver     = hlle           # Riemann solver
@@ -96,7 +103,9 @@ c2p_tol     = 2.49e-13
 gamma_max   = 20.025         # Lorentz factor ceiling
 use_NQT     = false
 
-table = /pfs/10/project/bw25h005/DD2_T0.1_beta_m931.athtab
+# DD2 tabulated EOS -- must match the converged BHNS data's
+# eosfile=dd2.lorene / eostype=Cold_Table.
+table = /sakura/ptmp/tlam/PyCompOSE/examples/DD2/DD2_T0.1_beta_m931.athtab
 
 <adm>
 
@@ -126,29 +135,34 @@ extraction_radius_2  = 400
 extraction_radius_3  = 600
 waveform_dt          = 2.5
 
-# Neutron star tracker.
-# co_0_x / co_1_x: initial NS positions in the inertial frame [M_sun].
-# For a symmetric q=1 binary at separation d, use ±d/2.
-# Read DIST from the Celephais TOML file and note that Kadath places
-# the COM at x=axis (bconfig(COM)); both stars sit at x = axis ± d/2.
-nco         = 2
-co_0_type   = NS
-co_0_x      = 17.5      # position of NS1 along x-axis [M_sun] — set from TOML DIST/2
-co_0_radius = 8.0       # tracker search radius [M_sun]
-co_1_type   = NS
-co_1_x      = -17.5     # position of NS2 along x-axis [M_sun] — set from TOML -DIST/2
-co_1_radius = 8.0
+# Compact-object tracker: one NS, one BH (AthenaK already supports mixed
+# NS/BH tracker types -- see src/z4c/compact_object_tracker.{hpp,cpp}).
+# co_0_x / co_1_x are the same rough estimates used for <refined_region1/2>
+# above.
+nco          = 2
+co_0_type    = NS
+co_0_x       = -12.5    # estimated NS position along x-axis [M_sun]
+co_0_radius  = 14.0
+co_1_type    = BH
+co_1_x       =  27.5    # estimated BH position along x-axis [M_sun]
+co_1_radius  = 5.0
 tracker_mode = walk
 
 <problem>
-# Path to the Celephais TOML config file.
-# The .dat space file must be in the same directory with the same base name.
-initial_data_file = /pfs/10/project/bw25h005/res19_imbal/converged_BNS_NOSYM_QUASI_EQUIL.dd2.35.0.3.z30.0.z0.2.8.q1.0.0.0.15.toml
+# Path to the Celephais BHNS TOML config file (kadath_config<BIN_INFO>,
+# BCO1=NS, BCO2=BH). The .dat space file must be in the same directory with
+# the same base name.
+initial_data_file = /sakura/ptmp/tlam/Kadath_release/apps/BHNS/sbatch_outputs/converged_BHNS_ECC_RED.dd2.40.0.0.2.4.q0.714286.0.0.09.toml
+kadath_symmetry   = sym    # "sym" -> Space_bhns (BHNS app)
+                            # "nosym" -> Space_bhns_nosym (BHNS_nosym app)
 user_hist         = true
-table             = /pfs/10/project/bw25h005/DD2_T0.1_beta_m931.athtab
-kadath_symmetry   = nosym
-batch_fields      = true
-skip_vacuum_velocity = true
+table             = /sakura/ptmp/tlam/PyCompOSE/examples/DD2/DD2_T0.1_beta_m931.athtab
+
+# BH-excision extrapolation knobs -- usually leave at defaults (match
+# apps/BHNS/src/2sacra.cpp's own tuning; "8th order suggested by Tootle").
+# bh_interpolation_offset = 1e-6
+# bh_interp_order         = 8
+# bh_delta_r_rel          = 0.3
 
 <output1>
 file_type = hst      # History output (rho-max, alpha-min)

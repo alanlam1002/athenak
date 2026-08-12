@@ -51,10 +51,10 @@ struct GrassUnits {
 
   // -- Hop 1 helpers (GRASS-internal -> cgs) ----------------------------------------
   Real LengthGrassToCgs(Real r_internal) const {
-    return r_internal * std::sqrt(kKappa);
+    return r_internal * Kokkos::sqrt(kKappa);
   }
   Real RateGrassToCgs(Real omega_internal) const {
-    return omega_internal * kGrassC / std::sqrt(kKappa);
+    return omega_internal * kGrassC / Kokkos::sqrt(kKappa);
   }
   Real EnergyDensityGrassToCgs(Real e_internal) const {
     return e_internal / (kGrassC * kGrassC * kKscale);

@@ -62,9 +62,9 @@ namespace grass {
 
 inline Real WebEnvelope(Real rho, Real rho_lo, Real rho_hi) {
   if (rho <= 0.0 || rho_hi <= rho_lo) { return 0.0; }
-  Real u = 2.0*std::log(rho/rho_lo)/std::log(rho_hi/rho_lo) - 1.0;
-  if (std::abs(u) >= 1.0) { return 0.0; }
-  return std::exp(1.0 - 1.0/(1.0 - u*u));
+  Real u = 2.0*Kokkos::log(rho/rho_lo)/Kokkos::log(rho_hi/rho_lo) - 1.0;
+  if (Kokkos::abs(u) >= 1.0) { return 0.0; }
+  return Kokkos::exp(1.0 - 1.0/(1.0 - u*u));
 }
 
 //----------------------------------------------------------------------------------------
@@ -92,7 +92,7 @@ struct WebModeTable {
 
 inline void GenerateWebModeTable(ParameterInput *pin, WebModeTable *table) {
   int nmodes = pin->GetOrAddInteger("problem", "web_nmodes", 128);
-  nmodes = std::min(nmodes, WebModeTable::kMaxModes);
+  nmodes = Kokkos::min(nmodes, WebModeTable::kMaxModes);
   Real kmin = pin->GetReal("problem", "web_kmin");
   Real kmax = pin->GetReal("problem", "web_kmax");
   Real alpha = pin->GetOrAddReal("problem", "web_alpha", 1.0);
@@ -104,19 +104,19 @@ inline void GenerateWebModeTable(ParameterInput *pin, WebModeTable *table) {
   std::uniform_real_distribution<Real> uniform_2pi(0.0, 2.0*M_PI);
   std::normal_distribution<Real> normal01(0.0, 1.0);
 
-  Real lnkmin = std::log(kmin), lnkmax = std::log(kmax);
+  Real lnkmin = Kokkos::log(kmin), lnkmax = Kokkos::log(kmax);
   for (int p = 0; p < nmodes; ++p) {
     Real u_k = uniform01(rng);
-    Real k_p = std::exp(lnkmin + u_k*(lnkmax - lnkmin));
+    Real k_p = Kokkos::exp(lnkmin + u_k*(lnkmax - lnkmin));
     Real costheta = 2.0*uniform01(rng) - 1.0;
     Real phi_k = uniform_2pi(rng);
     Real phase = uniform_2pi(rng);
     Real zeta = normal01(rng);
-    Real amp = zeta * std::pow(k_p, -alpha);
+    Real amp = zeta * Kokkos::pow(k_p, -alpha);
 
-    Real sintheta = std::sqrt(std::max(0.0, 1.0 - costheta*costheta));
-    table->kx[p] = k_p*sintheta*std::cos(phi_k);
-    table->ky[p] = k_p*sintheta*std::sin(phi_k);
+    Real sintheta = Kokkos::sqrt(Kokkos::max(0.0, 1.0 - costheta*costheta));
+    table->kx[p] = k_p*sintheta*Kokkos::cos(phi_k);
+    table->ky[p] = k_p*sintheta*Kokkos::sin(phi_k);
     table->kz[p] = k_p*costheta;
     table->k[p] = k_p;
     table->amp[p] = amp;
@@ -134,7 +134,7 @@ inline Real PsiP(Real x, Real y, Real z, const WebModeTable &table) {
   Real sum = 0.0;
   for (int p = 0; p < table.nmodes; ++p) {
     Real kdotx = table.kx[p]*x + table.ky[p]*y + table.kz[p]*z;
-    sum += table.amp[p] * std::sin(kdotx + table.phase[p]);
+    sum += table.amp[p] * Kokkos::sin(kdotx + table.phase[p]);
   }
   return sum;
 }
@@ -143,7 +143,7 @@ inline Real PsiT(Real x, Real y, Real z, const WebModeTable &table, Real mu_star
   Real sum = 0.0;
   for (int p = 0; p < table.nmodes; ++p) {
     Real kdotx = table.kx[p]*x + table.ky[p]*y + table.kz[p]*z;
-    sum += table.k[p] * table.amp[p] * std::sin(kdotx + table.phase[p]);
+    sum += table.k[p] * table.amp[p] * Kokkos::sin(kdotx + table.phase[p]);
   }
   return mu_star * sum;
 }
@@ -153,7 +153,7 @@ inline void DPsiP(Real x, Real y, Real z, const WebModeTable &table,
   Real sx = 0.0, sy = 0.0, sz = 0.0;
   for (int p = 0; p < table.nmodes; ++p) {
     Real kdotx = table.kx[p]*x + table.ky[p]*y + table.kz[p]*z;
-    Real c = table.amp[p] * std::cos(kdotx + table.phase[p]);
+    Real c = table.amp[p] * Kokkos::cos(kdotx + table.phase[p]);
     sx += c*table.kx[p];
     sy += c*table.ky[p];
     sz += c*table.kz[p];
@@ -189,14 +189,14 @@ inline void WebA(Real x, Real y, Real z, const WebModeTable &table, Real mu_star
 inline Real DipoleA1(Real x, Real y, Real z, Real I_0, Real r_0) {
   Real w2 = SQR(x) + SQR(y);
   Real r2 = w2 + SQR(z);
-  return -y * M_PI * SQR(r_0)*I_0 / std::pow(SQR(r_0) + r2, 1.5) *
+  return -y * M_PI * SQR(r_0)*I_0 / Kokkos::pow(SQR(r_0) + r2, 1.5) *
          (1.0 + 15.0/8.0*SQR(r_0)*(SQR(r_0)+w2)/SQR(SQR(r_0)+r2));
 }
 
 inline Real DipoleA2(Real x, Real y, Real z, Real I_0, Real r_0) {
   Real w2 = SQR(x) + SQR(y);
   Real r2 = w2 + SQR(z);
-  return x * M_PI * SQR(r_0)*I_0 / std::pow(SQR(r_0) + r2, 1.5) *
+  return x * M_PI * SQR(r_0)*I_0 / Kokkos::pow(SQR(r_0) + r2, 1.5) *
          (1.0 + 15.0/8.0*SQR(r_0)*(SQR(r_0)+w2)/SQR(SQR(r_0)+r2));
 }
 

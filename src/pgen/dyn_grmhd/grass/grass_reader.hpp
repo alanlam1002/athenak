@@ -154,28 +154,28 @@ class GrassData {
   void LocateStencil(Real s_query, Real mu_query, int *is_out, int *im_out) const {
     int is = 0;
     for (int ii = 1; ii < sdiv_; ++ii) { if (S(ii) > s_query) { is = ii; break; } is = ii; }
-    is = std::min(sdiv_ - 1 - n_order, std::max(n_order, is));
+    is = Kokkos::min(sdiv_ - 1 - n_order, Kokkos::max(n_order, is));
     int im = 0;
     for (int jj = 1; jj < mdiv_; ++jj) { if (Mu(jj) > mu_query) { im = jj; break; } im = jj; }
-    im = std::min(mdiv_ - 1 - n_order, std::max(0, im));
+    im = Kokkos::min(mdiv_ - 1 - n_order, Kokkos::max(0, im));
     *is_out = is;
     *im_out = im;
   }
 
   // r(s) = r_e * (s/(1-s))^s_pwr, GRASS-internal units.
   Real RadiusOfS(Real s) const {
-    Real x = s / std::max(1.0 - s, 1.0e-300);
-    return r_e_internal_ * std::pow(x, static_cast<Real>(s_pwr_));
+    Real x = s / Kokkos::max(1.0 - s, 1.0e-300);
+    return r_e_internal_ * Kokkos::pow(x, static_cast<Real>(s_pwr_));
   }
   // s(r), inverse of the above.
   Real SOfRadius(Real r) const {
-    Real x = std::pow(std::max(r, 0.0) / std::max(r_e_internal_, 1.0e-300),
+    Real x = Kokkos::pow(Kokkos::max(r, 0.0) / Kokkos::max(r_e_internal_, 1.0e-300),
                       1.0 / static_cast<Real>(s_pwr_));
     return x / (1.0 + x);
   }
   // ds/dr = s(1-s)/(s_pwr*r), GRASS-internal units.
   Real DsDr(Real s, Real r) const {
-    return s*(1.0 - s) / (static_cast<Real>(s_pwr_) * std::max(r, 1.0e-300));
+    return s*(1.0 - s) / (static_cast<Real>(s_pwr_) * Kokkos::max(r, 1.0e-300));
   }
 };
 
@@ -248,7 +248,7 @@ inline void GrassData::Load(const std::string &fname) {
   };
   for (int i = 0; i < sdiv_; ++i) {
     for (int j = 0; j < mdiv_; ++j) {
-      sphi_max = std::max(sphi_max, std::abs(raw[RawIdx(F_SPHI, i, j)]));
+      sphi_max = Kokkos::max(sphi_max, Kokkos::abs(raw[RawIdx(F_SPHI, i, j)]));
     }
   }
   if (sphi_max > 1.0e-10) {
@@ -309,9 +309,9 @@ inline void GrassData::Load(const std::string &fname) {
 
 inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &eos_table,
                                    const tov::TabulatedEOS &slice_eos, Point *out) const {
-  Real r_code = std::sqrt(x*x + y*y + z*z);
-  Real varpi = std::sqrt(x*x + y*y);
-  Real varpi_safe = std::max(varpi, 1.0e-30*std::max(r_code, 1.0));
+  Real r_code = Kokkos::sqrt(x*x + y*y + z*z);
+  Real varpi = Kokkos::sqrt(x*x + y*y);
+  Real varpi_safe = Kokkos::max(varpi, 1.0e-30*Kokkos::max(r_code, 1.0));
 
   Real costh, sinth;
   if (r_code < 1.0e-30) {
@@ -322,9 +322,9 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   }
   Real cosph = x / varpi_safe, sinph = y / varpi_safe;
   Real zsign = (z >= 0.0) ? 1.0 : -1.0;
-  Real mu_query = std::abs(costh);   // theta' = arccos(|cos theta|), always in [0,1]
+  Real mu_query = Kokkos::abs(costh);   // theta' = arccos(|cos theta|), always in [0,1]
 
-  Real r_internal = r_code / std::max(units_.LengthToCode(1.0), 1.0e-300);
+  Real r_internal = r_code / Kokkos::max(units_.LengthToCode(1.0), 1.0e-300);
   Real s_query = SOfRadius(r_internal);
 
   int is, im;
@@ -398,15 +398,15 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
 
   // ---- ADM quantities, spherical-polar, AthenaK code units ------------------------
   // alpha_pot/gama_pot/rho_pot are dimensionless RNS potentials, unit-system-invariant.
-  Real N = std::exp(0.5*(gama_pot + rho_pot));
-  Real gam_rr = std::exp(2.0*alpha_pot);
+  Real N = Kokkos::exp(0.5*(gama_pot + rho_pot));
+  Real gam_rr = Kokkos::exp(2.0*alpha_pot);
   Real gam_thth = gam_rr * r_code*r_code;
-  Real gam_phph = std::exp(gama_pot - rho_pot) * r_code*r_code * sinth*sinth;
+  Real gam_phph = Kokkos::exp(gama_pot - rho_pot) * r_code*r_code * sinth*sinth;
   Real K_rphi = -(gam_phph/(2.0*N)) * dww_dr_code;
   Real K_thphi = -(gam_phph/(2.0*N)) * dww_dtheta_code;
 
   // ---- Spherical -> Cartesian Jacobian (on-axis-safe) -----------------------------
-  Real r_safe = std::max(r_code, 1.0e-30);
+  Real r_safe = Kokkos::max(r_code, 1.0e-30);
   Real dr_dx = x/r_safe, dr_dy = y/r_safe, dr_dz = z/r_safe;
   Real dth_dx = costh*cosph/r_safe, dth_dy = costh*sinph/r_safe, dth_dz = -sinth/r_safe;
   Real dph_dx = -sinph/varpi_safe, dph_dy = cosph/varpi_safe, dph_dz = 0.0;
@@ -433,14 +433,14 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   Real vu[3] = {0.0, 0.0, 0.0};
   Real rho0_cgs = 0.0;
   if (inside_star) {
-    Real v2 = std::pow((omg - ww)*r_internal*sinth*std::exp(-rho_pot), 2);
-    v2 = std::min(std::max(v2, 0.0), 1.0 - 1.0e-12);
-    Real utilde_phi = (omg_code - ww_code) / (N * std::sqrt(1.0 - v2));
+    Real v2 = Kokkos::pow((omg - ww)*r_internal*sinth*Kokkos::exp(-rho_pot), 2);
+    v2 = Kokkos::min(Kokkos::max(v2, 0.0), 1.0 - 1.0e-12);
+    Real utilde_phi = (omg_code - ww_code) / (N * Kokkos::sqrt(1.0 - v2));
     vu[0] = y*utilde_phi; vu[1] = -x*utilde_phi; vu[2] = 0.0;
     // Floor before the EOS-table log() lookup: near the surface the Lagrange stencil
     // can ring across the density discontinuity and undershoot energy to <=0 even
     // though `inside_star` (a separate enthalpy threshold) is true.
-    energy_internal = std::max(energy_internal, 1.0e-300);
+    energy_internal = Kokkos::max(energy_internal, 1.0e-300);
     rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;  // g/cm^3
   }
 
@@ -468,8 +468,8 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   // Check finiteness before GetYeFromRho() below: its own lrho<lrho_min guard doesn't
   // catch NaN (compares false against everything), so a NaN rho0 would otherwise reach
   // an undefined int-cast further inside TabulatedEOS's bisection.
-  if (!std::isfinite(out->alpha) || !std::isfinite(out->rho0) ||
-      !std::isfinite(out->pres)) {
+  if (!Kokkos::isfinite(out->alpha) || !Kokkos::isfinite(out->rho0) ||
+      !Kokkos::isfinite(out->pres)) {
     std::stringstream msg;
     msg << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
         << "NaN/Inf in GRASS interpolated data at (x,y,z)=(" << x << "," << y << ","
@@ -489,11 +489,11 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
 
 inline Real GrassData::InterpolateRho(Real x, Real y, Real z,
                                        const GrassEosTable &eos_table) const {
-  Real r_code = std::sqrt(x*x + y*y + z*z);
+  Real r_code = Kokkos::sqrt(x*x + y*y + z*z);
   Real costh = (r_code < 1.0e-30) ? 1.0 : z / r_code;
-  Real mu_query = std::abs(costh);
+  Real mu_query = Kokkos::abs(costh);
 
-  Real r_internal = r_code / std::max(units_.LengthToCode(1.0), 1.0e-300);
+  Real r_internal = r_code / Kokkos::max(units_.LengthToCode(1.0), 1.0e-300);
   Real s_query = SOfRadius(r_internal);
 
   int is, im;
@@ -524,7 +524,7 @@ inline Real GrassData::InterpolateRho(Real x, Real y, Real z,
   bool inside_star = (enthalpy_pot > 1.0e-6);   // same criterion as Interpolate()
   if (!inside_star) { return 0.0; }
 
-  energy_internal = std::max(energy_internal, 1.0e-300);  // same floor as Interpolate()
+  energy_internal = Kokkos::max(energy_internal, 1.0e-300);  // same floor as Interpolate
   Real rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;
   return units_.RestMassDensityCgsToCode(rho0_cgs);
 }

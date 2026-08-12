@@ -44,10 +44,10 @@ class GrassEosTable {
   //  eos_mod.f90's n0_at_e(ee). `e_internal` must be un-pre-converted -- Load() already
   //  applies the same C^2*KSCALE factor GRASS's own loadEos uses when building log_e_.
   Real N0FromE(Real e_internal) const {
-    Real log_in = std::log(e_internal);
+    Real log_in = Kokkos::log(e_internal);
     int i = FindCell(log_e_, log_in);
     Real log_out = HermiteEval(log_e_, log_n0_, slope_n0_of_e_, i, log_in);
-    return std::exp(log_out);
+    return Kokkos::exp(log_out);
   }
 
  private:
@@ -93,8 +93,8 @@ class GrassEosTable {
     for (int i = 0; i < num_tab; ++i) {
       Real e_internal = e_raw[i] * GrassUnits::kGrassC * GrassUnits::kGrassC
                          * GrassUnits::kKscale;
-      log_e_[i] = std::log(e_internal);
-      log_n0_[i] = std::log(n0_raw[i]);
+      log_e_[i] = Kokkos::log(e_internal);
+      log_n0_[i] = Kokkos::log(n0_raw[i]);
     }
 
     slope_n0_of_e_.assign(num_tab, 0.0);
@@ -137,7 +137,7 @@ class GrassEosTable {
     Real m_e = ((2.0*h_a + h_b)*d_a - h_a*d_b) / (h_a + h_b);
     if (m_e * d_a <= 0.0) {
       m_e = 0.0;
-    } else if (d_a * d_b < 0.0 && std::abs(m_e) > 3.0*std::abs(d_a)) {
+    } else if (d_a * d_b < 0.0 && Kokkos::abs(m_e) > 3.0*Kokkos::abs(d_a)) {
       m_e = 3.0 * d_a;
     }
     return m_e;

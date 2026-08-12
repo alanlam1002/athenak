@@ -7,61 +7,48 @@
 //========================================================================================
 //! \file grass_reader.hpp
 //  \brief Host-side reader/interpolator for GRASS (RNS-family rotating-NS equilibrium
-//  code) restart binaries (Res/res.rst). GRASS uses the classic RNS/Cook-Shapiro-
-//  Teukolsky (CST) stationary-axisymmetric metric in spherical-polar coordinates:
+//  code) restart binaries (Res/res.rst). GRASS uses the RNS/Cook-Shapiro-Teukolsky
+//  (CST) stationary-axisymmetric metric in spherical-polar coordinates:
 //
 //    ds^2 = -e^{gama+rho} dt^2 + e^{2alpha}(dr^2 + r^2 dtheta^2)
 //           + e^{gama-rho} r^2 sin^2(theta) (dphi - ww dt)^2
 //
-//  This is directly ADM-physical (no conformal decomposition needed, unlike the
-//  sibling rns_st_reader.hpp for scalar-tensor SACRA data). Reading off the ADM split
-//  and deriving the extrinsic curvature for this stationary metric (verified this
-//  session against AthenaK's own Z4c RHS sign convention, dt(gamma_ij) =
-//  -2*alpha*K_ij + D_i(beta_j) + D_j(beta_i)):
+//  Directly ADM-physical (no conformal decomposition, unlike the sibling
+//  rns_st_reader.hpp for scalar-tensor data). ADM split (K_ij from
+//  dt(gamma_ij) = -2*alpha*K_ij + D_i(beta_j) + D_j(beta_i)):
 //
-//    N       = e^{(gama+rho)/2}                    (the frame-dragging term in g_tt
-//                                                    cancels exactly against beta_i*beta^i)
-//    beta^phi = -ww,  beta^r = beta^theta = 0
-//    gamma_rr = e^{2alpha}, gamma_thth = e^{2alpha} r^2, gamma_phph = e^{gama-rho} r^2 sin^2(theta)
-//    K_rphi   = -(gamma_phph/(2N)) * dr(ww)
-//    K_thphi  = -(gamma_phph/(2N)) * dth(ww)        (all other K_ij = 0)
+//    N = e^{(gama+rho)/2},  beta^phi = -ww,  beta^r = beta^theta = 0
+//    gamma_rr = e^{2alpha},  gamma_thth = gamma_rr*r^2
+//    gamma_phph = e^{gama-rho}*r^2*sin^2(theta)
+//    K_rphi = -(gamma_phph/2N)*dr(ww),  K_thphi = -(gamma_phph/2N)*dth(ww)  (rest zero)
 //
-//  Only ww's derivatives are needed anywhere in this construction -- alpha, gama, rho
-//  are needed only as point values. Fluid velocity (ZAMO-frame azimuthal, matching
-//  GRASS's own `velocity_sq` field exactly -- see the derivation in the investigation
-//  notes/plan) gives AthenaK's primitive convention u-tilde^i = gamma^ij u_j directly:
+//  Fluid velocity is ZAMO-frame azimuthal (matches GRASS's own `velocity_sq` field),
+//  giving AthenaK's primitive convention u-tilde^i = gamma^ij u_j directly:
 //
 //    u-tilde^phi = (omg - ww) / (N*sqrt(1 - v^2)),   v = (omg-ww)*r*sin(theta)*e^{-rho}
 //
 //  Restart binary layout (access='stream', no Fortran record padding, all 8-byte
-//  doubles -- confirmed against /u/tlam/GRASS/src/theory/spin_integration_mod.f90's
-//  write_restart_file and /u/tlam/GRASS/src/core/regrid_mod.f90's read_binary_restart):
+//  doubles; see GRASS's spin_integration_mod.f90::write_restart_file and
+//  regrid_mod.f90::read_binary_restart):
 //
 //    char[10]   magic = "GRASSRST01"
 //    int32[6]   header_ints  = [format_version=1, storage_size=64, field_count=10,
 //                                SDIV, MDIV, s_pwr]
-//    double[5]  header_meta  = [r_e, e_center, r_ratio, Omega_e, Omega_c]  (GRASS-internal units)
+//    double[5]  header_meta  = [r_e, e_center, r_ratio, Omega_e, Omega_c]  (GRASS units)
 //    double[SDIV]        s_gp
-//    double[MDIV]        mu           (= cos(theta), mu[0]=0 equator -> mu[MDIV-1]=1 pole)
-//    double[10][SDIV][MDIV]  restart_data, field index fastest-varying (Fortran
-//                            column-major), field order:
-//                            alpha,gama,rho,ww,pressure,energy,enthalpy,velocity_sq,omg,sphi
+//    double[MDIV]        mu       (= cos(theta), mu[0]=0 equator -> mu[MDIV-1]=1 pole)
+//    double[10][SDIV][MDIV]  restart_data, field fastest-varying (Fortran column-major),
+//                            field order: alpha,gama,rho,ww,pressure,energy,enthalpy,
+//                            velocity_sq,omg,sphi
 //
-//  Physical radius reconstruction: r_internal(s) = r_e * (s/(1-s))^s_pwr (GRASS's own
-//  compactification, confirmed in analysis_mod.f90/sphere_mod.f90/spin_integration_mod.f90);
-//  ds/dr = s*(1-s)/(s_pwr*r), used to chain-rule the Lagrange-basis d/ds(ww) into dr(ww).
+//  Physical radius: r_internal(s) = r_e*(s/(1-s))^s_pwr (GRASS's compactification);
+//  ds/dr = s*(1-s)/(s_pwr*r) chain-rules the Lagrange-basis d/ds(ww) into dr(ww).
 //
-//  Grid is a half-domain in theta (mu=cos(theta) in [0,1], equator->pole -- confirmed
-//  via grid_mod.f90 for all three of GRASS's angular-collocation options). Reused
-//  directly from the sibling rns_st_reader.hpp's own existing idiom for its own
-//  half-domain angular array: query at mu'=|cos(theta)|=|z|/r (always in-bounds --
-//  the QUERY itself never goes negative), and flip the sign of the theta-derivative-
-//  dependent extrinsic-curvature components for z<0 (chain rule:
-//  theta'=arccos(|cos(theta)|), dtheta'/dtheta=-1 for z<0). Note this does NOT mean
-//  the Lagrange stencil itself stays in-bounds near the equator -- it still needs
-//  ghost-padded storage at negative angular indices whenever the nearest real grid
-//  index is within n_order of mu=0 (routine, since GRASS's mu grid clusters points
-//  near the equator); see the equatorial mirror in Load() below.
+//  Grid is a half-domain in theta (mu=cos(theta) in [0,1], equator->pole). Query at
+//  mu'=|cos(theta)|=|z|/r (always in-bounds), flip the sign of the theta-derivative-
+//  dependent K_ij components for z<0 (theta'=arccos(|cos(theta)|), dtheta'/dtheta=-1).
+//  The Lagrange stencil itself still needs ghost-padded storage near mu=0 -- see the
+//  equatorial mirror in Load() below.
 
 #include <algorithm>
 #include <cmath>
@@ -88,21 +75,16 @@ namespace grass {
 class GrassData {
  public:
   struct Point {
-    Real alpha;        // ADM lapse N (AthenaK naming clash with GRASS's own `alpha`
-                        // metric potential -- this is the LAPSE, not GRASS's alpha)
+    Real alpha;        // ADM lapse N (not GRASS's own `alpha` metric potential)
     Real beta_u[3];    // shift, Cartesian
     Real g_dd[6];      // xx,xy,xz,yy,yz,zz
     Real K_dd[6];      // xx,xy,xz,yy,yz,zz
     Real rho0;         // rest-mass density, AthenaK code units
     Real pres;         // pressure, AthenaK code units
-    Real vu[3];        // u-tilde^i = gamma^ij u_j, Cartesian (AthenaK primitive convention)
-    Real Yq;           // electron/charge fraction, seeded from the DD2_hot_slice 1D table
-                        // (Yl(nb) along the SAME trajectory that produced GRASS's own
-                        // e(n0),p(n0) -- see grass/grass_units.hpp file header and
-                        // build_dd2_hot_slice_1d_athtab.py). Not load-bearing for correct
-                        // initial data (PrimToCons recovers T internally from the runtime
-                        // 3D EOS regardless) -- this only seeds the passive scalar Y[e]
-                        // consistently with the trajectory the star was actually built on.
+    Real vu[3];        // u-tilde^i = gamma^ij u_j, Cartesian (AthenaK primitive conv.)
+    Real Yq;           // Y[e], seeded from the DD2_hot_slice 1D table along the same
+                        // (nb,T,Yl) trajectory that produced GRASS's e(n0),p(n0) -- a
+                        // composition seed only, not load-bearing for correctness.
   };
 
   GrassData(const std::string &fname, const GrassUnits &units) : units_(units) {
@@ -113,20 +95,12 @@ class GrassData {
   void Interpolate(Real x, Real y, Real z, const GrassEosTable &eos_table,
                     const tov::TabulatedEOS &slice_eos, Point *out) const;
 
-  // Rho-only variant of Interpolate(), for the magnetic-web vector-potential
-  // builder (grass_magnetic_web.hpp / dyngr_grass.cpp's BuildMagneticField),
-  // which needs h(rho0) at many more points than the ADM/hydro fill loop
-  // (three separate edge-staggered grids, each built at least twice for the
-  // web's poloidal/toroidal decomposition, again for an optionally-confined
-  // dipole) -- skips the metric/Jacobian/velocity construction entirely,
-  // evaluating only the two fields (energy, enthalpy) actually needed to
-  // recover rho0. Shares the stencil-LOCATION logic with Interpolate() via
-  // LocateStencil() below (that logic is exactly where this session's two
-  // real bugs lived -- keeping it in one place matters); duplicates only the
-  // much simpler 2-field stencil SUM itself, to avoid threading a variable-
-  // length field list through Interpolate()'s existing, already-validated
-  // 8-field loop. Returns rho0 in AthenaK code units (0.0 outside the star),
-  // same convention as Point::rho0.
+  // Rho-only variant of Interpolate(), for the magnetic-web vector-potential builder
+  // (grass_magnetic_web.hpp / dyngr_grass.cpp's BuildMagneticField), which needs
+  // h(rho0) at far more points than the ADM/hydro fill loop. Skips the metric/
+  // Jacobian/velocity construction, evaluating only {energy, enthalpy}. Shares
+  // stencil-location logic with Interpolate() via LocateStencil() below. Returns rho0
+  // in AthenaK code units (0.0 outside the star), same convention as Point::rho0.
   Real InterpolateRho(Real x, Real y, Real z, const GrassEosTable &eos_table) const;
 
  private:
@@ -144,19 +118,12 @@ class GrassData {
   Real r_e_internal_ = 0.0;       // GRASS-internal units (header_meta[0])
   Real r_e_code_ = 0.0;           // AthenaK code units
 
-  // Flat storage, ghost-padded: s in [-n_order, sdiv_-1], mu in [-n_order, mdiv_-1+n_order].
-  // Ghost IS needed at the mu=0/equator end, despite the query itself (|z|/r) never
-  // going negative: the Lagrange stencil is centered on the nearest grid index `im`
-  // and always spans [im-n_order, im+n_order] regardless of where the query sits, so
-  // any query with `im < n_order` (routine near the equator, since GRASS's mu grid
-  // clusters points there -- confirmed this session: mu[1..3] ~ 0.002-0.016 for a
-  // representative restart) needs negative-index storage. Originally missing here,
-  // causing silent reads into adjacent/out-of-bounds memory (NaN/Inf propagating into
-  // rho0, then into tov::TabulatedEOS's bisection -- a Kokkos::View OOB abort) for any
-  // query point close enough to the equatorial plane. Fixed the same way as the
-  // pre-existing pole (mu=1) ghost below: even reflection, since physical fields are
-  // even functions of cos(theta) and this is exactly the mu=0 counterpart of that
-  // same symmetry.
+  // Flat storage, ghost-padded: s in [-n_order,sdiv_-1], mu in [-n_order,mdiv_+n_order-1]
+  // Ghost is also needed at the mu=0/equator end, despite the query itself (|z|/r)
+  // never going negative: the Lagrange stencil spans [im-n_order, im+n_order] around
+  // the nearest grid index `im`, and GRASS's mu grid clusters points near the equator,
+  // so `im < n_order` is routine there. Padded by even reflection (physical fields are
+  // even functions of cos(theta)), same as the pole (mu=1) ghost below.
   std::vector<Real> s_gp_;        // size sdiv_ + n_order
   std::vector<Real> mu_;          // size mdiv_ + 2*n_order
   std::vector<Real> field_;       // size kNumFields * (sdiv_+n_order) * (mdiv_+2*n_order)
@@ -306,18 +273,16 @@ inline void GrassData::Load(const std::string &fname) {
     }
   }
 
-  // Radial ghost padding: mirror through the center (s<0 <-> s>0, same angular index
-  // -- an approximation valid asymptotically close to r=0, exactly where it is used;
-  // same idiom as the sibling rns_st_reader.hpp's own S(1-i)=-S(1+i) treatment).
+  // Radial ghost padding: mirror through the center (s<0 <-> s>0, same angular index),
+  // valid asymptotically close to r=0 where it's used.
   for (int i = 1; i <= n_order; ++i) {
     S(-i) = -S(i);
     for (int j = 0; j < mdiv_; ++j) {
       for (int f = 0; f < kNumFields; ++f) { Field(f, -i, j) = Field(f, i, j); }
     }
   }
-  // Equatorial ghost padding: mirror through the equator (mu=0 boundary), even
-  // reflection -- same reasoning/idiom as the pole block just below, just at the
-  // other end (see the class-level storage comment for why this is needed at all).
+  // Equatorial ghost padding: mirror through mu=0, even reflection (see the
+  // class-level storage comment above for why this is needed).
   for (int j = 1; j <= n_order; ++j) {
     Mu(-j) = 2.0*Mu(0) - Mu(j);
     for (int i = -n_order; i < sdiv_; ++i) {
@@ -326,9 +291,8 @@ inline void GrassData::Load(const std::string &fname) {
       }
     }
   }
-  // Polar ghost padding: mirror through the pole (mu=1 boundary), even reflection --
-  // physical fields in this axisymmetric, equatorially-and-polar-regular ansatz do not
-  // flip sign there (mirrors rns_st_reader.hpp's own pole treatment).
+  // Polar ghost padding: mirror through mu=1, even reflection (fields are regular
+  // and don't flip sign at the pole in this ansatz).
   for (int j = 1; j <= n_order; ++j) {
     Mu(mdiv_ - 1 + j) = 2.0*Mu(mdiv_ - 1) - Mu(mdiv_ - 1 - j);
     for (int i = -n_order; i < sdiv_; ++i) {
@@ -363,18 +327,12 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   Real r_internal = r_code / std::max(units_.LengthToCode(1.0), 1.0e-300);
   Real s_query = SOfRadius(r_internal);
 
-  // Locate and clamp Lagrange-stencil base indices so [base-n_order, base+n_order]
-  // stays within the (ghost-padded) stored arrays. Linear scan is adequate at GRASS's
-  // grid sizes (SDIV~O(1e3)); replace with a binary search if profiling ever demands it.
   int is, im;
   LocateStencil(s_query, mu_query, &is, &im);
 
   // Point values of the 8 fields we need directly, plus d/ds and d/dmu of ww (F_WW).
-  // F_ENTHALPY is included solely as GRASS's own inside-star/vacuum indicator (h>1
-  // inside, h<=1 in vacuum -- exactly the check GRASS's own exporter_mod.f90 uses
-  // before calling n0_at_e; skipping it risks calling log() on a near-zero or
-  // slightly-negative interpolated `energy` just outside the stellar surface, where
-  // the Lagrange stencil can overshoot across the density discontinuity).
+  // F_ENTHALPY is GRASS's own inside-star/vacuum indicator, needed to gate energy/
+  // pressure before they're used (the stencil can overshoot near the surface).
   Real val[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   Real dww_ds = 0.0, dww_dmu = 0.0;
   static constexpr int kUse[8] = {F_ALPHA, F_GAMA, F_RHO, F_WW, F_PRESSURE,
@@ -420,36 +378,26 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   Real alpha_pot = val[0], gama_pot = val[1], rho_pot = val[2], ww = val[3];
   Real pressure_internal = val[4], energy_internal = val[5], omg = val[6];
   Real enthalpy_pot = val[7];
-  // Inside-star indicator. GRASS's restart `enthalpy` field is log(h) (h = GRASS's
-  // dimensionless specific enthalpy, h=1 at the vacuum surface) -- confirmed directly
-  // against a real restart binary this session: enthalpy(center)=0.287 matches
-  // GRASS's own printed "h_c" exactly, and enthalpy(exterior)~1e-9 matches the
-  // printed "log(h_min)" threshold from GRASS's EOS-table load. So the correct
-  // criterion is log(h)>~0 (any small positive constant well below the O(0.1-1)
-  // interior values and well above the ~1e-9 exterior floor works safely), NOT h>1.
+  // GRASS's restart `enthalpy` field is log(h) (h = dimensionless specific enthalpy,
+  // h=1 at the vacuum surface), so the inside-star criterion is log(h)>~0, not h>1.
   bool inside_star = (enthalpy_pot > 1.0e-6);
   if (!inside_star) {
     pressure_internal = 0.0;
     energy_internal = 0.0;
   }
 
-  // ---- Convert to AthenaK code units up front, BEFORE building any derived tensor
-  // (deliberately avoids the error-prone alternative of building the metric/curvature
-  // in GRASS-internal units and rescaling the assembled tensors afterward -- every
-  // quantity below is in AthenaK code units from this point on).
-  Real len_conv = units_.LengthToCode(1.0);    // code-length-units per GRASS-internal-length
-  Real rate_conv = units_.RateToCode(1.0);     // code-rate-units per GRASS-internal-rate
+  // ---- Convert to AthenaK code units up front -- everything below is code units ---
+  Real len_conv = units_.LengthToCode(1.0);   // code units per GRASS-internal length
+  Real rate_conv = units_.RateToCode(1.0);    // code units per GRASS-internal rate
   Real ww_code = ww * rate_conv;
   Real omg_code = omg * rate_conv;
   Real ds_dr_internal = DsDr(s_query, r_internal);      // per unit r_internal
   Real ds_dr_code = ds_dr_internal / len_conv;          // per unit r_code (chain rule)
   Real dww_dr_code = (dww_ds * ds_dr_code) * rate_conv; // d(ww_code)/d(r_code)
-  Real dww_dtheta_code = zsign * (-sinth * dww_dmu) * rate_conv;  // theta is dimensionless
+  Real dww_dtheta_code = zsign * (-sinth * dww_dmu) * rate_conv;  // theta dimensionless
 
   // ---- ADM quantities, spherical-polar, AthenaK code units ------------------------
-  // r_code (already in code units, the Cartesian-derived radius) is used directly for
-  // every r-dependent metric potential below -- alpha_pot/gama_pot/rho_pot themselves
-  // are dimensionless RNS potentials, unaffected by the unit system.
+  // alpha_pot/gama_pot/rho_pot are dimensionless RNS potentials, unit-system-invariant.
   Real N = std::exp(0.5*(gama_pot + rho_pot));
   Real gam_rr = std::exp(2.0*alpha_pot);
   Real gam_thth = gam_rr * r_code*r_code;
@@ -480,12 +428,8 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   Real beta_up[3] = { y*beta_phi_up, -x*beta_phi_up, 0.0 };  // d(x,y,z)/dphi = (-y,x,0)
 
   // ---- Fluid velocity (ZAMO-frame azimuthal, AthenaK contravariant convention) ---
-  // v is dimensionless (a physical velocity in units of c), so the GRASS-internal
-  // formula for v^2 needs r_internal (not r_code) even though omg/ww here are already
-  // code-unit rates -- rebuild v^2 from the GRASS-internal quantities directly
-  // (equivalent either way since v^2 is unit-system-invariant by construction; using
-  // the internal quantities avoids re-deriving an r_code-consistent rate/length
-  // cancellation).
+  // v (dimensionless, units of c) is unit-system-invariant, so built directly from
+  // the GRASS-internal quantities rather than the code-unit ones above.
   Real vu[3] = {0.0, 0.0, 0.0};
   Real rho0_cgs = 0.0;
   if (inside_star) {
@@ -493,17 +437,9 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
     v2 = std::min(std::max(v2, 0.0), 1.0 - 1.0e-12);
     Real utilde_phi = (omg_code - ww_code) / (N * std::sqrt(1.0 - v2));
     vu[0] = y*utilde_phi; vu[1] = -x*utilde_phi; vu[2] = 0.0;
-    // Floor energy_internal to a tiny positive value before the EOS-table log()
-    // lookup. `inside_star` is based on the (separately-interpolated) enthalpy
-    // field crossing its own threshold -- it does NOT guarantee energy_internal
-    // itself is positive right at the stellar surface, where the Lagrange
-    // stencil can ring (Gibbs phenomenon) across the sharp density
-    // discontinuity and briefly undershoot to zero/negative just inside the
-    // enthalpy-based boundary. N0FromE()'s std::log() of that is NaN, which
-    // previously reached slice_eos.GetYeFromRho() below BEFORE the isfinite
-    // guard could catch it, crashing inside TabulatedEOS's own bisection
-    // (Kokkos::View OOB with an undefined int-cast-of-NaN index) instead of
-    // this file's own controlled fatal error.
+    // Floor before the EOS-table log() lookup: near the surface the Lagrange stencil
+    // can ring across the density discontinuity and undershoot energy to <=0 even
+    // though `inside_star` (a separate enthalpy threshold) is true.
     energy_internal = std::max(energy_internal, 1.0e-300);
     rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;  // g/cm^3
   }
@@ -529,12 +465,9 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
   out->rho0 = units_.RestMassDensityCgsToCode(rho0_cgs);
   out->pres = units_.PressureToCode(pressure_internal);
 
-  // Check finiteness BEFORE calling into slice_eos.GetYeFromRho() below --
-  // GetYeFromRho does its own log(rho) internally and only guards against
-  // *small* rho (its own lrho<lrho_min check), not NaN (NaN compares false
-  // against everything, so a NaN rho0 silently skips that guard and reaches
-  // an undefined int-cast further in, previously surfacing as a Kokkos::View
-  // out-of-bounds abort instead of this file's own controlled error).
+  // Check finiteness before GetYeFromRho() below: its own lrho<lrho_min guard doesn't
+  // catch NaN (compares false against everything), so a NaN rho0 would otherwise reach
+  // an undefined int-cast further inside TabulatedEOS's bisection.
   if (!std::isfinite(out->alpha) || !std::isfinite(out->rho0) ||
       !std::isfinite(out->pres)) {
     std::stringstream msg;
@@ -544,11 +477,8 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
     throw std::runtime_error(msg.str());
   }
 
-  // Seed Yq from the 1D slice table at this point's OWN rho0 -- GetYeFromRho already
-  // degrades gracefully to its own atmosphere default (ye_atmosphere, <mhd>
-  // s0_atmosphere) whenever rho0 is zero/below the slice table's floor, so no separate
-  // inside_star gate is needed here (out->rho0 is already 0 outside the star) -- and by
-  // this point out->rho0 is guaranteed finite (see the isfinite check just above).
+  // GetYeFromRho degrades gracefully to its own atmosphere default below the slice
+  // table's floor, so no separate inside_star gate is needed here.
   out->Yq = slice_eos.GetYeFromRho<tov::LocationTag::Host>(out->rho0);
 }
 
@@ -569,12 +499,8 @@ inline Real GrassData::InterpolateRho(Real x, Real y, Real z,
   int is, im;
   LocateStencil(s_query, mu_query, &is, &im);
 
-  // Same field selection/ordering rationale as Interpolate()'s F_ENTHALPY note --
-  // enthalpy gates inside-star, energy feeds the EOS-table rho0 lookup. No
-  // derivatives needed here (unlike F_WW in Interpolate()), so fr/fp are hoisted
-  // out of the inner loop rather than recomputed per (di,dj) pair -- a pure
-  // efficiency simplification versus Interpolate()'s loop shape (which computes
-  // fdr/fdp cross terms this function doesn't need), not a behavioral difference.
+  // Same {energy, enthalpy} fields as Interpolate(); no derivatives needed here, so
+  // fr/fp are hoisted out of the inner loop instead of recomputed per (di,dj).
   Real val[2] = {0.0, 0.0};   // {energy, enthalpy}
   static constexpr int kUse[2] = {F_ENERGY, F_ENTHALPY};
   for (int di = -n_order; di <= n_order; ++di) {
@@ -598,10 +524,7 @@ inline Real GrassData::InterpolateRho(Real x, Real y, Real z,
   bool inside_star = (enthalpy_pot > 1.0e-6);   // same criterion as Interpolate()
   if (!inside_star) { return 0.0; }
 
-  // Same energy floor as Interpolate() -- see that function's comment for why
-  // (Lagrange ringing near the stellar surface can undershoot energy to
-  // zero/negative just inside the enthalpy-based boundary).
-  energy_internal = std::max(energy_internal, 1.0e-300);
+  energy_internal = std::max(energy_internal, 1.0e-300);  // same floor as Interpolate()
   Real rho0_cgs = eos_table.N0FromE(energy_internal) * GrassUnits::kGrassMB;
   return units_.RestMassDensityCgsToCode(rho0_cgs);
 }

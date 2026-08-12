@@ -6,19 +6,15 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file grass_eos_table.hpp
-//  \brief Host-side reader for GRASS's own 4-column EOS table format
-//  (num_tab header line, then rows "e[g/cm^3] p[dyn/cm^2] h n0[cm^-3]"), used ONLY to
-//  recover rest-mass density from GRASS's restart-file `energy` field -- GRASS's
-//  restart already carries a self-consistent (pressure, energy) pair from its own
-//  equilibrium solve, so no other EOS call is needed for the initial data.
+//  \brief Host-side reader for GRASS's own 4-column EOS table format (num_tab header,
+//  then rows "e[g/cm^3] p[dyn/cm^2] h n0[cm^-3]"), used only to recover rest-mass
+//  density from the restart file's `energy` field -- GRASS's restart already carries a
+//  self-consistent (pressure, energy) pair, so no other EOS call is needed.
 //
-//  This is a direct, line-by-line port of GRASS's own /u/tlam/GRASS/src/core/eos_mod.f90
-//  (loadEos, pchip_slopes, endpoint_slope, find_cell, hermite_eval, interp_eos/n0_at_e)
-//  -- monotone cubic Hermite (Fritsch-Carlson) interpolation in log-log space, matching
-//  GRASS's own scheme exactly rather than bridging into AthenaK's CompOSE-native,
-//  rho-indexed TabulatedEOS (different column schema, different interpolation, would
-//  reintroduce small inconsistencies at exactly the phase-transition/near-surface
-//  regions PCHIP was chosen to handle cleanly in GRASS's own solve).
+//  Direct port of GRASS's own eos_mod.f90 (loadEos/pchip_slopes/endpoint_slope/
+//  find_cell/hermite_eval/n0_at_e): monotone cubic Hermite (Fritsch-Carlson)
+//  interpolation in log-log space. Kept separate from AthenaK's CompOSE-native
+//  TabulatedEOS to match GRASS's own scheme exactly near the phase-transition/surface.
 
 #include <algorithm>
 #include <cmath>
@@ -44,12 +40,9 @@ class GrassEosTable {
     Load(fname, units);
   }
 
-  //! \brief GRASS-internal-units energy density in -> baryon number density out
-  //  [cm^-3], mirroring eos_mod.f90's n0_at_e(ee) exactly (same log-space table, same
-  //  cell finder, same Hermite evaluator). `e_internal` must be in the SAME
-  //  GRASS-internal units as the restart file's raw `energy` field (no pre-conversion
-  //  -- this loader applies the same C^2*KSCALE factor GRASS's own loadEos applies
-  //  when building log_e_ from the raw cgs table file, so the two match).
+  //! \brief GRASS-internal energy density -> baryon number density [cm^-3], mirroring
+  //  eos_mod.f90's n0_at_e(ee). `e_internal` must be un-pre-converted -- Load() already
+  //  applies the same C^2*KSCALE factor GRASS's own loadEos uses when building log_e_.
   Real N0FromE(Real e_internal) const {
     Real log_in = std::log(e_internal);
     int i = FindCell(log_e_, log_in);
@@ -93,9 +86,8 @@ class GrassEosTable {
       n0_raw[i] = n0;
     }
 
-    // Mirror eos_mod.f90::loadEos exactly: log_e = log(e_cgs * C^2 * KSCALE) so that
-    // this table's log_e_ lands in the SAME GRASS-internal units as the restart
-    // file's raw `energy` field -- no separate conversion needed at lookup time.
+    // Mirrors eos_mod.f90::loadEos: log_e = log(e_cgs*C^2*KSCALE), landing in the same
+    // GRASS-internal units as the restart file's raw `energy` field.
     log_e_.resize(num_tab);
     log_n0_.resize(num_tab);
     for (int i = 0; i < num_tab; ++i) {
@@ -110,9 +102,8 @@ class GrassEosTable {
   }
 
   //! \brief Fritsch-Carlson monotone-cubic-Hermite slopes, port of eos_mod.f90's
-  //  pchip_slopes (interior: weighted-harmonic-mean of adjacent secants, collapsing to
-  //  zero when secants disagree in sign or either is zero; endpoints: 3-point
-  //  one-sided formula with the same monotonicity clamp via EndpointSlope).
+  //  pchip_slopes (weighted-harmonic-mean secants interior, EndpointSlope's one-sided
+  //  formula at the boundaries).
   static void PchipSlopes(const std::vector<Real> &x, const std::vector<Real> &y,
                           std::vector<Real> &m) {
     int n = static_cast<int>(x.size());
@@ -152,9 +143,8 @@ class GrassEosTable {
     return m_e;
   }
 
-  //! \brief Binary-search cell finder, port of eos_mod.f90's find_cell (0-based here;
-  //  Fortran's `i` such that x(i)<=xb<x(i+1) becomes C++ `i` such that
-  //  x[i]<=xb<x[i+1], 0-based, valid for HermiteEval's x[i]/x[i+1] pair access).
+  //! \brief Binary-search cell finder, port of eos_mod.f90's find_cell
+  //  (0-based: returns i such that x[i]<=xb<x[i+1]).
   static int FindCell(const std::vector<Real> &x, Real xb) {
     int n = static_cast<int>(x.size());
     if (n <= 1) { return 0; }

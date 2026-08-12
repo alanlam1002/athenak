@@ -8,30 +8,20 @@
 //! \file grass_units.hpp
 //  \brief Unit conversion for GRASS (RNS-family rotating-NS equilibrium code) initial
 //  data: GRASS-internal (KAPPA/KSCALE-scaled RNS units) -> cgs -> AthenaK's own
-//  geometrized G=c=Msun=1 units. Two explicit hops, both confirmed against GRASS's own
-//  source this session (not re-derived from scratch):
+//  geometrized G=c=Msun=1 units, in two hops.
 //
-//  Hop 1 (GRASS-internal -> cgs), confirmed against
-//  /u/tlam/GRASS/src/tool/exporter_mod.f90 and /u/tlam/GRASS/src/para_panel.f90:
+//  Hop 1 (GRASS-internal -> cgs), per GRASS's exporter_mod.f90/para_panel.f90:
 //    C = 2.99792458e10 cm/s, G = 6.67408e-8 cgs, MB = 1.6749286e-24 g
-//    KAPPA = 1e-15 * C^2 / G
-//    KSCALE = KAPPA * G / C^4  (simplifies to 1e-15/C^2, independent of G)
-//    r_cgs[cm]      = r_internal * sqrt(KAPPA)
-//    Omega_cgs[1/s] = Omega_internal * C/sqrt(KAPPA)   (applies to both omg and ww)
-//    e_cgs[g/cm^3]  = e_internal / (C^2 * KSCALE)
-//    p_cgs[erg/cm^3] = p_internal / KSCALE
-//  n0_at_e() in GRASS's own eos_mod.f90 takes its argument already in GRASS-internal
-//  units (its own table loader bakes the C^2*KSCALE/KSCALE factors in when the table
-//  file is read) -- grass_eos_table.hpp mirrors that convention exactly, so the restart
-//  file's raw `energy` field is fed to N0FromE() with NO pre-conversion.
+//    KAPPA = 1e-15*C^2/G, KSCALE = KAPPA*G/C^4 (= 1e-15/C^2)
+//    r_cgs = r_internal*sqrt(KAPPA), Omega_cgs = Omega_internal*C/sqrt(KAPPA)
+//    e_cgs = e_internal/(C^2*KSCALE), p_cgs = p_internal/KSCALE
+//  GRASS's own n0_at_e() (eos_mod.f90) takes its argument already in GRASS-internal
+//  units, so grass_eos_table.hpp feeds the restart's raw `energy` field to N0FromE()
+//  with no pre-conversion.
 //
-//  Hop 2 (cgs -> AthenaK code units), via Primitive::UnitSystem (eos/primitive-solver/
-//  unit_system.hpp): mass density / energy density / length use
-//  MassDensityConversion/EnergyDensityConversion/LengthConversion directly. Angular
-//  velocity is a RATE (1/time), which transforms with the RECIPROCAL of
-//  TimeConversion (TimeConversion converts a duration; verified by dimensional
-//  analysis against the textbook GM_sun/c^3 ~ 4.925 microsecond timescale -- do not
-//  multiply by TimeConversion for a rate, that is backwards).
+//  Hop 2 (cgs -> AthenaK code units) via Primitive::UnitSystem
+//  (eos/primitive-solver/unit_system.hpp). Angular velocity is a rate (1/time): divide
+//  by TimeConversion, don't multiply.
 
 #include <cmath>
 
@@ -84,15 +74,12 @@ struct GrassUnits {
     return e_cgs * cgs.EnergyDensityConversion(code);
   }
   Real PressureCgsToCode(Real p_cgs) const {
-    // Pressure has the same dimensions as energy density (erg/cm^3), so the same
-    // conversion method applies -- UnitSystem has no separate "pressure density"
-    // method distinct from EnergyDensityConversion for this purpose.
+    // Pressure has the same dimensions as energy density (erg/cm^3); UnitSystem has
+    // no separate pressure-conversion method.
     return p_cgs * cgs.EnergyDensityConversion(code);
   }
   Real RateCgsToCode(Real omega_cgs) const {
-    // Rate = 1/time transforms with the RECIPROCAL of TimeConversion (which converts
-    // a duration, not a rate) -- see file header note.
-    return omega_cgs / cgs.TimeConversion(code);
+    return omega_cgs / cgs.TimeConversion(code);  // rate = 1/time, see file header
   }
 
   // -- Convenience: full GRASS-internal -> AthenaK code, one hop each ---------------

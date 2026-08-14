@@ -105,11 +105,21 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
       }
       coord_data.punc_0_spin[2] = coord_data.bh_spin;
       coord_data.punc_0_rad = coord_data.punc_1_rad = -1.0;
-      coord_data.flux_excise_r = (pin->DoesBlockExist("radiation")) ?
+      // NOTE: "is this a radiation problem" must also recognize <radiation_m1>,
+      // not just the discrete-ordinate module's <radiation> block -- otherwise
+      // radiation_m1 problems silently fall back to the non-radiation default
+      // (rexcise=1.0 instead of the horizon-based 1+sqrt(1-a^2)), giving a
+      // smaller-than-intended excision/smoothing radius near the BH. Found
+      // comparing gr_torus.cpp (DO, <radiation>) against gr_torus_m1.cpp
+      // (<radiation_m1>): the two runs' innermost diagnostic radius silently
+      // differed (r=3 vs r=2) despite byte-identical <coord> blocks.
+      const bool is_radiation_problem = pin->DoesBlockExist("radiation") ||
+                                         pin->DoesBlockExist("radiation_m1");
+      coord_data.flux_excise_r = (is_radiation_problem) ?
         1.0+sqrt(1.0-SQR(coord_data.bh_spin)) :
         pin->GetOrAddReal("coord","flux_excise_r",1.0);
       coord_data.rexcise =
-        (pin->DoesBlockExist("radiation")) ? 1.0+sqrt(1.0-SQR(coord_data.bh_spin)) : 1.0;
+        (is_radiation_problem) ? 1.0+sqrt(1.0-SQR(coord_data.bh_spin)) : 1.0;
       coord_data.smooth_excise = pin->GetOrAddBoolean("coord","smooth_excision", false);
       Real max_dx = 0.0;
       auto &mb_size = pmy_pack->pmb->mb_size;

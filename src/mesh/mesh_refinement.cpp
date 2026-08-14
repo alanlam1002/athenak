@@ -656,10 +656,16 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   pm->pmb_pack->gide = pm->pmb_pack->gids + pm->nmb_eachrank[global_variable::my_rank]-1;
   pm->pmb_pack->nmb_thispack = pm->pmb_pack->gide - pm->pmb_pack->gids + 1;
 
-  // Delete old then allocate new MeshBlocks and Coordinates (latter includes masks in GR)
+  // Delete old then allocate new MeshBlocks, Geometry, and Coordinates (latter includes
+  // masks in GR). Geometry must be rebuilt here too since mb_size (block extents) change
+  // across a regrid even for coord=cartesian, the only case that reaches this path today
+  // (curvilinear+multilevel is fatally guarded at Mesh construction, see
+  // Mesh::ValidateCoordGeneral() -- Task A1/C3).
   delete (pm->pmb_pack->pmb);
+  delete (pm->pmb_pack->pgeom);
   delete (pm->pmb_pack->pcoord);
   pm->pmb_pack->AddMeshBlocks(pin);
+  pm->pmb_pack->AddGeometry(pin);
   pm->pmb_pack->AddCoordinates(pin);
   pm->pmb_pack->pmb->SetNeighbors(pm->ptree, pm->rank_eachmb);
 

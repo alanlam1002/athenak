@@ -14,6 +14,7 @@
 
 #include "athena.hpp"
 #include "eos/eos.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "plm.hpp"    // PLM()
 #include "ppm.hpp"    // PPM4(), PPMX()
 #include "wenoz.hpp"  // WENOZ()
@@ -39,7 +40,7 @@
 //! constexpr-if on the template parameter, so no per-cell branch survives on the device.
 template <ReconstructionMethod recon, int ivx>
 KOKKOS_INLINE_FUNCTION
-void ReconCellT(const EOS_Data &eos, const bool apply_floors,
+void ReconCellT(const EOS_Data &eos, const GeomData &geom, const bool apply_floors,
                 const int m, const int n, const int k, const int j, const int i,
                 const DvceArray5D<Real> &q,
                 const DvceArray5D<Real> &wl,
@@ -57,24 +58,57 @@ void ReconCellT(const EOS_Data &eos, const bool apply_floors,
     ql_val = q(m, n, k, j, i);
     qr_val = q(m, n, k, j, i);
   } else if constexpr (recon == ReconstructionMethod::plm) {
+    // centroid and face positions along the reconstruction direction, selected at
+    // COMPILE time (same mechanism as di/dj/dk above -- no runtime branch survives)
+    Real x_im1, x_i, x_ip1, xf_i, xf_ip1;
+    if constexpr (ivx == IVX) {
+      x_im1 = geom.x1v(m,i-1); x_i = geom.x1v(m,i); x_ip1 = geom.x1v(m,i+1);
+      xf_i  = geom.xf1(m,i);   xf_ip1 = geom.xf1(m,i+1);
+    } else if constexpr (ivx == IVY) {
+      x_im1 = geom.x2v(m,j-1); x_i = geom.x2v(m,j); x_ip1 = geom.x2v(m,j+1);
+      xf_i  = geom.xf2(m,j);   xf_ip1 = geom.xf2(m,j+1);
+    } else {
+      x_im1 = geom.x3v(m,k-1); x_i = geom.x3v(m,k); x_ip1 = geom.x3v(m,k+1);
+      xf_i  = geom.xf3(m,k);   xf_ip1 = geom.xf3(m,k+1);
+    }
     PLM(q(m, n, k - dk, j - dj, i - di),
         q(m, n, k,      j,      i),
         q(m, n, k + dk, j + dj, i + di),
+        x_im1, x_i, x_ip1, xf_i, xf_ip1,
         ql_val, qr_val);
   } else if constexpr (recon == ReconstructionMethod::ppm4) {
-    PPM4(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
-         q(m, n, k -   dk, j -   dj, i -   di),
-         q(m, n, k,        j,        i),
-         q(m, n, k +   dk, j +   dj, i +   di),
-         q(m, n, k + 2*dk, j + 2*dj, i + 2*di),
-         ql_val, qr_val);
+    // x1 uses the position-dependent curvilinear coefficients (Task B7); x2/x3 keep the
+    // old flat/uniform overload (curvilinear PPM generalization is scoped to x1 only --
+    // see mesh_geometry.hpp doc comment on the ppm_c*i/ppm_h*i fields).
+    if constexpr (ivx == IVX) {
+      PPM4(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+           q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+           geom.ppm_c1i(m,i),   geom.ppm_c2i(m,i),   geom.ppm_c3i(m,i),   geom.ppm_c4i(m,i),
+           geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1), geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+           geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+    } else {
+      PPM4(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
+           q(m, n, k -   dk, j -   dj, i -   di),
+           q(m, n, k,        j,        i),
+           q(m, n, k +   dk, j +   dj, i +   di),
+           q(m, n, k + 2*dk, j + 2*dj, i + 2*di),
+           ql_val, qr_val);
+    }
   } else if constexpr (recon == ReconstructionMethod::ppmx) {
-    PPMX(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
-         q(m, n, k -   dk, j -   dj, i -   di),
-         q(m, n, k,        j,        i),
-         q(m, n, k +   dk, j +   dj, i +   di),
-         q(m, n, k + 2*dk, j + 2*dj, i + 2*di),
-         ql_val, qr_val);
+    if constexpr (ivx == IVX) {
+      PPMX(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+           q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+           geom.ppm_c1i(m,i),   geom.ppm_c2i(m,i),   geom.ppm_c3i(m,i),   geom.ppm_c4i(m,i),
+           geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1), geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+           geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+    } else {
+      PPMX(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
+           q(m, n, k -   dk, j -   dj, i -   di),
+           q(m, n, k,        j,        i),
+           q(m, n, k +   dk, j +   dj, i +   di),
+           q(m, n, k + 2*dk, j + 2*dj, i + 2*di),
+           ql_val, qr_val);
+    }
     if (apply_floors) {
       if (n == IDN) { ql_val = fmax(ql_val, dfloor); qr_val = fmax(qr_val, dfloor); }
       if (eos.is_ideal && n == IEN) {
@@ -134,7 +168,7 @@ void ReconCellT(const EOS_Data &eos, const bool apply_floors,
 template <int ivx>
 inline void ReconDispatch(ReconstructionMethod recon, const char *name, int nmb1,
     int kl, int ku, int jl, int ju, int il, int iu,
-    const EOS_Data &eos, bool apply_floors, int nvars,
+    const EOS_Data &eos, const GeomData &geom, bool apply_floors, int nvars,
     const DvceArray5D<Real> &q,
     const DvceArray5D<Real> &ql, const DvceArray5D<Real> &qr) {
   switch (recon) {
@@ -142,35 +176,35 @@ inline void ReconDispatch(ReconstructionMethod recon, const char *name, int nmb1
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::plm, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
     case ReconstructionMethod::ppm4:
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::ppm4, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
     case ReconstructionMethod::ppmx:
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::ppmx, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
     case ReconstructionMethod::wenoz:
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::wenoz, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
     case ReconstructionMethod::teno:
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::teno, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
     case ReconstructionMethod::dc:
@@ -178,7 +212,7 @@ inline void ReconDispatch(ReconstructionMethod recon, const char *name, int nmb1
       par_for(name, DevExeSpace(), 0, nmb1, 0, nvars-1, kl, ku, jl, ju, il, iu,
         KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
           ReconCellT<ReconstructionMethod::dc, ivx>(
-              eos, apply_floors, m, n, k, j, i, q, ql, qr);
+              eos, geom, apply_floors, m, n, k, j, i, q, ql, qr);
         });
       break;
   }

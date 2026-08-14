@@ -17,6 +17,7 @@
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/coordinates.hpp"
+#include "coordinates/geometric_srcterms.hpp"
 #include "eos/eos.hpp"
 #include "diffusion/viscosity.hpp"
 #include "diffusion/resistivity.hpp"
@@ -266,6 +267,9 @@ TaskStatus MHD::MHDSrcTerms(Driver *pdrive, int stage) {
     pmy_pack->pcoord->CoordSrcTerms(w0, bcc0, peos->eos_data, beta_dt, u0);
   } else if (pmy_pack->pcoord->is_dynamical_relativistic) {
     pmy_pack->pdyngr->AddCoordTerms(w0, bcc0, beta_dt, u0, pmy_pack->pmesh->mb_indcs.ng);
+  } else {
+    // Newtonian curvilinear geometric source terms (Task C1/C2); no-op for cartesian.
+    AddCoordGeomSrcTermsMHD(pmy_pack, w0, bcc0, peos->eos_data, beta_dt, u0, uflx);
   }
 
   // Add user source terms

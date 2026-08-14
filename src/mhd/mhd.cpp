@@ -242,6 +242,17 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
       } else if (xorder.compare("teno") == 0) {
         recon_method = ReconstructionMethod::teno;
       }
+      // Task B7: WENOZ/TENO have not been generalized to non-uniform/curvilinear grid
+      // spacing (unlike PLM/PPM4/PPMX); a silent uniform-spacing assumption would give
+      // wrong (not just less-accurate) results, so fatal here rather than fail quietly.
+      if ((recon_method == ReconstructionMethod::wenoz ||
+           recon_method == ReconstructionMethod::teno) &&
+          pmy_pack->pmesh->coord_general != CoordinateGeneral::cartesian) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << xorder << " reconstruction is not yet generalized to "
+          << "non-Cartesian coordinates; use plm, ppm4, or ppmx instead." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
     } else {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "<mhd>/recon = '" << xorder << "' not implemented"

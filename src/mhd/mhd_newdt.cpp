@@ -46,6 +46,7 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
   auto &w0_ = w0;
   auto &eos = pmy_pack->pmhd->peos->eos_data;
   auto &mbsize = pmy_pack->pmb->mb_size;
+  auto &geom = pmy_pack->pgeom->geom_data;
   auto &is_special_relativistic_ = pmy_pack->pcoord->is_special_relativistic;
   auto &is_general_relativistic_ = pmy_pack->pcoord->is_general_relativistic;
   auto &is_dynamical_relativistic_ = pmy_pack->pcoord->is_dynamical_relativistic;
@@ -66,8 +67,8 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
       j += js;
 
       min_dt1 = fmin((mbsize.d_view(m).dx1/fabs(w0_(m,IVX,k,j,i))), min_dt1);
-      min_dt2 = fmin((mbsize.d_view(m).dx2/fabs(w0_(m,IVY,k,j,i))), min_dt2);
-      min_dt3 = fmin((mbsize.d_view(m).dx3/fabs(w0_(m,IVZ,k,j,i))), min_dt3);
+      min_dt2 = fmin((geom.CenterWidth2(m,k,j,i)/fabs(w0_(m,IVY,k,j,i))), min_dt2);
+      min_dt3 = fmin((geom.CenterWidth3(m,k,j,i)/fabs(w0_(m,IVZ,k,j,i))), min_dt3);
     }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
   } else {
     // find smallest dx/(v +/- Cf) in each direction for mhd problems
@@ -145,8 +146,8 @@ TaskStatus MHD::NewTimeStep(Driver *pdriver, int stage) {
       }
 
       min_dt1 = fmin((mbsize.d_view(m).dx1/max_dv1), min_dt1);
-      min_dt2 = fmin((mbsize.d_view(m).dx2/max_dv2), min_dt2);
-      min_dt3 = fmin((mbsize.d_view(m).dx3/max_dv3), min_dt3);
+      min_dt2 = fmin((geom.CenterWidth2(m,k,j,i)/max_dv2), min_dt2);
+      min_dt3 = fmin((geom.CenterWidth3(m,k,j,i)/max_dv3), min_dt3);
     }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2),Kokkos::Min<Real>(dt3));
   }
 

@@ -17,6 +17,7 @@
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates/coordinates.hpp"
+#include "coordinates/geometric_srcterms.hpp"
 #include "eos/eos.hpp"
 #include "diffusion/viscosity.hpp"
 #include "diffusion/conduction.hpp"
@@ -246,6 +247,9 @@ TaskStatus Hydro::HydroSrcTerms(Driver *pdrive, int stage) {
   // Add coordinate source terms in GR.  Again, must be computed with only primitives.
   if (pmy_pack->pcoord->is_general_relativistic) {
     pmy_pack->pcoord->CoordSrcTerms(w0, peos->eos_data, beta_dt, u0);
+  } else {
+    // Newtonian curvilinear geometric source terms (Task C1/C2); no-op for cartesian.
+    AddCoordGeomSrcTermsHydro(pmy_pack, w0, peos->eos_data, beta_dt, u0, uflx);
   }
 
   // Add user source terms

@@ -40,11 +40,15 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
   auto flx1 = uflx.x1f;
   auto flx2 = uflx.x2f;
   auto flx3 = uflx.x3f;
-  auto &mbsize = pmy_pack->pmb->mb_size;
+  auto &geom = pmy_pack->pgeom->geom_data;
 
   // hierarchical parallel loop that updates conserved variables to intermediate step
   // using weights and fractional time step appropriate to stages of time-integrator used
   // Vector inner loop used for good performance on cpus
+  //
+  // Generic area-weighted/volume-normalized divergence -- see the identical rewrite (and
+  // its rationale) in src/hydro/hydro_update.cpp for the full derivation. Reduces exactly
+  // to the previous uniform-Cartesian formula for coord=cartesian.
   int scr_level = 0;
   size_t scr_size = ScrArray1D<Real>::shmem_size(ncells1);
 
@@ -52,32 +56,36 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
   KOKKOS_LAMBDA(TeamMember_t member, const int m, const int n, const int k, const int j) {
     ScrArray1D<Real> divf(member.team_scratch(scr_level), ncells1);
 
-    // compute dF1/dx1
+    // compute d(A1*F1)
     par_for_inner(member, is, ie, [&](const int i) {
-      divf(i) = (flx1(m,n,k,j,i+1) - flx1(m,n,k,j,i))/mbsize.d_view(m).dx1;
+      divf(i) = geom.Area1(m,k,j,i+1)*flx1(m,n,k,j,i+1)
+              - geom.Area1(m,k,j,i)  *flx1(m,n,k,j,i);
     });
     member.team_barrier();
 
-    // Add dF2/dx2
+    // Add d(A2*F2)
     // Fluxes must be summed in pairs to symmetrize round-off error in each dir
     if (multi_d) {
       par_for_inner(member, is, ie, [&](const int i) {
-        divf(i) += (flx2(m,n,k,j+1,i) - flx2(m,n,k,j,i))/mbsize.d_view(m).dx2;
+        divf(i) += geom.Area2(m,k,j+1,i)*flx2(m,n,k,j+1,i)
+                 - geom.Area2(m,k,j,i)  *flx2(m,n,k,j,i);
       });
       member.team_barrier();
     }
 
-    // Add dF3/dx3
+    // Add d(A3*F3)
     // Fluxes must be summed in pairs to symmetrize round-off error in each dir
     if (three_d) {
       par_for_inner(member, is, ie, [&](const int i) {
-        divf(i) += (flx3(m,n,k+1,j,i) - flx3(m,n,k,j,i))/mbsize.d_view(m).dx3;
+        divf(i) += geom.Area3(m,k+1,j,i)*flx3(m,n,k+1,j,i)
+                 - geom.Area3(m,k,j,i)  *flx3(m,n,k,j,i);
       });
       member.team_barrier();
     }
 
     par_for_inner(member, is, ie, [&](const int i) {
-      u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i) - beta_dt*divf(i);
+      u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i)
+                     - beta_dt*divf(i)/geom.Vol(m,k,j,i);
     });
   });
   return TaskStatus::complete;

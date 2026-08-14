@@ -107,7 +107,7 @@ void HistoryOutput::LoadHydroHistoryData(HistoryData *pdata, Mesh *pm) {
 
   // capture class variables for kernel
   auto &u0_ = pm->pmb_pack->phydro->u0;
-  auto &size = pm->pmb_pack->pmb->mb_size;
+  auto &geom = pm->pmb_pack->pgeom->geom_data;
   int &nhist_ = pdata->nhist;
 
   // loop over all MeshBlocks in this pack
@@ -129,7 +129,7 @@ void HistoryOutput::LoadHydroHistoryData(HistoryData *pdata, Mesh *pm) {
     k += ks;
     j += js;
 
-    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    Real vol = geom.Vol(m,k,j,i);
 
     // Hydro conserved variables:
     array_sum::GlobalSum hvars;
@@ -308,7 +308,7 @@ void HistoryOutput::LoadMHDHistoryData(HistoryData *pdata, Mesh *pm) {
   auto &bx1f = pm->pmb_pack->pmhd->b0.x1f;
   auto &bx2f = pm->pmb_pack->pmhd->b0.x2f;
   auto &bx3f = pm->pmb_pack->pmhd->b0.x3f;
-  auto &size = pm->pmb_pack->pmb->mb_size;
+  auto &geom = pm->pmb_pack->pgeom->geom_data;
   int &nhist_ = pdata->nhist;
 
   // loop over all MeshBlocks in this pack
@@ -330,7 +330,7 @@ void HistoryOutput::LoadMHDHistoryData(HistoryData *pdata, Mesh *pm) {
     k += ks;
     j += js;
 
-    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    Real vol = geom.Vol(m,k,j,i);
 
     // MHD conserved variables:
     array_sum::GlobalSum hvars;

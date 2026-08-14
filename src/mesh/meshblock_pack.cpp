@@ -71,6 +71,7 @@ MeshBlockPack::~MeshBlockPack() {
   if (pmhd   != nullptr) {delete pmhd;}
   if (phydro != nullptr) {delete phydro;}
   if (punit  != nullptr) {delete punit;}
+  delete pgeom;
   delete pcoord;
   delete pmb;
 }
@@ -92,6 +93,18 @@ void MeshBlockPack::AddMeshBlocks(ParameterInput *pin) {
 
 void MeshBlockPack::AddCoordinates(ParameterInput *pin) {
   pcoord = new Coordinates(pin, this);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn MeshBlockPack::AddGeometry(ParameterInput *pin)
+//! \brief Wrapper function for calling MeshGeometry constructor inside MeshBlockPack.
+//! Must be called AFTER AddMeshBlocks() (needs mb_size to already be populated) and
+//! BEFORE AddPhysics() (physics modules read pgeom during setup, same ordering
+//! requirement as AddCoordinates() above). Deliberately independent of pcoord/
+//! Coordinates -- see mesh_geometry.hpp for the rationale.
+
+void MeshBlockPack::AddGeometry(ParameterInput *pin) {
+  pgeom = new MeshGeometry(pin, this);
 }
 
 //----------------------------------------------------------------------------------------

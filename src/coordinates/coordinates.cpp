@@ -41,6 +41,19 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
               << "Cannot specify both SR and GR at same time" << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  // Curvilinear coordinates are a pure Newtonian/SR grid construct (Task G1 adds SR);
+  // GR and dynamical-GR (z4c/adm) both assume a Cartesian coordinate chart throughout
+  // (the metric/ADM machinery, and z4c itself, are Cartesian-only by hard project
+  // requirement -- see the plan's "Not touched" section), so guard against silently
+  // combining either with coord_general != cartesian rather than letting the curvilinear
+  // geometry factors get used inconsistently with the (Cartesian-only) metric machinery.
+  if ((is_general_relativistic || is_dynamical_relativistic) &&
+      ppack->pmesh->coord_general != CoordinateGeneral::cartesian) {
+    std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
+              << "GR and dynamical-GR (z4c/adm) require coord=cartesian; curvilinear "
+              << "coordinates are not supported with general relativity" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Read properties of metric and excision from input file for GR.
   if (is_general_relativistic || is_dynamical_relativistic) {

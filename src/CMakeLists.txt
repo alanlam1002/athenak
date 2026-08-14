@@ -30,6 +30,12 @@ add_executable(
         coordinates/adm.cpp
         coordinates/coordinates.cpp
         coordinates/excision.cpp
+        coordinates/mesh_geometry.cpp
+        coordinates/geometry_cartesian.cpp
+        coordinates/geometry_cylindrical.cpp
+        coordinates/geometry_cylindrical_axisym.cpp
+        coordinates/geometry_spherical.cpp
+        coordinates/geometric_srcterms.cpp
 
         diffusion/ambipolar.cpp
         diffusion/conduction.cpp

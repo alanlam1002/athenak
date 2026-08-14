@@ -80,6 +80,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
   auto &size_  = pmy_pack->pmb->mb_size;
   auto &coord_ = pmy_pack->pcoord->coord_data;
+  auto &geom_  = pmy_pack->pgeom->geom_data;  // always cartesian for dyn-GR (z4c is
+                                               // Cartesian-only); geometry-neutral here
   auto &w0_    = pmy_pack->pmhd->w0;
   auto &bcc0_  = pmy_pack->pmhd->bcc0;
   auto &eos_   = pmy_pack->pmhd->peos->eos_data;   // EOS_Data (recon floors; unused here)
@@ -116,10 +118,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
     // Reconstruct W over cells i in [il-1, iu], variables n in [0, nvars-1]
     ReconDispatch<IVX>(recon_method_, "dyngrflux_x1_recon_w", nmb1,
-        kl, ku, jl, ju, il-1, iu, eos_, false, nvars, w0_, wl_, wr_);
+        kl, ku, jl, ju, il-1, iu, eos_, geom_, false, nvars, w0_, wl_, wr_);
     // Reconstruct Bcc over cells i in [il-1, iu], components n in [0, 2]
     ReconDispatch<IVX>(recon_method_, "dyngrflux_x1_recon_b", nmb1,
-        kl, ku, jl, ju, il-1, iu, eos_, false, 3,     bcc0_, bl_, br_);
+        kl, ku, jl, ju, il-1, iu, eos_, geom_, false, 3,     bcc0_, bl_, br_);
 
     // Riemann solve over faces i in [il, iu]
     par_for("dyngrflux_x1_rsolve", DevExeSpace(),
@@ -168,10 +170,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
     // Reconstruct W over cells j in [jl-1, ju], i in [is-1, ie+1], n in [0, nvars-1]
     ReconDispatch<IVY>(recon_method_, "dyngrflux_x2_recon_w", nmb1,
-        kl, ku, jl-1, ju, is-1, ie+1, eos_, false, nvars, w0_, wl_, wr_);
+        kl, ku, jl-1, ju, is-1, ie+1, eos_, geom_, false, nvars, w0_, wl_, wr_);
     // Reconstruct Bcc over cells j in [jl-1, ju], i in [is-1, ie+1], n in [0, 2]
     ReconDispatch<IVY>(recon_method_, "dyngrflux_x2_recon_b", nmb1,
-        kl, ku, jl-1, ju, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+        kl, ku, jl-1, ju, is-1, ie+1, eos_, geom_, false, 3,     bcc0_, bl_, br_);
 
     // Riemann solve over faces j in [jl, ju], i in [is-1, ie+1]
     par_for("dyngrflux_x2_rsolve", DevExeSpace(),
@@ -217,10 +219,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Reconstruct W over cells k in [kl-1, ku], j in [js-1, je+1], i in [is-1, ie+1],
     // variables n in [0, nvars-1]
     ReconDispatch<IVZ>(recon_method_, "dyngrflux_x3_recon_w", nmb1,
-        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, nvars, w0_, wl_, wr_);
+        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, geom_, false, nvars, w0_, wl_, wr_);
     // Reconstruct Bcc over the same cells, components n in [0, 2]
     ReconDispatch<IVZ>(recon_method_, "dyngrflux_x3_recon_b", nmb1,
-        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, geom_, false, 3,     bcc0_, bl_, br_);
 
     // Riemann solve over faces k in [kl, ku], j in [js-1, je+1], i in [is-1, ie+1]
     par_for("dyngrflux_x3_rsolve", DevExeSpace(),

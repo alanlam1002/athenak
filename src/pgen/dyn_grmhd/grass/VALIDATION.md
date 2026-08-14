@@ -526,9 +526,72 @@ this doc's own §0, `dipole_bmax_gauss` — targeting `B̄_R~1e15-1e16 G` for
 the web's internal tor/pol split. The discriminating measurement (doc §7)
 is the **m=0 split**: FFT `B_R(theta,phi)` in `phi` on spherical shells and
 compare `m=0` power to summed `m!=0` power (`B̄_R/B̃_R`, must exceed
-`~1e-2`). **This diagnostic does not exist yet** anywhere in
-`grass_web_*/plot/` — building it is the natural next step before scanning
-`dipole_bmax_gauss` in earnest.
+`~1e-2`).
+
+### Follow-up (2026-08-14, cont'd): the `m=0` split diagnostic is now built
+
+**No C++ needed.** `file_type=sph` (`src/outputs/spherical_surface.cpp`,
+`SphericalSurfaceOutput`) already interpolates any standard output variable
+onto one or more spherical shells (`radius`/`radii`/`nradii`+`r_min`/`r_max`,
+`r_spacing=linear|log`) and writes a VTK `STRUCTURED_GRID` with `theta`/`phi`
+at Gauss-Legendre-in-`theta` x uniform-in-`phi` points (`ntheta`, `nphi=
+2*ntheta`), plus a per-point quadrature `weights` field. `variable=
+mhd_w_bcc` works unmodified via the same shared `BaseTypeOutput` variable
+machinery every other output type already uses, giving `bcc1/bcc2/bcc3` on
+each shell.
+
+**Python side** (`grass_web_rhohi2e3_hires/plot/`):
+- `athplot/load_sph_vtk.py`'s `SphericalData` was extended to handle
+  multi-radius `sph` files (it previously errored on anything but a single
+  radius) — fields now come back shaped `(nphi,ntheta,nradii)` with a new
+  `field_at_radius(name, ir)` accessor; `theta`/`phi` stay 2D since they
+  don't depend on radius. Scoped to this run directory's own copy of the
+  library only.
+- `m0_split.py` (new): per shell, projects `bcc{1,2,3}` to `B_R(theta,phi)`
+  via `sph_integrate.calc_ur` (reused as-is), FFTs over `phi` at each
+  `theta` ring, splits `m=0` power (`c0 = rfft(...)[0].real`, the genuine
+  phi-average) from the total `<B_R^2>_phi` computed directly (no manual
+  Parseval/Nyquist bookkeeping), then combines over `theta` using the VTK
+  file's own `weights` field (not re-derived from `theta` spacing) to get a
+  single `B̄_R_rms(r)/B̃_R_rms(r)` and `m=0` power fraction per shell.
+
+**First measurement** (settled config above, `dipole_bmax_gauss=1e16 G`,
+`dipole_confine=0`, 12 shells log-spaced `r=2` to `30`, `ntheta=32`):
+
+| `r` | `B̄_R,rms` | `B̃_R,rms` | `B̄_R/B̃_R` | `m=0` frac |
+|---|---|---|---|---|
+| `2.00` | `5.08e-05` | `1.52e-07` | `333` | `1.0000` |
+| `2.56` | `4.23e-05` | `7.21e-07` | `58.7` | `0.9997` |
+| `3.27` | `3.23e-05` | `1.92e-06` | `16.8` | `0.9965` |
+| `4.19` | `2.23e-05` | `3.23e-06` | `6.91` | `0.9795` |
+| `5.35` | `1.39e-05` | `4.47e-09` | `3119` | `1.0000` |
+| `6.85`-`30.0` | — | — | `3000-14000` | `1.0000` |
+
+(Confinement shell for this config: `R_cyl in [1.62,4.77]`; `dipole_r0=5.0`.)
+
+**Unexpected finding: the dipole's axisymmetric field dominates `B_R`
+almost everywhere, not just outside the web's shell.** The naive
+expectation was a *low* ratio inside the shell (web's random tangle
+providing most of the non-axisymmetric power) rising to a high ratio only
+once the shell ends (`r > 4.77`) and only the unconfined dipole remains.
+Instead the ratio is `>6.9` at every radius sampled, including `r=4.19`
+(`82%` of the way from the shell's inner edge `1.62` to its outer edge
+`4.77` — not some fringe of the sampling). Both components are confirmed correctly
+normalized to the *same* `1e16 G` peak
+(`out_253191.out`: `web ... scale factor=3.77e-08 -> target reached`,
+`dipole ... scale factor=1.00126 -> target reached`), so this isn't a
+normalization bug — it's the geometric consequence flagged (but not
+quantified) during the dropped toroidal-boost design: the web's amplitude
+is fixed by its own rare peak (typical of a `~32`-mode random superposition),
+so its RMS away from that peak is much smaller than its peak, while the
+dipole's field is smooth and stays close to its own peak over a wide radius
+range. **Practical implication for the dipole scan:** since the web's
+non-axisymmetric contribution to `B_R` is subdominant even inside its own
+shell at this `web_bmax_gauss`, the achieved `B̄_R/B̃_R` at realistic
+`dipole_bmax_gauss` values will likely clear the `~1e-2` threshold with
+enormous margin — the discriminating regime to actually probe is *lower*
+`dipole_bmax_gauss` (well below `1e16 G`, where the web's tangle can
+plausibly compete), not higher.
 
 ## Known gaps (explicit scope decisions, not oversights)
 

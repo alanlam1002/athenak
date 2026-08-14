@@ -569,6 +569,16 @@ each shell.
 
 (Confinement shell for this config: `R_cyl in [1.62,4.77]`; `dipole_r0=5.0`.)
 
+> **CORRECTION (2026-08-14, same day): the last two rows of that table are
+> noise, not signal — see the "reanalysis" follow-up below.** At `r >= 5.35`
+> the density is exactly the atmosphere floor, the web is identically zero,
+> and only the exactly-axisymmetric dipole remains, so `B̃_R` there is pure
+> interpolation truncation error. The quoted `3000-14000` are
+> signal-to-noise, not a physical measurement. Only `r = 2.56, 3.27, 4.19`
+> carry real signal. The "unexpected finding" below survives in weakened
+> form (the dipole does dominate `B_R` inside the shell) but its stated
+> reach ("almost everywhere") was overstated.
+
 **Unexpected finding: the dipole's axisymmetric field dominates `B_R`
 almost everywhere, not just outside the web's shell.** The naive
 expectation was a *low* ratio inside the shell (web's random tangle
@@ -592,6 +602,167 @@ shell at this `web_bmax_gauss`, the achieved `B̄_R/B̃_R` at realistic
 enormous margin — the discriminating regime to actually probe is *lower*
 `dipole_bmax_gauss` (well below `1e16 G`, where the web's tangle can
 plausibly compete), not higher.
+
+> **SUPERSEDED — see the reanalysis follow-up immediately below.** The
+> "scan lower `dipole_bmax_gauss`" recommendation above only considered the
+> `m=0` split constraint. Checking the *other* constraint doc §0 actually
+> imposes (`t_A` in the `10-100 ms` window) reverses this: `1e16 G` is
+> already close to the upper edge of the usable range, and the m=0
+> constraint has ~700x more margin than the Alfven-time constraint does —
+> it was never the binding one.
+
+### Follow-up (2026-08-14, cont'd): reanalysis of the `m=0` split
+measurement — the noise floor, the `ntheta` margin, and a proper
+`rho_lo`/`rho_hi` criterion
+
+Revisiting the first measurement above turned up one overstatement (already
+corrected inline), one setup risk that turned out **not** to be a bug, and
+two substantive findings about how this star's ID actually behaves that
+change the recommended config.
+
+**1. `ntheta=32` has zero spectral margin, but is not aliasing (tested, not
+assumed).** Raising `web_kmin/web_kmax` to `6.0/7.5` pushes the web's
+azimuthal content to `m ~ k*R_cyl`, naively `~12-36` across the shell —
+uncomfortably close to `ntheta=32`'s Nyquist limit (`nphi=2*ntheta=64`,
+`m_max=32`). Reran the same snapshot at `ntheta=96` (`m_max=96`) and
+compared:
+
+| `r` | `B̄_R/B̃_R` (`ntheta=32`) | (`ntheta=96`) | change |
+|---|---|---|---|
+| `2.00` | `333` | `223` | `-33%` |
+| `2.56` | `58.7` | `53.1` | `-9.5%` |
+| `3.27` | `16.8` | `16.4` | `-2.6%` |
+| `4.19` | `6.91` | `6.75` | `-2.3%` |
+
+The direct azimuthal power spectrum of `B_R` at `ntheta=96` shows why: **100%
+of the web's non-`m0` power in `B_R` sits below `m=32`** at every shell
+tested (unlike `|B|`'s own spectrum, which genuinely peaks at `m~13-19` — the
+naive `k*R_cyl` estimate overstated `B_R`'s content specifically, since
+isotropic modes project onto `phi_hat` with a geometry-dependent factor <1,
+and the radial field component is systematically redder than `|B|` for a
+solenoidal random field). So `ntheta=32` was capturing essentially all of
+the real signal — the `2-10%` shifts above are that shell's own answer
+changing slightly with more resolution, not aliased power appearing from
+nowhere. **Conclusion: not a bug, but no headroom.** `ntheta=64` or higher
+is the safer default going forward, especially if `web_kmax` is raised
+again. (The `-33%` at `r=2.00` is unrelated to `ntheta` — see point 2.)
+
+**2. The large-`r` "signal" in the first measurement was noise —
+confirmed, and the mechanism is now checked quantitatively, not just
+argued.** Per-shell density range and the finite-difference truncation
+scale `(dx/r)^2` (interpolation error on a fixed-resolution Cartesian grid
+scales this way):
+
+| `r` | `rho` range on shell | `B̃_R/B̄_R` | `(dx/r)^2` |
+|---|---|---|---|
+| `2.00` | `1.05e-3` .. `1.71e-3` | `3.0e-3` | `1.9e-3` |
+| `2.56` | `5.2e-4` .. `1.39e-3` | `1.7e-2` | `1.2e-3` |
+| `3.27` | `5.6e-10` .. `1.06e-3` | `6.0e-2` | `7.2e-4` |
+| `4.19` | `2.8e-15` .. `6.1e-4` | `1.4e-1` | `4.4e-4` |
+| `>=5.35` | `2.8e-15` (atmosphere floor) everywhere | `7e-5` .. `3.4e-4` | `1e-4` .. `3e-4` |
+
+At `r>=5.35` the shell is entirely outside the star (`rho` = the floor at
+every point), so the web contributes nothing there and only the
+exactly-axisymmetric, unconfined dipole remains — `B̃_R` at those radii is
+pure interpolation truncation, and it tracks `(dx/r)^2` to within a factor
+of ~2, the expected signature. **Practical fix for any future run of this
+diagnostic: restrict the shell sweep to radii where the shell is still
+substantially inside `[web_rho_lo, web_rho_hi]` (roughly `r <~ 4.3` for this
+star/shell), or treat any shell whose `rho` range touches the atmosphere
+floor as noise-dominated, not a measurement.**
+
+**3. Sphere-vs-oblate geometry mismatch, worth remembering when reading
+these radii.** The startup diagnostic (`dyngr_grass.cpp:396-399`) only
+prints the *equatorial* `R_cyl` shell (`[1.62,4.77]` for this config). The
+actual confinement region is an oblate shell in `(R_cyl,z)`, not a sphere in
+`r`, so a "spherical shell at `r=3.27`" already exits the star well before
+the pole even though `3.27` sits mid-shell at the equator. This is fine for
+what was measured (the relevant physics — `B_R` on shells the dipole
+actually threads — is legitimately spherical), but it means "`r`" in the
+table above is not directly comparable to the `R_cyl` numbers quoted
+elsewhere in this document for shell width.
+
+**4. The doc's own `rho_lo`/`rho_hi` placement rule ("span the region of
+largest `|d ln Omega/d ln R|`", sec 2.1) does not discriminate for this
+star — measured directly, not assumed.** Computed the full GR coordinate
+angular velocity `Omega = (alpha*v^phi - beta^phi)/R_cyl` (recovering the
+Lorentz factor `W` from `w0(IVX/IVY/IVZ) = W*v^i` via the ADM 3-metric,
+since frame dragging is not negligible this close to the core) from the
+`adm_xy`/`prim_xy` dumps:
+
+- `|Omega|` falls smoothly, `~0.145` at `R_cyl=0.25` to `~0.034` at
+  `R_cyl=4.6` (only a factor ~4 across the whole star).
+- `d ln|Omega|/d ln R_cyl` ranges only `0.44` to `0.73` across the entire
+  profile — no localized shear layer exists for this star. The current
+  shell (`R_cyl in [1.62,4.77]`) already spans `0.44-0.73` (mean `0.56`),
+  i.e. essentially the *whole* available range. On the doc's own stated
+  criterion, the current placement is therefore already adequate — there is
+  no sharper feature being missed.
+
+**5. The real, unenforced ceiling on `rho_hi` is topological, not the
+`rho_hi<=rho_max` check the code has.** The equatorial density profile is
+mildly **quasi-toroidal**: `rho(R_cyl=0) = 2.265e-3`, peaking *off-centre*
+at `2.483e-3` at `R_cyl=0.575` (vs. the 3D `rho_max=2.505e-3` printed at
+startup, which occurs off-equator). Scanning `rho_hi`:
+
+| `rho_hi` | region with `rho>rho_hi` | topology |
+|---|---|---|
+| `2.0e-3` (current) | `R_cyl in [0,1.53]` | simply connected (includes centre) — OK |
+| `2.2e-3` | `R_cyl in [0,1.23]` | simply connected — OK |
+| `2.30e-3` | `R_cyl in [0.25,1.07]` | **a torus, not a disk** — the web's inner exclusion region no longer includes the centre |
+
+Once `rho_hi` exceeds `rho(R_cyl=0)=2.265e-3`, the excluded (`rho>rho_hi`)
+region becomes an annulus rather than a disk, and the web's confinement
+shell — everything satisfying `rho_lo<rho<rho_hi` — **splits into two
+disconnected pieces** (a small torus around the density peak, plus the
+intended outer shell). `dyngr_grass.cpp:379`'s existing guard only checks
+`rho_hi<=rho_max` (`2.505e-3`), so the entire band
+`(2.265e-3, 2.505e-3)` — nearly a tenth of the way to `rho_max` from the
+peak — passes validation silently while actually fragmenting the shell.
+**This is a real gap, not yet fixed**: the guard should also reject
+`rho_hi` at or above the *equatorial on-axis* density, not just the global
+3D max. **Recommendation:** keep `web_rho_lo=1e-4`; `web_rho_hi` may safely
+go up to `~2.2e-3` (pulling the shell's inner edge from `1.53` to `1.23`,
+coupling more mass and slightly more `Omega` contrast) but should not
+approach `2.265e-3`.
+
+**6. Walking back the "scan lower `dipole_bmax_gauss`" recommendation
+above — checked against doc sec 0's *other* criterion, the Alfven time.**
+`t_A = R_cyl*sqrt(4*pi*rho)/B̄_R`, using the corrected (noise-floor-excluded)
+measurements:
+
+| `R_cyl` | `B̄_R` | `t_A` |
+|---|---|---|
+| `2.00` | `~1.7e15 G`-equivalent | `~28 ms` |
+| `3.27` | `~3.2e15 G`-equivalent | `~59 ms` |
+| `4.19` | `~4.2e15 G`-equivalent | `~80 ms` |
+
+All three sit squarely inside doc sec 0's target `t_A~10-100 ms` window at
+the *current* `dipole_bmax_gauss=1e16 G`. Since `t_A ~ 1/dipole_bmax_gauss`,
+lowering `dipole_bmax_gauss` — the earlier recommendation — pushes `t_A`
+*past* 100 ms (e.g. `~3e15 G` -> `t_A~195-267 ms`, outside a `~100 ms`
+run). Meanwhile the `m=0` split has enormous margin at `1e16 G`
+(measured ratios `6.9-59` vs. the `~1e-2` threshold — roughly `700-6000x`)
+and only becomes binding around `dipole_bmax_gauss~1.4e13 G`, three orders
+of magnitude below where the Alfven-time constraint already fails. **The
+Alfven-time window is the binding constraint, not the `m=0` split — the
+usable range for this star/shell is roughly `dipole_bmax_gauss in
+[8e15,1e16] G` for a `~100 ms` run, and the already-configured `1e16 G` is
+near-optimal, not something to lower.**
+
+**7. Aside, not acted on: this star's rotation profile technically
+violates doc sec 0's own MRI-absence assumption, but is protected by
+under-resolution, not by the profile itself.** Doc sec 0 asserts
+"`Omega=Omega(R_cyl)` with `dOmega/dR>0`, so the MRI is absent by
+construction." The measured profile has `|Omega|` *decreasing* outward
+everywhere sampled (point 4 above), i.e. `d(Omega^2)/dR<0` — MRI-unstable
+in principle, with a fastest growth time `~0.44 ms`.
+`lambda_MRI~2*pi*v_A/Omega` evaluates to roughly `0.04-0.17` at these radii,
+well below `dx_finest=0.088-0.176` depending on AMR level — i.e. the MRI is
+suppressed by grid under-resolution at current resolution, not by the
+rotation profile satisfying the doc's stated assumption. Not urgent (nothing
+currently resolves it), but worth remembering before ever refining this
+run's mesh near the core.
 
 ## Known gaps (explicit scope decisions, not oversights)
 

@@ -9,6 +9,7 @@
 // Athena++ headers
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "srcterms/srcterms.hpp"
 #include "driver/driver.hpp"
 #include "mhd.hpp"
@@ -16,9 +17,17 @@
 namespace mhd {
 //----------------------------------------------------------------------------------------
 //! \fn  void MHD::CT
-//  \brief Constrained Transport implementation of dB/dt = -Curl(E), where E=-(v X B)
-//  To be clear, the edge-centered variable 'efld' stores E = -(v X B).
-//  Temporal update uses multi-step SSP integrators, e.g. RK2, RK3
+//  \brief Constrained Transport implementation of dB/dt = -Curl(E), where E=-(v X B),
+//  written in area/edge-length-weighted Stokes form (Task D1):
+//    d(B1*Area1)/dt = -[e3*Len3]_{j+1} + [e3*Len3]_j + [e2*Len2]_{k+1} - [e2*Len2]_k
+//  (and cyclic for B2/B3), i.e. the discrete curl of E integrated around the four edges
+//  bounding each face, divided by that face's area. This is the exact generalization of
+//  the flat/uniform formula below (Area1=dx2*dx3, Len3=dx3, Len2=dx2, etc. reduce it
+//  back to the old dx2/dx3-division form exactly -- verified by hand for all three
+//  faces, see DEVELOPMENT.md Task D1 log) that only reads the SAME Area1/2/3, Len1/2/3
+//  accessors already used by the flux divergence (Task A3/A4) and CFL (Task B5)
+//  kernels -- no new GeomData fields needed. To be clear, the edge-centered variable
+//  'efld' stores E = -(v X B). Temporal update uses multi-step SSP integrators.
 
 TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -36,7 +45,7 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto e1 = efld.x1e;
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
-  auto &mbsize = pmy_pack->pmb->mb_size;
+  auto &geom = pmy_pack->pgeom->geom_data;
 
   //---- update B1 (only for 2D/3D problems)
   if (multi_d) {
@@ -44,10 +53,13 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
     auto bx1f_old = b1.x1f;
     par_for("CT-b1", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie+1,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real area1 = geom.Area1(m,k,j,i);
       bx1f(m,k,j,i) = gam0*bx1f(m,k,j,i) + gam1*bx1f_old(m,k,j,i);
-      bx1f(m,k,j,i) -= beta_dt*(e3(m,k,j+1,i) - e3(m,k,j,i))/mbsize.d_view(m).dx2;
+      bx1f(m,k,j,i) -= beta_dt*(geom.Len3(m,k,j+1,i)*e3(m,k,j+1,i)
+                                - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area1;
       if (three_d) {
-        bx1f(m,k,j,i) += beta_dt*(e2(m,k+1,j,i) - e2(m,k,j,i))/mbsize.d_view(m).dx3;
+        bx1f(m,k,j,i) += beta_dt*(geom.Len2(m,k+1,j,i)*e2(m,k+1,j,i)
+                                  - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area1;
       }
     });
   }
@@ -57,10 +69,13 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto bx2f_old = b1.x2f;
   par_for("CT-b2", DevExeSpace(), 0, nmb1, ks, ke, js, je+1, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real area2 = geom.Area2(m,k,j,i);
     bx2f(m,k,j,i) = gam0*bx2f(m,k,j,i) + gam1*bx2f_old(m,k,j,i);
-    bx2f(m,k,j,i) += beta_dt*(e3(m,k,j,i+1) - e3(m,k,j,i))/mbsize.d_view(m).dx1;
+    bx2f(m,k,j,i) += beta_dt*(geom.Len3(m,k,j,i+1)*e3(m,k,j,i+1)
+                              - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area2;
     if (three_d) {
-      bx2f(m,k,j,i) -= beta_dt*(e1(m,k+1,j,i) - e1(m,k,j,i))/mbsize.d_view(m).dx3;
+      bx2f(m,k,j,i) -= beta_dt*(geom.Len1(m,k+1,j,i)*e1(m,k+1,j,i)
+                                - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area2;
     }
   });
 
@@ -69,10 +84,13 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto bx3f_old = b1.x3f;
   par_for("CT-b3", DevExeSpace(), 0, nmb1, ks, ke+1, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real area3 = geom.Area3(m,k,j,i);
     bx3f(m,k,j,i) = gam0*bx3f(m,k,j,i) + gam1*bx3f_old(m,k,j,i);
-    bx3f(m,k,j,i) -= beta_dt*(e2(m,k,j,i+1) - e2(m,k,j,i))/mbsize.d_view(m).dx1;
+    bx3f(m,k,j,i) -= beta_dt*(geom.Len2(m,k,j,i+1)*e2(m,k,j,i+1)
+                              - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area3;
     if (multi_d) {
-      bx3f(m,k,j,i) += beta_dt*(e1(m,k,j+1,i) - e1(m,k,j,i))/mbsize.d_view(m).dx2;
+      bx3f(m,k,j,i) += beta_dt*(geom.Len1(m,k,j+1,i)*e1(m,k,j+1,i)
+                                - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area3;
     }
   });
 

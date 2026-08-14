@@ -15,6 +15,7 @@
 
 #include "parameter_input.hpp"
 #include "coordinates/coordinates.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "diffusion/parabolic_process.hpp"
 #include "driver/driver.hpp"
 #include "tasklist/task_list.hpp"
@@ -62,6 +63,8 @@ class MeshBlockPack {
 
   MeshBlock* pmb;         // MeshBlocks in this MeshBlockPack
   Coordinates* pcoord;
+  MeshGeometry* pgeom;    // grid geometry (face areas/volumes/edge lengths); distinct
+                          // from pcoord (GR/SR metric on a Cartesian background)
 
   // physics (controlled by AddPhysics() function in meshblock_pack.cpp)
   hydro::Hydro *phydro=nullptr;
@@ -90,6 +93,7 @@ class MeshBlockPack {
   void AddPhysics(ParameterInput *pin);
   void AddMeshBlocks(ParameterInput *pin);
   void AddCoordinates(ParameterInput *pin);
+  void AddGeometry(ParameterInput *pin);
   void RegisterParabolicProcess(parabolic::ParabolicProcessDescriptor process) {
     parabolic_processes.push_back(process);
   }

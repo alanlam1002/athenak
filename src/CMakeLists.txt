@@ -30,6 +30,12 @@ add_executable(
         coordinates/adm.cpp
         coordinates/coordinates.cpp
         coordinates/excision.cpp
+        coordinates/mesh_geometry.cpp
+        coordinates/geometry_cartesian.cpp
+        coordinates/geometry_cylindrical.cpp
+        coordinates/geometry_cylindrical_axisym.cpp
+        coordinates/geometry_spherical.cpp
+        coordinates/geometric_srcterms.cpp
 
         cyclic_zoom/cyclic_zoom.cpp
         cyclic_zoom/zoom_criteria.cpp

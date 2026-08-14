@@ -103,6 +103,7 @@ void Hydro::CalculateFluxes(Driver *pdriver, int stage) {
   auto &eos_ = peos->eos_data;
   auto &size_ = pmy_pack->pmb->mb_size;
   auto &coord_ = pmy_pack->pcoord->coord_data;
+  auto &geom_ = pmy_pack->pgeom->geom_data;
   auto &w0_ = w0;
   auto wl_ = wl3d;
   auto wr_ = wr3d;
@@ -113,7 +114,7 @@ void Hydro::CalculateFluxes(Driver *pdriver, int stage) {
     auto &flx1 = uflx.x1f;
     // Reconstruction over cells i in [il1-1, iu1], j in [jtl, jtu], k in [ktl, ktu]
     ReconDispatch<IVX>(recon_method_, "hflux_x1_recon", nmb1,
-        ktl, ktu, jtl, jtu, il1-1, iu1, eos_, true, nvars, w0_, wl_, wr_);
+        ktl, ktu, jtl, jtu, il1-1, iu1, eos_, geom_, true, nvars, w0_, wl_, wr_);
 
     // Riemann solve over faces i in [il1, iu1]
     par_for("hflux_x1_rsolve", DevExeSpace(),
@@ -153,7 +154,7 @@ void Hydro::CalculateFluxes(Driver *pdriver, int stage) {
     auto &flx2 = uflx.x2f;
     // Reconstruction over cells j in [jl2-1, ju2], i in [itl, itu], k in [ktl, ktu]
     ReconDispatch<IVY>(recon_method_, "hflux_x2_recon", nmb1,
-        ktl, ktu, jl2-1, ju2, itl, itu, eos_, true, nvars, w0_, wl_, wr_);
+        ktl, ktu, jl2-1, ju2, itl, itu, eos_, geom_, true, nvars, w0_, wl_, wr_);
 
     // Riemann solve over faces j in [jl2, ju2]
     par_for("hflux_x2_rsolve", DevExeSpace(),
@@ -192,7 +193,7 @@ void Hydro::CalculateFluxes(Driver *pdriver, int stage) {
     auto &flx3 = uflx.x3f;
     // Reconstruction over cells k in [kl3-1, ku3], j in [jtl, jtu], i in [itl, itu]
     ReconDispatch<IVZ>(recon_method_, "hflux_x3_recon", nmb1,
-        kl3-1, ku3, jtl, jtu, itl, itu, eos_, true, nvars, w0_, wl_, wr_);
+        kl3-1, ku3, jtl, jtu, itl, itu, eos_, geom_, true, nvars, w0_, wl_, wr_);
 
     // Riemann solve over faces k in [kl3, ku3]
     par_for("hflux_x3_rsolve", DevExeSpace(),

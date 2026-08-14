@@ -1058,16 +1058,23 @@ void BaseTypeOutput::ComputeDerivedVariable(std::string name, Mesh *pm) {
 
     auto dv = derived_var;
     auto b0 = pm->pmb_pack->pmhd->b0;
+    auto &geom = pm->pmb_pack->pgeom->geom_data;
     par_for("divb", DevExeSpace(), 0, (nmb-1), kl, ku, jl, ju, (is-ng), (ie+ng),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real divb = (b0.x1f(m,k,j,i+1) - b0.x1f(m,k,j,i))/size.d_view(m).dx1;
+      // area-weighted flux-form divergence (matches the flux-divergence kernels of
+      // Task A3/A4 and the CT curl of Task D1 exactly -- reduces to the old flat
+      // dx1/dx2/dx3 formula for cartesian, since Area1=dx2*dx3, Vol=dx1*dx2*dx3, etc.
+      Real divb = (geom.Area1(m,k,j,i+1)*b0.x1f(m,k,j,i+1)
+                   - geom.Area1(m,k,j,i)*b0.x1f(m,k,j,i));
       if (multi_d) {
-        divb += (b0.x2f(m,k,j+1,i) - b0.x2f(m,k,j,i))/size.d_view(m).dx2;
+        divb += (geom.Area2(m,k,j+1,i)*b0.x2f(m,k,j+1,i)
+                 - geom.Area2(m,k,j,i)*b0.x2f(m,k,j,i));
       }
       if (three_d) {
-        divb += (b0.x3f(m,k+1,j,i) - b0.x3f(m,k,j,i))/size.d_view(m).dx3;
+        divb += (geom.Area3(m,k+1,j,i)*b0.x3f(m,k+1,j,i)
+                 - geom.Area3(m,k,j,i)*b0.x3f(m,k,j,i));
       }
-      dv(m,i_dv,k,j,i) = divb;
+      dv(m,i_dv,k,j,i) = divb/geom.Vol(m,k,j,i);
     });
     i_dv += 1; // increment derived variable index
   }

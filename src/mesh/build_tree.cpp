@@ -265,6 +265,7 @@ void Mesh::BuildTreeFromScratch(ParameterInput *pin) {
   pmb_pack = new MeshBlockPack(this, mbp_gids, mbp_gide);
   nmb_packs_thisrank = 1;
   pmb_pack->AddMeshBlocks(pin);
+  pmb_pack->AddGeometry(pin);
   pmb_pack->pmb->SetNeighbors(ptree, rank_eachmb);
 
   // Fix maximum number of MeshBlocks per rank with AMR
@@ -369,6 +370,12 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
   std::memcpy(&ncycle, &(headerdata[hdos]), sizeof(int));
   delete [] headerdata;
 
+  // coord_general is not part of the restart binary payload (it always comes from
+  // ParameterInput -- see mesh.hpp's ValidateCoordGeneral() docs); re-validate it against
+  // mesh_size/mesh_indcs now that both have just been overwritten from the restart file,
+  // in case a -i override left coord_general inconsistent with the actual restart data.
+  ValidateCoordGeneral();
+
   // calculate the number of MeshBlocks at root level in each dir
   nmb_rootx1 = mesh_indcs.nx1/mb_indcs.nx1;
   nmb_rootx2 = mesh_indcs.nx2/mb_indcs.nx2;
@@ -469,6 +476,7 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
 
   pmb_pack = new MeshBlockPack(this, mbp_gids, mbp_gide);
   pmb_pack->AddMeshBlocks(pin);
+  pmb_pack->AddGeometry(pin);
   pmb_pack->pmb->SetNeighbors(ptree, rank_eachmb);
 
   // Fix maximum number of MeshBlocks per rank with AMR

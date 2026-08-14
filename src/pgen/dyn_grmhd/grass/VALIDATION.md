@@ -132,6 +132,290 @@ a genuine "no solution for these parameters" outcome, and the code's
 correct response to it (per the spec's own "abort if no positive real root"
 instruction), not a crash.
 
+### Follow-up (2026-08-12): the achievable `web_tor_pol` set is an exact,
+computable window, not just an empirically-observed ceiling
+
+Re-tested on a **different star** (`grass_diff_DD2_hot_v2/res.rst`, a denser,
+differentially-rotating remnant, `rho_max~2.5e-3` vs. the fiducial star's
+`~1.2e-3`), at a resolution comfortably clearing the short-wavelength guard
+(`nx1=192` uniform over `x1min/max=-24/24`, `dx=0.25`, `2*pi/web_kmax=4.19 >=
+8*dx=2.0`, ~2.1x margin). Same `web_nmodes=32`/`web_seed=20260808`/
+`web_kmin=1.2`/`web_kmax=1.5` as the fiducial parameter set.
+
+**`web_tor_pol=4.0` fails here too**, both at the original `web_mu_star=2.0`
+(`A=-1.26094e+06 B=133975 C=-2.39757e+06`) and at `web_mu_star=4.0` tested
+earlier this session — confirming the unreachability is not specific to the
+originally-tested star.
+
+**The achievable set is an exact, closed-form window, derivable from two
+failing runs.** Since `qA(t)=sc-t*sf`, `qB(t)=sb-t*se`, `qC(t)=sa-t*sd` are
+each *linear* in `target` (`t`), the discriminant `Delta(t)=qB(t)^2 -
+4*qA(t)*qC(t)` is a *quadratic* in `t` — so the set of `target` values with a
+real (and positive) root is generically a **bounded interval**, not a
+half-line "everything below some ceiling." Two failing runs (`target=2.0`:
+`A=-289270 B=75640.3 C=-1.01407e+06`; `target=4.0` above) fully determine all
+six integrals (`sa=369430 sb=17306 sc=682400 sd=691750 se=-29167 sf=485835`
+for this star/`mu_star=2` realization) and hence `Delta(t)` in closed form:
+
+```
+Delta(t) = -1.343e12 t^2 + 2.607e12 t - 1.008e12
+Delta(t) = 0  at  t = 0.533  and  t = 1.407
+```
+
+Real, positive roots exist **only for `target` in `(0.533, 1.407)`** for this
+star/realization. The lower edge is exactly `sa/sd` — the pure poloidal-
+generator's (`lambda_T=0`) own ratio, matching the already-documented
+observation that the P-pass ratio sits below target in every trial. The
+upper edge is where the two roots merge and go complex.
+
+**Confirmed empirically, not just algebraically**: `target=1.4` (inside the
+window) succeeded with `lambda_T=7.90485`, matching the closed-form
+prediction to 6 significant figures, and hit `achieved=1.4` exactly.
+`target=1.42` (just outside) failed immediately with the same "no positive
+real root" error. `target=1.0` (the fiducial default, used throughout this
+report) sits comfortably inside the window, which is why it has always
+worked.
+
+**Dependence on `web_mu_star`: none, for the window itself.** Extending the
+sign-independence proof above: since `sc,sf ~ mu_star^2` and `sb,se ~
+mu_star^1` while `sa,sd` don't depend on `mu_star` at all,
+`Delta(t) = mu_star^2 * Delta0(t)` exactly, where `Delta0` is the
+`mu_star=1`-normalized discriminant. Since `mu_star^2 >= 0` always, the
+*zero-crossings* of `Delta(t)` — i.e. the window edges — are exactly
+`mu_star`-independent; only the solved `lambda_T` value (not whether a
+solution exists) changes with `mu_star`. Verified numerically: rescaling this
+run's exact `mu_star=2` integrals to `mu_star=4` predicts `lambda_T=0.5839`
+at `target=1`, matching the actual `mu_star=4` run's measured `0.583884` to
+4 significant figures.
+
+**Dependence on `web_nmodes`: expected, but the qualitative conclusion looks
+robust.** `sa..sf` are literal sums over the `N`-mode table, so a different
+`web_nmodes` gives a different specific realization and window. The original
+`web_tor_pol=4.0` investigation already found it unreachable across
+`web_nmodes in {32, 128, 512}` and two seeds — i.e. not a small-`N` sampling
+fluke — but the *exact* window edges (unlike the `mu_star`-independence,
+which is a proven identity) are realization-specific and were not
+recomputed for other `N`/seed combinations this session.
+
+**Dependence on the initial-data profile: yes, directly.** `sa,sd` (setting
+the window's lower edge) and `sc,sf` (entering the upper edge) are volume
+integrals of the poloidal/toroidal-generator fields *weighted by the star's
+own metric and confinement shell* (`dV=sqrt(gamma)*dx1dx2dx3`, restricted to
+`rho>rho_lo`) — so a different star changes the window directly, not just
+through a different mode-table realization. Concretely: this denser star's
+mass-shell window is only `width=1.764` wide (`R_cyl in [3.2,5.0]`) vs. the
+original star's `width=5.616` (`R_cyl in [1.9,7.5]`) for the *same* absolute
+`web_rho_lo/web_rho_hi` — a direct consequence of the denser star's steeper
+density profile — so even holding every `<problem>` key fixed, switching
+`id_file` alone changes the achievable `web_tor_pol` window. No exact window
+was computed for the original star this session (would need one more
+failing data point there), but the qualitative dependence is not in doubt.
+
+### Follow-up (2026-08-12, cont'd): `web_rho_lo`/`web_rho_hi` dependence,
+tested directly at `grass_web_hires_cfc`'s resolution
+
+**Mechanism, confirmed by reading the code (not inferred from the `mu_star`
+case):** `h = WebEnvelope(rho, rho_lo, rho_hi)` is evaluated at every edge-
+staggered point and multiplies the P-pass and T-pass vector potentials
+*before* the curl (`dyngr_grass.cpp:624-664`). Unlike `mu_star` (an overall
+scalar on the T-bracket, so `curl(mu_star*X) = mu_star*curl(X)` exactly, no
+cross-terms — the basis of the `Delta(t)=mu_star^2*Delta0(t)` identity),
+`h(rho(x))` is *spatially varying*, so `curl(h(x)*X(x)) = h(x)*curl(X(x)) +
+grad(h) x X(x)` — a genuine cross-term with no clean multiplicative
+factorization. So there is **no analogous exact invariance for
+`web_rho_lo`/`web_rho_hi`**; the effect has to be measured directly.
+
+**Tested**: same star (`grass_diff_DD2_hot_v2/res.rst`), same `web_mu_star=2.0`,
+same mode table, but at `grass_web_hires_cfc`'s full mesh/AMR resolution
+(256^3 base + 5 static-AMR levels, `dx_finest~0.088`, 16 nodes) rather than
+the earlier uniform `nx1=192` test, with `web_rho_hi` raised from `1.1e-3` to
+`2.0e-3` (`web_rho_lo=1.0e-8` unchanged). Confirmed first that the
+mode-construction/plotting pipeline works cleanly at this resolution+shell
+combination (`t=0` snapshot, `target=1.0`: `lambda_T=0.776084`,
+`achieved=1`, `max|div(B)|*dx/|B|=1.11e-14`).
+
+**Shell widens as expected**: `R_cyl in [1.62,5.04]`, `width=3.42` — roughly
+**2x wider** than the `1.1e-3` case's `width=1.764` on this same star, since
+`2.0e-3` sits much closer to `rho_max~2.5e-3`.
+
+**The achievable `web_tor_pol` window widens correspondingly.** Two failing
+runs (`target=3.0`: `A=-971565 B=80335.1 C=-4.52435e+06`; `target=4.0`:
+`A=-2.07883e+06 B=111129 C=-6.40493e+06`) give, by the same reconstruction
+method as before:
+
+```
+sa=1117390  sb=-12047  sc=2350230
+sd=1880580  se=-30794   sf=1107265
+
+Delta(t) = -8.328e12 t^2 + 2.263e13 t - 1.050e13
+Delta(t) = 0  at  t = 0.594  and  t = 2.123
+```
+
+i.e. the window grew from `(0.533, 1.407)` (narrow shell, `width=1.764`) to
+**`(0.594, 2.123)`** (wider shell, `width=3.42`) — both edges moved, and the
+*width of the window itself* grew from `0.874` to `1.529`, roughly tracking
+the shell-width increase. Confirmed empirically at three points:
+`target=1.0` and `target=2.0` both succeeded (`lambda_T=0.776084` and
+`4.23505` respectively — the latter notable since `target=2.0` had *failed*
+on the narrower shell); `target=2.1` succeeded with `lambda_T=9.64618`,
+matching the closed-form prediction (`9.647`) to 4 significant figures;
+`target=3.0`/`4.0` failed, both outside the predicted window.
+
+**Answer to "does it depend on `web_rho_lo`/`web_rho_hi`": yes, substantially,
+and in the intuitive direction** (wider shell -> wider achievable-ratio
+window), unlike `web_mu_star` (provably no effect on the window) but similar
+in character to the star-dependence (both act by reweighting the same
+integrals, not through a clean algebraic rescaling). Still nowhere near
+`web_tor_pol=4.0` even at 2x the shell width — extrapolating the trend, a
+*much* wider shell (or larger `web_nmodes` to reduce realization-to-
+realization scatter, still untested) would be needed before `4.0` becomes
+reachable, if it can be reached this way at all.
+
+### Follow-up (2026-08-12, cont'd): `web_nmodes=128` at the same shell, and a
+correction to `web_rho_lo`'s validity
+
+**`web_nmodes=128`** (same star, `web_rho_hi=2.0e-3`, `mu_star=2`, hires
+resolution): two failing points (`target=3.0`:
+`A=-2.69391e+06 B=71902.5 C=-8.8839e+06`; `target=4.0`:
+`A=-5.59329e+06 B=82908.4 C=-1.30724e+07`) give window **`(0.879, 2.071)`**,
+width `1.192` — **narrower** than the `web_nmodes=32` window on the same
+shell (`(0.594, 2.123)`, width `1.529`). This is the opposite of what a
+naive central-limit-theorem "more modes -> more self-averaging -> wider
+window" argument would predict — a genuine, un-obvious finding, not yet
+understood. Only one realization tested at each `N`, so this could still be
+seed-to-seed scatter rather than a real trend with `N`; a proper answer
+needs multiple seeds at each `web_nmodes`, not done this session.
+
+**Important correction: `web_rho_lo=1.0e-8` (the fiducial value used
+everywhere above) is not solidly "inside" the star.** A direct radial
+density-profile probe (not just the code's own diagnostic) along the
+equatorial `+x` axis of the `grass_diff_DD2_hot_v2` star shows density
+staying smooth and non-trivial (`~1.16e-6` at `r=4.96`) right up until it
+**collapses to the atmosphere floor (`dfloor=2.8e-15`) within a single grid
+cell** by `r=5.02`. `web_rho_lo=1.0e-8` sits inside that one-cell cliff, not
+in the star's smoothly-varying bulk — technically above the floor, but at
+the numerically dangerous surface-adjacent edge (the same kind of
+under-resolved steep-gradient region flagged in the earlier "noisy field
+lines" investigation, this document's own V2 discussion, and consistent
+with `web_rho_lo` being recommended "at least ~3 orders of magnitude above
+the atmosphere floor" in `magnetic_web_id_athenak.md` section 2.1 — `1e-8`
+is only `~7` orders above `dfloor`, but landing right at the one-cell
+transition shows that "orders above floor" alone doesn't guarantee "clear of
+the surface cliff" for a steep enough profile).
+
+**Corrected to `web_rho_lo=1.0e-4`** (density there `~4-6e-4`, several grid
+cells back from the cliff, comfortably in the smooth part of the profile).
+Shell narrows slightly (`R_cyl in [1.62,4.77]`, `width=3.15`, vs. `3.42` at
+`rho_lo=1e-8` — pulling the outer edge in from the risky cliff). Two failing
+points (`target=3.0`: `A=-385987 B=-18129.3 C=-3.77327e+06`; `target=4.0`:
+`A=-1.10008e+06 B=-24322.5 C=-5.27392e+06`) give window
+**`(0.486, 2.459)`**, width `1.974` — confirmed empirically at `target=2.4`
+(`lambda_T=8.39644`, matching the closed-form prediction `8.396` to 4
+significant figures).
+
+**Notable: the corrected, narrower shell (`3.15` vs. `3.42`) gives a WIDER
+window (`1.974` vs. `1.529`), not narrower.** This breaks the simple
+"wider shell -> wider window" story from the `web_rho_hi` follow-up above —
+confirming that *where* the shell sits (specifically, staying clear of the
+noisy surface-cliff region) matters independently of raw shell width. All
+four configurations tested this session, for reference:
+
+| `rho_lo` | `rho_hi` | `nmodes` | shell width | window | window width |
+|---|---|---|---|---|---|
+| `1e-8` | `1.1e-3` | 32 | `1.764` | `(0.533, 1.407)` | `0.874` |
+| `1e-8` | `2.0e-3` | 32 | `3.42`  | `(0.594, 2.123)` | `1.529` |
+| `1e-8` | `2.0e-3` | 128 | `3.42` | `(0.879, 2.071)` | `1.192` |
+| `1e-4` | `2.0e-3` | 32 | `3.15`  | `(0.486, 2.459)` | `1.974` |
+
+Widest window found so far uses the *corrected* `rho_lo`, still on the same
+star/`mu_star`/`web_kmin/kmax`. **Practical implication**: before scanning
+`web_rho_hi` (or any other parameter) for a wider window, check first that
+`web_rho_lo` isn't sitting in a steep-gradient/floor-adjacent cell —
+confirmed here to matter more than the raw shell-width comparison suggested
+on its own.
+
+### Follow-up (2026-08-12, cont'd): `web_kmin`/`web_kmax` tested directly —
+hypothesis falsified, window appears unaffected
+
+**Motivation.** Every run above (all four rows of the comparison table) kept
+`web_kmin=1.2`/`web_kmax=1.5` fixed, and every single one triggered the
+code's own soft warning at `dyngr_grass.cpp:400-406`:
+
+```
+web_kmin=1.2 gives the longest mode wavelength 2*pi/web_kmin=5.236 exceeding
+the shell width=3.15 -- consider raising web_kmin.
+```
+
+The doc's `E_tor/E_pol ~ mu_star^2` estimate (`magnetic_web_id_athenak.md`
+§2.2) implicitly assumes a mode is "locally uniform" over the region where
+`h(rho)` is non-negligible, i.e. `k*shell_width >> 2*pi`. With the longest
+mode's wavelength actually *exceeding* the shell width, that assumption is
+violated on every run so far — `h(rho)`'s gradient is comparable to, not a
+small perturbation on, the mode's own spatial variation, which is exactly the
+kind of cross-term (`curl(h*X) = h*curl(X) + grad(h) x X`) already identified
+as the reason `web_rho_lo/web_rho_hi` has no clean invariance. Hypothesis:
+raising `web_kmin`/`web_kmax` (same shell, same star, same `mu_star`) so
+modes are locally well-resolved within the shell would restore more of the
+idealized scaling and widen the window toward (or past) `4.0`.
+
+**Test**: same corrected shell (`web_rho_lo=1e-4, web_rho_hi=2e-3`,
+`width=3.15`), same `web_nmodes=32`/`web_seed=20260808`/`web_mu_star=2.0`,
+`web_kmin` raised `1.2 -> 6.0` and `web_kmax` raised `1.5 -> 7.5` (same `1.25`
+ratio, shifted up 5x — `2*pi/web_kmin=1.047`, now well inside the `3.15`-wide
+shell; resolution guard still satisfied with margin, `2*pi/web_kmax=0.838 >=
+8*dx_finest=0.703`, vs. a hard ceiling of `web_kmax~8.94` at this AMR
+resolution).
+
+**Result: `target=4.0` still fails**, and by a wider margin, not a narrower
+one — `A=-2.89021e+07 B=-168725 C=-4.74447e+07`, coefficients ~10-25x larger
+in magnitude than the old-`k` failure at the same shell
+(`A=-1.10008e+06 B=-24322.5 C=-5.27392e+06`, from the `web_rho_lo` correction
+above).
+
+**That magnitude growth is a red herring, not evidence of a worse window.**
+A quadratic's roots, and whether it has a real positive root at all, are
+*invariant to any overall positive rescaling* of `(A,B,C)` — only the
+relative balance between the six energy integrals `sa..sf` matters, not
+their absolute scale. The real diagnostic is `target=1.0`, run at the same
+new `k`: it succeeded with `lambda_T=0.796408`, barely different from the
+old-`k` value at the same shell (`lambda_T=0.863399`). If the window had
+genuinely widened or shifted, this number should have moved by much more
+than the old-vs-new `mu_star`/`rho_hi` comparisons above did (e.g. the
+`rho_hi=1.1e-3 -> 2.0e-3` shell change moved `target=1`'s `lambda_T` by a
+similar amount while also moving the window edges substantially). The near-
+constancy here suggests the field simply got more energetic at shorter
+wavelength (an overall rescaling of `sa..sf` together, which cancels in the
+roots) without meaningfully rebalancing toroidal vs. poloidal content.
+
+**Not exactly reconstructed** (would need a second failing point at this `k`
+to solve for `sa..sf` the way every other row was solved) — not pursued
+further since the qualitative signal already answers the question the test
+was designed for.
+
+**Conclusion: the `web_kmin`/`web_kmax`-vs-shell-width mismatch, despite
+being flagged by the code's own warning on every run, is not the mechanism
+limiting `web_tor_pol`.** This is the fifth independent lever ruled out this
+session (`web_rho_lo`, `web_rho_hi`, `web_nmodes`, `web_mu_star` — the last
+two proven algebraically not just empirically — and now `web_kmin/web_kmax`).
+`target=4.0` has failed in *every* configuration tried; the achievable
+ceiling has topped out around `~2.4-2.6` regardless of which single
+parameter is varied. Updated comparison table:
+
+| `rho_lo` | `rho_hi` | `nmodes` | `kmin`/`kmax` | shell width | window | window width |
+|---|---|---|---|---|---|---|
+| `1e-8` | `1.1e-3` | 32 | `1.2`/`1.5` | `1.764` | `(0.533, 1.407)` | `0.874` |
+| `1e-8` | `2.0e-3` | 32 | `1.2`/`1.5` | `3.42`  | `(0.594, 2.123)` | `1.529` |
+| `1e-8` | `2.0e-3` | 128 | `1.2`/`1.5` | `3.42` | `(0.879, 2.071)` | `1.192` |
+| `1e-4` | `2.0e-3` | 32 | `1.2`/`1.5` | `3.15`  | `(0.486, 2.459)` | `1.974` |
+| `1e-4` | `2.0e-3` | 32 | `6.0`/`7.5` | `3.15`  | not fully reconstructed; `target=1` behavior (`lambda_T=0.796` vs. `0.863`) indicates little to no change from the `1.2`/`1.5` row |
+
+**Practical implication**: this makes it more likely the `web_tor_pol=4.0`
+ceiling is a structural property of the confined, cylindrically-projected
+Chandrasekhar-style construction itself (as the original investigation
+suspected — the P-pass's own toroidal "leakage" staying below target in
+every trial) rather than a resolution/sampling artifact fixable by any of
+the five knobs tried so far.
+
 ## Known gaps (explicit scope decisions, not oversights)
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside
@@ -143,8 +427,21 @@ instruction), not a crash.
   (Total angular momentum `J` *is* now computed — see `GrassHistory`'s
   `ang-mom` column, reusing `xns_rotstar.cpp`'s validated formula.)
 - **Maxwell stress** (`integral(b_R*b_phi) dV`) is likewise not implemented.
-- **The `web_tor_pol=4.0` unreachability** (above) is an open finding, not a
-  closed issue — worth a follow-up investigation (larger `web_nmodes`, a
-  systematic seed sweep, or reconsidering whether the P-pass's own
-  cylindrically-projected toroidal "leakage" is expected/correctable) before
-  the feature is used for literature-matched production physics.
+- **The `web_tor_pol=4.0` unreachability** is no longer just an empirical
+  observation — the follow-up above derives the achievable set in closed
+  form (a bounded window, exact `mu_star`-independent edges, star- and
+  `web_nmodes`-dependent otherwise) and confirms it empirically to 6
+  significant figures. Five independent levers have now been tried and none
+  reach `4.0`: `web_rho_lo`, `web_rho_hi`, `web_nmodes`, `web_mu_star` (the
+  latter two proven algebraically, not just empirically, to leave the window
+  edges unchanged/realization-specific), and `web_kmin`/`web_kmax` (tested
+  directly against the "modes unresolved relative to the shell width"
+  hypothesis — falsified; see the `web_kmin`/`web_kmax` follow-up above).
+  What remains open: *why* the window is this narrow physically (the
+  suspected cause is still the P-pass's own cylindrically-projected toroidal
+  "leakage," per the original investigation) — a systematic `web_nmodes`/seed
+  sweep to see whether the window widens with more modes (as the central-
+  limit-theorem-like self-averaging argument would suggest) would settle
+  that, and hasn't been done. Until then, treat `web_tor_pol` as effectively
+  bounded well below the literature target of `4` for realistic `web_nmodes`
+  (tested up to 512), not just "avoid exactly `4.0`."

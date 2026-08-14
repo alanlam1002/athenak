@@ -382,15 +382,54 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                 << " -- the mass-shell window must lie within the star." << std::endl;
       exit(EXIT_FAILURE);
     }
-    if (global_variable::my_rank == 0) {
-      Real r_inner = -1.0, r_outer = -1.0;
+    // ---- Equatorial density sweep: rho_lo/rho_hi -> R_cyl mapping, plus a
+    // fragmentation guard. The rho_hi<=rho_max check above only guards against
+    // rho_hi missing the star entirely -- it does NOT guard against rho_hi sitting
+    // strictly between this star's on-axis (r=0) density and its true (possibly
+    // off-center) peak, a real risk for differentially rotating remnants whose
+    // equatorial density profile can be quasi-toroidal (peaking off-center, not at
+    // r=0). If rho_hi falls in that band, the excluded (rho>=rho_hi) region is an
+    // ANNULUS rather than a disk containing the axis, so the confinement shell
+    // (rho_lo<rho<rho_hi) silently fragments into a spurious inner disk near the
+    // center plus the intended outer shell -- confirmed empirically on
+    // grass_diff_DD2_hot_v2 (VALIDATION.md's 2026-08-14 m=0-split reanalysis).
+    // Detected here by walking the same equatorial ray used for the r_inner/r_outer
+    // diagnostic below: once the profile has dropped below rho_hi (entering the
+    // shell), it must never rise back above rho_hi before dropping below rho_lo
+    // (leaving the star) -- any re-crossing means the excluded core is not
+    // simply-connected. Runs identically on every rank (InterpolateRho is a
+    // deterministic host-side evaluation -- same reproducibility guarantee as
+    // GenerateWebModeTable), so a detected fragmentation aborts every rank
+    // together, avoiding an MPI deadlock from only rank 0 calling exit().
+    Real r_inner = -1.0, r_outer = -1.0, r_reentry = -1.0;
+    {
       Real x1max = pmy_mesh_->mesh_size.x1max;
+      bool entered_shell = false;
       for (int s = 1; s <= 2000; ++s) {
         Real r = s * (x1max / 2000.0);
         Real rho_here = data.InterpolateRho(r, 0.0, 0.0, eos_table);
-        if (rho_here < rho_hi && r_inner < 0.0) { r_inner = r; }
+        if (rho_here < rho_hi) {
+          if (r_inner < 0.0) { r_inner = r; }
+          entered_shell = true;
+        } else if (entered_shell && r_reentry < 0.0) {
+          r_reentry = r;
+        }
         if (rho_here < rho_lo && r_outer < 0.0) { r_outer = r; break; }
       }
+    }
+    if (r_reentry > 0.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "web_rho_hi=" << rho_hi << " sits between this star's on-axis (r=0) "
+                << "density and its true (possibly off-center) peak: the equatorial "
+                << "density profile drops below rho_hi at r=" << r_inner << " but rises "
+                << "back above it at r=" << r_reentry << ". The high-density region "
+                << "excluded from the web is therefore an annulus, not a disk containing "
+                << "the axis, so the confinement shell fragments into a spurious inner "
+                << "disk plus the intended outer shell. Lower web_rho_hi below this "
+                << "star's on-axis (r=0) density." << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (global_variable::my_rank == 0) {
       if (r_inner > 0.0 && r_outer > r_inner) {
         Real shell_width = r_outer - r_inner;
         std::cout << "GRASS magnetic web: rho shell [" << rho_lo << "," << rho_hi

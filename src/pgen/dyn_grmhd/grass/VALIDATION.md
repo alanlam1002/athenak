@@ -719,12 +719,31 @@ intended outer shell). `dyngr_grass.cpp:379`'s existing guard only checks
 `rho_hi<=rho_max` (`2.505e-3`), so the entire band
 `(2.265e-3, 2.505e-3)` — nearly a tenth of the way to `rho_max` from the
 peak — passes validation silently while actually fragmenting the shell.
-**This is a real gap, not yet fixed**: the guard should also reject
-`rho_hi` at or above the *equatorial on-axis* density, not just the global
-3D max. **Recommendation:** keep `web_rho_lo=1e-4`; `web_rho_hi` may safely
-go up to `~2.2e-3` (pulling the shell's inner edge from `1.53` to `1.23`,
-coupling more mass and slightly more `Omega` contrast) but should not
-approach `2.265e-3`.
+
+> **FIXED (2026-08-14, same day).** `dyngr_grass.cpp`'s existing equatorial
+> `r_inner`/`r_outer` sweep (used for the shell startup diagnostic) now also
+> tracks whether the profile, having once dropped below `rho_hi` (entering
+> the shell), ever rises back above it before dropping below `rho_lo`
+> (leaving the star) — any such re-crossing means the excluded core is not
+> simply-connected, and the run now aborts with a `FATAL ERROR` naming the
+> exact re-entry radius, rather than silently fragmenting the shell. Moved
+> outside the `my_rank==0` gate (the sweep is a deterministic host-side
+> evaluation, same reproducibility guarantee as `GenerateWebModeTable`) so
+> every rank aborts together — no MPI deadlock from a single rank calling
+> `exit()`. Verified both directions on this exact star: `rho_hi=2.0e-3`
+> (this section's "current"/safe row) still runs clean, no false positive;
+> `rho_hi=2.3e-3` (this section's confirmed-bad row) now aborts with
+> `"...drops below rho_hi at r=0.012 but rises back above it at r=0.24..."`
+> — matching the `R_cyl in [0.25,1.07]` torus boundary measured by hand
+> above to within the coarser sampling used there. The `rho_hi<=rho_max`
+> check (`dyngr_grass.cpp:379`) is unchanged and still needed for its own
+> purpose (rejecting `rho_hi` that misses the star entirely).
+
+**Recommendation (unchanged):** keep `web_rho_lo=1e-4`; `web_rho_hi` may
+safely go up to `~2.2e-3` (pulling the shell's inner edge from `1.53` to
+`1.23`, coupling more mass and slightly more `Omega` contrast) but should
+not approach `2.265e-3` — this is now enforced automatically rather than
+merely recommended.
 
 **6. Walking back the "scan lower `dipole_bmax_gauss`" recommendation
 above — checked against doc sec 0's *other* criterion, the Alfven time.**

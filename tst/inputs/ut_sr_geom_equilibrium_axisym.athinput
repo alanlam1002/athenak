@@ -1,0 +1,62 @@
+# AthenaK input file for Task G1 unit test: SR geometric source terms preserve the same
+# rotating equilibrium as the Newtonian case (geom_equilibrium_test) at small v0 -- the
+# v/c->0 cross-check against the already-validated Newtonian result.
+
+<comment>
+problem   = SR rotating equilibrium unit test (cylindrical_axisym)
+
+<job>
+basename  = ut_sr_geom_equilibrium_axisym
+
+<coord>
+special_rel = true
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 4
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 4
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 20.0
+ndiag      = 100
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = sr_geom_equilibrium_test
+dens      = 1.0
+pgas      = 1.0
+r0        = 1.5
+vphi0     = 0.05

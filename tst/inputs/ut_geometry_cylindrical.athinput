@@ -1,0 +1,53 @@
+# AthenaK input file for Task B4 unit test: cylindrical (R,phi,z) geometry construction.
+# 3D, multiple MeshBlocks in R (per-block x1min differences exercised), small grid.
+
+<comment>
+problem   = cylindrical MeshGeometry/GeomData construction unit test
+
+<job>
+basename  = ut_geometry_cylindrical
+
+<mesh>
+nghost    = 2
+coord     = cylindrical
+nx1       = 16
+x1min     = 0.5
+x1max     = 2.5
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 6
+x2min     = 0.0
+x2max     = 6.283185307179586
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 4
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 6
+nx3       = 4
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geometry_curvilinear_test

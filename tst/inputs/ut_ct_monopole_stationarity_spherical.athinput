@@ -1,0 +1,57 @@
+# AthenaK input file for Task D3 unit test: 1D-radial spherical stationarity of
+# B_r*r^2 = const under a radial wind.
+
+<comment>
+problem   = 1D radial B_r ~ 1/r^2 stationarity unit test (spherical)
+
+<job>
+basename  = ut_ct_monopole_stationarity_spherical
+
+<mesh>
+nghost    = 2
+coord     = spherical_polar
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 1
+x2min     = 0.0
+x2max     = 3.14159265358979324
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 1
+x3min     = 0.0
+x3max     = 6.283185307179586
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 5.0
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.4
+
+<problem>
+pgen_name = ct_monopole_stationarity_test
+dens      = 1.0
+pgas      = 1.0
+vr        = 0.05
+br_flux   = 1.0

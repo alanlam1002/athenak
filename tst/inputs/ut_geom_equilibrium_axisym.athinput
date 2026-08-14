@@ -1,0 +1,59 @@
+# AthenaK input file for Task C1 unit test: rotating (centrifugal-pressure-balance)
+# equilibrium in cylindrical_axisym (R,z) coordinates, using the corrected Delta-A/Delta-V
+# geometric source-term coefficients (v2 plan Correction C2).
+
+<comment>
+problem   = rotating equilibrium unit test (cylindrical_axisym)
+
+<job>
+basename  = ut_geom_equilibrium_axisym
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 4
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 4
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 50.0
+ndiag      = 100
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geom_equilibrium_test
+dens      = 1.0
+pgas      = 1.0
+r0        = 1.5
+vphi0     = 0.3

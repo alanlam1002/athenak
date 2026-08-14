@@ -1,0 +1,62 @@
+# AthenaK input file for Task D3 unit test: field-loop advection in cylindrical_axisym
+# (R,z) -- the real correctness gate for the area/edge-length-weighted CT curl (Task D1),
+# since div(B)=0 (Task D2) is a topological identity that cannot detect a wrong edge
+# length, handedness, or EMF sign.
+
+<comment>
+problem   = field-loop advection unit test (cylindrical_axisym)
+
+<job>
+basename  = ut_ct_field_loop_axisym
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 32
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 32
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 32
+nx2       = 32
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 2.0
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.66666666667
+
+<problem>
+pgen_name   = ct_field_loop_test
+dens        = 1.0
+pgas        = 1.0
+vz          = 1.0
+amp         = 1.0e-3
+loop_radius = 0.3
+R0          = 1.5
+z0          = 0.0

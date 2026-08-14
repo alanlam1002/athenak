@@ -80,6 +80,18 @@ class ProblemGenerator {
   // predefined problem generator functions for unit tests
   void EOSCompose(ParameterInput *pin, const bool restart);
   void GaussLegendre(ParameterInput *pin, const bool restart);
+  void GeometryCartesianTest(ParameterInput *pin, const bool restart);
+  void GeometryCurvilinearTest(ParameterInput *pin, const bool restart);
+  void ReconExactGradientTest(ParameterInput *pin, const bool restart);
+  void ReconExactCubicTest(ParameterInput *pin, const bool restart);
+  void GeomEquilibriumTest(ParameterInput *pin, const bool restart);
+  void CTDivBTest(ParameterInput *pin, const bool restart);
+  void CTFieldLoopTest(ParameterInput *pin, const bool restart);
+  void CTMonopoleStationarityTest(ParameterInput *pin, const bool restart);
+  void OriginConservationTest(ParameterInput *pin, const bool restart);
+  void MHDDiskEquilibriumTest(ParameterInput *pin, const bool restart);
+  void SmoothPulseConvergenceTest(ParameterInput *pin, const bool restart);
+  void SRGeomEquilibriumTest(ParameterInput *pin, const bool restart);
 
   // Generic error output function (using difference u0-u1)
   void OutputErrors(ParameterInput *pin, Mesh *pm);

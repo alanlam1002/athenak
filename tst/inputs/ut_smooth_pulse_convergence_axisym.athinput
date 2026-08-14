@@ -1,0 +1,62 @@
+# AthenaK input file for Task F3 unit test: formal convergence-order verification via a
+# smooth entropy-mode density pulse advected by uniform z-velocity in cylindrical_axisym
+# (R,z), on a domain periodic in z. nx1/nx2/meshblock overridden via command-line flags
+# by the python test wrapper to sweep resolution.
+
+<comment>
+problem   = smooth pulse convergence-order unit test (cylindrical_axisym)
+
+<job>
+basename  = ut_smooth_pulse_convergence_axisym
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 16
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 16
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 2.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = hllc
+gamma       = 1.66666666667
+
+<problem>
+pgen_name = smooth_pulse_convergence_test
+dens      = 1.0
+pgas      = 1.0
+vz        = 1.0
+amp       = 0.5
+sigma     = 0.25
+R0        = 1.5
+z0        = 0.0

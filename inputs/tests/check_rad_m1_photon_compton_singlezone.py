@@ -2,9 +2,9 @@
 """Standalone Compton-relaxation check for the grey photon M1 single zone test.
 
 Not wired into the tst/ pytest harness yet -- run by hand after executing
-AthenaK with inputs/tests/rad_m1_photon_compton_singlezone.athinput, e.g.:
+AthenaK with tst/inputs/rad_m1_photon_compton_singlezone.athinput, e.g.:
 
-    ./src/athena -i ../inputs/tests/rad_m1_photon_compton_singlezone.athinput
+    ./src/athena -i ../tst/inputs/rad_m1_photon_compton_singlezone.athinput
     python ../inputs/tests/check_rad_m1_photon_compton_singlezone.py
 
 Run from the build directory (so the default "tab/" output directory is
@@ -47,7 +47,7 @@ ELECTRON_REST_MASS_ENERGY_CGS = 5.93e9  # Kelvin
 ATOMIC_MASS_UNIT_CGS = 1.660538921e-24
 MSUN_CGS = 1.98841586e+33
 
-# Must match inputs/tests/rad_m1_photon_compton_singlezone.athinput
+# Must match tst/inputs/rad_m1_photon_compton_singlezone.athinput
 BHMASS_MSUN = 1.0
 DENSITY_CGS = 1.0
 MU = 1.0

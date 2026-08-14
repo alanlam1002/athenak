@@ -27,7 +27,3 @@ staging_manifests/
 
 # bns_nurates
 src/bns_nurates/
-
-# sbatch job logs
-*.out
-*.err

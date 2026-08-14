@@ -273,15 +273,18 @@ TaskStatus Z4c::RestrictU(Driver *pdrive, int stage) {
 
 TaskStatus Z4c::Prolongate(Driver *pdrive, int stage) {
   if (pmy_pack->pmesh->multilevel) {  // only prolongate with SMR/AMR
-    // Note: no separate coarse-BC step here. Z4cBCs (called from
-    // ApplyPhysicalBCs, after this prolongation step) is the consolidated
-    // fine+coarse implementation (upstream af0c17da/e1605bbb) and fills the
-    // coarse-array ghost zones itself when pm->multilevel -- a standalone
-    // coarse-only call doesn't exist for Z4c (unlike Hydro/MHD/DO-radiation).
-    // FillCoarseInBndryCC is intentionally not called either: for Z4c the
+    // Step 1: apply physical BCs to the coarse array, so the prolongation stencil
+    //         reads valid data in coarse ghost zones that sit at a physical boundary.
+    if (!(pmy_pack->pmesh->strictly_periodic)) {
+      pbval_u->Z4cBCsCoarse(pmy_pack, pbval_u->u_in, coarse_u0);
+    }
+
+    // Note: FillCoarseInBndryCC is intentionally not called here. For Z4c the
     // coarse-array data in same-level boundary regions (including edges and
     // corners) is communicated directly via the isame_z4c buffers in
     // Send/RecvU, so restricting it again would be redundant.
+
+    // Step 2: prolongate fine ghost zones from the coarse array.
     pbval_u->ProlongateCC(u0, coarse_u0, true);
   }
   return TaskStatus::complete;
@@ -294,9 +297,10 @@ TaskStatus Z4c::Prolongate(Driver *pdrive, int stage) {
 TaskStatus Z4c::ApplyPhysicalBCs(Driver *pdrive, int stage) {
   // only apply BCs if domain is not strictly periodic
   if (!(pmy_pack->pmesh->strictly_periodic)) {
-    // Consolidated call: fills fine-array (u0) ghost zones, and (if
-    // pm->multilevel) coarse-array (coarse_u0) ghost zones too, in one shot.
-    pbval_u->Z4cBCs((pmy_pack), (pbval_u->u_in), u0, coarse_u0);
+    // Step 3: apply physical BCs to the fine array. This is called *after* prolongation,
+    //         so that the corner ghost zones between a coarse neighbor and a physical
+    //         boundary read valid data.
+    pbval_u->Z4cBCs((pmy_pack), (pbval_u->u_in), u0);
 
     // user BCs
     if (pmy_pack->pmesh->pgen->user_bcs) {

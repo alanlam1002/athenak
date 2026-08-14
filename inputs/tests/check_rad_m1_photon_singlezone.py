@@ -2,9 +2,9 @@
 """Standalone LTE-relaxation check for the grey photon M1 single zone test.
 
 Not wired into the tst/ pytest harness yet -- run by hand after executing
-AthenaK with inputs/tests/rad_m1_photon_singlezone.athinput, e.g.:
+AthenaK with tst/inputs/rad_m1_photon_singlezone.athinput, e.g.:
 
-    ./src/athena -i ../inputs/tests/rad_m1_photon_singlezone.athinput
+    ./src/athena -i ../tst/inputs/rad_m1_photon_singlezone.athinput
     python ../inputs/tests/check_rad_m1_photon_singlezone.py
 
 Run from the build directory (so the default "tab/" output directory is
@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(__file__))
 from m1_tab_utils import load_series  # noqa: E402
 
-# Must match inputs/tests/rad_m1_photon_singlezone.athinput
+# Must match tst/inputs/rad_m1_photon_singlezone.athinput
 RHO = 1.0
 TEMP = 1.0
 KAPPA_P = 10.0

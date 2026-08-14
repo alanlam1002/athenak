@@ -577,23 +577,6 @@ TaskStatus RadiationM1::TimeUpdate_(Driver *d, int stage) {
                   abs_local, scat_1_(m, nuidx, k, j, i),
                   chi_(m, nuidx, k, j, i), Enew, Fnew_d, params_,
                   params_.closure_type);
-#ifdef DEBUG_BUILD
-              // Permanent, compile-time-gated diagnostic (DEVELOPMENT.md
-              // Stage 14): source_update()'s return signal is otherwise
-              // discarded below (only ever consumed by the DEBUG_BUILD
-              // printfs inside source_update() itself, which fire only on
-              // the SrcFail/backup-solver paths, never on SrcThin/SrcEquil/
-              // SrcScat). Density-thresholded to stay legible on a full
-              // AMR mesh; raise/lower the threshold to target a specific
-              // problem's disk/atmosphere boundary.
-              if (ismhd_ && w0_(m, IDN, k, j, i) > 0.05) {
-                Kokkos::printf(
-                    "M1_SRC_DIAG: signal=%d rho=%.6e E=%.6e Fx=%.6e "
-                    "Fy=%.6e Fz=%.6e mkji=(%d,%d,%d,%d)\n",
-                    static_cast<int>(src_signal), w0_(m, IDN, k, j, i), Enew,
-                    Fnew_d(1), Fnew_d(2), Fnew_d(3), m, k, j, i);
-              }
-#endif
               apply_floor(g_uu, Enew, Fnew_d, params_);
 
               // Update closure

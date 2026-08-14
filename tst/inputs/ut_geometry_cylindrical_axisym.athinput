@@ -1,0 +1,53 @@
+# AthenaK input file for Task B4 unit test: cylindrical_axisym (R,z) geometry
+# construction. 2D, nx3=1 as required, multiple MeshBlocks in R.
+
+<comment>
+problem   = cylindrical_axisym MeshGeometry/GeomData construction unit test
+
+<job>
+basename  = ut_geometry_cylindrical_axisym
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 16
+x1min     = 0.5
+x1max     = 2.5
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 8
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 8
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geometry_curvilinear_test

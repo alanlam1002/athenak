@@ -1,0 +1,55 @@
+# AthenaK input file for Task A2 unit test: Cartesian MeshGeometry/GeomData construction.
+# 3D, multiple MeshBlocks in x1 (to exercise per-block geometry, since x1min differs
+# per block), small grid for speed. Builds Mesh+Physics, runs the pgen (which does the
+# actual comparison and exits with EXIT_FAILURE on mismatch), then exits (nlim=0).
+
+<comment>
+problem   = Cartesian MeshGeometry/GeomData construction unit test
+
+<job>
+basename  = ut_geometry_cartesian
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 16
+x1min     = -1.0
+x1max     = 1.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 6
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 4
+x3min     = -0.25
+x3max     = 0.25
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 6
+nx3       = 4
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geometry_cartesian_test

@@ -1,0 +1,57 @@
+# AthenaK input file for Task D2 unit test: div(B)=0 preservation under the area/edge-
+# length-weighted CT curl (Task D1), general cylindrical (R,phi,z).
+
+<comment>
+problem   = CT div(B)=0 unit test (cylindrical)
+
+<job>
+basename  = ut_ct_divb_cylindrical
+
+<mesh>
+nghost    = 2
+coord     = cylindrical
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 16
+x2min     = 0.0
+x2max     = 6.283185307179586
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 16
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 0.3
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.4
+
+<problem>
+pgen_name = ct_divb_test
+amp       = 0.3
+dens      = 1.0
+pgas      = 1.0
+v0        = 0.1

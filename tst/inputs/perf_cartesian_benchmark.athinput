@@ -1,0 +1,60 @@
+# AthenaK input file for Task A5: CPU zone-cycles/sec throughput benchmark.
+# 2D Orszag-Tang MHD vortex at 400x400 (single MeshBlock), fixed cycle count, no I/O,
+# to isolate pure compute throughput of the flux-divergence/CT/reconstruction/Riemann
+# pipeline (the hot loops this whole project's GPU-performance requirement targets).
+# Used to compare zone-cycles/cpu_second before/after the GeomData area/volume-weighted
+# rewrite (Tasks A2-A4, D1) on coord=cartesian, where no coordinate-specific behavior
+# should have changed -- only whether the extra array-factor multiplies cost anything
+# measurable relative to the previous direct mbsize.dxN division.
+
+<comment>
+problem   = Orszag-Tang vortex (CPU throughput benchmark)
+
+<job>
+basename   = PerfBenchmark
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 400
+x1min     = -0.5
+x1max     = 0.5
+ix1_bc    = periodic
+ox1_bc    = periodic
+
+nx2       = 400
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 400
+nx2       = 400
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = 50
+tlim       = 1.0e10
+ndiag      = 1
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.666666667
+
+<problem>
+pgen_name   = orszag_tang

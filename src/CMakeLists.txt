@@ -148,6 +148,18 @@ add_executable(
 
         pgen/unit_tests/eos_compose.cpp
         pgen/unit_tests/gauss_legendre.cpp
+        pgen/unit_tests/geometry_cartesian_test.cpp
+        pgen/unit_tests/geometry_curvilinear_test.cpp
+        pgen/unit_tests/recon_exact_gradient_test.cpp
+        pgen/unit_tests/recon_exact_cubic_test.cpp
+        pgen/unit_tests/geom_equilibrium_test.cpp
+        pgen/unit_tests/ct_divb_test.cpp
+        pgen/unit_tests/ct_field_loop_test.cpp
+        pgen/unit_tests/ct_monopole_stationarity_test.cpp
+        pgen/unit_tests/origin_conservation_test.cpp
+        pgen/unit_tests/mhd_disk_equilibrium_test.cpp
+        pgen/unit_tests/smooth_pulse_convergence_test.cpp
+        pgen/unit_tests/sr_geom_equilibrium_test.cpp
 
         radiation/radiation.cpp
         radiation/radiation_fluxes.cpp

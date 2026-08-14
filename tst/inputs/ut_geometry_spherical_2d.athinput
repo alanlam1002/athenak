@@ -1,0 +1,55 @@
+# AthenaK input file for Task B5 unit test: spherical geometry construction with theta
+# resolved (nx2>1), to exercise the non-degenerate trig-based theta-centroid formula and
+# the angular CenterWidth2/3 CFL-width fix (both are trivial/degenerate in the required
+# 1D-radial layout, where nx2=1 always hits the simple-midpoint special case instead).
+
+<comment>
+problem   = spherical (2D, theta resolved) MeshGeometry/GeomData construction unit test
+
+<job>
+basename  = ut_geometry_spherical_2d
+
+<mesh>
+nghost    = 2
+coord     = spherical_polar
+nx1       = 16
+x1min     = 1.0
+x1max     = 3.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 8
+x2min     = 0.3
+x2max     = 2.8
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 1
+x3min     = 0.0
+x3max     = 6.283185307179586
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 8
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geometry_curvilinear_test

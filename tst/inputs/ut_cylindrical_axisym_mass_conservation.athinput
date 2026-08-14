@@ -1,0 +1,78 @@
+# AthenaK input file for Task B4 (conservation half) unit test: mass conservation for
+# the cylindrical_axisym (R,z) area/volume-weighted flux divergence (Tasks A3/B2) on the
+# REQUIRED layout, including the true R=0 origin (reflecting boundary there). Closed
+# domain: reflecting at R=0 and at the outer R boundary, reflecting at both z boundaries.
+# Since Area1(is)=R_f(is)=0 exactly at R=0 (verified in the B2 geometry factory), the
+# reflecting wall there has exactly zero mass flux by construction, not just by the
+# generic reflecting-Riemann-flux argument used at R>0 boundaries -- this is the most
+# direct test of the "well-behaved at R=0" claim from DEVELOPMENT.md's B1/B2 log.
+
+<comment>
+problem   = shock tube in a cylindrical_axisym disk (mass-conservation unit test)
+
+<job>
+basename  = ut_cylindrical_axisym_mass_conservation
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 16
+x1min     = 0.0
+x1max     = 1.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 16
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = reflect
+ox2_bc    = reflect
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 16
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 0.05
+ndiag      = 1
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = shock_tube
+shock_dir  = 1
+xshock     = 0.5
+
+dl = 1.0
+pl = 1.0
+ul = 0.0
+vl = 0.0
+wl = 0.0
+
+dr = 0.6
+pr = 0.5
+ur = 0.0
+vr = 0.0
+wr = 0.0
+
+<output1>
+file_type = hst
+dt        = 0.005

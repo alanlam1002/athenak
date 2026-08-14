@@ -1,0 +1,69 @@
+# AthenaK input file for coord=<...> input-validation unit test (Task A1).
+# Builds the Mesh (exercising Mesh::ValidateCoordGeneral()) and exits without evolving
+# (nlim=0, tlim=0). Individual test cases override <mesh>/coord, x1min, x2min/x2max,
+# nx3, and mesh_refinement/refinement via command-line block/param=value flags.
+
+<comment>
+problem   = coordinate-system input validation unit test
+
+<job>
+basename  = ut_coord_validation
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 8
+x1min     = 0.1
+x1max     = 1.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 1
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = shock_tube
+shock_dir  = 1
+xshock     = 0.5
+
+dl = 1.0
+pl = 1.0
+ul = 0.0
+vl = 0.0
+wl = 0.0
+
+dr = 0.125
+pr = 0.1
+ur = 0.0
+vr = 0.0
+wr = 0.0

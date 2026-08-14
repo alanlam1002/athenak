@@ -1,0 +1,53 @@
+# AthenaK input file for Task B7 unit test: PPM4/PPMX exact-cubic reconstruction,
+# cylindrical (Mignone 2014 eq. B.9, m_coord=1 curvilinear weights).
+
+<comment>
+problem   = PPM4/PPMX exact-cubic reconstruction unit test (cylindrical)
+
+<job>
+basename  = ut_recon_exact_cubic_cylindrical
+
+<mesh>
+nghost    = 3
+coord     = cylindrical
+nx1       = 16
+x1min     = 0.5
+x1max     = 2.5
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 1
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = ppm4
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = recon_exact_cubic_test

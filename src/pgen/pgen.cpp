@@ -963,6 +963,30 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     EOSCompose(pin, is_restart);
   } else if (pgen_fun_name.compare("gauss_legendre") == 0) {
     GaussLegendre(pin, is_restart);
+  } else if (pgen_fun_name.compare("geometry_cartesian_test") == 0) {
+    GeometryCartesianTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("geometry_curvilinear_test") == 0) {
+    GeometryCurvilinearTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("recon_exact_gradient_test") == 0) {
+    ReconExactGradientTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("recon_exact_cubic_test") == 0) {
+    ReconExactCubicTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("geom_equilibrium_test") == 0) {
+    GeomEquilibriumTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("ct_divb_test") == 0) {
+    CTDivBTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("ct_field_loop_test") == 0) {
+    CTFieldLoopTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("ct_monopole_stationarity_test") == 0) {
+    CTMonopoleStationarityTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("origin_conservation_test") == 0) {
+    OriginConservationTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("mhd_disk_equilibrium_test") == 0) {
+    MHDDiskEquilibriumTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("smooth_pulse_convergence_test") == 0) {
+    SmoothPulseConvergenceTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("sr_geom_equilibrium_test") == 0) {
+    SRGeomEquilibriumTest(pin, is_restart);
 
   } else {
     // name not set on command line or input file, print warning and quit

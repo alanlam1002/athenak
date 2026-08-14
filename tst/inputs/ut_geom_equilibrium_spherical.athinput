@@ -1,0 +1,59 @@
+# AthenaK input file for Task C2 unit test: rotating (centrifugal-pressure-balance)
+# equilibrium in spherical_polar (1D radial) coordinates, using the corrected
+# Delta-A/Delta-V geometric source-term coefficients (v2 plan Correction C2).
+
+<comment>
+problem   = rotating equilibrium unit test (spherical, 1D radial)
+
+<job>
+basename  = ut_geom_equilibrium_spherical
+
+<mesh>
+nghost    = 2
+coord     = spherical_polar
+nx1       = 16
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 1
+x2min     = 0.0
+x2max     = 3.14159265358979324
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 1
+x3min     = 0.0
+x3max     = 6.283185307179586
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 16
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 50.0
+ndiag      = 100
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = geom_equilibrium_test
+dens      = 1.0
+pgas      = 1.0
+r0        = 1.5
+vphi0     = 0.3

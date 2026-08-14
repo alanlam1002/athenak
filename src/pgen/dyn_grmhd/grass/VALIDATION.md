@@ -416,6 +416,120 @@ suspected — the P-pass's own toroidal "leakage" staying below target in
 every trial) rather than a resolution/sampling artifact fixable by any of
 the five knobs tried so far.
 
+### Follow-up (2026-08-14): closing the `web_tor_pol=4.0` thread — the
+target itself was the error, not the construction
+
+Before building a fix (a deterministic axisymmetric toroidal field
+superposed on the web specifically to force the overall ratio to `4.0` —
+design work summarized below), the actual physics justification for `4.0`
+was checked against the stability literature. **It does not hold up: `4.0`
+is not required, and the achieved `~2.0-2.4` carries no stability penalty.**
+This closes the investigation rather than extending it further.
+
+**Stability bounds, both checked directly:**
+
+- **Lower bound** — [Braithwaite 2009 (MNRAS 397, 763)](https://academic.oup.com/mnras/article/397/2/763/971846):
+  a purely poloidal field is unstable; `E_tor ≳ 0.25*E_pol` stabilizes it.
+  Both `2.4` and `4` clear this by ~10x.
+- **Upper bound** — [Akgün et al. 2013 (MNRAS 433, 2445)](https://academic.oup.com/mnras/article/433/3/2445/1232825):
+  a purely *toroidal* field is Tayler-unstable; stability needs
+  `E_pol/E_tor ≳ 2*a*E_tor/|E_grav|`, with **`a≈200` for neutron stars**
+  (vs. `≈7.4` for main-sequence stars). Using this pgen's own printed
+  `E_mag/M_rest=1.405e-6` (this session's runs) and `|W|~0.15*M_rest`
+  (typical NS binding-energy fraction):
+
+  | `E_tor/E_pol` | `E_pol/E_tor` (have) | required (Akgün) | margin |
+  |---|---|---|---|
+  | `4` | `0.25` | `3.2e-3` | `78x` |
+  | `2.4` | `0.417` | `2.8e-3` | `148x` |
+
+  Instability threshold sits near `E_tor/E_pol≈250`.
+
+**Net: the stable window is `~[0.25, 250]`, about 3 decades wide.** The
+gap between the achieved `~2.4` and the target `4` is `0.22` dex —
+comfortably mid-window on a log scale, not near either edge. The *lower*
+achieved ratio actually has *more* Tayler margin than `4.0` would.
+
+**The source paper itself does not specify a ratio.**
+[Skoutnev & Beloborodov 2025 (arXiv:2504.07223)](https://arxiv.org/html/2504.07223),
+the paper this pgen reproduces, requires only `B̄_φ ≳ B̄_R` (field
+*strengths*, not an energy ratio); their sturdiness criterion (their Eq. 8)
+is a threshold on **`B̄_R`**, the coherent axisymmetric radial field — which
+this pgen's own `magnetic_web_id_athenak.md` §0 already identifies as
+supplied by the **dipole**, calling it "the primary scan knob." The web's
+own internal `E_tor/E_pol` was never the physically load-bearing parameter.
+
+**Correction to `magnetic_web_id_athenak.md`:** its §0 point 3 calls
+`E_pol/E_mag=0.2` (i.e. `E_tor/E_pol=4`) "near Braithwaite's marginal-
+stability boundary for relaxed configurations." Per the numbers above, that
+is an overstatement — `0.2` sits mid-window, not near a boundary.
+
+**Caveats, stated plainly rather than buried:**
+1. The Braithwaite/Akgün criteria are derived for *relaxed, axisymmetric,
+   stably-stratified* equilibria. This pgen's field is a non-axisymmetric
+   random tangle — the criteria don't transfer rigorously, they only
+   indicate there is no nearby threshold in either direction.
+2. This doc's own pitfall #7 already notes the initial field is *not* an
+   equilibrium and relaxes with `E_mag` dropping by a factor of a few —
+   whatever ratio is imposed at `t=0` gets substantially reprocessed
+   regardless of whether it's `2.4` or `4.0`.
+
+**Design work done, then dropped, on a toroidal-boost fix (recorded so it
+isn't re-derived):** a deterministic axisymmetric field superposed on the
+web to force the overall ratio to `4.0` was designed down to the vector-
+potential level before this literature check. For any axisymmetric scalar
+`Psi(x)`, the ansatz `A_i(x) = Psi(x)*x_i` gives an **exactly** purely
+toroidal field (`B_R=B_z=0` identically, `B_phi = R_cyl*dPsi/dz -
+z*dPsi/dR_cyl`) — verified on `Psi=z` giving `B=(-y,x,0)=R_cyl*phi_hat`.
+Two things surfaced worth recording as traps for next time:
+- **The naive choice `Psi=h(rho)` is wrong.** Since `GrassData::
+  InterpolateRho` (`grass_reader.hpp:560-566`) depends on `(x,y,z)` only
+  through `r=sqrt(x^2+y^2+z^2)` and `mu=|z|/r` — i.e. `rho` is *exactly*
+  axisymmetric and *exactly* equatorially symmetric — `Psi=h(rho)` gives
+  `B_phi` identically zero for a spherical star (nonzero only through
+  rotational oblateness) and, because `rho` is even in `z`, **odd in `z`**:
+  vanishing exactly in the equatorial plane, precisely where the
+  differential-rotation shear the whole experiment targets actually lives.
+  The fix would have been `Psi=h(rho)*z`.
+- **Killer side effect, not fixable by profile choice:** any field of the
+  form `A_i=Psi*x_i` has *exactly zero* helicity density
+  (`A.B = Psi*r.(grad(Psi) x r) = 0`, a triple product with a repeated
+  vector). Since this doc's own §0 calls one-signed helicity physically
+  load-bearing for web formation, boosting `E_tor/E_pol` this way would
+  have diluted the very property the experiment depends on.
+
+**Resolution: no code change.** Settled production `<problem>` values for
+this star (`grass_diff_DD2_hot_v2`), all directly measured this session:
+
+```
+web_rho_lo  = 1.0e-4   # corrected off the surface density cliff
+web_rho_hi  = 2.0e-3
+web_mu_star = 2.0
+web_nmodes  = 32
+web_kmin    = 6.0      # raised from 1.2 -- silences the shell-width warning
+web_kmax    = 7.5      #   (2*pi/web_kmin=1.047 << shell_width=3.15)
+web_tor_pol = 2.0      # confirmed: lambda_T=3.56638, achieved=2 (this run)
+```
+
+`web_kmin/web_kmax=6.0/7.5` was shown earlier in this document not to widen
+the achievable window (a falsified hypothesis), but it remains preferable
+to `1.2/1.5` for a different reason: it's the only setting tested this
+session that satisfies `2*pi/web_kmin < shell_width` without the code's own
+soft warning firing (`dyngr_grass.cpp:400-406`) — every other run in this
+document triggered it. `target=2.0` at this `k` was confirmed cleanly
+(`lambda_T=3.56638`, `achieved=2`), comfortably inside both the achievable
+window and the stability window derived above.
+
+**Redirect: the dipole is the actual scan parameter.** Per the paper and
+this doc's own §0, `dipole_bmax_gauss` — targeting `B̄_R~1e15-1e16 G` for
+`t_A~10-100 ms` — is what the experiment's outcome actually depends on, not
+the web's internal tor/pol split. The discriminating measurement (doc §7)
+is the **m=0 split**: FFT `B_R(theta,phi)` in `phi` on spherical shells and
+compare `m=0` power to summed `m!=0` power (`B̄_R/B̃_R`, must exceed
+`~1e-2`). **This diagnostic does not exist yet** anywhere in
+`grass_web_*/plot/` — building it is the natural next step before scanning
+`dipole_bmax_gauss` in earnest.
+
 ## Known gaps (explicit scope decisions, not oversights)
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside
@@ -427,21 +541,22 @@ the five knobs tried so far.
   (Total angular momentum `J` *is* now computed — see `GrassHistory`'s
   `ang-mom` column, reusing `xns_rotstar.cpp`'s validated formula.)
 - **Maxwell stress** (`integral(b_R*b_phi) dV`) is likewise not implemented.
-- **The `web_tor_pol=4.0` unreachability** is no longer just an empirical
-  observation — the follow-up above derives the achievable set in closed
-  form (a bounded window, exact `mu_star`-independent edges, star- and
-  `web_nmodes`-dependent otherwise) and confirms it empirically to 6
-  significant figures. Five independent levers have now been tried and none
-  reach `4.0`: `web_rho_lo`, `web_rho_hi`, `web_nmodes`, `web_mu_star` (the
-  latter two proven algebraically, not just empirically, to leave the window
-  edges unchanged/realization-specific), and `web_kmin`/`web_kmax` (tested
-  directly against the "modes unresolved relative to the shell width"
-  hypothesis — falsified; see the `web_kmin`/`web_kmax` follow-up above).
-  What remains open: *why* the window is this narrow physically (the
-  suspected cause is still the P-pass's own cylindrically-projected toroidal
-  "leakage," per the original investigation) — a systematic `web_nmodes`/seed
-  sweep to see whether the window widens with more modes (as the central-
-  limit-theorem-like self-averaging argument would suggest) would settle
-  that, and hasn't been done. Until then, treat `web_tor_pol` as effectively
-  bounded well below the literature target of `4` for realistic `web_nmodes`
-  (tested up to 512), not just "avoid exactly `4.0`."
+- **The `web_tor_pol=4.0` unreachability is now CLOSED, not open** — see the
+  final follow-up above ("closing the `web_tor_pol=4.0` thread"). Five
+  independent levers were tried and none reach `4.0` (`web_rho_lo`,
+  `web_rho_hi`, `web_nmodes`, `web_mu_star` — the latter two proven
+  algebraically, not just empirically — and `web_kmin`/`web_kmax`), and the
+  achievable set was derived in closed form (a bounded window, exact
+  `mu_star`-independent edges). But the resolution isn't "keep searching for
+  a sixth lever" — a stability-literature check (Braithwaite 2009, Akgün et
+  al. 2013) found `4.0` was never actually required: the stable window is
+  `~[0.25,250]` and the achieved `~2.0-2.4` sits comfortably mid-window,
+  while the source paper (Skoutnev & Beloborodov 2025) specifies no ratio at
+  all and ties its actual stability criterion to `B̄_R` (the dipole), not
+  the web's internal split. Settled production values:
+  `web_rho_lo=1e-4, web_rho_hi=2e-3, web_mu_star=2.0, web_nmodes=32,
+  web_kmin=6.0, web_kmax=7.5, web_tor_pol=2.0`. What remains genuinely open
+  (not urgent): *why* the window is this narrow physically (suspected cause
+  still the P-pass's own cylindrically-projected toroidal "leakage") — a
+  `web_nmodes`/seed sweep would settle it, but is no longer motivated by a
+  need to reach `4.0`, only by intrinsic curiosity about the construction.

@@ -926,6 +926,48 @@ unmodified) — rerunning this scan for a different star, shell, or web
 realization only requires resubmitting the two reference jobs with the
 new config; the analysis itself needs no changes.
 
+### Follow-up (2026-08-15, cont'd): real-evolution stability check at the
+fully settled config
+
+Everything above (`web_tor_pol` window, `web_nmodes`/seed sweep,
+`dipole_bmax_gauss` scan) used `nlim=0` construction-only probes. As a
+final check, ran a genuine evolution (`nlim=100`, real RK3 steps, not just
+ID construction) at the fully settled configuration —
+`grass_dipole_evolution_test/parfile.par`: `web_rho_lo=1e-4,
+web_rho_hi=2e-3, web_mu_star=2.0, web_nmodes=128, web_kmin=6.0,
+web_kmax=7.5, web_tor_pol=1.0, dipole_bmax_gauss=1e16 G,
+dipole_confine=0` — the same 256^3+5-level-AMR hires resolution
+(`dx_finest=0.0879`) used throughout this investigation.
+
+**Scope, stated plainly:** at `cfl_number=0.25`'s limited `dt~0.375` code
+units/cycle, `nlim=100` reaches only `t~2.2` code units (`~0.011 ms`) —
+many orders of magnitude short of the `t_A~28-80 ms` relaxation timescale
+measured in the `dipole_bmax_gauss` scan above. This is a **stability/
+sanity check that the settled config evolves cleanly at production
+resolution**, not a physics run resolving the web's relaxation (doc
+pitfall #7's own transient).
+
+**Result: clean, stable, no code needed to touch anything.** `100/100`
+cycles completed (`Terminating on cycle limit`), `1:36:09` wall time
+(16 nodes), no `FATAL ERROR`, no `NaN`/`Inf` in either `.hst` file.
+Directly from the history output over the full run:
+
+| quantity | `t=0` | `t=2.197` (final) |
+|---|---|---|
+| `rho-max` | `2.4844e-3` | `2.4873e-3` |
+| `alpha-min` | `0.21715` | `0.21718` |
+| `mass` | `3.0000140472` | `3.0000140114` (conserved to 8 s.f.) |
+| `E_mag` | `4.4586e-6` | `4.4596e-6` |
+| `max|div(B)|` | `5.02e-15` | `7.22e-14` (still round-off) |
+| `ang-mom` | `-4.01320` | `-4.01309` |
+
+All quantities essentially flat over the run (as expected given how far
+short of `t_A` this falls) — the solenoidal constraint stays at round-off
+throughout evolution (not just at `t=0` construction), and nothing
+diverges. **Confirms the settled config is production-ready**; a genuine
+relaxation study would need `nlim` large enough to reach `t_A`-scale
+physical times, not attempted here.
+
 ## Known gaps (explicit scope decisions, not oversights)
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside

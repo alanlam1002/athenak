@@ -783,6 +783,67 @@ rotation profile satisfying the doc's stated assumption. Not urgent (nothing
 currently resolves it), but worth remembering before ever refining this
 run's mesh near the core.
 
+### Follow-up (2026-08-15): the `web_nmodes`/seed sweep, settling the
+window-narrowing question
+
+The one remaining open question from the closed `web_tor_pol=4.0`
+investigation — whether `nmodes=128` giving a narrower window than
+`nmodes=32` (an earlier, single-realization comparison, on the *old*
+uncorrected shell) was a real trend or seed-to-seed scatter — is now
+settled with a proper sweep: `web_nmodes in {32,128,512}`, 2 seeds each, on
+the current settled shell/`k` config (`web_rho_lo=1e-4, web_rho_hi=2e-3,
+web_kmin=6.0, web_kmax=7.5, web_mu_star=2.0`). Each window reconstructed
+from two guaranteed-failing probes (`target=4.0`, `target=0.05` — both
+outside every window measured this session) via the same closed-form
+method used throughout this document.
+
+| `nmodes` | seed | window | width |
+|---|---|---|---|
+| 32 | `20260808` | `(0.109, 2.120)` | `2.011` |
+| 32 | `11111` | `(0.207, 0.695)` | `0.488` |
+| 128 | `20260808` | `(0.159, 1.297)` | `1.138` |
+| 128 | `22222` | `(0.177, 1.090)` | `0.913` |
+| 512 | `20260808` | `(0.172, 1.038)` | `0.866` |
+| 512 | `33333` | `(0.196, 0.855)` | `0.658` |
+
+| `nmodes` | mean width | seed-to-seed spread |
+|---|---|---|
+| 32 | `1.249` | `1.523` |
+| 128 | `1.026` | `0.225` |
+| 512 | `0.762` | `0.208` |
+
+**Both halves of the original puzzle are now resolved, and they point the
+same direction for different reasons:**
+
+- **The scatter itself collapses sharply with `N`** (`1.52 -> 0.23 -> 0.21`,
+  `nmodes=32` to `128` to `512`) — textbook self-averaging. A single
+  `nmodes=32` realization is essentially unpredictable (its own two seeds
+  differ by a factor of ~4 in width); `nmodes>=128` realizations are far
+  more reproducible.
+- **The mean width also genuinely narrows with `N`** (`1.25 -> 1.03 ->
+  0.76`), and this survives the scatter: every individual `nmodes=512`
+  width sits below every individual `nmodes=128` width, which both sit
+  below the higher of the two `nmodes=32` widths. This is a real trend, not
+  a seed-selection artifact — with only 2 seeds per `N` it isn't a rigorous
+  `1/sqrt(N)`-scaling fit, but the direction and separation are clear.
+- **So the earlier "opposite of naive CLT" framing was the wrong
+  intuition, not a genuine anomaly.** Self-averaging with more modes means
+  individual realizations converge toward whatever the many-mode ensemble's
+  *typical* window is — there was never a reason to expect that limit to be
+  *wider* than a lucky small-`N` draw; realizations converging down toward
+  a smaller, more typical width is equally consistent with CLT behavior.
+  `nmodes=32`'s own high-seed outlier (`2.011`, `out_253026`/`out_253216`)
+  looks like exactly that: a lucky draw, not the norm.
+- **None of the 6 reconstructed windows come anywhere near `4.0`** — fully
+  consistent with, and further reinforcing, the closed investigation above.
+
+**Practical takeaway for future runs:** prefer `web_nmodes>=128` for
+reproducible results — `web_nmodes=32`'s realization-to-realization
+variance is too large (up to ~4x in window width between two arbitrary
+seeds) to draw any conclusion from a single seed at that mode count, a
+trap that the *original* `nmodes=32` vs `128` comparison earlier in this
+document fell into.
+
 ## Known gaps (explicit scope decisions, not oversights)
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside
@@ -808,8 +869,16 @@ run's mesh near the core.
   all and ties its actual stability criterion to `B̄_R` (the dipole), not
   the web's internal split. Settled production values:
   `web_rho_lo=1e-4, web_rho_hi=2e-3, web_mu_star=2.0, web_nmodes=32,
-  web_kmin=6.0, web_kmax=7.5, web_tor_pol=2.0`. What remains genuinely open
-  (not urgent): *why* the window is this narrow physically (suspected cause
-  still the P-pass's own cylindrically-projected toroidal "leakage") — a
-  `web_nmodes`/seed sweep would settle it, but is no longer motivated by a
-  need to reach `4.0`, only by intrinsic curiosity about the construction.
+  web_kmin=6.0, web_kmax=7.5, web_tor_pol=2.0`. The `web_nmodes`/seed sweep
+  called for here has since been run (see the 2026-08-15 follow-up above):
+  the earlier `nmodes=32` vs `128` narrowing was a mix of real trend (mean
+  width does shrink with `N`, `1.25->1.03->0.76` at `N=32/128/512`) and
+  scatter (`nmodes=32`'s own seed-to-seed spread, `1.52`, dwarfs its mean) —
+  the original comparison drew one `nmodes=32` seed that turned out to be a
+  high outlier. `web_nmodes>=128` is now recommended for reproducibility.
+  What remains genuinely open (not urgent, no longer motivated by a need to
+  reach `4.0`, only by intrinsic curiosity): *why* the window narrows with
+  `N` at all physically (suspected cause still the P-pass's own
+  cylindrically-projected toroidal "leakage") — would need either an
+  analytic CLT-type argument or enough seeds per `N` for a real
+  `1/sqrt(N)`-scaling fit, neither done here.

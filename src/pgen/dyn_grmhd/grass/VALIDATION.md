@@ -844,6 +844,88 @@ seeds) to draw any conclusion from a single seed at that mode count, a
 trap that the *original* `nmodes=32` vs `128` comparison earlier in this
 document fell into.
 
+### Follow-up (2026-08-15, cont'd): the `dipole_bmax_gauss` scan, set up and
+run
+
+The redirect from the `web_tor_pol` closure above ("the dipole is the actual
+scan parameter") is now acted on: a real `dipole_bmax_gauss` scan, using the
+`m=0` split diagnostic, in `grass_dipole_scan/`.
+
+**Method: only 2 simulations, then an exact analytic scan.** The dipole is
+added to the web via *linear* superposition, strictly after the web's own
+(nonlinear) tor/pol solve+rescale (`dyngr_grass.cpp:834-906`, added into
+`final_a1/2/3` independently of the web's own combine step). So for a fixed
+web realization, `B_R(dipole_bmax_gauss) = B_R_web + s*B_R_dipole_shape`
+exactly, where `s = dipole_bmax_gauss/dipole_bmax_gauss_ref`. Two runs
+suffice for the whole scan: `parfile_ref.par` (web+dipole,
+`dipole_bmax_gauss=1e16 G`) and `parfile_webonly.par` (identical web, same
+seed, `dipole_enable=0`). Confirmed empirically, not just assumed: both
+runs print the *identical* web solve (`lambda_T=1.26016`, `scale
+factor=5.26139e-08`) — the web truly is unaffected by the dipole switch.
+`dipole_scan.py` then reconstructs, per shell, `B_R_dipole_shape =
+B_R_total - B_R_web`, and since `<B_R^2>_phi` is quadratic in `s` (three
+fixed moments per shell: web-only power, dipole-shape power, and their
+cross term — the same quadratic-in-target technique used throughout this
+document's `web_tor_pol` reconstructions), any `dipole_bmax_gauss` is a
+cheap closed-form evaluation — no further simulations needed.
+
+Also switched `web_nmodes=32 -> 128` for this scan (per the sweep above)
+and re-picked `web_tor_pol=1.0` to stay inside `nmodes=128`'s measured
+window at this seed.
+
+**Unexpected finding: the doc's literal `Bbar_R/Btilde_R > 1e-2` threshold
+is non-binding — checked directly, not assumed.** At every clean shell, the
+web's *own* random realization already produces `m=0` leakage of
+`0.13-0.55` with **zero dipole** (doc sec 7's own caveat: "a random tangle
+has a residual `m=0` component of order `N^-1/2` purely by chance" — this
+is that leakage, and it's `13-55x` the threshold on its own). So the raw
+threshold is satisfied for *any* `dipole_bmax_gauss`, including zero, and
+provides no real constraint for this realization. The physically
+meaningful question is instead whether the *deliberate* dipole signal
+dominates the web's *spurious* one — computed as where `s*Bbar_dip =
+Bbar_web`:
+
+| `r` (clean) | web-only `m=0` leakage | dipole dominates above |
+|---|---|---|
+| `2.00` | `0.55` | `6.3e13 G` |
+| `2.56` | `0.48` | `2.4e14 G` |
+| `3.27` | `0.13` | `2.0e14 G` |
+
+**Both `m=0`-based checks turn out non-binding — the Alfven time is the
+sole real constraint.** Dipole dominance (`~1e14 G`) is cleared 1-2 orders
+of magnitude before the Alfven-time window even opens. Scanning
+`dipole_bmax_gauss` from `1e11` to `1e18 G` and finding where
+`t_A` (`=R_cyl*sqrt(4*pi*rho)/Bbar_R`, in ms) crosses `10` and `100 ms`:
+
+| `r` | `t_A=100ms` at | `t_A=10ms` at | usable range |
+|---|---|---|---|
+| `2.00` | `2.77e15 G` | `2.78e16 G` | `[2.77e15,2.78e16]` |
+| `2.56` | `3.78e15 G` | `3.82e16 G` | `[3.78e15,3.82e16]` |
+| `3.27` | `5.38e15 G` | `5.38e16 G` | `[5.38e15,5.38e16]` |
+
+**Intersection across all three clean shells (the range keeping `t_A` in
+`[10,100] ms` at every radius simultaneously): `dipole_bmax_gauss in
+[5.38e15, 2.78e16] G`.** This refines the earlier back-of-envelope estimate
+(`[8e15,1e16] G`, from the 2026-08-14 reanalysis, based on only 3 discrete
+radii at a single `dipole_bmax_gauss`) into an exact, continuously-scanned
+range — noticeably wider at the upper end (`2.78e16` vs. the earlier
+guess's `1e16`) since that reanalysis never checked how far `t_A` could
+still rise before leaving the window. The previously-used `1e16 G` sits
+comfortably inside this range, near its lower-middle, not "near-optimal at
+the edge" as the earlier rough estimate suggested.
+
+**Caveat, consistent with the established noise floor:** `r>=4.19`
+(reported `(NOISE FLOOR)` in the script's output, same criterion as the
+2026-08-14 reanalysis — shell density touches the atmosphere floor) is not
+included in the intersection above, even though its own numbers look
+similar; only genuinely star-interior shells are load-bearing here.
+
+**Reusable infrastructure**: `grass_dipole_scan/plot/dipole_scan.py`
+(reuses `athplot.load_sph_vtk.SphericalData`/`sph_integrate.calc_ur`,
+unmodified) — rerunning this scan for a different star, shell, or web
+realization only requires resubmitting the two reference jobs with the
+new config; the analysis itself needs no changes.
+
 ## Known gaps (explicit scope decisions, not oversights)
 
 - **V2's dedicated confinement re-check** (a startup `max|B|` scan outside

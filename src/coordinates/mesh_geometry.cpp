@@ -89,6 +89,50 @@ void MirrorReflectingGhostGeometry(MeshBlockPack *ppack, DvceArray2D<Real> &xv,
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn MirrorReflectingGhostCentroid()
+//! \brief the centroid-only half of MirrorReflectingGhostGeometry above, for the
+//! area-weighted face centroids (GeomData::fcN_d) added for SMR/AMR Phase 2.
+//!
+//! Same rationale as the Task B6 fix: linear extrapolation continues OUTWARD in the
+//! ghost zone while a reflecting BC mirrors the DATA inward, and any interpolation that
+//! reads ghost positions then sees a mismatched stencil. The fcN_d arrays feed exactly
+//! such an interpolation (face-centered prolongation), so they need the same treatment.
+//!
+//! Separate function because the face array is shared between several centroid arrays
+//! and has already been corrected by the time this runs -- correcting it repeatedly
+//! would mirror an already-mirrored value. `xf` is read-only here. The wall position it
+//! reads (`xf(is)` / `xf(ie+1)`) is an ACTIVE face, which that correction never touches,
+//! so this is insensitive to the order of the two calls.
+void MirrorReflectingGhostCentroid(MeshBlockPack *ppack, DvceArray2D<Real> &cv,
+                                   const DvceArray2D<Real> &xf, int is, int ie, int ng,
+                                   BoundaryFace inner_face, BoundaryFace outer_face) {
+  int nmb = ppack->nmb_thispack;
+  auto &mb_bcs = ppack->pmb->mb_bcs;
+  auto cv_h = Kokkos::create_mirror_view(cv);
+  auto xf_h = Kokkos::create_mirror_view(xf);
+  Kokkos::deep_copy(cv_h, cv);
+  Kokkos::deep_copy(xf_h, xf);
+  bool changed = false;
+  for (int m = 0; m < nmb; ++m) {
+    if (mb_bcs.h_view(m, inner_face) == BoundaryFlag::reflect) {
+      Real wall = xf_h(m, is);
+      for (int g = 1; g <= ng; ++g) {
+        cv_h(m, is - g) = 2.0*wall - cv_h(m, is + g - 1);
+      }
+      changed = true;
+    }
+    if (mb_bcs.h_view(m, outer_face) == BoundaryFlag::reflect) {
+      Real wall = xf_h(m, ie + 1);
+      for (int g = 1; g <= ng; ++g) {
+        cv_h(m, ie + g) = 2.0*wall - cv_h(m, ie - g + 1);
+      }
+      changed = true;
+    }
+  }
+  if (changed) { Kokkos::deep_copy(cv, cv_h); }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn MirrorReflectingGhostPpmCoeffs()
 //! \brief Task B7 analogue of MirrorReflectingGhostGeometry, for the x1 PPM4/PPMX
 //! interpolation weights (ppm_c1i..c4i, face-indexed) and overshoot ratios (ppm_hpi/hmi,
@@ -261,6 +305,9 @@ GeomDataHost MirrorGeomData(const GeomData &g) {
   h.cw3i = mirror(g.cw3i); h.cw3j = mirror(g.cw3j); h.cw3k = mirror(g.cw3k);
   h.x1v = mirror(g.x1v); h.x2v = mirror(g.x2v); h.x3v = mirror(g.x3v);
   h.xf1 = mirror(g.xf1); h.xf2 = mirror(g.xf2); h.xf3 = mirror(g.xf3);
+  h.fc1_2 = mirror(g.fc1_2); h.fc1_3 = mirror(g.fc1_3);
+  h.fc2_1 = mirror(g.fc2_1); h.fc2_3 = mirror(g.fc2_3);
+  h.fc3_1 = mirror(g.fc3_1); h.fc3_2 = mirror(g.fc3_2);
   return h;
 }
 
@@ -324,6 +371,28 @@ void BuildOneLevel(ParameterInput *pin, MeshBlockPack *ppack, const GeomIndcs &g
     MirrorReflectingGhostGeometry(ppack, geom.x3v, geom.xf3,
                                    gi.ks, ke, gi.ng,
                                    BoundaryFace::inner_x3, BoundaryFace::outer_x3);
+  }
+
+  // Same correction for the area-weighted face centroids (SMR/AMR Phase 2), which feed
+  // face-centered prolongation exactly as x1v/x2v/x3v feed PLM and ProlongCC. Grouped by
+  // the direction each array is indexed in, since that selects the face array and the
+  // index range. Must follow the calls above (they finalize xfN); see the doc comment on
+  // MirrorReflectingGhostCentroid for why the ordering is in fact immaterial.
+  MirrorReflectingGhostCentroid(ppack, geom.fc2_1, geom.xf1, gi.is, ie, gi.ng,
+                                BoundaryFace::inner_x1, BoundaryFace::outer_x1);
+  MirrorReflectingGhostCentroid(ppack, geom.fc3_1, geom.xf1, gi.is, ie, gi.ng,
+                                BoundaryFace::inner_x1, BoundaryFace::outer_x1);
+  if (ppack->pmesh->multi_d) {
+    MirrorReflectingGhostCentroid(ppack, geom.fc1_2, geom.xf2, gi.js, je, gi.ng,
+                                  BoundaryFace::inner_x2, BoundaryFace::outer_x2);
+    MirrorReflectingGhostCentroid(ppack, geom.fc3_2, geom.xf2, gi.js, je, gi.ng,
+                                  BoundaryFace::inner_x2, BoundaryFace::outer_x2);
+  }
+  if (ppack->pmesh->three_d) {
+    MirrorReflectingGhostCentroid(ppack, geom.fc1_3, geom.xf3, gi.ks, ke, gi.ng,
+                                  BoundaryFace::inner_x3, BoundaryFace::outer_x3);
+    MirrorReflectingGhostCentroid(ppack, geom.fc2_3, geom.xf3, gi.ks, ke, gi.ng,
+                                  BoundaryFace::inner_x3, BoundaryFace::outer_x3);
   }
 
   // Task B7 fix (see MirrorReflectingGhostPpmCoeffs doc comment above): x1-only, since
@@ -400,6 +469,38 @@ void BuildOneLevel(ParameterInput *pin, MeshBlockPack *ppack, const GeomIndcs &g
         all_const(geom.a1i) && all_const(geom.a1j) && all_const(geom.a1k) &&
         all_const(geom.a2i) && all_const(geom.a2j) && all_const(geom.a2k) &&
         all_const(geom.a3i) && all_const(geom.a3j) && all_const(geom.a3k);
+
+    // Cubic cells: uniform AND all three areas equal (see GeomData::cubic_cells).
+    // Only meaningful once cells_uniform holds, since otherwise "the" area of a
+    // direction is not a single number. Areas are compared at one interior cell, which
+    // is well-defined precisely because every factor is already known constant.
+    geom.cubic_cells = false;
+    if (geom.cells_uniform) {
+      auto at0 = [](const DvceArray2D<Real> &f) {
+        auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), f);
+        return h;
+      };
+      auto a1i_h = at0(geom.a1i), a1j_h = at0(geom.a1j), a1k_h = at0(geom.a1k);
+      auto a2i_h = at0(geom.a2i), a2j_h = at0(geom.a2j), a2k_h = at0(geom.a2k);
+      auto a3i_h = at0(geom.a3i), a3j_h = at0(geom.a3j), a3k_h = at0(geom.a3k);
+      bool cubic = true;
+      for (int m = 0; m < a1i_h.extent_int(0) && cubic; ++m) {
+        Real A1 = a1i_h(m,0)*a1j_h(m,0)*a1k_h(m,0);
+        Real A2 = a2i_h(m,0)*a2j_h(m,0)*a2k_h(m,0);
+        Real A3 = a3i_h(m,0)*a3j_h(m,0)*a3k_h(m,0);
+        // Only compare directions the mesh actually resolves: a 1-cell direction carries
+        // an arbitrary extent (often exactly 1.0) that must not veto the fast path, or
+        // every 1D/2D Cartesian run would be treated as non-cubic.
+        Real ref = A1;
+        if (ppack->pmesh->multi_d && std::abs(A2-ref) > 1.0e-12*std::abs(ref)) {
+          cubic = false;
+        }
+        if (ppack->pmesh->three_d && std::abs(A3-ref) > 1.0e-12*std::abs(ref)) {
+          cubic = false;
+        }
+      }
+      geom.cubic_cells = cubic;
+    }
   }
 
   geom.plm_uniform1 =

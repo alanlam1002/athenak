@@ -173,6 +173,19 @@ void BuildCylindricalAxisymGeometry(ParameterInput *pin, MeshBlockPack *ppack,
   geom.xf1 = BuildFactor("geom.xf1", nmb, ncells1+1, Rf_of);
   geom.xf2 = BuildFactor("geom.xf2", nmb, ncells2+1, xf2_of);
   geom.xf3 = BuildFactor("geom.xf3", nmb, ncells3+1, xf3_of);
+  // area-weighted transverse face centroids (SMR/AMR Phase 2). Here x2 is z and x3 is
+  // the ignorable phi. The z-face (a2i == Rmom == vi) weights R volumetrically, giving
+  // x1v; the phi-face (a3i == dR) weights it by the plain width, giving the arithmetic
+  // midpoint. Note this is the mirror image of the cylindrical case, where the roles of
+  // directions 2 and 3 are swapped -- which is exactly why these are stored per
+  // face/direction pair rather than inferred at the use site.
+  auto Rmid_of = [&](int m, int i) { return 0.5*(rf(m, i) + rf(m, i+1)); };
+  geom.fc1_2 = BuildFactor("geom.fc1_2", nmb, ncells2, x2v_of);
+  geom.fc1_3 = BuildFactor("geom.fc1_3", nmb, ncells3, x3v_of);
+  geom.fc2_1 = BuildFactor("geom.fc2_1", nmb, ncells1, x1v_of);
+  geom.fc2_3 = BuildFactor("geom.fc2_3", nmb, ncells3, x3v_of);
+  geom.fc3_1 = BuildFactor("geom.fc3_1", nmb, ncells1, Rmid_of);
+  geom.fc3_2 = BuildFactor("geom.fc3_2", nmb, ncells2, x2v_of);
   // geometric source-term coefficients
   geom.src1 = BuildFactor("geom.src1", nmb, ncells1, src1_of);
   geom.src2 = BuildFactor("geom.src2", nmb, ncells1, src2_of);

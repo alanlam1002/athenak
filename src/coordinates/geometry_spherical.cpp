@@ -186,6 +186,27 @@ void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack,
   geom.xf1 = BuildFactor("geom.xf1", nmb, ncells1+1, rf_of);
   geom.xf2 = BuildFactor("geom.xf2", nmb, ncells2+1, thf);
   geom.xf3 = BuildFactor("geom.xf3", nmb, ncells3+1, xf3_of);
+  // area-weighted transverse face centroids (SMR/AMR Phase 2). This is the system where
+  // reusing the volumetric centroids would actually be wrong, in BOTH non-radial-face
+  // directions:
+  //   r-face  : a1j == dcos(th) == vj and a1k == dphi == vk, so x2v/x3v are correct.
+  //   th-face : a2i == integral(r dr), but vi == integral(r^2 dr)  -> different centroid.
+  //   phi-face: a3i == integral(r dr) likewise, and a3j == dtheta while
+  //             vj == integral(sin(th) dtheta) -> different again.
+  // The r*dr-weighted radial centroid is integral(r*r dr)/integral(r dr) =
+  // (2/3)(r+^3-r-^3)/(r+^2-r-^2), which is the same expression as cylindrical's x1v.
+  auto r_rdr_centroid_of = [&](int m, int i) {
+    Real rm = rf(m, i), rp = rf(m, i+1);
+    Real rm2 = rm*rm, rp2 = rp*rp;
+    return (2.0/3.0)*(rp2*rp - rm2*rm)/(rp2 - rm2);
+  };
+  auto thmid_of = [&](int m, int j) { return 0.5*(thf(m, j) + thf(m, j+1)); };
+  geom.fc1_2 = BuildFactor("geom.fc1_2", nmb, ncells2, x2v_of);
+  geom.fc1_3 = BuildFactor("geom.fc1_3", nmb, ncells3, x3v_of);
+  geom.fc2_1 = BuildFactor("geom.fc2_1", nmb, ncells1, r_rdr_centroid_of);
+  geom.fc2_3 = BuildFactor("geom.fc2_3", nmb, ncells3, x3v_of);
+  geom.fc3_1 = BuildFactor("geom.fc3_1", nmb, ncells1, r_rdr_centroid_of);
+  geom.fc3_2 = BuildFactor("geom.fc3_2", nmb, ncells2, thmid_of);
   // geometric source-term coefficients (radial part; theta part below, Task C2)
   geom.src1 = BuildFactor("geom.src1", nmb, ncells1, src1_of);
   geom.src2 = BuildFactor("geom.src2", nmb, ncells1, src2_of);

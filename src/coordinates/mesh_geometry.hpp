@@ -172,6 +172,34 @@ struct GeomData {
   // spacing AND the centroid-to-face offset -- see plm.hpp. Face factors, size
   // ncells1+1, ncells2+1, ncells3+1.
   DvceArray2D<Real> xf1, xf2, xf3;
+  // AREA-weighted transverse centroids of a face (curvilinear SMR/AMR Phase 2).
+  // fcN_d(m, idx) is the centroid, in direction d, of an xN-face, weighted by that
+  // face's own area measure in direction d -- i.e. integral(x * w dx)/integral(w dx)
+  // with w the corresponding aNi/aNj/aNk factor.
+  //
+  // WHY these are needed and why x1v/x2v/x3v cannot be reused. Conservative
+  // face-centered prolongation writes B_f = B_c + s*(y_f - y_c) and is exactly
+  // flux-conservative (sum(A_f*B_f) == A_c*B_c) precisely because
+  // sum(A_f*y_f) == A_c*y_c holds for the AREA-weighted centroid -- the same
+  // telescoping argument ProlongCC uses with the VOLUME-weighted centroid. The two
+  // weightings coincide for an x1-face in every system supported here (a1j == vj and
+  // a1k == vk), but NOT otherwise: in spherical a2i == a3i == integral(r dr) while
+  // vi == integral(r^2 dr), and a3j == dtheta while vj == integral(sin(th) dtheta).
+  // Using x1v/x2v/x3v for x2/x3-faces would therefore silently break div(B)=0 across a
+  // level jump in exactly the systems this project exists to support.
+  //
+  // Across all four factories only two formulas are ever needed beyond the existing
+  // centroids: the plain arithmetic midpoint (where the measure is a constant width)
+  // and spherical's r*dr-weighted radial centroid (2/3)(r+^3-r-^3)/(r+^2-r-^2), which
+  // happens to be the same expression as cylindrical's x1v. Several entries alias
+  // x1v/x2v/x3v by construction; they are still stored separately so that no use site
+  // has to reason about which aliasing happens to hold in which coordinate system.
+  //
+  // Cell factors, sized by the transverse direction: fc1_2/fc3_2 are size ncells2,
+  // fc1_3/fc2_3 size ncells3, fc2_1/fc3_1 size ncells1.
+  DvceArray2D<Real> fc1_2, fc1_3;   // x2, x3 centroid of an x1-face (weight a1j, a1k)
+  DvceArray2D<Real> fc2_1, fc2_3;   // x1, x3 centroid of an x2-face (weight a2i, a2k)
+  DvceArray2D<Real> fc3_1, fc3_2;   // x1, x2 centroid of an x3-face (weight a3i, a3j)
   // geometric source-term coefficients (Task C1/C2), Delta-A/Delta-V ratios; zero for
   // cartesian. Cell factor, size ncells1 (indexed by i, the radial-like direction for
   // all three curvilinear systems). NOTE: spherical_polar's theta-momentum source term
@@ -272,6 +300,19 @@ struct GeomData {
   // boundary test report ~1e6 C2P failures and to break the radiation AMR test. Same
   // reasoning, and same tolerance-then-use-exact-constants approach, as plm_uniform*.
   bool cells_uniform;
+  // True when, in addition to cells_uniform, all three face areas are EQUAL to each
+  // other -- i.e. cells are cubes (dx1 == dx2 == dx3), not merely uniform.
+  //
+  // This, not cells_uniform, is the correct fast-path predicate for the FACE-centered
+  // path, because upstream's FC prolongation is only divergence-preserving on cubic
+  // cells. Its Toth-Roe moments mix x2f and x3f differences with unit weight, so it
+  // enforces dB1 + dB2 + dB3 = 0 per child, whereas the actual constraint is
+  // A1*dB1 + A2*dB2 + A3*dB3 = 0. Measured on Cartesian with unmodified upstream code:
+  // a square grid holds div(B) at 4e-16, the same grid at aspect ratio 2 jumps to
+  // 7e-03 at the first regrid (see DEVELOPMENT.md, Phase 2 finding). Keying the fast
+  // path here keeps every existing (cubic) Cartesian AMR test bitwise unchanged while
+  // letting non-cubic grids take the corrected flux-form path.
+  bool cubic_cells;
 
   KOKKOS_INLINE_FUNCTION
   Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }
@@ -294,6 +335,35 @@ struct GeomData {
     return cw3i(m,i)*cw3j(m,j)*cw3k(m,k);
   }
 };
+
+//----------------------------------------------------------------------------------------
+//! \fn WeightedMean()
+//! \brief geometry-weighted mean of the 2 or 4 children of a coarse face or edge, i.e.
+//! sum(w_f*v_f)/sum(w_f). Used by face-centered restriction (w = Area) and by EMF
+//! correction at a level boundary (w = Len), which are the two places a coarse
+//! face/edge quantity must be formed from its children so that the integrated flux or
+//! line integral is preserved exactly.
+//!
+//! DEGENERATE WEIGHTS. Unlike Vol, an Area or Len can be exactly zero on the coordinate
+//! systems supported here: Area1 and Len2/Len3 vanish at r=0 in spherical, and Area2
+//! vanishes on the polar axis. The flux through such a face is zero whatever value is
+//! stored, but the value itself is still READ -- by the Toth-Roe internal-face stencil,
+//! by bcc0, and by the reconstruction -- so it has to stay finite and smooth rather than
+//! become NaN. Falling back to the unweighted mean there reproduces upstream's behaviour
+//! at exactly the points where the weighting carries no information anyway.
+KOKKOS_INLINE_FUNCTION
+Real WeightedMean(Real w0, Real v0, Real w1, Real v1) {
+  Real wsum = w0 + w1;
+  return (wsum > 0.0) ? (w0*v0 + w1*v1)/wsum : 0.5*(v0 + v1);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real WeightedMean(Real w0, Real v0, Real w1, Real v1,
+                  Real w2, Real v2, Real w3, Real v3) {
+  Real wsum = w0 + w1 + w2 + w3;
+  return (wsum > 0.0) ? (w0*v0 + w1*v1 + w2*v2 + w3*v3)/wsum
+                      : 0.25*(v0 + v1 + v2 + v3);
+}
 
 //----------------------------------------------------------------------------------------
 //! \struct GeomDataHost
@@ -325,6 +395,9 @@ struct GeomDataHost {
   // the volume-weighted mean of the child centroids, which is what makes the
   // centroid-based prolongation exactly conservative).
   HostArr x1v, x2v, x3v, xf1, xf2, xf3;
+  // area-weighted transverse face centroids, for the host-side check that
+  // A_c*y_c == sum(A_f*y_f) -- the identity the FC prolongation's conservation rests on.
+  HostArr fc1_2, fc1_3, fc2_1, fc2_3, fc3_1, fc3_2;
 
   Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }
   Real Area2(int m, int k, int j, int i) const { return a2i(m,i)*a2j(m,j)*a2k(m,k); }

@@ -161,6 +161,18 @@ void BuildCylindricalGeometry(ParameterInput *pin, MeshBlockPack *ppack,
   geom.xf1 = BuildFactor("geom.xf1", nmb, ncells1+1, Rf_of);
   geom.xf2 = BuildFactor("geom.xf2", nmb, ncells2+1, xf2_of);
   geom.xf3 = BuildFactor("geom.xf3", nmb, ncells3+1, xf3_of);
+  // area-weighted transverse face centroids (SMR/AMR Phase 2). phi and z carry constant
+  // measures (dphi, dz), so their centroids are the midpoints x2v/x3v. The radial ones
+  // differ by which face is being weighted: a z-face weights R by Rmom == vi, giving the
+  // volumetric centroid x1v, whereas a phi-face weights R by the plain width dR, giving
+  // the arithmetic midpoint. Using x1v for both would break FC prolongation on phi-faces.
+  auto Rmid_of = [&](int m, int i) { return 0.5*(rf(m, i) + rf(m, i+1)); };
+  geom.fc1_2 = BuildFactor("geom.fc1_2", nmb, ncells2, x2v_of);
+  geom.fc1_3 = BuildFactor("geom.fc1_3", nmb, ncells3, x3v_of);
+  geom.fc2_1 = BuildFactor("geom.fc2_1", nmb, ncells1, Rmid_of);
+  geom.fc2_3 = BuildFactor("geom.fc2_3", nmb, ncells3, x3v_of);
+  geom.fc3_1 = BuildFactor("geom.fc3_1", nmb, ncells1, x1v_of);
+  geom.fc3_2 = BuildFactor("geom.fc3_2", nmb, ncells2, x2v_of);
   // geometric source-term coefficients
   geom.src1 = BuildFactor("geom.src1", nmb, ncells1, src1_of);
   geom.src2 = BuildFactor("geom.src2", nmb, ncells1, src2_of);

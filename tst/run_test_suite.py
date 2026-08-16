@@ -150,7 +150,16 @@ if args.mpicpu is not None:
     os.chdir(original_dir)
 
 if args.gpu is not None:
-    testutils.clean_make(flags=cmake_flags(args.gpu, ["-D", "Kokkos_ENABLE_CUDA=On"]))
+    # Default to CUDA, but do not force it if the caller already selected a Kokkos
+    # device backend. Without this, --gpu is unusable on non-NVIDIA hardware (Intel
+    # PVC via SYCL, AMD via HIP), since Kokkos rejects two device backends at once.
+    # Passing e.g. --gpu "-DKokkos_ENABLE_SYCL=On -DKokkos_ARCH_INTEL_PVC=ON" now works.
+    gpu_flags = cmake_flags(args.gpu, [])
+    backends = ("Kokkos_ENABLE_CUDA", "Kokkos_ENABLE_SYCL", "Kokkos_ENABLE_HIP",
+                "Kokkos_ENABLE_OPENMPTARGET")
+    if not any(b in f for f in gpu_flags for b in backends):
+        gpu_flags += ["-D", "Kokkos_ENABLE_CUDA=On"]
+    testutils.clean_make(flags=gpu_flags)
     test(tests + ["-k", "_gpu"])  # run all scripts with _gpu in name
     os.chdir(original_dir)
 

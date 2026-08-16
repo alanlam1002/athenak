@@ -29,6 +29,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_amr.hpp"
@@ -599,6 +600,59 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   new_to_old.template modify<HostMemSpace>();
   new_to_old.template sync<DevExeSpace>();
 
+  // Rebuilding the grid objects is packaged as a lambda because WHEN it runs depends on
+  // whether prolongation needs geometry.
+  //
+  // For curvilinear coordinates ProlongCC reads the new blocks' volumetric centroids, so
+  // the rebuild must precede Step 9; leaving it until after makes prolongation read a
+  // pgeom sized and positioned for the OLD blocks, which costs ~5e-6 in conservation.
+  //
+  // For coord=cartesian the conservative form reduces EXACTLY to the old index-space one
+  // and needs no geometry at all, so the rebuild stays exactly where it has always been.
+  // That is deliberate: it keeps every Cartesian path -- including the GR, radiation and
+  // z4c AMR paths, none of which can ever be curvilinear (GR + curvilinear is fatal in
+  // coordinates.cpp) -- on its original ordering. Hoisting it for them is not merely
+  // unnecessary but actively harmful: it perturbs the refinement cadence enough to slow
+  // the radiation AMR test past the harness timeout, and any attempt to hoist only part
+  // of the group segfaults, since the new MeshBlock would be left without neighbour
+  // lists.
+  //
+  // The four steps inside must stay together for that same reason.
+  const bool early_rebuild = (pm->coord_general != CoordinateGeneral::cartesian);
+  auto rebuild_grid = [&]() {
+    // Update data in Mesh/MeshBlockPack/MeshBlock classes with new grid properties
+    delete [] pm->lloc_eachmb;
+    delete [] pm->rank_eachmb;
+    delete [] pm->cost_eachmb;
+    delete [] pm->gids_eachrank;
+    delete [] pm->nmb_eachrank;
+    pm->lloc_eachmb = new_lloc_eachmb;
+    pm->rank_eachmb = new_rank_eachmb;
+    pm->cost_eachmb = new_cost_eachmb;
+    pm->gids_eachrank = new_gids_eachrank;
+    pm->nmb_eachrank  = new_nmb_eachrank;
+    pm->nmb_total = new_nmb_total;
+    pm->nmb_thisrank = pm->nmb_eachrank[global_variable::my_rank];
+
+    pm->pmb_pack->gids = pm->gids_eachrank[global_variable::my_rank];
+    pm->pmb_pack->gide =
+        pm->pmb_pack->gids + pm->nmb_eachrank[global_variable::my_rank] - 1;
+    pm->pmb_pack->nmb_thispack = pm->pmb_pack->gide - pm->pmb_pack->gids + 1;
+
+    // Delete old then allocate new MeshBlocks, Geometry, and Coordinates (latter includes
+    // masks in GR). Geometry must be rebuilt since mb_size (block extents) changes across
+    // a regrid, for every coordinate system including cartesian.
+    delete (pm->pmb_pack->pmb);
+    delete (pm->pmb_pack->pgeom);
+    delete (pm->pmb_pack->pcoord);
+    pm->pmb_pack->AddMeshBlocks(pin);
+    pm->pmb_pack->AddGeometry(pin);
+    pm->pmb_pack->AddCoordinates(pin);
+    pm->pmb_pack->pmb->SetNeighbors(pm->ptree, pm->rank_eachmb);
+  };
+
+  if (early_rebuild) { rebuild_grid(); }
+
   // Step 9.
   // Coarse arrays are now up-to-date, either through copies on same rank or MPI calls
   // So prolongate (refine) evolved physics variables for all MBs flagged for refinement.
@@ -634,36 +688,7 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   Kokkos::realloc(ncyc_since_ref, new_nmb_total);
   Kokkos::deep_copy(ncyc_since_ref, new_ncyc_since_ref);
 
-  // Update data in Mesh/MeshBlockPack/MeshBlock classes with new grid properties
-  delete [] pm->lloc_eachmb;
-  delete [] pm->rank_eachmb;
-  delete [] pm->cost_eachmb;
-  delete [] pm->gids_eachrank;
-  delete [] pm->nmb_eachrank;
-  pm->lloc_eachmb = new_lloc_eachmb;
-  pm->rank_eachmb = new_rank_eachmb;
-  pm->cost_eachmb = new_cost_eachmb;
-  pm->gids_eachrank = new_gids_eachrank;
-  pm->nmb_eachrank  = new_nmb_eachrank;
-  pm->nmb_total = new_nmb_total;
-  pm->nmb_thisrank = pm->nmb_eachrank[global_variable::my_rank];
-
-  pm->pmb_pack->gids = pm->gids_eachrank[global_variable::my_rank];
-  pm->pmb_pack->gide = pm->pmb_pack->gids + pm->nmb_eachrank[global_variable::my_rank]-1;
-  pm->pmb_pack->nmb_thispack = pm->pmb_pack->gide - pm->pmb_pack->gids + 1;
-
-  // Delete old then allocate new MeshBlocks, Geometry, and Coordinates (latter includes
-  // masks in GR). Geometry must be rebuilt here too since mb_size (block extents) change
-  // across a regrid even for coord=cartesian, the only case that reaches this path today
-  // (curvilinear+multilevel is fatally guarded at Mesh construction, see
-  // Mesh::ValidateCoordGeneral() -- Task A1/C3).
-  delete (pm->pmb_pack->pmb);
-  delete (pm->pmb_pack->pgeom);
-  delete (pm->pmb_pack->pcoord);
-  pm->pmb_pack->AddMeshBlocks(pin);
-  pm->pmb_pack->AddGeometry(pin);
-  pm->pmb_pack->AddCoordinates(pin);
-  pm->pmb_pack->pmb->SetNeighbors(pm->ptree, pm->rank_eachmb);
+  if (!early_rebuild) { rebuild_grid(); }
 
   Kokkos::realloc(fc_amr_repair, new_nmb_total);
   for (int m=0; m<new_nmb_total; ++m) {
@@ -1055,6 +1080,15 @@ void MeshRefinement::RefineCC(DualArray1D<int> &n2o, DvceArray5D<Real> &a,
   auto& prolong_2nd = weights.prolong_2nd;
   auto& prolong_4th = weights.prolong_4th;
 
+  // Fine/coarse centroids for the conservative prolongation (see ProlongCC).
+  auto &cx1v = pmy_mesh->pmb_pack->pgeom->coarse_geom_data.x1v;
+  auto &cx2v = pmy_mesh->pmb_pack->pgeom->coarse_geom_data.x2v;
+  auto &cx3v = pmy_mesh->pmb_pack->pgeom->coarse_geom_data.x3v;
+  auto &x1v  = pmy_mesh->pmb_pack->pgeom->geom_data.x1v;
+  auto &x2v  = pmy_mesh->pmb_pack->pgeom->geom_data.x2v;
+  auto &x3v  = pmy_mesh->pmb_pack->pgeom->geom_data.x3v;
+  const bool geom_uni = pmy_mesh->pmb_pack->pgeom->geom_data.cells_uniform;
+
   auto &refine_flag_ = refine_flag;
   bool &multi_d = pmy_mesh->multi_d;
   bool &three_d = pmy_mesh->three_d;
@@ -1088,7 +1122,9 @@ void MeshRefinement::RefineCC(DualArray1D<int> &n2o, DvceArray5D<Real> &a,
 
         // call inlined prolongation operator for CC variables
         if (!is_z4c) {
-          ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,ca,a);
+          ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,
+                    cx1v,cx2v,cx3v,x1v,x2v,x3v,
+                    geom_uni,ca,a);
         } else {
           switch (indcs.ng) {
             case 2: HighOrderProlongCC<2>(m,v,k,j,i,fk,fj,fi,nx1,nx2,nx3,
@@ -1244,12 +1280,29 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
   auto& restrict_2nd = weights.restrict_2nd;
   auto& restrict_4th = weights.restrict_4th;
   auto& restrict_4th_edge = weights.restrict_4th_edge;
+
+  // Volume-weighted conservative restriction: cu = sum(V_f*u_f)/sum(V_f). Only the FINE
+  // geometry is needed -- a coarse cell is exactly the union of its children, so
+  // V_coarse == sum(V_fine) to roundoff (asserted by coarse_geometry_test.cpp). Reduces
+  // EXACTLY to the previous 0.5/0.25/0.125 constants for equal-volume children.
+  auto &geom = pmy_mesh->pmb_pack->pgeom->geom_data;
+  // On a uniform grid take upstream's exact constants -- bitwise identical, not merely
+  // equivalent. See GeomData::cells_uniform for why that distinction matters here.
+  const bool uni = geom.cells_uniform;
+
   // restrict in 1D
   if (pmy_mesh->one_d) {
     par_for("restrictCC-1D",DevExeSpace(), 0,nmb-1, 0,nvar-1, cis,cie,
     KOKKOS_LAMBDA(const int m, const int n, const int i) {
       int finei = 2*i - cis;  // correct when cis=is
-      cu(m,n,cks,cjs,i) = 0.5*(u(m,n,cks,cjs,finei) + u(m,n,cks,cjs,finei+1));
+      if (uni) {
+        cu(m,n,cks,cjs,i) = 0.5*(u(m,n,cks,cjs,finei) + u(m,n,cks,cjs,finei+1));
+      } else {
+        Real v0 = geom.Vol(m,cks,cjs,finei);
+        Real v1 = geom.Vol(m,cks,cjs,finei+1);
+        cu(m,n,cks,cjs,i) =
+            (v0*u(m,n,cks,cjs,finei) + v1*u(m,n,cks,cjs,finei+1))/(v0+v1);
+      }
     });
   // restrict in 2D
   } else if (pmy_mesh->two_d) {
@@ -1257,8 +1310,18 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
     KOKKOS_LAMBDA(const int m, const int n, const int j, const int i) {
       int finei = 2*i - cis;  // correct when cis=is
       int finej = 2*j - cjs;  // correct when cjs=js
-      cu(m,n,cks,j,i) = 0.25*(u(m,n,cks,finej  ,finei) + u(m,n,cks,finej  ,finei+1)
-                            + u(m,n,cks,finej+1,finei) + u(m,n,cks,finej+1,finei+1));
+      if (uni) {
+        cu(m,n,cks,j,i) = 0.25*(u(m,n,cks,finej  ,finei) + u(m,n,cks,finej  ,finei+1)
+                              + u(m,n,cks,finej+1,finei) + u(m,n,cks,finej+1,finei+1));
+        return;
+      }
+      Real v00 = geom.Vol(m,cks,finej  ,finei  );
+      Real v01 = geom.Vol(m,cks,finej  ,finei+1);
+      Real v10 = geom.Vol(m,cks,finej+1,finei  );
+      Real v11 = geom.Vol(m,cks,finej+1,finei+1);
+      cu(m,n,cks,j,i) = (v00*u(m,n,cks,finej  ,finei) + v01*u(m,n,cks,finej  ,finei+1)
+                       + v10*u(m,n,cks,finej+1,finei) + v11*u(m,n,cks,finej+1,finei+1))
+                        /(v00 + v01 + v10 + v11);
     });
 
   // restrict in 3D
@@ -1269,11 +1332,28 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
       int finej = 2*j - cjs;  // correct when cjs=js
       int finek = 2*k - cks;  // correct when cks=ks
       if (!is_z4c) {
+        if (uni) {
+          cu(m,n,k,j,i) =
+              0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
+                  + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
+                  + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
+                  + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
+          return;
+        }
+        Real v000 = geom.Vol(m,finek  ,finej  ,finei  );
+        Real v001 = geom.Vol(m,finek  ,finej  ,finei+1);
+        Real v010 = geom.Vol(m,finek  ,finej+1,finei  );
+        Real v011 = geom.Vol(m,finek  ,finej+1,finei+1);
+        Real v100 = geom.Vol(m,finek+1,finej  ,finei  );
+        Real v101 = geom.Vol(m,finek+1,finej  ,finei+1);
+        Real v110 = geom.Vol(m,finek+1,finej+1,finei  );
+        Real v111 = geom.Vol(m,finek+1,finej+1,finei+1);
         cu(m,n,k,j,i) =
-            0.125*(u(m,n,finek  ,finej  ,finei) + u(m,n,finek  ,finej  ,finei+1)
-                + u(m,n,finek  ,finej+1,finei) + u(m,n,finek  ,finej+1,finei+1)
-                + u(m,n,finek+1,finej,  finei) + u(m,n,finek+1,finej,  finei+1)
-                + u(m,n,finek+1,finej+1,finei) + u(m,n,finek+1,finej+1,finei+1));
+            (v000*u(m,n,finek  ,finej  ,finei) + v001*u(m,n,finek  ,finej  ,finei+1)
+           + v010*u(m,n,finek  ,finej+1,finei) + v011*u(m,n,finek  ,finej+1,finei+1)
+           + v100*u(m,n,finek+1,finej,  finei) + v101*u(m,n,finek+1,finej,  finei+1)
+           + v110*u(m,n,finek+1,finej+1,finei) + v111*u(m,n,finek+1,finej+1,finei+1))
+            /(v000 + v001 + v010 + v011 + v100 + v101 + v110 + v111);
       } else {
         switch (indcs.ng) {
           case 2: cu(m,n,k,j,i) = RestrictInterpolation<2>(m,n,finek,finej,finei,

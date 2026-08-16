@@ -382,6 +382,26 @@ void BuildOneLevel(ParameterInput *pin, MeshBlockPack *ppack, const GeomIndcs &g
     geom.ppm_uniform1 = uni;
   }
 
+  // Uniform-geometry flag (see GeomData::cells_uniform). A direction counts as uniform
+  // when its volume factor and all three area factors are constant along it.
+  {
+    auto all_const = [](const DvceArray2D<Real> &v) {
+      auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), v);
+      for (int m = 0; m < h.extent_int(0); ++m) {
+        Real v0 = h(m,0);
+        for (int i = 1; i < h.extent_int(1); ++i) {
+          if (std::abs(h(m,i) - v0) > 1.0e-12*std::max(std::abs(v0), 1.0)) return false;
+        }
+      }
+      return true;
+    };
+    geom.cells_uniform =
+        all_const(geom.vi) && all_const(geom.vj) && all_const(geom.vk) &&
+        all_const(geom.a1i) && all_const(geom.a1j) && all_const(geom.a1k) &&
+        all_const(geom.a2i) && all_const(geom.a2j) && all_const(geom.a2k) &&
+        all_const(geom.a3i) && all_const(geom.a3j) && all_const(geom.a3k);
+  }
+
   geom.plm_uniform1 =
       BuildPlmFactors(geom.plm_c1, geom.x1v, geom.xf1, "geom.plm_c1");
   geom.plm_uniform2 =

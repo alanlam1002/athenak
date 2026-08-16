@@ -14,6 +14,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "bvals.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -40,6 +41,14 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendFluxCC(DvceFaceFld5D<Real> &flx) {
   auto &nghbr = pmy_pack->pmb->nghbr;
   auto &mbgid = pmy_pack->pmb->mb_gid;
   auto &mblev = pmy_pack->pmb->mb_lev;
+  // Area-weighted flux restriction: the coarse face receives sum(A_f*F_f)/sum(A_f),
+  // since flx holds flux DENSITIES. Only this (fine) block's geometry is needed -- the
+  // coarse face is exactly tiled by its children, so sum(A_f) IS the coarse face area,
+  // and a fine block never needs its coarse neighbour's geometry. On a uniform grid the
+  // original constants are used instead, which is bitwise identical rather than merely
+  // equivalent (see GeomData::cells_uniform).
+  auto &geom = pmy_pack->pgeom->geom_data;
+  const bool uni = geom.cells_uniform;
   auto &sbuf = sendbuf;
   auto &rbuf = recvbuf;
   auto &one_d = pmy_pack->pmesh->one_d;
@@ -87,10 +96,26 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendFluxCC(DvceFaceFld5D<Real> &flx) {
           if (one_d) {
             rflx = flx.x1f(m,v,0,0,fi);
           } else if (two_d) {
-            rflx = 0.5*(flx.x1f(m,v,0,fj,fi) + flx.x1f(m,v,0,fj+1,fi));
+            if (uni) {
+              rflx = 0.5*(flx.x1f(m,v,0,fj,fi) + flx.x1f(m,v,0,fj+1,fi));
+            } else {
+              Real a0 = geom.Area1(m,0,fj  ,fi);
+              Real a1 = geom.Area1(m,0,fj+1,fi);
+              rflx = (a0*flx.x1f(m,v,0,fj,fi) + a1*flx.x1f(m,v,0,fj+1,fi))/(a0 + a1);
+            }
           } else {
-            rflx = 0.25*(flx.x1f(m,v,fk  ,fj,fi) + flx.x1f(m,v,fk  ,fj+1,fi) +
-                         flx.x1f(m,v,fk+1,fj,fi) + flx.x1f(m,v,fk+1,fj+1,fi));
+            if (uni) {
+              rflx = 0.25*(flx.x1f(m,v,fk  ,fj,fi) + flx.x1f(m,v,fk  ,fj+1,fi) +
+                           flx.x1f(m,v,fk+1,fj,fi) + flx.x1f(m,v,fk+1,fj+1,fi));
+            } else {
+              Real a00 = geom.Area1(m,fk  ,fj  ,fi);
+              Real a01 = geom.Area1(m,fk  ,fj+1,fi);
+              Real a10 = geom.Area1(m,fk+1,fj  ,fi);
+              Real a11 = geom.Area1(m,fk+1,fj+1,fi);
+              rflx = (a00*flx.x1f(m,v,fk  ,fj,fi) + a01*flx.x1f(m,v,fk  ,fj+1,fi) +
+                      a10*flx.x1f(m,v,fk+1,fj,fi) + a11*flx.x1f(m,v,fk+1,fj+1,fi))
+                     /(a00 + a01 + a10 + a11);
+            }
           }
           // copy directly into recv buffer if MeshBlocks on same rank
           if (nghbr.d_view(m,n).rank == my_rank) {
@@ -113,10 +138,26 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendFluxCC(DvceFaceFld5D<Real> &flx) {
           int fk = 2*k - cks;
           Real rflx;
           if (two_d) {
-            rflx = 0.5*(flx.x2f(m,v,0,fj,fi) + flx.x2f(m,v,0,fj,fi+1));
+            if (uni) {
+              rflx = 0.5*(flx.x2f(m,v,0,fj,fi) + flx.x2f(m,v,0,fj,fi+1));
+            } else {
+              Real a0 = geom.Area2(m,0,fj,fi  );
+              Real a1 = geom.Area2(m,0,fj,fi+1);
+              rflx = (a0*flx.x2f(m,v,0,fj,fi) + a1*flx.x2f(m,v,0,fj,fi+1))/(a0 + a1);
+            }
           } else {
-            rflx = 0.25*(flx.x2f(m,v,fk  ,fj,fi) + flx.x2f(m,v,fk  ,fj,fi+1) +
-                         flx.x2f(m,v,fk+1,fj,fi) + flx.x2f(m,v,fk+1,fj,fi+1));
+            if (uni) {
+              rflx = 0.25*(flx.x2f(m,v,fk  ,fj,fi) + flx.x2f(m,v,fk  ,fj,fi+1) +
+                           flx.x2f(m,v,fk+1,fj,fi) + flx.x2f(m,v,fk+1,fj,fi+1));
+            } else {
+              Real a00 = geom.Area2(m,fk  ,fj,fi  );
+              Real a01 = geom.Area2(m,fk  ,fj,fi+1);
+              Real a10 = geom.Area2(m,fk+1,fj,fi  );
+              Real a11 = geom.Area2(m,fk+1,fj,fi+1);
+              rflx = (a00*flx.x2f(m,v,fk  ,fj,fi) + a01*flx.x2f(m,v,fk  ,fj,fi+1) +
+                      a10*flx.x2f(m,v,fk+1,fj,fi) + a11*flx.x2f(m,v,fk+1,fj,fi+1))
+                     /(a00 + a01 + a10 + a11);
+            }
           }
           // copy directly into recv buffer if MeshBlocks on same rank
           if (nghbr.d_view(m,n).rank == my_rank) {
@@ -137,8 +178,19 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendFluxCC(DvceFaceFld5D<Real> &flx) {
           j += jl;
           int fi = 2*i - cis;
           int fj = 2*j - cjs;
-          Real rflx = 0.25*(flx.x3f(m,v,fk,fj  ,fi) + flx.x3f(m,v,fk,fj  ,fi+1) +
-                            flx.x3f(m,v,fk,fj+1,fi) + flx.x3f(m,v,fk,fj+1,fi+1));
+          Real rflx;
+          if (uni) {
+            rflx = 0.25*(flx.x3f(m,v,fk,fj  ,fi) + flx.x3f(m,v,fk,fj  ,fi+1) +
+                         flx.x3f(m,v,fk,fj+1,fi) + flx.x3f(m,v,fk,fj+1,fi+1));
+          } else {
+            Real a00 = geom.Area3(m,fk,fj  ,fi  );
+            Real a01 = geom.Area3(m,fk,fj  ,fi+1);
+            Real a10 = geom.Area3(m,fk,fj+1,fi  );
+            Real a11 = geom.Area3(m,fk,fj+1,fi+1);
+            rflx = (a00*flx.x3f(m,v,fk,fj  ,fi) + a01*flx.x3f(m,v,fk,fj  ,fi+1) +
+                    a10*flx.x3f(m,v,fk,fj+1,fi) + a11*flx.x3f(m,v,fk,fj+1,fi+1))
+                   /(a00 + a01 + a10 + a11);
+          }
           // copy directly into recv buffer if MeshBlocks on same rank
           if (nghbr.d_view(m,n).rank == my_rank) {
             rbuf[dn].flux(dm, (i-il + ni*(j-jl + nj*v)) ) = rflx;

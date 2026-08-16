@@ -261,6 +261,17 @@ struct GeomData {
   // PPM4/PPMX directly. (x2/x3 always use upstream's PPM unconditionally -- the
   // curvilinear PPM generalization is x1-only -- so they need no flag.)
   bool ppm_uniform1;
+  // True when every cell has the same volume and every face in a given direction the
+  // same area, i.e. the grid is uniform (coord=cartesian, since AthenaK has no mesh
+  // stretching). Lets restriction, prolongation and flux correction take upstream's
+  // original constant-weight expressions, which are BITWISE identical to a
+  // pre-curvilinear build rather than merely mathematically equivalent.
+  //
+  // That distinction turned out to matter: the weighted forms differ from the constants
+  // only in floating-point association, but that was enough to make the GR-MHD AMR
+  // boundary test report ~1e6 C2P failures and to break the radiation AMR test. Same
+  // reasoning, and same tolerance-then-use-exact-constants approach, as plm_uniform*.
+  bool cells_uniform;
 
   KOKKOS_INLINE_FUNCTION
   Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }

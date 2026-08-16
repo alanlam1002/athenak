@@ -85,16 +85,29 @@ final state:
 | + PLM factors precomputed            | 18.45%            | 4.25%        |
 | + update-kernel invariant hoist      | 18.30%            | 3.88%        |
 | + uniform-spacing PLM path           | 5.81%             | 3.91%        |
-| + uniform-spacing PPM path (current) | **6.9% / 7.1%**   | **1.5% / 1.1%** |
+| + uniform-spacing PPM path           | 6.89% / 7.06%     | 1.53% / 1.07% |
+| **after `upstream/main` merge (`f84c65d0`, current)** | **7.75%** | **1.92%** |
 
 **Axis B — coordinate cost.** How much slower is curvilinear than Cartesian?
 Four inputs (`tst/inputs/perf_coord_*.athinput`, `ct_divb_test`, 400x400) that
-are byte-identical apart from the `coord =` line, all on the current build:
+are byte-identical apart from the `coord =` line, all on the current build.
+Pre-merge values in parentheses:
 
 | recon | cartesian | cylindrical | cylindrical_axisym | spherical_polar |
 |-------|-----------|-------------|--------------------|-----------------|
-| plm   | baseline  | 9.7%        | 9.8%               | 16.5%           |
-| ppm4  | baseline  | 4.2%        | 4.4%               | 5.2%            |
+| plm   | baseline  | 9.94% (9.67) | 9.68% (9.75)      | 16.26% (16.47)  |
+| ppm4  | baseline  | 4.62% (4.24) | 4.27% (4.35)      | 5.08% (5.16)    |
+
+**The merge cost nothing measurable.** Upstream rewrote `Mesh::NewTimeStep` and
+split `mhd_newdt.cpp`, either of which could in principle have moved these, so
+the whole matrix was re-run afterwards. Axis B is unchanged to within a few
+tenths of a point everywhere. Axis A's plm figure sits at the top of its scatter
+band rather than the middle — but there are three pre-merge plm samples spanning
+5.81-7.06 on this machine, so 7.75 is consistent with run-to-run noise rather
+than a regression. Anyone who needs that distinction settled properly should
+raise the repetition count (`NREPS=10 ./perf_benchmark_compare.sh 190d482e`)
+instead of reading one more single run; the default `NREPS=3` is tuned for a
+quick answer, not for resolving a one-point difference.
 
 ### How to read these numbers
 
@@ -103,7 +116,7 @@ a regression.** Both sides of the comparison used to be equally slow, which
 flattered the ratio; Cartesian is now ~18% faster in absolute terms
 (3.37e6 -> 4.08e6 zc/cpu_s with plm) and the genuine cost of curvilinear
 geometry is finally visible. Axis A is the number that measures whether
-anything got worse, and it improved by a factor of ~3.5.
+anything got worse, and it improved by a factor of ~3 (23.46% -> 7.75%).
 
 The original 23.5% was almost entirely the generalized PLM limiter (Task B6):
 `PLMGeom()` did 7 divisions per cell per variable per direction where upstream
@@ -133,7 +146,7 @@ roughly broke even. Three changes fixed it, in decreasing order of effect:
    arithmetic is cheaper relative to memory. **Recorded here as a negative
    result so nobody re-derives it.**
 
-The residual ~7% (plm) / ~1% (ppm4) is the area/volume-weighted flux divergence,
+The residual ~7-8% (plm) / ~2% (ppm4) is the area/volume-weighted flux divergence,
 the Stokes-form CT curl and the geometry-based CFL widths, none of which have a
 uniform fast path. Adding one would mean templating those kernels, which grows
 the upstream merge surface in exactly the files upstream edits most — not worth

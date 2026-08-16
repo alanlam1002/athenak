@@ -1267,7 +1267,14 @@ void MeshRefinement::RepairAMRFC(DvceFaceFld4D<Real> &b) {
 
 void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
     bool is_z4c) {
-  int nmb  = u.extent_int(0);  // TODO(@user): 1st index from L of in array must be NMB
+  // Clamp to the MeshBlocks that actually exist, not the array capacity -- u0 is
+  // allocated for nmb_maxperrank, which is larger. Upstream could safely iterate the
+  // whole capacity because it only touched u/cu (surplus slots hold garbage that is read
+  // and written in place), but the volume weighting below reads geometry arrays sized to
+  // the real block count. Without this clamp the weighted branch reads past the end of
+  // geom.vi; a Kokkos bounds-checked build aborts on it, while a Release build silently
+  // reads adjacent heap and still produces plausible numbers.
+  int nmb  = std::min(u.extent_int(0), pmy_mesh->pmb_pack->nmb_thispack);
   int nvar = u.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
 
   auto &indcs = pmy_mesh->mb_indcs;

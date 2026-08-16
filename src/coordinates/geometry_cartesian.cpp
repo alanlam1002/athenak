@@ -42,20 +42,33 @@ DvceArray2D<Real> BuildFactor(const std::string &label, int nmb, int n, F value)
 }
 } // namespace
 
-void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData &geom) {
-  auto &indcs = ppack->pmesh->mb_indcs;
+void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack,
+                            const GeomIndcs &gi, GeomData &geom) {
   int nmb = ppack->nmb_thispack;
-  int ng = indcs.ng;
-  int ncells1 = indcs.nx1 + 2*ng;
-  int ncells2 = NCells(indcs.nx2, ng);
-  int ncells3 = NCells(indcs.nx3, ng);
+  int ng = gi.ng;
+  int ncells1 = gi.nx1 + 2*ng;
+  int ncells2 = NCells(gi.nx2, ng);
+  int ncells3 = NCells(gi.nx3, ng);
 
   auto &size = ppack->pmb->mb_size;  // DualArray1D<RegionSize>, host view already synced
 
+  // Cell widths derived from the index space, NOT from RegionSize::dx1/dx2/dx3 --
+  // those are always the FINE widths and would be wrong by a factor of two when this
+  // factory is building the coarse arrays. Matches meshblock.cpp's own definition.
+  auto dxw1 = [&](int m) {
+    return (size.h_view(m).x1max - size.h_view(m).x1min)/static_cast<Real>(gi.nx1);
+  };
+  auto dxw2 = [&](int m) {
+    return (size.h_view(m).x2max - size.h_view(m).x2min)/static_cast<Real>(gi.nx2);
+  };
+  auto dxw3 = [&](int m) {
+    return (size.h_view(m).x3max - size.h_view(m).x3min)/static_cast<Real>(gi.nx3);
+  };
+
   // "cell" (width-type) factors: constant = dx_d for every index, per MeshBlock
-  auto dx1_of = [&](int m, int) { return size.h_view(m).dx1; };
-  auto dx2_of = [&](int m, int) { return size.h_view(m).dx2; };
-  auto dx3_of = [&](int m, int) { return size.h_view(m).dx3; };
+  auto dx1_of = [&](int m, int) { return dxw1(m); };
+  auto dx2_of = [&](int m, int) { return dxw2(m); };
+  auto dx3_of = [&](int m, int) { return dxw3(m); };
   // "face" (face-valued) factors: constant = 1 for Cartesian (own-direction area/edge
   // factor has no metric weighting when the direction is flat)
   auto one_of = [&](int, int) { return static_cast<Real>(1.0); };
@@ -65,32 +78,32 @@ void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
   // returns the domain midpoint -- a harmless placeholder since no reconstruction or
   // area/volume weighting ever varies with that direction's position.
   auto x1v_of = [&](int m, int i) {
-    return CellCenterX(i - indcs.is, indcs.nx1, size.h_view(m).x1min,
+    return CellCenterX(i - gi.is, gi.nx1, size.h_view(m).x1min,
                        size.h_view(m).x1max);
   };
   auto x2v_of = [&](int m, int j) {
-    int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;
-    int j0 = (indcs.nx2 > 1) ? (j - indcs.js) : 0;
+    int n2 = (gi.nx2 > 1) ? gi.nx2 : 1;
+    int j0 = (gi.nx2 > 1) ? (j - gi.js) : 0;
     return CellCenterX(j0, n2, size.h_view(m).x2min, size.h_view(m).x2max);
   };
   auto x3v_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    int k0 = (indcs.nx3 > 1) ? (k - indcs.ks) : 0;
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    int k0 = (gi.nx3 > 1) ? (k - gi.ks) : 0;
     return CellCenterX(k0, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
   auto zero_of = [&](int, int) { return static_cast<Real>(0.0); };
   // face positions (Task B6), same LeftEdgeX() formula used everywhere else; ncells_d==1
   // (inactive-direction) branches use n=1, matching the x*v_of placeholder convention.
   auto xf1_of = [&](int m, int i) {
-    return LeftEdgeX(i - indcs.is, indcs.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    return LeftEdgeX(i - gi.is, gi.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
   };
   auto xf2_of = [&](int m, int j) {
-    int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;
-    return LeftEdgeX(j - indcs.js, n2, size.h_view(m).x2min, size.h_view(m).x2max);
+    int n2 = (gi.nx2 > 1) ? gi.nx2 : 1;
+    return LeftEdgeX(j - gi.js, n2, size.h_view(m).x2min, size.h_view(m).x2max);
   };
   auto xf3_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    return LeftEdgeX(k - indcs.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    return LeftEdgeX(k - gi.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
 
   // Area1 = a1i(i)*a1j(j)*a1k(k) = 1 * dx2 * dx3

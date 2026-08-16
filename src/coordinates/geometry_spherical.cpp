@@ -60,28 +60,41 @@ DvceArray2D<Real> BuildFactor(const std::string &label, int nmb, int n, F value)
 }
 } // namespace
 
-void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData &geom) {
-  auto &indcs = ppack->pmesh->mb_indcs;
+void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack,
+                            const GeomIndcs &gi, GeomData &geom) {
   int nmb = ppack->nmb_thispack;
-  int ng = indcs.ng;
-  int ncells1 = indcs.nx1 + 2*ng;
-  int ncells2 = NCells(indcs.nx2, ng);
-  int ncells3 = NCells(indcs.nx3, ng);
-  int is = indcs.is, js = indcs.js;
+  int ng = gi.ng;
+  int ncells1 = gi.nx1 + 2*ng;
+  int ncells2 = NCells(gi.nx2, ng);
+  int ncells3 = NCells(gi.nx3, ng);
+  int is = gi.is, js = gi.js;
 
   auto &size = ppack->pmb->mb_size;
 
+  // Cell widths derived from the index space, NOT from RegionSize::dx1/dx2/dx3 --
+  // those are always the FINE widths and would be wrong by a factor of two when this
+  // factory is building the coarse arrays. Matches meshblock.cpp's own definition.
+  auto dxw1 = [&](int m) {
+    return (size.h_view(m).x1max - size.h_view(m).x1min)/static_cast<Real>(gi.nx1);
+  };
+  auto dxw2 = [&](int m) {
+    return (size.h_view(m).x2max - size.h_view(m).x2min)/static_cast<Real>(gi.nx2);
+  };
+  auto dxw3 = [&](int m) {
+    return (size.h_view(m).x3max - size.h_view(m).x3min)/static_cast<Real>(gi.nx3);
+  };
+
   // raw radial face position (see geometry_cylindrical.cpp for the ghost-zone rationale)
   auto rf = [&](int m, int i) {
-    return LeftEdgeX(i - is, indcs.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    return LeftEdgeX(i - is, gi.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
   };
   // raw polar-angle face position (n=1 case: LeftEdgeX linearly interpolates between
   // x2min at j=js and x2max at j=js+1, same semantics as the nx2>1 case)
   auto thf = [&](int m, int j) {
-    int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;
+    int n2 = (gi.nx2 > 1) ? gi.nx2 : 1;
     return LeftEdgeX(j - js, n2, size.h_view(m).x2min, size.h_view(m).x2max);
   };
-  auto dphi_of = [&](int m, int) { return size.h_view(m).dx3; };
+  auto dphi_of = [&](int m, int) { return dxw3(m); };
   auto one_of = [&](int, int) { return static_cast<Real>(1.0); };
 
   auto rf_of = [&](int m, int i) { return rf(m, i); };
@@ -110,7 +123,7 @@ void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
   auto sintheta_face_of = [&](int m, int j) { return std::abs(std::sin(thf(m, j))); };
 
   auto x2v_of = [&](int m, int j) {
-    if (indcs.nx2 == 1) {
+    if (gi.nx2 == 1) {
       return 0.5*(thf(m, j+1) + thf(m, j));
     }
     Real tm = thf(m, j), tp = thf(m, j+1);
@@ -119,15 +132,15 @@ void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
     return num/den;
   };
   auto x3v_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    int k0 = (indcs.nx3 > 1) ? (k - indcs.ks) : 0;
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    int k0 = (gi.nx3 > 1) ? (k - gi.ks) : 0;
     return CellCenterX(k0, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
   // face positions (Task B6); xf1 = rf_of (above), xf2 = thf (theta face, already
   // computed above and reused directly, no new lambda needed)
   auto xf3_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    return LeftEdgeX(k - indcs.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    return LeftEdgeX(k - gi.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
 
   auto src1_of = [&](int m, int i) { return r2mom_of(m, i) / r3mom_of(m, i); };
@@ -209,7 +222,7 @@ void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
   // rationale as geometry_cylindrical.cpp (see that file's comment for the full
   // derivation) -- theta/phi directions are explicitly NOT generalized here (see
   // mesh_geometry.hpp's GeomData doc comment on ppm_c1i..c4i for why).
-  auto ppm_io_of = [&](int m, int i) { return rf(m, i) / size.h_view(m).dx1; };
+  auto ppm_io_of = [&](int m, int i) { return rf(m, i) / dxw1(m); };
   auto ppm_c1_of = [&](int m, int i) {
     Real io = ppm_io_of(m, i);
     Real io2 = io*io, io3 = io2*io, io4 = io2*io2, io5 = io4*io, io6 = io4*io2;

@@ -53,6 +53,31 @@ class ParameterInput;
 //! adopted here (see DEVELOPMENT.md Task A2 log).
 
 //----------------------------------------------------------------------------------------
+//! \struct GeomIndcs
+//! \brief the index space a GeomData is built over.
+//!
+//! Exists so the four geometry factories can build either the FINE arrays or the COARSE
+//! ones (used by SMR/AMR prolongation) from identical code. Everything in a factory
+//! downstream of its short prologue is expressed through LeftEdgeX/CellCenterX applied to
+//! these fields, so parameterizing them is all that is needed.
+//!
+//! Because both levels are the same rational interpolation of [xmin,xmax] (see
+//! cell_locations.hpp), a coarse face lands BIT-EXACTLY on every other fine face. That
+//! exactness is what makes the conservation identities V_coarse = sum(V_fine) and
+//! A_coarse = sum(A_fine) hold to roundoff rather than approximately, which in turn is
+//! what lets restriction and flux correction be done from the fine geometry alone.
+//!
+//! NOTE the cell WIDTH must be derived from these fields as (xmax-xmin)/nx, NOT read from
+//! RegionSize::dx1/dx2/dx3 -- those are always the fine widths, so using them in a coarse
+//! build is wrong by exactly a factor of two.
+
+struct GeomIndcs {
+  int ng;              // ghost zones (same count at both levels)
+  int nx1, nx2, nx3;   // active cells in this index space
+  int is, js, ks;      // first active index in this index space
+};
+
+//----------------------------------------------------------------------------------------
 //! \enum PlmCoefIdx
 //! \brief component indices into GeomData::plm_c1/c2/c3 (see the doc comment there).
 //! pF/pB scale the forward/backward differences; cf/cb/cc are the limiter's
@@ -284,6 +309,11 @@ struct GeomDataHost {
   HostArr vi, vj, vk;
   HostArr l1i, l1j, l1k, l2i, l2j, l2k, l3i, l3j, l3k;
   HostArr cw2i, cw2j, cw3i, cw3j, cw3k;
+  // volumetric centroids and face positions. Mirrored too because host-side checks of
+  // the restriction/prolongation identities need them (e.g. that the coarse centroid is
+  // the volume-weighted mean of the child centroids, which is what makes the
+  // centroid-based prolongation exactly conservative).
+  HostArr x1v, x2v, x3v, xf1, xf2, xf3;
 
   Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }
   Real Area2(int m, int k, int j, int i) const { return a2i(m,i)*a2j(m,j)*a2k(m,k); }
@@ -310,16 +340,29 @@ GeomDataHost MirrorGeomData(const GeomData &g);
 //! \brief owns and builds GeomData for a MeshBlockPack. Deliberately separate from the
 //! GR/SR Coordinates class (coordinates.hpp), which is untouched by this project. Built
 //! by MeshBlockPack::AddGeometry(), called immediately after AddMeshBlocks() (both at
-//! initial construction and at every SMR regrid -- though SMR+curvilinear is currently
-//! guarded against, see Mesh::ValidateCoordGeneral()), since it needs mb_size to be
-//! already populated.
+//! initial construction and at every SMR/AMR regrid), since it needs mb_size to be
+//! already populated. The regrid call site (mesh_refinement.cpp) means both the fine and
+//! coarse arrays are automatically rebuilt whenever block extents change.
 
 class MeshGeometry {
  public:
   MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack);
   ~MeshGeometry() = default;
 
-  GeomData geom_data;
+  GeomData geom_data;         // fine (normal) index space -- always built
+
+  // Coarse index space (cnx1/cnx2/cnx3, cis/cjs/cks). Built ONLY when the mesh is
+  // multilevel; left default-constructed (empty Views) otherwise.
+  //
+  // Needed by prolongation alone. Restriction and flux correction deliberately do NOT
+  // use this: a coarse cell is exactly the union of its children, so V_coarse =
+  // sum(V_fine) and A_coarse = sum(A_fine) are computable from the fine arrays, which
+  // keeps those two per-stage hot paths on a single GeomData and means a fine block
+  // never needs its coarse neighbour's geometry. Prolongation cannot do the same,
+  // because at a fine/coarse boundary the coarse ghost data comes from a coarser
+  // neighbour where no fine cells exist to derive anything from.
+  GeomData coarse_geom_data;
+  bool has_coarse;
 
  private:
   MeshBlockPack* pmy_pack;

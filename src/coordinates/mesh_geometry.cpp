@@ -22,11 +22,14 @@
 // geometry factory functions, one per coordinate system (declared here, defined in
 // geometry_<system>.cpp -- Task A2 implements cartesian, Task B1 cylindrical; Task
 // B2/B3 add cylindrical_axisym/spherical_polar)
-void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData &geom);
-void BuildCylindricalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData &geom);
+void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack,
+                            const GeomIndcs &gi, GeomData &geom);
+void BuildCylindricalGeometry(ParameterInput *pin, MeshBlockPack *ppack,
+                              const GeomIndcs &gi, GeomData &geom);
 void BuildCylindricalAxisymGeometry(ParameterInput *pin, MeshBlockPack *ppack,
-                                     GeomData &geom);
-void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData &geom);
+                                    const GeomIndcs &gi, GeomData &geom);
+void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack,
+                            const GeomIndcs &gi, GeomData &geom);
 
 namespace {
 //----------------------------------------------------------------------------------------
@@ -256,29 +259,52 @@ GeomDataHost MirrorGeomData(const GeomData &g) {
   h.l3i = mirror(g.l3i); h.l3j = mirror(g.l3j); h.l3k = mirror(g.l3k);
   h.cw2i = mirror(g.cw2i); h.cw2j = mirror(g.cw2j);
   h.cw3i = mirror(g.cw3i); h.cw3j = mirror(g.cw3j); h.cw3k = mirror(g.cw3k);
+  h.x1v = mirror(g.x1v); h.x2v = mirror(g.x2v); h.x3v = mirror(g.x3v);
+  h.xf1 = mirror(g.xf1); h.xf2 = mirror(g.xf2); h.xf3 = mirror(g.xf3);
   return h;
 }
 
 //----------------------------------------------------------------------------------------
 // constructor
 
-MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
-    pmy_pack(ppack) {
-  CoordinateGeneral coord_general = ppack->pmesh->coord_general;
-  switch (coord_general) {
+namespace {
+} // namespace
+
+//----------------------------------------------------------------------------------------
+// constructor
+
+//----------------------------------------------------------------------------------------
+//! \fn BuildOneLevel()
+//! \brief builds a complete GeomData over the index space `gi` -- coordinate factory,
+//! reflecting-ghost corrections, PPM uniformity snap, PLM factors.
+//!
+//! Called twice when the mesh is multilevel: once for the fine arrays and once for the
+//! coarse ones. Sharing this path is the point of GeomIndcs -- it guarantees the coarse
+//! geometry is built by exactly the same code (and therefore obeys exactly the same
+//! conventions for ghost zones, centroids and uniformity flags) as the fine geometry,
+//! rather than by a parallel implementation that could drift.
+
+void BuildOneLevel(ParameterInput *pin, MeshBlockPack *ppack, const GeomIndcs &gi,
+                   GeomData &geom) {
+  switch (ppack->pmesh->coord_general) {
     case CoordinateGeneral::cartesian:
-      BuildCartesianGeometry(pin, ppack, geom_data);
+      BuildCartesianGeometry(pin, ppack, gi, geom);
       break;
     case CoordinateGeneral::cylindrical:
-      BuildCylindricalGeometry(pin, ppack, geom_data);
+      BuildCylindricalGeometry(pin, ppack, gi, geom);
       break;
     case CoordinateGeneral::cylindrical_axisym:
-      BuildCylindricalAxisymGeometry(pin, ppack, geom_data);
+      BuildCylindricalAxisymGeometry(pin, ppack, gi, geom);
       break;
     case CoordinateGeneral::spherical_polar:
-      BuildSphericalGeometry(pin, ppack, geom_data);
+      BuildSphericalGeometry(pin, ppack, gi, geom);
       break;
   }
+
+  // last active index in each direction, for this index space
+  int ie = gi.is + gi.nx1 - 1;
+  int je = gi.js + gi.nx2 - 1;
+  int ke = gi.ks + gi.nx3 - 1;
 
   // Task B6 fix (see MirrorReflectingGhostGeometry doc comment above): must run after
   // the coordinate-specific factory above has filled x1v/xf1/x2v/xf2/x3v/xf3 for every
@@ -286,28 +312,27 @@ MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
   // too in principle, though for Cartesian the correction is exactly zero (uniform
   // spacing already has mirror-symmetric ghost geometry under linear extrapolation), so
   // this is a genuine no-op for Cartesian and does not affect any existing behavior.
-  auto &indcs = ppack->pmesh->mb_indcs;
-  MirrorReflectingGhostGeometry(ppack, geom_data.x1v, geom_data.xf1,
-                                 indcs.is, indcs.ie, indcs.ng,
+    MirrorReflectingGhostGeometry(ppack, geom.x1v, geom.xf1,
+                                 gi.is, ie, gi.ng,
                                  BoundaryFace::inner_x1, BoundaryFace::outer_x1);
   if (ppack->pmesh->multi_d) {
-    MirrorReflectingGhostGeometry(ppack, geom_data.x2v, geom_data.xf2,
-                                   indcs.js, indcs.je, indcs.ng,
+    MirrorReflectingGhostGeometry(ppack, geom.x2v, geom.xf2,
+                                   gi.js, je, gi.ng,
                                    BoundaryFace::inner_x2, BoundaryFace::outer_x2);
   }
   if (ppack->pmesh->three_d) {
-    MirrorReflectingGhostGeometry(ppack, geom_data.x3v, geom_data.xf3,
-                                   indcs.ks, indcs.ke, indcs.ng,
+    MirrorReflectingGhostGeometry(ppack, geom.x3v, geom.xf3,
+                                   gi.ks, ke, gi.ng,
                                    BoundaryFace::inner_x3, BoundaryFace::outer_x3);
   }
 
   // Task B7 fix (see MirrorReflectingGhostPpmCoeffs doc comment above): x1-only, since
   // the non-uniform PPM generalization itself is scoped to x1 only (x2/x3 keep the old
   // hardcoded uniform PPM4/PPMX formula, which needs no such fix).
-  MirrorReflectingGhostPpmCoeffs(ppack, geom_data.ppm_c1i, geom_data.ppm_c2i,
-                                  geom_data.ppm_c3i, geom_data.ppm_c4i,
-                                  geom_data.ppm_hpi, geom_data.ppm_hmi,
-                                  indcs.is, indcs.ie, indcs.ng,
+  MirrorReflectingGhostPpmCoeffs(ppack, geom.ppm_c1i, geom.ppm_c2i,
+                                  geom.ppm_c3i, geom.ppm_c4i,
+                                  geom.ppm_hpi, geom.ppm_hmi,
+                                  gi.is, ie, gi.ng,
                                   BoundaryFace::inner_x1, BoundaryFace::outer_x1);
 
   // Precomputed PLM limiter factors. Built here, after BOTH the coordinate factory and
@@ -320,12 +345,12 @@ MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
   // identical to upstream PPM4/PPMX rather than merely equivalent.
   {
     const Real c1 = -1.0/12.0, c2 = 7.0/12.0, hp = 2.0;
-    auto c1_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c1i);
-    auto c2_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c2i);
-    auto c3_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c3i);
-    auto c4_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c4i);
-    auto hp_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_hpi);
-    auto hm_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_hmi);
+    auto c1_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_c1i);
+    auto c2_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_c2i);
+    auto c3_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_c3i);
+    auto c4_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_c4i);
+    auto hp_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_hpi);
+    auto hm_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.ppm_hmi);
     int nmb = c1_h.extent_int(0);
     int nf = c1_h.extent_int(1);
     int nc = hp_h.extent_int(1);
@@ -347,20 +372,47 @@ MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
         }
         for (int i = 0; i < nc; ++i) { hp_h(m,i) = hp; hm_h(m,i) = hp; }
       }
-      Kokkos::deep_copy(geom_data.ppm_c1i, c1_h);
-      Kokkos::deep_copy(geom_data.ppm_c2i, c2_h);
-      Kokkos::deep_copy(geom_data.ppm_c3i, c3_h);
-      Kokkos::deep_copy(geom_data.ppm_c4i, c4_h);
-      Kokkos::deep_copy(geom_data.ppm_hpi, hp_h);
-      Kokkos::deep_copy(geom_data.ppm_hmi, hm_h);
+      Kokkos::deep_copy(geom.ppm_c1i, c1_h);
+      Kokkos::deep_copy(geom.ppm_c2i, c2_h);
+      Kokkos::deep_copy(geom.ppm_c3i, c3_h);
+      Kokkos::deep_copy(geom.ppm_c4i, c4_h);
+      Kokkos::deep_copy(geom.ppm_hpi, hp_h);
+      Kokkos::deep_copy(geom.ppm_hmi, hm_h);
     }
-    geom_data.ppm_uniform1 = uni;
+    geom.ppm_uniform1 = uni;
   }
 
-  geom_data.plm_uniform1 =
-      BuildPlmFactors(geom_data.plm_c1, geom_data.x1v, geom_data.xf1, "geom.plm_c1");
-  geom_data.plm_uniform2 =
-      BuildPlmFactors(geom_data.plm_c2, geom_data.x2v, geom_data.xf2, "geom.plm_c2");
-  geom_data.plm_uniform3 =
-      BuildPlmFactors(geom_data.plm_c3, geom_data.x3v, geom_data.xf3, "geom.plm_c3");
+  geom.plm_uniform1 =
+      BuildPlmFactors(geom.plm_c1, geom.x1v, geom.xf1, "geom.plm_c1");
+  geom.plm_uniform2 =
+      BuildPlmFactors(geom.plm_c2, geom.x2v, geom.xf2, "geom.plm_c2");
+  geom.plm_uniform3 =
+      BuildPlmFactors(geom.plm_c3, geom.x3v, geom.xf3, "geom.plm_c3");
+}
+
+//----------------------------------------------------------------------------------------
+// constructor
+
+MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
+    has_coarse(false), pmy_pack(ppack) {
+  auto &indcs = ppack->pmesh->mb_indcs;
+
+  GeomIndcs fine;
+  fine.ng = indcs.ng;
+  fine.nx1 = indcs.nx1;  fine.nx2 = indcs.nx2;  fine.nx3 = indcs.nx3;
+  fine.is = indcs.is;    fine.js = indcs.js;    fine.ks = indcs.ks;
+  BuildOneLevel(pin, ppack, fine, geom_data);
+
+  // Coarse arrays exist only on a multilevel mesh, and only prolongation reads them (see
+  // the note on MeshGeometry::coarse_geom_data). Note the coarse index space carries the
+  // SAME ghost width as the fine one -- coarse arrays are sized cnx_d + 2*ng, not
+  // cnx_d + ng -- matching how coarse_u0 is allocated in hydro.cpp/mhd.cpp.
+  if (ppack->pmesh->multilevel) {
+    GeomIndcs coarse;
+    coarse.ng = indcs.ng;
+    coarse.nx1 = indcs.cnx1;  coarse.nx2 = indcs.cnx2;  coarse.nx3 = indcs.cnx3;
+    coarse.is = indcs.cis;    coarse.js = indcs.cjs;    coarse.ks = indcs.cks;
+    BuildOneLevel(pin, ppack, coarse, coarse_geom_data);
+    has_coarse = true;
+  }
 }

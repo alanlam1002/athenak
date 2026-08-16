@@ -104,17 +104,15 @@ void Mesh::ValidateCoordGeneral() {
         << mesh_indcs.nx3 << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  // SMR/AMR restriction/prolongation (mesh_refinement.cpp) currently does unweighted
-  // 1/4, 1/8 averaging, which silently breaks conservation at level boundaries for
-  // curvilinear volumes/areas. Curvilinear + multilevel is out of scope until that is
-  // fixed (see DEVELOPMENT.md "Deferred" section), so guard against it explicitly
-  // rather than allowing a silent conservation violation.
-  if (multilevel && coord_general != CoordinateGeneral::cartesian) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-        << "SMR/AMR (mesh_refinement/refinement != none) is not yet supported for "
-        << "coord != cartesian: curvilinear restriction/prolongation is not "
-        << "implemented and would silently break conservation at level boundaries."
-        << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
+  // NOTE on SMR/AMR + curvilinear: this used to be a blanket fatal here. Cell-centered
+  // restriction, prolongation and flux correction are now volume/area weighted, so
+  // HYDRO + curvilinear + refinement is supported and no longer guarded. What remains
+  // unsupported is the FACE-centered half, so the guard now lives in mhd.cpp -- i.e.
+  // where the module that actually owns the unconverted kernels is constructed. It
+  // cannot live here because ValidateCoordGeneral() runs during Mesh construction,
+  // before any physics module exists to test for.
+  //
+  // radiation and z4c need no guard of their own: both require general relativity, and
+  // GR + curvilinear is already fatal in coordinates.cpp, so neither can reach a
+  // curvilinear mesh in the first place.
 }

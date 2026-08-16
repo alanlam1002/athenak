@@ -13,46 +13,124 @@
 
 //----------------------------------------------------------------------------------------
 //! \fn ProlongCC()
-//! \brief 2nd-order (piecewise-linear) prolongation operator for cell-centered variables
+//! \brief 2nd-order (piecewise-linear) CONSERVATIVE prolongation for cell-centered
+//! variables, valid on curvilinear as well as Cartesian grids.
+//!
+//! Writes the reconstruction in terms of TRUE VOLUMETRIC CENTROIDS:
+//!
+//!     a_f = a_c + sum_d s_d * (x_d,fine - x_d,coarse)
+//!
+//! which is EXACTLY volume-conservative, i.e. sum_f (V_f * a_f) == V_c * a_c. The reason
+//! is that the volumetric centroid satisfies V_c*x_c == sum_f(V_f*x_f) by construction
+//! (the moment integral is additive over sub-intervals), so sum_f V_f*(x_f - x_c) == 0
+//! and every slope term cancels in the volume-weighted sum. Because GeomData's geometry
+//! is separable (V = vi*vj*vk), the 3D sum factorizes into three independent 1D
+//! identities, so this holds in 1D/2D/3D alike. Both identities are asserted directly by
+//! pgen/unit_tests/coarse_geometry_test.cpp rather than merely assumed here.
+//!
+//! No correction pass is therefore needed -- conservation is structural, not enforced
+//! afterwards.
+//!
+//! Slopes are min-mod limited on the COARSE centroid spacing (physical units, per unit
+//! length), then evaluated at the fine centroid offsets. For a uniform grid
+//! x_f - x_c = +/-dx_c/4 and the coarse spacings are equal, so this reduces EXACTLY to
+//! the previous `0.125*(SIGN(dl)+SIGN(dr))*fmin(|dl|,|dr|)` form -- Cartesian results are
+//! unchanged.
+//!
+//! Takes the six centroid arrays rather than two whole GeomData structs so the enclosing
+//! kernel closure grows by 6 View handles instead of ~92 (see the capture-size note in
+//! mesh_geometry.hpp).
 
 KOKKOS_INLINE_FUNCTION
 void ProlongCC(const int m, const int v, const int k, const int j, const int i,
                const int fk, const int fj, const int fi,
                const bool multi_d, const bool three_d,
+               const DvceArray2D<Real> &cx1v, const DvceArray2D<Real> &cx2v,
+               const DvceArray2D<Real> &cx3v,
+               const DvceArray2D<Real> &x1v, const DvceArray2D<Real> &x2v,
+               const DvceArray2D<Real> &x3v,
+               const bool uniform,
                const DvceArray5D<Real> &ca, const DvceArray5D<Real> &a) {
-  // calculate x1-gradient using the min-mod limiter
+  if (uniform) {
+    // Uniform grid: upstream's original expression, BITWISE identical to a
+    // pre-curvilinear build. The centroid form below is mathematically equal here but
+    // differs in floating-point association, and that alone was enough to break the
+    // GR-MHD AMR boundary test (~1e6 C2P failures) and the radiation AMR test.
+    Real dl = ca(m,v,k,j,i  ) - ca(m,v,k,j,i-1);
+    Real dr = ca(m,v,k,j,i+1) - ca(m,v,k,j,i  );
+    Real dvar1 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    Real dvar2 = 0.0;
+    if (multi_d) {
+      dl = ca(m,v,k,j  ,i) - ca(m,v,k,j-1,i);
+      dr = ca(m,v,k,j+1,i) - ca(m,v,k,j  ,i);
+      dvar2 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    }
+    Real dvar3 = 0.0;
+    if (three_d) {
+      dl = ca(m,v,k  ,j,i) - ca(m,v,k-1,j,i);
+      dr = ca(m,v,k+1,j,i) - ca(m,v,k  ,j,i);
+      dvar3 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    }
+    a(m,v,fk,fj,fi  ) = ca(m,v,k,j,i) - dvar1 - dvar2 - dvar3;
+    a(m,v,fk,fj,fi+1) = ca(m,v,k,j,i) + dvar1 - dvar2 - dvar3;
+    if (multi_d) {
+      a(m,v,fk,fj+1,fi  ) = ca(m,v,k,j,i) - dvar1 + dvar2 - dvar3;
+      a(m,v,fk,fj+1,fi+1) = ca(m,v,k,j,i) + dvar1 + dvar2 - dvar3;
+    }
+    if (three_d) {
+      a(m,v,fk+1,fj  ,fi  ) = ca(m,v,k,j,i) - dvar1 - dvar2 + dvar3;
+      a(m,v,fk+1,fj  ,fi+1) = ca(m,v,k,j,i) + dvar1 - dvar2 + dvar3;
+      a(m,v,fk+1,fj+1,fi  ) = ca(m,v,k,j,i) - dvar1 + dvar2 + dvar3;
+      a(m,v,fk+1,fj+1,fi+1) = ca(m,v,k,j,i) + dvar1 + dvar2 + dvar3;
+    }
+    return;
+  }
+  // x1 slope: min-mod limited gradient on the coarse centroid spacing
   Real dl = ca(m,v,k,j,i  ) - ca(m,v,k,j,i-1);
   Real dr = ca(m,v,k,j,i+1) - ca(m,v,k,j,i  );
-  Real dvar1 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+  Real gl = dl/(cx1v(m,i) - cx1v(m,i-1));
+  Real gr = dr/(cx1v(m,i+1) - cx1v(m,i));
+  Real s1 = 0.5*(SIGN(gl) + SIGN(gr))*fmin(fabs(gl), fabs(gr));
+  Real d1m = x1v(m,fi  ) - cx1v(m,i);
+  Real d1p = x1v(m,fi+1) - cx1v(m,i);
 
-  // calculate x2-gradient using the min-mod limiter
-  Real dvar2 = 0.0;
+  // x2 slope
+  Real s2 = 0.0, d2m = 0.0, d2p = 0.0;
   if (multi_d) {
     dl = ca(m,v,k,j  ,i) - ca(m,v,k,j-1,i);
     dr = ca(m,v,k,j+1,i) - ca(m,v,k,j  ,i);
-    dvar2 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    gl = dl/(cx2v(m,j) - cx2v(m,j-1));
+    gr = dr/(cx2v(m,j+1) - cx2v(m,j));
+    s2 = 0.5*(SIGN(gl) + SIGN(gr))*fmin(fabs(gl), fabs(gr));
+    d2m = x2v(m,fj  ) - cx2v(m,j);
+    d2p = x2v(m,fj+1) - cx2v(m,j);
   }
 
-  // calculate x1-gradient using the min-mod limiter
-  Real dvar3 = 0.0;
+  // x3 slope
+  Real s3 = 0.0, d3m = 0.0, d3p = 0.0;
   if (three_d) {
     dl = ca(m,v,k  ,j,i) - ca(m,v,k-1,j,i);
     dr = ca(m,v,k+1,j,i) - ca(m,v,k  ,j,i);
-    dvar3 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    gl = dl/(cx3v(m,k) - cx3v(m,k-1));
+    gr = dr/(cx3v(m,k+1) - cx3v(m,k));
+    s3 = 0.5*(SIGN(gl) + SIGN(gr))*fmin(fabs(gl), fabs(gr));
+    d3m = x3v(m,fk  ) - cx3v(m,k);
+    d3p = x3v(m,fk+1) - cx3v(m,k);
   }
 
-  // interpolate to the finer grid
-  a(m,v,fk,fj,fi  ) = ca(m,v,k,j,i) - dvar1 - dvar2 - dvar3;
-  a(m,v,fk,fj,fi+1) = ca(m,v,k,j,i) + dvar1 - dvar2 - dvar3;
+  // interpolate to the finer grid at each child's own centroid
+  Real ac = ca(m,v,k,j,i);
+  a(m,v,fk,fj,fi  ) = ac + s1*d1m + s2*d2m + s3*d3m;
+  a(m,v,fk,fj,fi+1) = ac + s1*d1p + s2*d2m + s3*d3m;
   if (multi_d) {
-    a(m,v,fk,fj+1,fi  ) = ca(m,v,k,j,i) - dvar1 + dvar2 - dvar3;
-    a(m,v,fk,fj+1,fi+1) = ca(m,v,k,j,i) + dvar1 + dvar2 - dvar3;
+    a(m,v,fk,fj+1,fi  ) = ac + s1*d1m + s2*d2p + s3*d3m;
+    a(m,v,fk,fj+1,fi+1) = ac + s1*d1p + s2*d2p + s3*d3m;
   }
   if (three_d) {
-    a(m,v,fk+1,fj  ,fi  ) = ca(m,v,k,j,i) - dvar1 - dvar2 + dvar3;
-    a(m,v,fk+1,fj  ,fi+1) = ca(m,v,k,j,i) + dvar1 - dvar2 + dvar3;
-    a(m,v,fk+1,fj+1,fi  ) = ca(m,v,k,j,i) - dvar1 + dvar2 + dvar3;
-    a(m,v,fk+1,fj+1,fi+1) = ca(m,v,k,j,i) + dvar1 + dvar2 + dvar3;
+    a(m,v,fk+1,fj  ,fi  ) = ac + s1*d1m + s2*d2m + s3*d3p;
+    a(m,v,fk+1,fj  ,fi+1) = ac + s1*d1p + s2*d2m + s3*d3p;
+    a(m,v,fk+1,fj+1,fi  ) = ac + s1*d1m + s2*d2p + s3*d3p;
+    a(m,v,fk+1,fj+1,fi+1) = ac + s1*d1p + s2*d2p + s3*d3p;
   }
   return;
 }

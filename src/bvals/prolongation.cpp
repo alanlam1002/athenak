@@ -21,6 +21,7 @@
 #include "mesh/restriction.hpp" // implements restriction operators
 
 #include "coordinates/cell_locations.hpp"
+#include "coordinates/mesh_geometry.hpp"
 
 namespace {
 
@@ -385,6 +386,8 @@ void MeshBoundaryValuesCC::FillCoarseInBndryCC(DvceArray5D<Real> &a,
   auto& restrict_2nd = pmy_pack->pmesh->pmr->weights.restrict_2nd;
   auto& restrict_4th = pmy_pack->pmesh->pmr->weights.restrict_4th;
   auto& restrict_4th_edge = pmy_pack->pmesh->pmr->weights.restrict_4th_edge;
+  auto &geom = pmy_pack->pgeom->geom_data;
+  const bool uni = geom.cells_uniform;
 
   // Restrict data into coarse array in any boundary filled with data from the same
   // level.  This ensures data in the coarse array at corners where one direction is a
@@ -432,18 +435,47 @@ void MeshBoundaryValuesCC::FillCoarseInBndryCC(DvceArray5D<Real> &a,
           int finej = (j - indcs.cjs)*2 + indcs.js;
           int finek = (k - indcs.cks)*2 + indcs.ks;
 
+          // Volume-weighted, matching MeshRefinement::RestrictCC -- see the doc comment
+          // there. Only fine geometry is needed since V_coarse == sum(V_fine).
           // restrict in 2D
           if (!(three_d)) {
-            ca(m,v,kl,j,i) = 0.25*(a(m,v,kl,finej  ,finei) + a(m,v,kl,finej  ,finei+1)
-                                 + a(m,v,kl,finej+1,finei) + a(m,v,kl,finej+1,finei+1));
+            if (uni) {
+              ca(m,v,kl,j,i) = 0.25*(a(m,v,kl,finej  ,finei) + a(m,v,kl,finej  ,finei+1)
+                                   + a(m,v,kl,finej+1,finei) + a(m,v,kl,finej+1,finei+1));
+              return;
+            }
+            Real v00 = geom.Vol(m,kl,finej  ,finei  );
+            Real v01 = geom.Vol(m,kl,finej  ,finei+1);
+            Real v10 = geom.Vol(m,kl,finej+1,finei  );
+            Real v11 = geom.Vol(m,kl,finej+1,finei+1);
+            ca(m,v,kl,j,i) = (v00*a(m,v,kl,finej  ,finei) + v01*a(m,v,kl,finej  ,finei+1)
+                            + v10*a(m,v,kl,finej+1,finei) + v11*a(m,v,kl,finej+1,finei+1))
+                             /(v00 + v01 + v10 + v11);
           // restrict in 3D
           } else {
             if (!is_z4c) {
-              ca(m,v,k,j,i) = 0.125*(
-                  a(m,v,finek  ,finej  ,finei) + a(m,v,finek  ,finej  ,finei+1)
-                + a(m,v,finek  ,finej+1,finei) + a(m,v,finek  ,finej+1,finei+1)
-                + a(m,v,finek+1,finej,  finei) + a(m,v,finek+1,finej,  finei+1)
-                + a(m,v,finek+1,finej+1,finei) + a(m,v,finek+1,finej+1,finei+1));
+              if (uni) {
+                ca(m,v,k,j,i) = 0.125*(
+                    a(m,v,finek  ,finej  ,finei) + a(m,v,finek  ,finej  ,finei+1)
+                  + a(m,v,finek  ,finej+1,finei) + a(m,v,finek  ,finej+1,finei+1)
+                  + a(m,v,finek+1,finej,  finei) + a(m,v,finek+1,finej,  finei+1)
+                  + a(m,v,finek+1,finej+1,finei) + a(m,v,finek+1,finej+1,finei+1));
+                return;
+              }
+              Real v000 = geom.Vol(m,finek  ,finej  ,finei  );
+              Real v001 = geom.Vol(m,finek  ,finej  ,finei+1);
+              Real v010 = geom.Vol(m,finek  ,finej+1,finei  );
+              Real v011 = geom.Vol(m,finek  ,finej+1,finei+1);
+              Real v100 = geom.Vol(m,finek+1,finej  ,finei  );
+              Real v101 = geom.Vol(m,finek+1,finej  ,finei+1);
+              Real v110 = geom.Vol(m,finek+1,finej+1,finei  );
+              Real v111 = geom.Vol(m,finek+1,finej+1,finei+1);
+              ca(m,v,k,j,i) = (
+                  v000*a(m,v,finek  ,finej  ,finei) + v001*a(m,v,finek  ,finej  ,finei+1)
+                + v010*a(m,v,finek  ,finej+1,finei) + v011*a(m,v,finek  ,finej+1,finei+1)
+                + v100*a(m,v,finek+1,finej,  finei) + v101*a(m,v,finek+1,finej,  finei+1)
+                + v110*a(m,v,finek+1,finej+1,finei) + v111*a(m,v,finek+1,finej+1,finei+1))
+                 /(v000 + v001 + v010 + v011 + v100 + v101 + v110 + v111);
             } else {
                 switch (indcs.ng) {
                   case 2: ca(m,v,k,j,i) = RestrictInterpolation<2>(m,v,finek,finej,finei,
@@ -485,6 +517,17 @@ void MeshBoundaryValuesCC::ProlongateCC(DvceArray5D<Real> &a, DvceArray5D<Real> 
   auto &indcs  = pmy_pack->pmesh->mb_indcs;
   const bool multi_d = pmy_pack->pmesh->multi_d;
   const bool three_d = pmy_pack->pmesh->three_d;
+
+  // Fine and coarse volumetric centroids for the conservative prolongation (see the
+  // ProlongCC doc comment). Only the six centroid arrays are pulled out, so the kernel
+  // closure grows by 6 View handles rather than by two whole GeomData structs.
+  auto &cx1v = pmy_pack->pgeom->coarse_geom_data.x1v;
+  auto &cx2v = pmy_pack->pgeom->coarse_geom_data.x2v;
+  auto &cx3v = pmy_pack->pgeom->coarse_geom_data.x3v;
+  auto &x1v  = pmy_pack->pgeom->geom_data.x1v;
+  auto &x2v  = pmy_pack->pgeom->geom_data.x2v;
+  auto &x3v  = pmy_pack->pgeom->geom_data.x3v;
+  const bool geom_uni = pmy_pack->pgeom->geom_data.cells_uniform;
   auto &nx1 = indcs.nx1;
   auto &nx2 = indcs.nx2;
   auto &nx3 = indcs.nx3;
@@ -528,7 +571,9 @@ void MeshBoundaryValuesCC::ProlongateCC(DvceArray5D<Real> &a, DvceArray5D<Real> 
         int fk = (k - indcs.cks)*2 + indcs.ks;
         // call inlined prolongation operator for CC variables
         if (!is_z4c) {
-          ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,ca,a);
+          ProlongCC(m,v,k,j,i,fk,fj,fi,multi_d,three_d,
+                    cx1v,cx2v,cx3v,x1v,x2v,x3v,
+                    geom_uni,ca,a);
         } else {
           switch (indcs.ng) {
             case 2: HighOrderProlongCC<2>(m,v,k,j,i,fk,fj,fi,nx1,nx2,nx3,

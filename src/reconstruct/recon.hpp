@@ -59,36 +59,43 @@ void ReconCellT(const EOS_Data &eos, const GeomData &geom, const bool apply_floo
     ql_val = q(m, n, k, j, i);
     qr_val = q(m, n, k, j, i);
   } else if constexpr (recon == ReconstructionMethod::plm) {
-    // centroid and face positions along the reconstruction direction, selected at
-    // COMPILE time (same mechanism as di/dj/dk above -- no runtime branch survives)
-    Real x_im1, x_i, x_ip1, xf_i, xf_ip1;
+    // Precomputed non-uniform limiter factors for the reconstruction direction, selected
+    // at COMPILE time (same mechanism as di/dj/dk above -- no runtime branch survives).
+    // These replace the raw centroid/face positions the limiter used to be handed: all
+    // seven position-dependent ratios are built once at construction (see
+    // GeomData::plm_c1/c2/c3), which takes the kernel from 7 divisions per cell per
+    // variable per direction back to 1.
     if constexpr (ivx == IVX) {
-      x_im1 = geom.x1v(m,i-1); x_i = geom.x1v(m,i); x_ip1 = geom.x1v(m,i+1);
-      xf_i  = geom.xf1(m,i);   xf_ip1 = geom.xf1(m,i+1);
+      PLMGeom(q(m, n, k, j, i-1), q(m, n, k, j, i), q(m, n, k, j, i+1),
+              geom.plm_c1, geom.plm_uniform1, m, i, ql_val, qr_val);
     } else if constexpr (ivx == IVY) {
-      x_im1 = geom.x2v(m,j-1); x_i = geom.x2v(m,j); x_ip1 = geom.x2v(m,j+1);
-      xf_i  = geom.xf2(m,j);   xf_ip1 = geom.xf2(m,j+1);
+      PLMGeom(q(m, n, k, j-1, i), q(m, n, k, j, i), q(m, n, k, j+1, i),
+              geom.plm_c2, geom.plm_uniform2, m, j, ql_val, qr_val);
     } else {
-      x_im1 = geom.x3v(m,k-1); x_i = geom.x3v(m,k); x_ip1 = geom.x3v(m,k+1);
-      xf_i  = geom.xf3(m,k);   xf_ip1 = geom.xf3(m,k+1);
+      PLMGeom(q(m, n, k-1, j, i), q(m, n, k, j, i), q(m, n, k+1, j, i),
+              geom.plm_c3, geom.plm_uniform3, m, k, ql_val, qr_val);
     }
-    PLMGeom(q(m, n, k - dk, j - dj, i - di),
-            q(m, n, k,      j,      i),
-            q(m, n, k + dk, j + dj, i + di),
-            x_im1, x_i, x_ip1, xf_i, xf_ip1,
-            ql_val, qr_val);
   } else if constexpr (recon == ReconstructionMethod::ppm4) {
     // x1 uses the position-dependent curvilinear coefficients (Task B7); x2/x3 keep the
     // old flat/uniform overload (curvilinear PPM generalization is scoped to x1 only --
     // see mesh_geometry.hpp doc comment on the ppm_c*i/ppm_h*i fields).
     if constexpr (ivx == IVX) {
-      PPM4Geom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
-               q(m, n, k, j, i+1), q(m, n, k, j, i+2),
-               geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
-               geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
-               geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
-               geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
-               geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      // Flat coefficients (any uniform-x1 grid, not just cartesian): call upstream's
+      // PPM4 directly. Grid-uniform branch, so predicted on CPU / warp-coherent on GPU,
+      // and the coefficients were snapped to the exact flat constants at construction so
+      // this is bitwise identical to the general call, just cheaper.
+      if (geom.ppm_uniform1) {
+        PPM4(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+             q(m, n, k, j, i+1), q(m, n, k, j, i+2), ql_val, qr_val);
+      } else {
+        PPM4Geom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+                 q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+                 geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
+                 geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
+                 geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
+                 geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+                 geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      }
     } else {
       PPM4(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
            q(m, n, k -   dk, j -   dj, i -   di),
@@ -99,13 +106,22 @@ void ReconCellT(const EOS_Data &eos, const GeomData &geom, const bool apply_floo
     }
   } else if constexpr (recon == ReconstructionMethod::ppmx) {
     if constexpr (ivx == IVX) {
-      PPMXGeom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
-               q(m, n, k, j, i+1), q(m, n, k, j, i+2),
-               geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
-               geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
-               geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
-               geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
-               geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      // Flat coefficients (any uniform-x1 grid, not just cartesian): call upstream's
+      // PPMX directly. Grid-uniform branch, so predicted on CPU / warp-coherent on GPU,
+      // and the coefficients were snapped to the exact flat constants at construction so
+      // this is bitwise identical to the general call, just cheaper.
+      if (geom.ppm_uniform1) {
+        PPMX(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+             q(m, n, k, j, i+1), q(m, n, k, j, i+2), ql_val, qr_val);
+      } else {
+        PPMXGeom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+                 q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+                 geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
+                 geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
+                 geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
+                 geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+                 geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      }
     } else {
       PPMX(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
            q(m, n, k -   dk, j -   dj, i -   di),

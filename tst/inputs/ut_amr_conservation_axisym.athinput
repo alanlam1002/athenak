@@ -1,0 +1,71 @@
+# AthenaK input file: curvilinear SMR/AMR Phase 1 acceptance gate (cylindrical_axisym).
+#
+# The refinement pattern OSCILLATES between the inner and outer half of the domain, so
+# blocks are repeatedly refined AND derefined -- derefinement is the only path through
+# which RestrictCC can change the total mass, and a criterion that only ever adds blocks
+# cannot test it. See src/pgen/unit_tests/amr_conservation_test.cpp for why this pgen
+# exists instead of an .hst-based check.
+
+<comment>
+problem   = AMR mass conservation gate (cylindrical_axisym)
+
+<job>
+basename  = ut_amr_conservation_axisym
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 64
+x1min     = 0.5
+x1max     = 2.5
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 1
+x2min     = 0.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = 0.0
+x3max     = 1.0
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement          = adaptive
+num_levels          = 2
+ncycle_check        = 1
+refinement_interval = 1
+max_nmb_per_rank    = 512
+
+<amr_criterion0>
+method = user
+
+<meshblock>
+nx1       = 16
+nx2       = 1
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 0.12
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name    = amr_conservation_test
+drift_tol    = 1.0e-11
+ref_period   = 0.02
+target_level = 1
+d0           = 1.0
+amp          = 0.5
+p0           = 1.0

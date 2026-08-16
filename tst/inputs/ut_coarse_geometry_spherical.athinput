@@ -1,0 +1,66 @@
+# AthenaK input file: COARSE GeomData construction + the telescoping identities
+# V_coarse = sum(V_fine) and A_coarse = sum(A_fine), Cartesian control.
+#
+# Requires a multilevel mesh, since MeshGeometry only builds coarse_geom_data when
+# pmesh->multilevel is true. Uses static refinement so no regrid is needed -- the test
+# only inspects geometry, it does not evolve anything (nlim=0).
+
+<comment>
+problem   = coarse MeshGeometry/GeomData construction unit test (spherical_polar)
+
+<job>
+basename  = ut_coarse_geometry_spherical
+
+<mesh>
+nghost    = 2
+coord     = spherical_polar
+nx1       = 16
+x1min     = 0.5
+x1max     = 2.5
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 8
+x2min     = 0.3
+x2max     = 2.8
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 8
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<mesh_refinement>
+refinement = static
+
+<refined_region1>
+level = 1
+x1min = 1.0
+x1max = 1.5
+x2min = 1.0
+x2max = 1.5
+x3min = -0.2
+x3max = 0.2
+
+<meshblock>
+nx1       = 8
+nx2       = 8
+nx3       = 8
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.8
+nlim       = 0
+tlim       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name = coarse_geometry_test

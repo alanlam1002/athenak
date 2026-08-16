@@ -522,6 +522,39 @@ WENOZ/TENO curvilinear generalization. Full-3D polar-axis handling beyond the
 required layouts. Non-separable coordinate mappings. SR+MHD geometric source
 terms.
 
+**SMR/AMR + curvilinear, Phase 1 (cell-centered) — DONE.** Hydro + curvilinear +
+refinement (static and adaptive) is supported and no longer guarded. Volume-weighted
+`RestrictCC`, conservative centroid-based `ProlongCC`, area-weighted CC flux correction,
+and a coarse `GeomData` built through the same `BuildOneLevel()` path as the fine one.
+Phase 2 (face-centered / MHD) remains guarded in `mhd.cpp`: `RestrictFC`,
+`ProlongFCShared*`/`ProlongFCInternal` and `flux_correct_fc.cpp` still average without
+Area/Len weighting, and the Toth-Roe internal-face scheme needs recasting onto
+face-integrated `A*B` to stay divergence-free across a level jump.
+
+Three things from Phase 1 that are easy to get wrong and are worth reading before
+starting Phase 2, since all three will recur there:
+
+1. *Prolongation needs the NEW geometry.* `RefineCC` runs during a regrid, before the
+   grid objects were historically rebuilt, so a geometry-aware prolongation reads a
+   `pgeom` sized and positioned for the OLD blocks. The rebuild is now a lambda invoked
+   early only when `coord_general != cartesian`; Cartesian keeps its original ordering,
+   because hoisting it perturbs the refinement cadence enough to time out the radiation
+   AMR test, and hoisting only part of the group segfaults (the new MeshBlock is left
+   without neighbour lists). The four rebuild steps must stay together.
+2. *"Reduces exactly" is not "bitwise".* The weighted forms are mathematically equal to
+   upstream's constants on a uniform grid but differ in floating-point association, and
+   that alone produced ~1e6 C2P failures in the GR-MHD AMR boundary test. Hence
+   `GeomData::cells_uniform`, which routes uniform grids through upstream's original
+   expressions. Same pattern as `plm_uniform*`.
+3. *Conservation is structural, not enforced.* Writing prolongation in terms of true
+   volumetric centroids is exactly conservative because `V_c*x_c == sum(V_f*x_f)`; no
+   correction pass is needed. Restriction and flux correction need no coarse geometry at
+   all, because a coarse cell is exactly the union of its children.
+
+The acceptance gate (`pgen/unit_tests/amr_conservation_test.cpp`) was itself rebuilt
+after the first version proved toothless -- see that file's comment. It is verified to
+FAIL when either half of the weighting is reverted, by ~6 orders of magnitude.
+
 **Diffusion + curvilinear** (added 2026-08-16, see the merge log above). Every
 gradient/flux in `src/diffusion/` uses flat cell widths, so viscosity,
 conduction, resistivity and ambipolar diffusion are all rejected under

@@ -154,6 +154,8 @@ add_executable(
         pgen/unit_tests/gauss_legendre.cpp
         pgen/unit_tests/geometry_cartesian_test.cpp
         pgen/unit_tests/geometry_curvilinear_test.cpp
+        pgen/unit_tests/coarse_geometry_test.cpp
+        pgen/unit_tests/amr_conservation_test.cpp
         pgen/unit_tests/recon_exact_gradient_test.cpp
         pgen/unit_tests/recon_exact_cubic_test.cpp
         pgen/unit_tests/geom_equilibrium_test.cpp

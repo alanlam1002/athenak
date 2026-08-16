@@ -967,6 +967,10 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     GeometryCartesianTest(pin, is_restart);
   } else if (pgen_fun_name.compare("geometry_curvilinear_test") == 0) {
     GeometryCurvilinearTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("coarse_geometry_test") == 0) {
+    CoarseGeometryTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("amr_conservation_test") == 0) {
+    AMRConservationTest(pin, is_restart);
   } else if (pgen_fun_name.compare("recon_exact_gradient_test") == 0) {
     ReconExactGradientTest(pin, is_restart);
   } else if (pgen_fun_name.compare("recon_exact_cubic_test") == 0) {

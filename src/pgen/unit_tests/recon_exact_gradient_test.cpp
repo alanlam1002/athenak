@@ -22,7 +22,7 @@
 #include "mesh/meshblock.hpp"
 #include "mesh/meshblock_pack.hpp"
 #include "coordinates/mesh_geometry.hpp"
-#include "reconstruct/plm.hpp"
+#include "reconstruct/recon_geom.hpp"
 
 namespace {
 constexpr Real kTol = 1.0e-12;
@@ -54,7 +54,7 @@ void ProblemGenerator::ReconExactGradientTest(ParameterInput *pin, const bool re
     Real xf_i = xf1_h(m, i), xf_ip1 = xf1_h(m, i+1);
 
     Real ql_ip1, qr_i;
-    PLM(q_im1, q_i, q_ip1, x_im1, x_i, x_ip1, xf_i, xf_ip1, ql_ip1, qr_i);
+    PLMGeom(q_im1, q_i, q_ip1, x_im1, x_i, x_ip1, xf_i, xf_ip1, ql_ip1, qr_i);
 
     Real expected_right_face = a + b*xf_ip1;  // ql at face i+1
     Real expected_left_face  = a + b*xf_i;    // qr at face i

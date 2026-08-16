@@ -16,6 +16,7 @@
 #include <string>
 
 #include "athena.hpp"
+#include "coordinates/coord_general.hpp"  // CoordinateGeneral enum, ParseCoordGeneral()
 
 // Define following structure before other "include" files to resolve declarations
 //----------------------------------------------------------------------------------------
@@ -39,29 +40,6 @@ struct RegionIndcs {
   int cnx1, cnx2, cnx3;         // number of active coarse cells (not including gzs)
   int cis,cie,cjs,cje,cks,cke;  // indices of ACTIVE coarse cells
 };
-
-//----------------------------------------------------------------------------------------
-//! \enum CoordinateGeneral
-//! \brief selects the grid-geometry (curvilinear) coordinate system used by the Mesh.
-//! This is independent of, and must not be confused with, the relativistic metric
-//! properties held by the <coord> input block and the Coordinates class (GR/SR on a
-//! Cartesian computational background) -- CoordinateGeneral instead controls the
-//! face-area/cell-volume/edge-length geometry used by MeshGeometry (see
-//! src/coordinates/mesh_geometry.hpp).
-//!
-//! Layouts (see DEVELOPMENT.md for the full rationale):
-//!   cartesian           : x1,x2,x3 = x,y,z                    (1D/2D/3D)
-//!   cylindrical         : x1,x2,x3 = R,phi,z (right-handed)   (2D (R,phi)/3D)
-//!   cylindrical_axisym  : x1,x2 = R,z; x3 unused (nx3=1 required); phi carried
-//!                         as a non-grid rotational component (left-handed R,z,phi).
-//!                         This -- not "cylindrical with nx2=1" -- is how an
-//!                         axisymmetric (R,z) grid is represented, because AthenaK's
-//!                         one_d/two_d/three_d/multi_d flags are strictly nested
-//!                         (nx3>1 forces multi_d, and nx2<4 && multi_d is fatal), so
-//!                         nx2=1,nx3>1 cannot be built.
-//!   spherical_polar     : x1,x2,x3 = r,theta,phi (right-handed) (1D (r)/2D/3D)
-
-enum class CoordinateGeneral {cartesian, cylindrical, cylindrical_axisym, spherical_polar};
 
 //----------------------------------------------------------------------------------------
 //! \struct NeighborBlock
@@ -206,13 +184,6 @@ class Mesh {
   std::unique_ptr<MeshBlockTree> ptree;  // pointer to root node in binary/quad/oct-tree
   void LoadBalance(float *clist, int *rlist, int *slist, int *nlist, int nb);
   int amr_lb_seq_ = 0;
-  // validates mesh_size/mesh_indcs/multilevel against coord_general. Called once from
-  // the constructor (fresh runs) and again from BuildTreeFromRestart() after mesh_size/
-  // mesh_indcs are overwritten from the restart file's binary header, since coord_general
-  // itself is not part of that binary payload (it always comes from ParameterInput, which
-  // for restarts is normally the input text embedded in the restart file, but can be
-  // overridden by a separately-supplied -i file -- this second call catches the case
-  // where such an override leaves coord_general inconsistent with the actual restart data)
-  void ValidateCoordGeneral();
+  void ValidateCoordGeneral();  // defined in coordinates/coord_general.cpp
 };
 #endif  // MESH_MESH_HPP_

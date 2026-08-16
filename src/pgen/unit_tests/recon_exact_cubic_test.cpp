@@ -28,7 +28,7 @@
 #include "mesh/meshblock.hpp"
 #include "mesh/meshblock_pack.hpp"
 #include "coordinates/mesh_geometry.hpp"
-#include "reconstruct/ppm.hpp"
+#include "reconstruct/recon_geom.hpp"
 
 namespace {
 constexpr Real kTol = 1.0e-10;
@@ -102,13 +102,13 @@ void ProblemGenerator::ReconExactCubicTest(ParameterInput *pin, const bool resta
     Real scale = std::max(std::abs(expected_right_face), Real(1.0));
 
     Real ql4, qr4;
-    PPM4(q_im2, q_im1, q_i, q_ip1, q_ip2,
+    PPM4Geom(q_im2, q_im1, q_i, q_ip1, q_ip2,
          c1_h(m,i),   c2_h(m,i),   c3_h(m,i),   c4_h(m,i),
          c1_h(m,i+1), c2_h(m,i+1), c3_h(m,i+1), c4_h(m,i+1),
          hp_h(m,i), hm_h(m,i), ql4, qr4);
 
     Real qlx, qrx;
-    PPMX(q_im2, q_im1, q_i, q_ip1, q_ip2,
+    PPMXGeom(q_im2, q_im1, q_i, q_ip1, q_ip2,
          c1_h(m,i),   c2_h(m,i),   c3_h(m,i),   c4_h(m,i),
          c1_h(m,i+1), c2_h(m,i+1), c3_h(m,i+1), c4_h(m,i+1),
          hp_h(m,i), hm_h(m,i), qlx, qrx);

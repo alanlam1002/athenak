@@ -43,10 +43,11 @@ SR+MHD+Cartesian runs too, not just curvilinear ones (G1, caught by the
 session-wide full-suite re-run, not the coordinates suite alone).
 
 **Remaining work**: none from the approved v2 plan. The "Deferred" section
-below (SMR/AMR for curvilinear, WENOZ/TENO curvilinear reconstruction, full
-3D polar-axis handling, non-separable coordinate mappings) was explicitly
-out of scope from the start and remains so unless the user asks to revisit
-it. A follow-on effort covering performance, GPU-readiness and upstream
+below (WENOZ/TENO curvilinear reconstruction, full 3D polar-axis handling,
+non-separable coordinate mappings) was explicitly out of scope from the start
+and remains so unless the user asks to revisit it. SMR/AMR for curvilinear was
+also deferred there originally, but has since been implemented in two follow-on
+phases (cell-centered, then face-centered/MHD) — see that section. A follow-on effort covering performance, GPU-readiness and upstream
 separation is tracked in "Performance and GPU status" below.
 
 **Working tree state**: the v2 plan landed on branch `curvilinear_coordinate`
@@ -517,22 +518,77 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done (with commit ref),
 - [x] G1 — SR geometric source term generalization — DONE 2026-08-14
 
 ### Deferred (not implemented in this project)
-SMR/AMR for curvilinear (volume/area-weighted restriction/prolongation).
 WENOZ/TENO curvilinear generalization. Full-3D polar-axis handling beyond the
 required layouts. Non-separable coordinate mappings. SR+MHD geometric source
-terms.
+terms. (SMR/AMR for curvilinear is no longer on this list -- Phases 1 and 2 below
+cover cell- and face-centered data respectively.)
 
 **SMR/AMR + curvilinear, Phase 1 (cell-centered) — DONE.** Hydro + curvilinear +
 refinement (static and adaptive) is supported and no longer guarded. Volume-weighted
 `RestrictCC`, conservative centroid-based `ProlongCC`, area-weighted CC flux correction,
 and a coarse `GeomData` built through the same `BuildOneLevel()` path as the fine one.
-Phase 2 (face-centered / MHD) remains guarded in `mhd.cpp`: `RestrictFC`,
-`ProlongFCShared*`/`ProlongFCInternal` and `flux_correct_fc.cpp` still average without
-Area/Len weighting, and the Toth-Roe internal-face scheme needs recasting onto
-face-integrated `A*B` to stay divergence-free across a level jump.
 
-Three things from Phase 1 that are easy to get wrong and are worth reading before
-starting Phase 2, since all three will recur there:
+**SMR/AMR + curvilinear, Phase 2 (face-centered / MHD) — DONE.** MHD + curvilinear +
+refinement now runs; the guard in `mhd.cpp` is gone. Four pieces:
+
+1. **`RestrictFC`** (both copies: `mesh_refinement.cpp` and `FillCoarseInBndryFC` in
+   `bvals/prolongation.cpp`) → `sum(A_f*B_f)/sum(A_f)`, fine geometry only.
+2. **EMF correction** (`flux_correct_fc.cpp`, 11 sites) → `sum(Len_f*E_f)/sum(Len_f)`.
+   Component and `Len` index always match (`x1e`↔`Len1` summed over i, etc.). The RECEIVE
+   side is deliberately left unweighted -- every division there averages duplicate
+   computations of one edge, never distinct sub-intervals; see the comment on
+   `AverageBoundaryFluxes`.
+3. **`ProlongFCShared*`** → `B_f = B_c + s*(y_f - y_c)` with `y` the AREA-weighted
+   transverse centroid (new `GeomData::fcN_d`). Exactly flux-conservative because
+   `sum(A_f*y_f) == A_c*y_c`. The volumetric centroids `x1v/x2v/x3v` will NOT do: they
+   coincide with the area-weighted ones only for x1-faces.
+4. **`ProlongFCInternal`** → Toth-Roe run on face fluxes `Phi = A*B`. A change of
+   variable, not a re-derivation: the constraint `sum(+/- A*B_n) = 0` is formally the
+   Cartesian unit-cube case in `Phi`, so the published 1/8 and 1/16 coefficients carry
+   over verbatim.
+
+Both `ProlongFCShared*` and `ProlongFCInternal` had their arithmetic DE-duplicated in the
+process (`FCSharedIncrements`, `ProlongFCInternalValues`) so the regrid path and the
+boundary path can no longer drift apart -- previously six pieces of arithmetic in twelve
+places.
+
+Note the two fast paths key on DIFFERENT predicates: restriction, EMF correction and
+shared-face prolongation need only equal child areas (`cells_uniform`), while the
+internal-face kernel additionally needs the three areas equal to each other
+(`cubic_cells`) -- see the upstream-bug finding below.
+
+Acceptance gate `pgen/unit_tests/amr_divb_test.cpp`, 160 cycles of continuous
+refine/derefine, `rel_divb` against a 1e-10 tolerance:
+
+| | div(B) | with all four weightings reverted |
+|---|---|---|
+| cartesian (control) | 2.13e-16 | 2.13e-16 (unchanged -- takes the fast path either way) |
+| cylindrical | 2.04e-16 | 4.22e-02 |
+| axisym | 4.04e-16 | 1.41e-03 |
+| spherical | 2.96e-16 | 1.35e-02 |
+
+The mutation was performed by forcing `cells_uniform` and `cubic_cells` true, which
+reverts all four weightings at once. `ProlongFCInternal` additionally has an INDEPENDENT
+single-piece check that needs no mutation at all: because upstream's version is
+cubic-cells-only, running the stock Cartesian AMR problem at aspect ratio 2 exercises
+exactly that kernel and nothing else (6.9e-03 before the flux recast, 1.8e-16 after).
+
+**Verification.** Full CPU suite: **275 passed, 15 skipped, 5 failed** -- the 5 being the
+pre-existing `math.nextafter` failures in upstream's RKL2 controller test (Python 3.8 on
+this cluster), which fail identically on pristine upstream. The previous baseline was 271
+passed; the +4 are exactly the new `test_amr_divb_cpu` cases. Cartesian AMR is bitwise
+unchanged at every step, checked after each of steps 2-5 against
+`tst/inputs/divb_amr_2d.athinput` and confirmed by
+`test_gr_mhd_lwave_amr_bc_cpu.py` (the test that caught Phase 1's
+floating-point-association problem) and `test_nr_cpaw_amr_cpu.py`.
+
+Both Phase 1 and Phase 2 gates also pass under a
+`-DKokkos_ENABLE_DEBUG_BOUNDS_CHECK=On` build, which is how the stale-block-count defect
+below was found. **That build is worth adding to the routine**: a Release-only suite
+cannot see out-of-bounds reads, and this one survived a full Phase 1 review.
+
+Three things from Phase 1 that are easy to get wrong. All three did recur in Phase 2, and
+they are worth reading before touching any of this again:
 
 1. *Prolongation needs the NEW geometry.* `RefineCC` runs during a regrid, before the
    grid objects were historically rebuilt, so a geometry-aware prolongation reads a
@@ -554,6 +610,72 @@ starting Phase 2, since all three will recur there:
 The acceptance gate (`pgen/unit_tests/amr_conservation_test.cpp`) was itself rebuilt
 after the first version proved toothless -- see that file's comment. It is verified to
 FAIL when either half of the weighting is reverted, by ~6 orders of magnitude.
+
+**Phase 2 finding (2026-08-16): upstream's FC prolongation is CUBIC-CELLS-ONLY.**
+Measured before writing any Phase 2 code, because it decides which predicate the FC
+fast path keys on. `ProlongFCInternal` builds its Toth-Roe moments by mixing `x2f` and
+`x3f` differences with unit weight, so it enforces `dB1 + dB2 + dB3 = 0` per child --
+but the actual constraint is `A1*dB1 + A2*dB2 + A3*dB3 = 0`, i.e.
+`dB1/dx1 + dB2/dx2 + dB3/dx3 = 0`. The two agree only when `dx1 == dx2 == dx3`.
+
+Confirmed by running `tst/inputs/divb_amr_2d.athinput` (Cartesian, and unmodified
+upstream code -- `ProlongFCInternal` is byte-identical to `upstream/main` and no diff
+hunk on this branch touches any FC routine) at its native square aspect and again with
+`mesh/x2max=2.0`:
+
+| | t=0, no AMR | after 1st refine | steady | tolerance |
+|---|---|---|---|---|
+| square (`dx1==dx2`) | 1.0e-16 | 3.0e-16 | ~4e-16 | 2e-11 |
+| aspect 2 (`dx2 == 2*dx1`) | 5.4e-17 | **1.8e-03** | ~6.9e-03 | 2e-11 |
+
+Both are divergence-free to roundoff at t=0 and stay there for the two cycles before
+the first regrid, and both follow an *identical* `ncell` trajectory -- so this is the
+refinement path specifically, not the IC and not the CT update. `max_ndiv` jumps 13
+orders of magnitude at the exact cycle where `ncell` first grows.
+
+**Phase 2 finding: a stale-block-count out-of-bounds read, present since Phase 1.**
+`RestrictCC` (and, as first written, `RestrictFC`) iterate `u.extent_int(0)` -- the array
+CAPACITY, which is `nmb_maxperrank` -- while the geometry arrays are sized to the real
+block count. Upstream could safely iterate the capacity because it only touched `u`/`cu`,
+whose surplus slots hold garbage that is read and written in place; the volume/area
+weighting added in Phase 1 reads `geom.vi`/`geom.a*` at those same indices and runs off
+the end. A `Kokkos_ENABLE_DEBUG_BOUNDS_CHECK` build aborts on it in BOTH Phase 1
+curvilinear gates (`geom.vi` indices [4,2], extents [4,20]); a Release build silently
+reads adjacent heap and still produces passing numbers, which is why it survived Phase 1
+review and commit. Fixed by clamping both loops to `pmb_pack->nmb_thispack`.
+
+Lesson: **the Phase 1 conservation numbers were produced by a build with out-of-bounds
+reads.** A Release-only test suite cannot detect this class of defect. Re-running the
+Phase 1 gates under a bounds-checked build after the fix: all four pass clean.
+
+**Phase 2 finding: periodic BCs are invalid in a non-periodic curvilinear direction.**
+The Phase 2 spherical gate initially reported 2.9e-04 mass drift, which looked like a
+level-boundary conservation failure. It was not. Controls:
+
+| spherical theta BC | single level | with AMR |
+|---|---|---|
+| periodic | 4.3e-04 | 2.9e-04 |
+| reflect (closed domain) | 1.3e-12 | 4.8e-14 |
+
+Disabling AMR made it WORSE, which rules out the refinement machinery immediately. The
+cause is the input file: theta is not a periodic coordinate, so the ghost-zone metric
+continues past `theta_max` rather than wrapping, and flux crosses the seam through faces
+of the wrong area. Note a symmetric range (`theta_max = pi - theta_min`, which makes the
+two end areas match exactly) only halved the drift -- matching areas is not sufficient,
+because the ghost geometry is still wrong. Always close a curvilinear conservation-test
+domain with reflecting walls.
+
+The residual ~1e-11 in cylindrical is also not AMR: single level is worse (9.4e-11 vs
+1.9e-11), and the drift grows super-linearly with cycle count (x6 per doubling, ~N^2.6),
+so it tracks growing flow amplitude at the reflecting radial wall -- the known non-origin
+reflecting-wall effect from Task B6 -- rather than a per-regrid leak. The gate's
+`mass_tol` is set above that measured floor and documented in the input files.
+
+Consequence for Phase 2: the FC fast path must key on **cubic cells**
+(`Area1 == Area2 == Area3`, each constant), NOT on `cells_uniform`. Every existing
+Cartesian AMR test uses square/cubic cells, so all stay bitwise unchanged; non-cubic
+Cartesian silently picks up the corrected flux-form path, which is right where
+upstream is wrong. This is a latent upstream bug, not a regression from this branch.
 
 **Diffusion + curvilinear** (added 2026-08-16, see the merge log above). Every
 gradient/flux in `src/diffusion/` uses flat cell widths, so viscosity,

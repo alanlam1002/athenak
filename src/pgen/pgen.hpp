@@ -84,6 +84,7 @@ class ProblemGenerator {
   void GeometryCurvilinearTest(ParameterInput *pin, const bool restart);
   void CoarseGeometryTest(ParameterInput *pin, const bool restart);
   void AMRConservationTest(ParameterInput *pin, const bool restart);
+  void AMRDivBTest(ParameterInput *pin, const bool restart);
   void ReconExactGradientTest(ParameterInput *pin, const bool restart);
   void ReconExactCubicTest(ParameterInput *pin, const bool restart);
   void GeomEquilibriumTest(ParameterInput *pin, const bool restart);

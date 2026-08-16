@@ -188,23 +188,11 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     std::exit(EXIT_FAILURE);
   }
 
-  // SMR/AMR + curvilinear is supported for cell-centered data only (volume-weighted
-  // RestrictCC, centroid-based conservative ProlongCC, area-weighted CC flux
-  // correction). The FACE-centered half is NOT done: RestrictFC/ProlongFCShared*/
-  // ProlongFCInternal still do unweighted 0.5/0.25 averaging, which needs Area weighting
-  // and a Toth-Roe scheme recast onto face-integrated A*B to stay divergence-free across
-  // a level jump, and flux_correct_fc.cpp still averages EMFs without Len weighting.
-  // Until that lands, MHD + curvilinear + refinement would silently violate both
-  // conservation and div(B)=0, so reject it.
-  if (pmy_pack->pmesh->multilevel &&
-      pmy_pack->pmesh->coord_general != CoordinateGeneral::cartesian) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-      << std::endl << "SMR/AMR is not yet supported for MHD with coord != cartesian: "
-      << "face-centered restriction/prolongation and EMF correction are not "
-      << "curvilinear-aware and would break conservation and div(B)=0 at level "
-      << "boundaries. Hydro + curvilinear + refinement IS supported." << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
+  // SMR/AMR + curvilinear is now supported for MHD too (Phase 2): RestrictFC and the
+  // EMF correction in flux_correct_fc.cpp are Area/Len-weighted, ProlongFCShared* uses
+  // the area-weighted transverse centroids, and the Toth-Roe internal-face scheme runs
+  // on face-integrated fluxes A*B. The guard that used to stand here is gone; see
+  // DEVELOPMENT.md and pgen/unit_tests/amr_divb_test.cpp for the acceptance gate.
 
   has_any_sts_cell_update = (has_sts_viscosity || has_sts_conduction ||
                              (has_sts_resistivity && peos->eos_data.is_ideal));

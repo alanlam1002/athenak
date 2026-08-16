@@ -65,7 +65,8 @@ void BuildCartesianGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
   // returns the domain midpoint -- a harmless placeholder since no reconstruction or
   // area/volume weighting ever varies with that direction's position.
   auto x1v_of = [&](int m, int i) {
-    return CellCenterX(i - indcs.is, indcs.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    return CellCenterX(i - indcs.is, indcs.nx1, size.h_view(m).x1min,
+                       size.h_view(m).x1max);
   };
   auto x2v_of = [&](int m, int j) {
     int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;

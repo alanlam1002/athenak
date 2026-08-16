@@ -51,6 +51,9 @@ void CheckCylindrical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
   int is = indcs.is;
   auto &size = pmbp->pmb->mb_size;
   auto &geom = pmbp->pgeom->geom_data;
+  // Host mirror: GeomData's accessors are __host__ __device__, so calling them
+  // directly from this host loop would dereference a device pointer at runtime.
+  GeomDataHost gh = MirrorGeomData(geom);
 
   auto a1i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a1i);
   auto a2i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a2i);
@@ -93,7 +96,7 @@ void CheckCylindrical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
     int i_chk = indcs.is + 1, j_chk = indcs.js, k_chk = indcs.ks;
     Real Rf1 = LeftEdgeX(i_chk - is, indcs.nx1, x1min, x1max);
     Real area1_expected = Rf1 * dx2 * dx3;
-    Real area1_got = geom.Area1(m, k_chk, j_chk, i_chk);
+    Real area1_got = gh.Area1(m, k_chk, j_chk, i_chk);
     CheckClose("cyl Area1 full", area1_got, area1_expected, failed);
 
     // Task B5: CenterWidth2 = R_v(i)*dphi (angular, R-weighted at the CENTROID, not the
@@ -101,9 +104,9 @@ void CheckCylindrical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
     Real Rm1 = LeftEdgeX(i_chk - is, indcs.nx1, x1min, x1max);
     Real Rp1 = LeftEdgeX(i_chk + 1 - is, indcs.nx1, x1min, x1max);
     Real Rv1 = (2.0/3.0)*(Rp1*Rp1*Rp1 - Rm1*Rm1*Rm1)/(Rp1*Rp1 - Rm1*Rm1);
-    CheckClose("cyl CenterWidth2", geom.CenterWidth2(m, k_chk, j_chk, i_chk),
+    CheckClose("cyl CenterWidth2", gh.CenterWidth2(m, k_chk, j_chk, i_chk),
                Rv1*dx2, failed);
-    CheckClose("cyl CenterWidth3", geom.CenterWidth3(m, k_chk, j_chk, i_chk),
+    CheckClose("cyl CenterWidth3", gh.CenterWidth3(m, k_chk, j_chk, i_chk),
                dx3, failed);
   }
 }
@@ -117,6 +120,9 @@ void CheckCylindricalAxisym(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *faile
   int is = indcs.is;
   auto &size = pmbp->pmb->mb_size;
   auto &geom = pmbp->pgeom->geom_data;
+  // Host mirror: GeomData's accessors are __host__ __device__, so calling them
+  // directly from this host loop would dereference a device pointer at runtime.
+  GeomDataHost gh = MirrorGeomData(geom);
 
   auto a1i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a1i);
   auto a2i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a2i);
@@ -149,10 +155,10 @@ void CheckCylindricalAxisym(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *faile
     // spot-check full Area1 (R-face) and Area3 (virtual phi-face, flat R-z rectangle)
     int i_chk = indcs.is + 1, j_chk = indcs.js, k_chk = indcs.ks;
     Real Rf1 = LeftEdgeX(i_chk - is, indcs.nx1, x1min, x1max);
-    CheckClose("axisym Area1 full", geom.Area1(m, k_chk, j_chk, i_chk), Rf1*dx2, failed);
+    CheckClose("axisym Area1 full", gh.Area1(m, k_chk, j_chk, i_chk), Rf1*dx2, failed);
     Real Rm_c = LeftEdgeX(i_chk - is, indcs.nx1, x1min, x1max);
     Real Rp_c = LeftEdgeX(i_chk + 1 - is, indcs.nx1, x1min, x1max);
-    CheckClose("axisym Area3 full", geom.Area3(m, k_chk, j_chk, i_chk),
+    CheckClose("axisym Area3 full", gh.Area3(m, k_chk, j_chk, i_chk),
                (Rp_c-Rm_c)*dx2, failed);
   }
 }
@@ -166,6 +172,9 @@ void CheckSpherical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
   int is = indcs.is;
   auto &size = pmbp->pmb->mb_size;
   auto &geom = pmbp->pgeom->geom_data;
+  // Host mirror: GeomData's accessors are __host__ __device__, so calling them
+  // directly from this host loop would dereference a device pointer at runtime.
+  GeomDataHost gh = MirrorGeomData(geom);
 
   auto a1i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a1i);
   auto a2i_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom.a2i);
@@ -205,13 +214,13 @@ void CheckSpherical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
       Real th_m = size.h_view(m).x2min, th_p = size.h_view(m).x2max;
       Real dcos = std::abs(std::cos(th_m) - std::cos(th_p));
       Real area1_expected = rf1*rf1 * dcos * dx3;
-      CheckClose("sph Area1 full", geom.Area1(m, k_chk, j_chk, i_chk),
+      CheckClose("sph Area1 full", gh.Area1(m, k_chk, j_chk, i_chk),
                  area1_expected, failed);
       // if x2 spans [0,pi] and x3 spans [0,2pi], this must equal a full sphere shell:
       // Area1 = 4*pi*r_f^2 (the standard result, a strong end-to-end sanity check)
       if (std::abs(th_m - 0.0) < 1e-10 && std::abs(th_p - M_PI) < 1e-10 &&
           std::abs(dx3 - 2.0*M_PI) < 1e-8) {
-        CheckClose("sph Area1 4pi*r^2", geom.Area1(m, k_chk, j_chk, i_chk),
+        CheckClose("sph Area1 4pi*r^2", gh.Area1(m, k_chk, j_chk, i_chk),
                    4.0*M_PI*rf1*rf1, failed);
       }
     }
@@ -241,9 +250,9 @@ void CheckSpherical(MeshBlockPack *pmbp, RegionIndcs &indcs, bool *failed) {
         thetav = num/den;
       }
       Real dphi = size.h_view(m).dx3;
-      CheckClose("sph CenterWidth2", geom.CenterWidth2(m, k_chk, j_chk, i_chk),
+      CheckClose("sph CenterWidth2", gh.CenterWidth2(m, k_chk, j_chk, i_chk),
                  rv2*dtheta, failed);
-      CheckClose("sph CenterWidth3", geom.CenterWidth3(m, k_chk, j_chk, i_chk),
+      CheckClose("sph CenterWidth3", gh.CenterWidth3(m, k_chk, j_chk, i_chk),
                  rv2*std::abs(std::sin(thetav))*dphi, failed);
     }
   }

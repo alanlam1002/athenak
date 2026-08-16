@@ -238,7 +238,7 @@ void BuildSphericalGeometry(ParameterInput *pin, MeshBlockPack *ppack, GeomData 
     return -(3.0*io2 + 9.0*io + 7.0)*(15.0*io6 - 48.0*io5 + 23.0*io4
                                        + 48.0*io3 - 30.0*io2 - 16.0*io + 12.0)/delta;
   };
-  // Mignone eq. 48 overshoot ratios, spherical (uses |x1v|, same rationale as cylindrical)
+  // Mignone eq. 48 overshoot ratios, spherical (uses |x1v|, as for cylindrical)
   auto ppm_hp_of = [&](int m, int i) {
     Real xv = std::abs(x1v_of(m, i));
     Real dxi = dr_of(m, i);

@@ -260,6 +260,52 @@ struct GeomData {
 };
 
 //----------------------------------------------------------------------------------------
+//! \struct GeomDataHost
+//! \brief HOST-resident mirror of GeomData, exposing the same Area/Vol/Len/CenterWidth
+//! accessors.
+//!
+//! Exists to make host-side geometry checks device-safe. GeomData's accessors are
+//! KOKKOS_INLINE_FUNCTION, i.e. __host__ __device__ on CUDA, so calling e.g.
+//! `geom.Area1(m,k,j,i)` from ordinary host code COMPILES CLEANLY and then dereferences
+//! a device pointer at runtime -- an illegal-memory abort with bounds checking on, and
+//! silent garbage without it. That trap is invisible on a CPU-only build (where device
+//! and host memory are the same), which is exactly how nine such calls survived in
+//! pgen/unit_tests/geometry_curvilinear_test.cpp until a device-portability audit.
+//!
+//! Use this from any host code that needs geometry:
+//!     GeomDataHost gh = MirrorGeomData(pmbp->pgeom->geom_data);
+//!     Real a = gh.Area1(m,k,j,i);
+//! The accessors below are deliberately NOT annotated, so a device-side call is a
+//! compile error rather than a runtime fault.
+
+struct GeomDataHost {
+  using HostArr = typename DvceArray2D<Real>::HostMirror;
+  HostArr a1i, a1j, a1k, a2i, a2j, a2k, a3i, a3j, a3k;
+  HostArr vi, vj, vk;
+  HostArr l1i, l1j, l1k, l2i, l2j, l2k, l3i, l3j, l3k;
+  HostArr cw2i, cw2j, cw3i, cw3j, cw3k;
+
+  Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }
+  Real Area2(int m, int k, int j, int i) const { return a2i(m,i)*a2j(m,j)*a2k(m,k); }
+  Real Area3(int m, int k, int j, int i) const { return a3i(m,i)*a3j(m,j)*a3k(m,k); }
+  Real Vol(int m, int k, int j, int i) const { return vi(m,i)*vj(m,j)*vk(m,k); }
+  Real Len1(int m, int k, int j, int i) const { return l1i(m,i)*l1j(m,j)*l1k(m,k); }
+  Real Len2(int m, int k, int j, int i) const { return l2i(m,i)*l2j(m,j)*l2k(m,k); }
+  Real Len3(int m, int k, int j, int i) const { return l3i(m,i)*l3j(m,j)*l3k(m,k); }
+  Real CenterWidth2(int m, int k, int j, int i) const { return cw2i(m,i)*cw2j(m,j); }
+  Real CenterWidth3(int m, int k, int j, int i) const {
+    return cw3i(m,i)*cw3j(m,j)*cw3k(m,k);
+  }
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn MirrorGeomData()
+//! \brief copies the arrays the GeomDataHost accessors need from device to host. Setup /
+//! diagnostic cost only -- never call this per cell or inside a kernel.
+
+GeomDataHost MirrorGeomData(const GeomData &g);
+
+//----------------------------------------------------------------------------------------
 //! \class MeshGeometry
 //! \brief owns and builds GeomData for a MeshBlockPack. Deliberately separate from the
 //! GR/SR Coordinates class (coordinates.hpp), which is untouched by this project. Built

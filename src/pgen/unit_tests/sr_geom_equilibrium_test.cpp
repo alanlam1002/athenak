@@ -63,7 +63,8 @@ void FillSRGeomEquilibrium(MeshBlockPack *pmbp, ParameterInput *pin,
     w_target(m,IDN,k,j,i) = rho0;
     w_target(m,IVX,k,j,i) = 0.0;
     w_target(m,IVY,k,j,i) = 0.0;
-    w_target(m,IVZ,k,j,i) = Gamma*v0;  // u^phi, phi carried in IM3/IVZ for axisym/spherical
+    // u^phi: phi is carried in IM3/IVZ for axisym/spherical
+    w_target(m,IVZ,k,j,i) = Gamma*v0;
     w_target(m,IEN,k,j,i) = pgas/gm1;  // internal energy density
   });
 

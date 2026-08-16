@@ -26,6 +26,8 @@
 //! correct (negative) centroid there, which is exactly what's needed for a correct
 //! gradient across the R=0 reflecting boundary.
 
+#include <cmath>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"

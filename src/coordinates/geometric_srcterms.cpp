@@ -52,7 +52,8 @@ void AddCoordGeomSrcTermsHydro(MeshBlockPack *pmbp, const DvceArray5D<Real> &w0,
       if (is_sr) {
         AddSphericalSrcTerms<false, true>(pmbp, w0, no_bcc, eos, beta_dt, geom, uflx, u0);
       } else {
-        AddSphericalSrcTerms<false, false>(pmbp, w0, no_bcc, eos, beta_dt, geom, uflx, u0);
+        AddSphericalSrcTerms<false, false>(pmbp, w0, no_bcc, eos, beta_dt, geom,
+                                          uflx, u0);
       }
       break;
   }

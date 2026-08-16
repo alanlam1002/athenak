@@ -237,6 +237,29 @@ bool BuildPlmFactors(DvceArray3D<Real> &arr, const DvceArray2D<Real> &xv,
 } // namespace
 
 //----------------------------------------------------------------------------------------
+//! \fn MirrorGeomData()
+//! \brief see the GeomDataHost doc comment in mesh_geometry.hpp.
+
+GeomDataHost MirrorGeomData(const GeomData &g) {
+  GeomDataHost h;
+  auto mirror = [](const DvceArray2D<Real> &src) {
+    auto dst = Kokkos::create_mirror_view(src);
+    Kokkos::deep_copy(dst, src);
+    return dst;
+  };
+  h.a1i = mirror(g.a1i); h.a1j = mirror(g.a1j); h.a1k = mirror(g.a1k);
+  h.a2i = mirror(g.a2i); h.a2j = mirror(g.a2j); h.a2k = mirror(g.a2k);
+  h.a3i = mirror(g.a3i); h.a3j = mirror(g.a3j); h.a3k = mirror(g.a3k);
+  h.vi  = mirror(g.vi);  h.vj  = mirror(g.vj);  h.vk  = mirror(g.vk);
+  h.l1i = mirror(g.l1i); h.l1j = mirror(g.l1j); h.l1k = mirror(g.l1k);
+  h.l2i = mirror(g.l2i); h.l2j = mirror(g.l2j); h.l2k = mirror(g.l2k);
+  h.l3i = mirror(g.l3i); h.l3j = mirror(g.l3j); h.l3k = mirror(g.l3k);
+  h.cw2i = mirror(g.cw2i); h.cw2j = mirror(g.cw2j);
+  h.cw3i = mirror(g.cw3i); h.cw3j = mirror(g.cw3j); h.cw3k = mirror(g.cw3k);
+  return h;
+}
+
+//----------------------------------------------------------------------------------------
 // constructor
 
 MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :

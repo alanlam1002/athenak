@@ -41,6 +41,8 @@
 //!   physics for the centrifugal/pressure terms is the same whether phi is resolved or
 //!   virtual -- Task C1 consumes these).
 
+#include <cmath>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"

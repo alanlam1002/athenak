@@ -8,7 +8,9 @@
 //! construction/regrid time -- never inside a hot per-cell loop, see mesh_geometry.hpp)
 //! to exactly one geometry factory function based on Mesh::coord_general.
 
+#include <cmath>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -157,6 +159,81 @@ void MirrorReflectingGhostPpmCoeffs(MeshBlockPack *ppack,
     Kokkos::deep_copy(hm, hm_h);
   }
 }
+//----------------------------------------------------------------------------------------
+//! \fn BuildPlmFactors()
+//! \brief fills one direction's precomputed PLM limiter factors from that direction's
+//! centroid (xv) and face (xf) positions. Deliberately generic: it derives everything
+//! from positions via MakePlmCoeff(), so it is written ONCE here rather than duplicated
+//! in each of the four coordinate factories, and any new coordinate system gets correct
+//! PLM factors for free just by filling xv/xf.
+//!
+//! MUST run after MirrorReflectingGhostGeometry(), which adjusts xv/xf in ghost zones at
+//! reflecting walls -- the factors have to be derived from the corrected positions.
+
+//! Returns true if the direction turned out to be uniformly spaced (see
+//! GeomData::plm_uniform1/2/3), in which case the stored factors are snapped to the
+//! exact uniform constants first.
+
+bool BuildPlmFactors(DvceArray3D<Real> &arr, const DvceArray2D<Real> &xv,
+                     const DvceArray2D<Real> &xf, const std::string &label) {
+  int nmb = xv.extent_int(0);
+  int n = xv.extent_int(1);
+  arr = DvceArray3D<Real>(label, nmb, NPLM_COEF, n);
+  auto arr_h = Kokkos::create_mirror_view(arr);
+  auto xv_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), xv);
+  auto xf_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), xf);
+  for (int m = 0; m < nmb; ++m) {
+    for (int idx = 0; idx < n; ++idx) {
+      // the outermost cells have no i-1/i+1 centroid stencil (and a 1-cell direction has
+      // no stencil at all); they are never reconstructed, so use the uniform factors
+      PlmCoeff c = (idx >= 1 && idx <= n-2)
+          ? MakePlmCoeff(xv_h(m,idx-1), xv_h(m,idx), xv_h(m,idx+1),
+                         xf_h(m,idx), xf_h(m,idx+1))
+          : UniformPlmCoeff();
+      arr_h(m,IPLM_PF,idx) = c.pF;
+      arr_h(m,IPLM_PB,idx) = c.pB;
+      arr_h(m,IPLM_CF,idx) = c.cf;
+      arr_h(m,IPLM_CB,idx) = c.cb;
+      arr_h(m,IPLM_CC,idx) = c.cc;
+      arr_h(m,IPLM_PP,idx) = c.pP;
+      arr_h(m,IPLM_PM,idx) = c.pM;
+    }
+  }
+
+  // Is this direction uniformly spaced? Compared with a relative tolerance rather than
+  // by equality: on a uniform grid dx1f and dx1v_fwd are mathematically equal but are
+  // computed from different subtractions, so pF can come out an ulp away from 1.0.
+  // Only the interior is examined -- the two end cells are uniform by construction and
+  // would otherwise mask a genuinely non-uniform direction.
+  PlmCoeff u = UniformPlmCoeff();
+  const Real uval[NPLM_COEF] = {u.pF, u.pB, u.cf, u.cb, u.cc, u.pP, u.pM};
+  bool uniform = true;
+  for (int m = 0; m < nmb && uniform; ++m) {
+    for (int idx = 1; idx <= n-2 && uniform; ++idx) {
+      for (int c = 0; c < NPLM_COEF; ++c) {
+        if (std::abs(arr_h(m,c,idx) - uval[c]) > 1.0e-12*std::abs(uval[c])) {
+          uniform = false;
+          break;
+        }
+      }
+    }
+  }
+  // Snap to the exact constants so the flag and the data agree bit for bit. This makes
+  // the uniform branch in PLMGeom() reproduce upstream's arithmetic EXACTLY, so a
+  // Cartesian run is bitwise identical to a pre-curvilinear build rather than merely
+  // close -- which is also what makes that branch safe to take at all.
+  if (uniform) {
+    for (int m = 0; m < nmb; ++m) {
+      for (int idx = 0; idx < n; ++idx) {
+        for (int c = 0; c < NPLM_COEF; ++c) { arr_h(m,c,idx) = uval[c]; }
+      }
+    }
+  }
+
+  Kokkos::deep_copy(arr, arr_h);
+  return uniform;
+}
+
 } // namespace
 
 //----------------------------------------------------------------------------------------
@@ -209,4 +286,58 @@ MeshGeometry::MeshGeometry(ParameterInput *pin, MeshBlockPack *ppack) :
                                   geom_data.ppm_hpi, geom_data.ppm_hmi,
                                   indcs.is, indcs.ie, indcs.ng,
                                   BoundaryFace::inner_x1, BoundaryFace::outer_x1);
+
+  // Precomputed PLM limiter factors. Built here, after BOTH the coordinate factory and
+  // the reflecting-ghost corrections above, since they are derived purely from the final
+  // centroid/face positions. Built for all three directions unconditionally: a
+  // 1-cell direction just gets the uniform factors, and the reconstruction kernel never
+  // reads a direction it does not reconstruct.
+  // Is the x1 PPM coefficient set the flat/uniform one? Same tolerance-then-snap
+  // approach as BuildPlmFactors (see there); snapping makes the fast path bitwise
+  // identical to upstream PPM4/PPMX rather than merely equivalent.
+  {
+    const Real c1 = -1.0/12.0, c2 = 7.0/12.0, hp = 2.0;
+    auto c1_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c1i);
+    auto c2_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c2i);
+    auto c3_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c3i);
+    auto c4_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_c4i);
+    auto hp_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_hpi);
+    auto hm_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), geom_data.ppm_hmi);
+    int nmb = c1_h.extent_int(0);
+    int nf = c1_h.extent_int(1);
+    int nc = hp_h.extent_int(1);
+    bool uni = true;
+    auto near = [](Real a, Real b) { return std::abs(a-b) <= 1.0e-12*std::abs(b); };
+    for (int m = 0; m < nmb && uni; ++m) {
+      for (int i = 0; i < nf && uni; ++i) {
+        if (!near(c1_h(m,i),c1) || !near(c2_h(m,i),c2) ||
+            !near(c3_h(m,i),c2) || !near(c4_h(m,i),c1)) { uni = false; }
+      }
+      for (int i = 0; i < nc && uni; ++i) {
+        if (!near(hp_h(m,i),hp) || !near(hm_h(m,i),hp)) { uni = false; }
+      }
+    }
+    if (uni) {
+      for (int m = 0; m < nmb; ++m) {
+        for (int i = 0; i < nf; ++i) {
+          c1_h(m,i) = c1; c2_h(m,i) = c2; c3_h(m,i) = c2; c4_h(m,i) = c1;
+        }
+        for (int i = 0; i < nc; ++i) { hp_h(m,i) = hp; hm_h(m,i) = hp; }
+      }
+      Kokkos::deep_copy(geom_data.ppm_c1i, c1_h);
+      Kokkos::deep_copy(geom_data.ppm_c2i, c2_h);
+      Kokkos::deep_copy(geom_data.ppm_c3i, c3_h);
+      Kokkos::deep_copy(geom_data.ppm_c4i, c4_h);
+      Kokkos::deep_copy(geom_data.ppm_hpi, hp_h);
+      Kokkos::deep_copy(geom_data.ppm_hmi, hm_h);
+    }
+    geom_data.ppm_uniform1 = uni;
+  }
+
+  geom_data.plm_uniform1 =
+      BuildPlmFactors(geom_data.plm_c1, geom_data.x1v, geom_data.xf1, "geom.plm_c1");
+  geom_data.plm_uniform2 =
+      BuildPlmFactors(geom_data.plm_c2, geom_data.x2v, geom_data.xf2, "geom.plm_c2");
+  geom_data.plm_uniform3 =
+      BuildPlmFactors(geom_data.plm_c3, geom_data.x3v, geom_data.xf3, "geom.plm_c3");
 }

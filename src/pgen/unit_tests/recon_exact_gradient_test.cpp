@@ -54,7 +54,11 @@ void ProblemGenerator::ReconExactGradientTest(ParameterInput *pin, const bool re
     Real xf_i = xf1_h(m, i), xf_ip1 = xf1_h(m, i+1);
 
     Real ql_ip1, qr_i;
-    PLMGeom(q_im1, q_i, q_ip1, x_im1, x_i, x_ip1, xf_i, xf_ip1, ql_ip1, qr_i);
+    // Drive the production limiter through the same factors the geometry builder
+    // precomputes (MakePlmCoeff is the single shared source of that formula), so this
+    // test cannot silently diverge from what the reconstruction kernel actually runs.
+    PlmCoeff pc = MakePlmCoeff(x_im1, x_i, x_ip1, xf_i, xf_ip1);
+    PLMGeom(q_im1, q_i, q_ip1, pc, ql_ip1, qr_i);
 
     Real expected_right_face = a + b*xf_ip1;  // ql at face i+1
     Real expected_left_face  = a + b*xf_i;    // qr at face i

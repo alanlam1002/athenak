@@ -49,7 +49,7 @@ TaskStatus Hydro::RKUpdate(Driver *pdriver, int stage) {
   // exactly to the previous uniform-Cartesian (flx[i+1]-flx[i])/dx formula since, for
   // coord=cartesian, Area1=dx2*dx3, Area2=dx1*dx3, Area3=dx1*dx2, Vol=dx1*dx2*dx3 (see
   // geometry_cartesian.cpp), so e.g. Area1(i+1)*flx1(i+1)-Area1(i)*flx1(i) all divided by
-  // Vol telescopes back to (flx1(i+1)-flx1(i))/dx1. For curvilinear coordinates, Area1/2/3
+  // Vol telescopes back to (flx1(i+1)-flx1(i))/dx1. For curvilinear coords, Area1/2/3
   // and Vol vary with position (see geometry_cylindrical.cpp etc., Task B1-B3) -- this is
   // the only change needed in this kernel to support them; no coordinate-system branching
   // is introduced here (see mesh_geometry.hpp for the confinement principle).
@@ -60,19 +60,30 @@ TaskStatus Hydro::RKUpdate(Driver *pdriver, int stage) {
   KOKKOS_LAMBDA(TeamMember_t member, const int m, const int n, const int k, const int j) {
     ScrArray1D<Real> divf(member.team_scratch(scr_level), ncells1);
 
+    // Hoist the transverse (j,k-indexed) geometry factors out of the inner i loop --
+    // they are invariant along i, and are also identical for every variable n. The
+    // compiler cannot hoist them itself: Kokkos Views carry no __restrict__, so it must
+    // assume the scratch store to divf(i) below could alias them. Written out as
+    // factored a*i/a*j/a*k reads rather than Area1/Area2/Area3 calls for that reason
+    // only -- the value computed is the same product, just associated so the
+    // loop-invariant part is evaluated once per (m,n,k,j) instead of once per cell.
+
     // compute d(A1*F1)
+    const Real a1jk = geom.a1j(m,j)*geom.a1k(m,k);
     par_for_inner(member, is, ie, [&](const int i) {
-      divf(i) = geom.Area1(m,k,j,i+1)*flx1(m,n,k,j,i+1)
-              - geom.Area1(m,k,j,i)  *flx1(m,n,k,j,i);
+      divf(i) = a1jk*(geom.a1i(m,i+1)*flx1(m,n,k,j,i+1)
+                    - geom.a1i(m,i)  *flx1(m,n,k,j,i));
     });
     member.team_barrier();
 
     // Add d(A2*F2)
     // Fluxes must be summed in pairs to symmetrize round-off error in each dir
     if (multi_d) {
+      const Real a2jp = geom.a2j(m,j+1)*geom.a2k(m,k);
+      const Real a2jm = geom.a2j(m,j)  *geom.a2k(m,k);
       par_for_inner(member, is, ie, [&](const int i) {
-        divf(i) += geom.Area2(m,k,j+1,i)*flx2(m,n,k,j+1,i)
-                 - geom.Area2(m,k,j,i)  *flx2(m,n,k,j,i);
+        divf(i) += geom.a2i(m,i)*(a2jp*flx2(m,n,k,j+1,i)
+                                - a2jm*flx2(m,n,k,j,i));
       });
       member.team_barrier();
     }
@@ -80,16 +91,19 @@ TaskStatus Hydro::RKUpdate(Driver *pdriver, int stage) {
     // Add d(A3*F3)
     // Fluxes must be summed in pairs to symmetrize round-off error in each dir
     if (three_d) {
+      const Real a3kp = geom.a3j(m,j)*geom.a3k(m,k+1);
+      const Real a3km = geom.a3j(m,j)*geom.a3k(m,k);
       par_for_inner(member, is, ie, [&](const int i) {
-        divf(i) += geom.Area3(m,k+1,j,i)*flx3(m,n,k+1,j,i)
-                 - geom.Area3(m,k,j,i)  *flx3(m,n,k,j,i);
+        divf(i) += geom.a3i(m,i)*(a3kp*flx3(m,n,k+1,j,i)
+                                - a3km*flx3(m,n,k,j,i));
       });
       member.team_barrier();
     }
 
+    const Real vjk = geom.vj(m,j)*geom.vk(m,k);
     par_for_inner(member, is, ie, [&](const int i) {
       u0_(m,n,k,j,i) = gam0*u0_(m,n,k,j,i) + gam1*u1_(m,n,k,j,i)
-                     - beta_dt*divf(i)/geom.Vol(m,k,j,i);
+                     - beta_dt*divf(i)/(vjk*geom.vi(m,i));
     });
   });
   return TaskStatus::complete;

@@ -26,6 +26,7 @@
 
 #include <math.h>
 #include "athena.hpp"
+#include "coordinates/mesh_geometry.hpp"  // PlmCoeff, PlmCoefIdx
 
 //----------------------------------------------------------------------------------------
 //! \fn PLMGeom()
@@ -49,32 +50,67 @@
 
 KOKKOS_INLINE_FUNCTION
 void PLMGeom(const Real &q_im1, const Real &q_i, const Real &q_ip1,
-             const Real &x_im1, const Real &x_i, const Real &x_ip1,
-             const Real &xf_i, const Real &xf_ip1,
-             Real &ql_ip1, Real &qr_i) {
+             const PlmCoeff &c, Real &ql_ip1, Real &qr_i) {
   // compute L/R differences
   Real dwl = (q_i - q_im1);
   Real dwr = (q_ip1 - q_i);
 
-  Real dx1f = xf_ip1 - xf_i;         // plain width of cell i
-  Real dx1v_fwd = x_ip1 - x_i;       // forward centroid spacing ("dx1v(i)")
-  Real dx1v_bwd = x_i - x_im1;       // backward centroid spacing ("dx1v(i-1)")
-
-  // Mignone (2014) eq. 33/37 generalized van Leer limiter for non-uniform spacing
-  Real dqF = dwr*dx1f/dx1v_fwd;
-  Real dqB = dwl*dx1f/dx1v_bwd;
+  // Mignone (2014) eq. 33/37 generalized van Leer limiter for non-uniform spacing.
+  // Every position-dependent ratio was precomputed by MakePlmCoeff(), so exactly ONE
+  // division survives here -- the same count as upstream's uniform-spacing PLM.
+  Real dqF = dwr*c.pF;
+  Real dqB = dwl*c.pB;
   Real dq2 = dqF*dqB;
 
-  Real cf = dx1v_fwd/(xf_ip1 - x_i);
-  Real cb = dx1v_bwd/(x_i - xf_i);
-
-  Real dqm = dq2*(cf*dqB + cb*dqF)/(SQR(dqB) + SQR(dqF) + dq2*(cf + cb - 2.0));
+  Real dqm = dq2*(c.cf*dqB + c.cb*dqF)/(SQR(dqB) + SQR(dqF) + dq2*c.cc);
   if (dq2 <= 0.0) dqm = 0.0;
 
   // compute ql_(i+1/2) and qr_(i-1/2) using limited slope and the true face offsets
-  ql_ip1 = q_i + ((xf_ip1 - x_i)/dx1f)*dqm;
-  qr_i   = q_i - ((x_i - xf_i)/dx1f)*dqm;
+  ql_ip1 = q_i + c.pP*dqm;
+  qr_i   = q_i - c.pM*dqm;
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn PLMGeom() -- GeomData array overload
+//! \brief loads the seven precomputed factors for cell `idx` out of one of GeomData's
+//! plm_c1/c2/c3 arrays and applies the limiter above. This is the form the reconstruction
+//! kernel uses; the PlmCoeff form above is the one the unit test drives directly.
+
+KOKKOS_INLINE_FUNCTION
+void PLMGeom(const Real &q_im1, const Real &q_i, const Real &q_ip1,
+             const DvceArray3D<Real> &pc, const bool uniform,
+             const int m, const int idx, Real &ql_ip1, Real &qr_i) {
+  if (uniform) {
+    // Uniformly spaced direction: the general limiter below provably collapses to this
+    // (with factors 1,1,2,2,2,0.5,0.5 the numerator becomes 2*dq2*(dwl+dwr) and the
+    // denominator (dwl+dwr)^2, and the face offsets become +/-1/2). Taking the collapsed
+    // form directly is both much cheaper -- 1 multiply and no coefficient loads, versus
+    // ~10 multiplies and 7 loads -- and BITWISE identical to upstream plm.hpp's PLM(),
+    // so a uniform-grid run reproduces a pre-curvilinear build exactly.
+    //
+    // `uniform` is constant across the whole launch (it is a property of the direction,
+    // not of the cell), so this costs one perfectly-predicted branch on CPU and is
+    // warp-coherent on GPU. It is NOT a coordinate-system test: cylindrical/spherical
+    // reach it too, in their flat phi/z directions.
+    Real dql = (q_i - q_im1);
+    Real dqr = (q_ip1 - q_i);
+    Real dq2 = dql*dqr;
+    Real dqm = dq2/(dql + dqr);
+    if (dq2 <= 0.0) dqm = 0.0;
+    ql_ip1 = q_i + dqm;
+    qr_i   = q_i - dqm;
+    return;
+  }
+  PlmCoeff c;
+  c.pF = pc(m,IPLM_PF,idx);
+  c.pB = pc(m,IPLM_PB,idx);
+  c.cf = pc(m,IPLM_CF,idx);
+  c.cb = pc(m,IPLM_CB,idx);
+  c.cc = pc(m,IPLM_CC,idx);
+  c.pP = pc(m,IPLM_PP,idx);
+  c.pM = pc(m,IPLM_PM,idx);
+  PLMGeom(q_im1, q_i, q_ip1, c, ql_ip1, qr_i);
 }
 
 //----------------------------------------------------------------------------------------

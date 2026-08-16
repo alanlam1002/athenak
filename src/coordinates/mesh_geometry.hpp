@@ -52,6 +52,62 @@ class ParameterInput;
 //! old Athena++'s coordinates.cpp/cylindrical.cpp/spherical_polar.cpp before being
 //! adopted here (see DEVELOPMENT.md Task A2 log).
 
+//----------------------------------------------------------------------------------------
+//! \enum PlmCoefIdx
+//! \brief component indices into GeomData::plm_c1/c2/c3 (see the doc comment there).
+//! pF/pB scale the forward/backward differences; cf/cb/cc are the limiter's
+//! centroid-offset weights (cc == cf+cb-2, precomputed); pP/pM are the centroid-to-face
+//! offsets as a fraction of the cell width. pM is stored rather than derived as 1-pP so
+//! that the two offsets stay exactly what the position formula produced.
+
+enum PlmCoefIdx {IPLM_PF=0, IPLM_PB, IPLM_CF, IPLM_CB, IPLM_CC, IPLM_PP, IPLM_PM,
+                 NPLM_COEF};
+
+//----------------------------------------------------------------------------------------
+//! \struct PlmCoeff
+//! \brief the seven non-uniform PLM limiter factors for one cell, as plain Reals.
+
+struct PlmCoeff {
+  Real pF, pB, cf, cb, cc, pP, pM;
+};
+
+//----------------------------------------------------------------------------------------
+//! \fn MakePlmCoeff()
+//! \brief computes the PLM factors for the cell bounded by faces xf_i/xf_ip1 with
+//! centroids x_im1/x_i/x_ip1. This is the ONLY place the position-to-factor formula
+//! lives: mesh_geometry.cpp calls it once per cell at construction to fill plm_c1/c2/c3,
+//! and the unit test calls it directly, so the tested math and the production math cannot
+//! drift apart. Pure scalar arithmetic (no Views), hence safe on host and device.
+
+KOKKOS_INLINE_FUNCTION
+PlmCoeff MakePlmCoeff(const Real x_im1, const Real x_i, const Real x_ip1,
+                      const Real xf_i, const Real xf_ip1) {
+  Real dx1f     = xf_ip1 - xf_i;   // plain width of cell i
+  Real dx1v_fwd = x_ip1 - x_i;     // forward centroid spacing
+  Real dx1v_bwd = x_i - x_im1;     // backward centroid spacing
+  PlmCoeff c;
+  c.pF = dx1f/dx1v_fwd;
+  c.pB = dx1f/dx1v_bwd;
+  c.cf = dx1v_fwd/(xf_ip1 - x_i);
+  c.cb = dx1v_bwd/(x_i - xf_i);
+  c.cc = c.cf + c.cb - 2.0;
+  c.pP = (xf_ip1 - x_i)/dx1f;
+  c.pM = (x_i - xf_i)/dx1f;
+  return c;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn UniformPlmCoeff()
+//! \brief the exact uniform-Cartesian factors. Used for the outermost ghost cells, where
+//! the i-1/i+1 centroid stencil MakePlmCoeff needs runs off the end of the array. Those
+//! cells are never reconstructed (the loop covers [is-1,ie+1], and nghost>=2), so this is
+//! only about not leaving NaNs in memory.
+
+KOKKOS_INLINE_FUNCTION
+PlmCoeff UniformPlmCoeff() {
+  return PlmCoeff{1.0, 1.0, 2.0, 2.0, 2.0, 0.5, 0.5};
+}
+
 struct GeomData {
   // Area1(m,k,j,i) = a1i(m,i) * a1j(m,j) * a1k(m,k)
   //   a1i: face factor, size ncells1+1 (own-direction, e.g. R_face, r_face^2)
@@ -133,6 +189,53 @@ struct GeomData {
   // original Colella-Woodward/Colella-Sekora limiters for coord=cartesian.
   DvceArray2D<Real> ppm_c1i, ppm_c2i, ppm_c3i, ppm_c4i;
   DvceArray2D<Real> ppm_hpi, ppm_hmi;
+  // Precomputed non-uniform PLM limiter factors, one array per direction, indexed
+  // (m, component, cell) with the component taken from the PlmCoefIdx enum below.
+  //
+  // WHY these exist: the generalized Mignone (2014) eq. 33/37 limiter needs SEVEN
+  // position-dependent ratios, and computing them from raw centroid/face positions inside
+  // the kernel costs 7 divisions per cell PER VARIABLE PER DIRECTION, versus 1 for
+  // upstream's uniform-spacing PLM. Measured, that made every run -- Cartesian
+  // included -- 23.5% slower (see DEVELOPMENT.md "Performance and GPU status").
+  // Every one of those divisors depends only on POSITION, so they are hoisted and
+  // computed once at
+  // construction, exactly as Task B7 already does for the PPM coefficients. The kernel is
+  // then back to 1 division, for curvilinear and Cartesian alike -- no Cartesian
+  // fast path and no per-cell coordinate branch is needed or wanted.
+  //
+  // Stored as one rank-3 array per direction rather than seven rank-2 arrays so that the
+  // kernel closure grows by 3 Kokkos::View handles instead of 21 (GeomData is captured by
+  // value into every reconstruction launch; see the note on capture size in
+  // DEVELOPMENT.md). LayoutRight keeps the fastest index -- the cell index -- contiguous,
+  // so each component read is still unit-stride across a warp.
+  //
+  // For coord=cartesian every entry is exactly (1,1,2,2,2,0.5,0.5), which makes the
+  // limiter reduce ALGEBRAICALLY EXACTLY to upstream's dqm = dq2/(dql+dqr) with +/-1/2
+  // face offsets -- verified by hand, and these constants are exactly representable, so
+  // Cartesian arithmetic is if anything closer to upstream's than the previous
+  // position-based form was.
+  DvceArray3D<Real> plm_c1, plm_c2, plm_c3;
+  // True when a direction's spacing is uniform, i.e. every plm_c* entry is exactly the
+  // uniform-Cartesian tuple. Set by BuildPlmFactors(), which also SNAPS the stored
+  // factors to the exact constants in that case (they are otherwise computed from two
+  // different subtractions and can land an ulp off 1.0 on a perfectly uniform grid, so
+  // an equality test alone would spuriously report "non-uniform").
+  //
+  // This lets the limiter take upstream's original, much cheaper expression where it is
+  // exactly equivalent. Note this is deliberately a question about SPACING, not about
+  // CoordinateGeneral: the kernel never branches on coordinate system (the confinement
+  // principle still holds), and the flags are per-direction, so cylindrical/spherical
+  // also take the fast path in their genuinely flat phi/z directions -- a
+  // "cartesian-only" fast path would have helped Cartesian alone.
+  //
+  // The branch is grid-uniform, hence perfectly predicted on CPU and warp-coherent on
+  // GPU -- the same argument recon.hpp already relies on for its runtime method dispatch.
+  bool plm_uniform1, plm_uniform2, plm_uniform3;
+  // Same idea for the x1 PPM coefficients: true when they are exactly the flat
+  // (-1/12,7/12,7/12,-1/12) weights with hp=hm=2, letting recon.hpp call upstream's
+  // PPM4/PPMX directly. (x2/x3 always use upstream's PPM unconditionally -- the
+  // curvilinear PPM generalization is x1-only -- so they need no flag.)
+  bool ppm_uniform1;
 
   KOKKOS_INLINE_FUNCTION
   Real Area1(int m, int k, int j, int i) const { return a1i(m,i)*a1j(m,j)*a1k(m,k); }

@@ -264,6 +264,47 @@ CPU suite. Do this often — a small, frequent merge is far cheaper than a large
 rare one, and `rerere` only helps if conflicts recur. **Do not push to
 `upstream`.**
 
+### Merge log
+
+**2026-08-16, `upstream/main` @ `24dd5275`** (3 commits: RKL2 super-time-stepping
+#779, pgen neighbor-read guards #778, MHD ghost refresh #777). Two conflicts,
+both "keep both sides" in an include block or a member list
+(`mesh/mesh.hpp`: our `coord_general.hpp` vs upstream's `diffusion/sts_types.hpp`;
+`mesh/meshblock_pack.hpp`: our `mesh_geometry.hpp`/`AddGeometry()` vs upstream's
+`parabolic_process.hpp`/`RegisterParabolicProcess()`).
+
+Upstream touched **neither `src/reconstruct/` nor `src/coordinates/`**, so the
+extraction described above did its job — `plm.hpp`/`ppm.hpp` stayed at zero diff
+and every curvilinear file merged untouched. `mhd_newdt.cpp` is worth noting as
+the good case: upstream split `NewTimeStep()` into a new
+`RecomputeTimeStepFromCurrentState()`, and because our change was confined to the
+function *body*, the `CenterWidth2/3` substitutions moved along with it
+automatically.
+
+**The important finding was not the merge but what it brought in.** Upstream's
+RKL2 adds `src/hydro/hydro_sts.cpp` and `src/mhd/mhd_sts.cpp`, which contain a
+SECOND copy of the kernels this project made curvilinear-aware:
+`Hydro::STSUpdate()` and `MHD::STSUpdateU()` each have a flux-divergence loop
+dividing by `mbsize.d_view(m).dx1/dx2/dx3`, and `MHD::STSUpdateB()` is a complete
+three-kernel CT curl, also flat-`dx`. These are byte-for-byte the pre-curvilinear
+forms that `hydro_update.cpp`/`mhd_update.cpp`/`mhd_ct.cpp` replaced.
+
+This also exposed a **pre-existing gap of our own**: nothing guarded diffusion +
+curvilinear, and all four diffusion modules compute gradients with flat cell
+widths (`viscosity.cpp` 24 `dx` uses, `resistivity.cpp` 30, `conduction.cpp` 30,
+`ambipolar.cpp` 7). Viscosity in cylindrical coordinates was already silently
+wrong before this merge.
+
+Resolved by **guarding, not porting** (`hydro.cpp`, `mhd.cpp`, next to the
+existing WENOZ/TENO + curvilinear guards). Porting the area/volume weighting into
+the STS kernels is mechanical, but it would be actively misleading: STS exists
+only to accelerate diffusion, and the fluxes it advances are themselves flat-`dx`.
+A curvilinear-correct update applied to curvilinear-incorrect fluxes is still
+wrong, while looking supported. Because STS is reachable only *through* a
+diffusion process, the one guard covers the RKL2 path too. Verified both ways:
+curvilinear + `nu_iso` fatals with a clear message, Cartesian + `nu_iso` still
+runs.
+
 ## History
 
 v1 was approved and implementation of Task A1 began. Verification against
@@ -465,7 +506,26 @@ Legend: `[ ]` not started, `[~]` in progress, `[x]` done (with commit ref),
 ### Deferred (not implemented in this project)
 SMR/AMR for curvilinear (volume/area-weighted restriction/prolongation).
 WENOZ/TENO curvilinear generalization. Full-3D polar-axis handling beyond the
-required layouts. Non-separable coordinate mappings.
+required layouts. Non-separable coordinate mappings. SR+MHD geometric source
+terms.
+
+**Diffusion + curvilinear** (added 2026-08-16, see the merge log above). Every
+gradient/flux in `src/diffusion/` uses flat cell widths, so viscosity,
+conduction, resistivity and ambipolar diffusion are all rejected under
+`coord != cartesian` by a guard in `hydro.cpp`/`mhd.cpp`. Lifting that guard is a
+two-part job and both parts are required — doing either alone still gives wrong
+answers:
+1. Make `src/diffusion/` curvilinear-aware (gradients, EMFs, and the parabolic
+   timestep limiters, which use `SQR(dx)` and would need `CenterWidth2/3`).
+2. Port the area/volume weighting into upstream's RKL2 STS kernels
+   (`hydro_sts.cpp` `STSUpdate`, `mhd_sts.cpp` `STSUpdateU`/`STSUpdateB`) — the
+   existing `hydro_update.cpp` and `mhd_ct.cpp` treatment transfers directly.
+   Note also that the STS path never calls `*SrcTerms()`, so
+   `AddCoordGeomSrcTermsHydro/MHD` would not be applied during STS sub-stages;
+   that needs handling too.
+
+**GPU verification** is not on this list because it is not a feature decision —
+it is undone work. See "Performance and GPU status".
 
 ## Per-task implementation log
 

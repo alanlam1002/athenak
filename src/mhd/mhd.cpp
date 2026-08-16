@@ -172,6 +172,22 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     pcond = nullptr;
   }
 
+  // Diffusion is not curvilinear-aware -- see the identical guard in hydro.cpp for the
+  // full reasoning. Briefly: every gradient/flux in src/diffusion uses flat cell widths,
+  // so curvilinear results would be silently wrong rather than obviously broken, and
+  // upstream's RKL2 STS kernels (mhd_sts.cpp) carry their own flat-dx copies of the flux
+  // divergence and the CT curl. Resistivity and ambipolar diffusion are MHD-only, hence
+  // the wider condition here than in hydro.cpp.
+  if ((pvisc != nullptr || pcond != nullptr || presist != nullptr) &&
+      pmy_pack->pmesh->coord_general != CoordinateGeneral::cartesian) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+      << std::endl << "Diffusion (viscosity/conduction/resistivity/ambipolar) is not "
+      << "supported for coord != cartesian: the diffusion fluxes and EMFs are computed "
+      << "with flat cell widths and would be silently wrong in curvilinear coordinates"
+      << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
   has_any_sts_cell_update = (has_sts_viscosity || has_sts_conduction ||
                              (has_sts_resistivity && peos->eos_data.is_ideal));
   has_any_sts_field_update = has_sts_resistivity;

@@ -122,6 +122,28 @@ Hydro::Hydro(MeshBlockPack *ppack, ParameterInput *pin) :
     pcond = nullptr;
   }
 
+  // Diffusion is not curvilinear-aware: every gradient/flux in src/diffusion
+  // (viscosity.cpp, conduction.cpp, resistivity.cpp, ambipolar.cpp) is built from flat
+  // cell widths (size.d_view(m).dx1/dx2/dx3), not from the metric-weighted GeomData
+  // areas/volumes/edge lengths, so the result would be plausible-looking but WRONG in
+  // cylindrical/spherical rather than obviously broken. Reject the combination instead,
+  // as is done for the other unsupported combinations (WENOZ/TENO below, SMR/AMR and
+  // GR in mesh.cpp/coordinates.cpp).
+  //
+  // This also covers upstream's RKL2 super-time-stepping: STS is only ever reached
+  // through a diffusion process, and its update kernels (hydro_sts.cpp, mhd_sts.cpp)
+  // carry their own flat-dx copies of the flux divergence and CT curl. Lifting this
+  // guard therefore means making src/diffusion curvilinear-aware AND porting those
+  // kernels -- see DEVELOPMENT.md's deferred list.
+  if ((pvisc != nullptr || pcond != nullptr) &&
+      pmy_pack->pmesh->coord_general != CoordinateGeneral::cartesian) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+      << std::endl << "Diffusion (viscosity/conduction) is not supported for "
+      << "coord != cartesian: the diffusion fluxes are computed with flat cell widths "
+      << "and would be silently wrong in curvilinear coordinates" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
   // Source terms (if needed)
   if (pin->DoesBlockExist("hydro_srcterms")) {
     psrc = new SourceTerms("hydro_srcterms", ppack, pin);

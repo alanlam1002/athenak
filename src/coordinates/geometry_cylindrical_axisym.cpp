@@ -69,23 +69,35 @@ DvceArray2D<Real> BuildFactor(const std::string &label, int nmb, int n, F value)
 } // namespace
 
 void BuildCylindricalAxisymGeometry(ParameterInput *pin, MeshBlockPack *ppack,
-                                     GeomData &geom) {
-  auto &indcs = ppack->pmesh->mb_indcs;
+                                    const GeomIndcs &gi, GeomData &geom) {
   int nmb = ppack->nmb_thispack;
-  int ng = indcs.ng;
-  int ncells1 = indcs.nx1 + 2*ng;
-  int ncells2 = NCells(indcs.nx2, ng);
-  int ncells3 = NCells(indcs.nx3, ng);  // always 1 (nx3=1 enforced for this system)
-  int is = indcs.is;
+  int ng = gi.ng;
+  int ncells1 = gi.nx1 + 2*ng;
+  int ncells2 = NCells(gi.nx2, ng);
+  int ncells3 = NCells(gi.nx3, ng);  // always 1 (nx3=1 enforced for this system)
+  int is = gi.is;
 
   auto &size = ppack->pmb->mb_size;
+
+  // Cell widths derived from the index space, NOT from RegionSize::dx1/dx2/dx3 --
+  // those are always the FINE widths and would be wrong by a factor of two when this
+  // factory is building the coarse arrays. Matches meshblock.cpp's own definition.
+  auto dxw1 = [&](int m) {
+    return (size.h_view(m).x1max - size.h_view(m).x1min)/static_cast<Real>(gi.nx1);
+  };
+  auto dxw2 = [&](int m) {
+    return (size.h_view(m).x2max - size.h_view(m).x2min)/static_cast<Real>(gi.nx2);
+  };
+  auto dxw3 = [&](int m) {
+    return (size.h_view(m).x3max - size.h_view(m).x3min)/static_cast<Real>(gi.nx3);
+  };
 
   // raw (possibly-negative-in-ghost-zone) radial face position -- see the identical
   // note in geometry_cylindrical.cpp: only ever read at active indices except for x1v.
   auto rf = [&](int m, int i) {
-    return LeftEdgeX(i - is, indcs.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    return LeftEdgeX(i - is, gi.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
   };
-  auto dz_of = [&](int m, int) { return size.h_view(m).dx2; };  // x2 = z here
+  auto dz_of = [&](int m, int) { return dxw2(m); };  // x2 = z here
   auto one_of = [&](int, int) { return static_cast<Real>(1.0); };
 
   auto Rf_of = [&](int m, int i) { return rf(m, i); };
@@ -100,24 +112,24 @@ void BuildCylindricalAxisymGeometry(ParameterInput *pin, MeshBlockPack *ppack,
     return (2.0/3.0)*(rp2*rp - rm2*rm)/(rp2 - rm2);
   };
   auto x2v_of = [&](int m, int j) {
-    int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;
-    int j0 = (indcs.nx2 > 1) ? (j - indcs.js) : 0;
+    int n2 = (gi.nx2 > 1) ? gi.nx2 : 1;
+    int j0 = (gi.nx2 > 1) ? (j - gi.js) : 0;
     return CellCenterX(j0, n2, size.h_view(m).x2min, size.h_view(m).x2max);
   };
   auto x3v_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    int k0 = (indcs.nx3 > 1) ? (k - indcs.ks) : 0;
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    int k0 = (gi.nx3 > 1) ? (k - gi.ks) : 0;
     return CellCenterX(k0, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
   // face positions (Task B6); xf1 = Rf_of (R-direction face, above). xf3 is never read
   // by PLM (three_d is always false, nx3=1 enforced) but filled for consistency.
   auto xf2_of = [&](int m, int j) {
-    int n2 = (indcs.nx2 > 1) ? indcs.nx2 : 1;
-    return LeftEdgeX(j - indcs.js, n2, size.h_view(m).x2min, size.h_view(m).x2max);
+    int n2 = (gi.nx2 > 1) ? gi.nx2 : 1;
+    return LeftEdgeX(j - gi.js, n2, size.h_view(m).x2min, size.h_view(m).x2max);
   };
   auto xf3_of = [&](int m, int k) {
-    int n3 = (indcs.nx3 > 1) ? indcs.nx3 : 1;
-    return LeftEdgeX(k - indcs.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
+    int n3 = (gi.nx3 > 1) ? gi.nx3 : 1;
+    return LeftEdgeX(k - gi.ks, n3, size.h_view(m).x3min, size.h_view(m).x3max);
   };
   auto src1_of = [&](int m, int i) { return dR_of(m, i) / Rmom_of(m, i); };
   auto src2_of = [&](int m, int i) {
@@ -180,7 +192,7 @@ void BuildCylindricalAxisymGeometry(ParameterInput *pin, MeshBlockPack *ppack,
   // power law regardless of whether phi is resolved or virtual. See that file for the
   // full derivation/rationale (io = signed local radius in units of dR, not an index
   // offset from is; ghost-zone reflecting-wall fixup handled separately).
-  auto ppm_io_of = [&](int m, int i) { return rf(m, i) / size.h_view(m).dx1; };
+  auto ppm_io_of = [&](int m, int i) { return rf(m, i) / dxw1(m); };
   auto ppm_c1_of = [&](int m, int i) {
     Real io = ppm_io_of(m, i);
     Real io2 = io*io, io3 = io2*io;

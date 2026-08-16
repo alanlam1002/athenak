@@ -30,6 +30,7 @@ add_executable(
         coordinates/adm.cpp
         coordinates/coordinates.cpp
         coordinates/excision.cpp
+        coordinates/coord_general.cpp
         coordinates/mesh_geometry.cpp
         coordinates/geometry_cartesian.cpp
         coordinates/geometry_cylindrical.cpp

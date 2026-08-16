@@ -17,6 +17,7 @@
 #include "coordinates/mesh_geometry.hpp"
 #include "plm.hpp"    // PLM()
 #include "ppm.hpp"    // PPM4(), PPMX()
+#include "recon_geom.hpp"  // PLMGeom(), PPM4Geom(), PPMXGeom()
 #include "wenoz.hpp"  // WENOZ()
 #include "teno.hpp"  // TENO()
 
@@ -71,21 +72,23 @@ void ReconCellT(const EOS_Data &eos, const GeomData &geom, const bool apply_floo
       x_im1 = geom.x3v(m,k-1); x_i = geom.x3v(m,k); x_ip1 = geom.x3v(m,k+1);
       xf_i  = geom.xf3(m,k);   xf_ip1 = geom.xf3(m,k+1);
     }
-    PLM(q(m, n, k - dk, j - dj, i - di),
-        q(m, n, k,      j,      i),
-        q(m, n, k + dk, j + dj, i + di),
-        x_im1, x_i, x_ip1, xf_i, xf_ip1,
-        ql_val, qr_val);
+    PLMGeom(q(m, n, k - dk, j - dj, i - di),
+            q(m, n, k,      j,      i),
+            q(m, n, k + dk, j + dj, i + di),
+            x_im1, x_i, x_ip1, xf_i, xf_ip1,
+            ql_val, qr_val);
   } else if constexpr (recon == ReconstructionMethod::ppm4) {
     // x1 uses the position-dependent curvilinear coefficients (Task B7); x2/x3 keep the
     // old flat/uniform overload (curvilinear PPM generalization is scoped to x1 only --
     // see mesh_geometry.hpp doc comment on the ppm_c*i/ppm_h*i fields).
     if constexpr (ivx == IVX) {
-      PPM4(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
-           q(m, n, k, j, i+1), q(m, n, k, j, i+2),
-           geom.ppm_c1i(m,i),   geom.ppm_c2i(m,i),   geom.ppm_c3i(m,i),   geom.ppm_c4i(m,i),
-           geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1), geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
-           geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      PPM4Geom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+               q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+               geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
+               geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
+               geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
+               geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+               geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
     } else {
       PPM4(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
            q(m, n, k -   dk, j -   dj, i -   di),
@@ -96,11 +99,13 @@ void ReconCellT(const EOS_Data &eos, const GeomData &geom, const bool apply_floo
     }
   } else if constexpr (recon == ReconstructionMethod::ppmx) {
     if constexpr (ivx == IVX) {
-      PPMX(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
-           q(m, n, k, j, i+1), q(m, n, k, j, i+2),
-           geom.ppm_c1i(m,i),   geom.ppm_c2i(m,i),   geom.ppm_c3i(m,i),   geom.ppm_c4i(m,i),
-           geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1), geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
-           geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
+      PPMXGeom(q(m, n, k, j, i-2), q(m, n, k, j, i-1), q(m, n, k, j, i),
+               q(m, n, k, j, i+1), q(m, n, k, j, i+2),
+               geom.ppm_c1i(m,i), geom.ppm_c2i(m,i),
+               geom.ppm_c3i(m,i), geom.ppm_c4i(m,i),
+               geom.ppm_c1i(m,i+1), geom.ppm_c2i(m,i+1),
+               geom.ppm_c3i(m,i+1), geom.ppm_c4i(m,i+1),
+               geom.ppm_hpi(m,i), geom.ppm_hmi(m,i), ql_val, qr_val);
     } else {
       PPMX(q(m, n, k - 2*dk, j - 2*dj, i - 2*di),
            q(m, n, k -   dk, j -   dj, i -   di),

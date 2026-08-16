@@ -10,16 +10,26 @@ numbers drift as earlier phases land.
 Plan file (frozen record of what was approved, **v2**):
 `/u/tlam/.claude/plans/go-to-athenak-curvilinear-right-sparkling-pizza.md`
 
-## Current state (as of 2026-08-14)
+## Current state (as of 2026-08-16)
 
 **Done and verified**: the ENTIRE v2 plan, Phase 0 through Phase G
 (T0, A1-A5, B1-B7, C1-C2, D1-D3, E1-E2, F1-F3, G1). All architecture,
 reconstruction, geometric source terms, constrained transport, origin
 boundary handling, end-to-end problem generators, and the SR extension are
 implemented and tested. **254/254 tests passing, 0 failures, 15 skipped**
-(GPU/MPI-only, correctly excluded on this no-CUDA node) — full suite
-re-run solo on a dedicated compute node (see "Testing on a shared cluster"
-below) after G1 landed and its regression was fixed.
+— full suite re-run solo on a dedicated compute node (see "Testing on a
+shared cluster" below) after G1 landed and its regression was fixed.
+
+NOTE on those 15 skips: an earlier version of this file described them as
+"GPU/MPI-only, correctly excluded on this no-CUDA node". That was wrong, and
+it mattered, so it is corrected here rather than silently edited. `pytest -k
+_cpu` DESELECTS the 18 `_gpu` test files; deselected and skipped are different
+pytest categories and the deselected count was never reported at all. The 15
+actual skips are in-test `pytest.skip()` calls (e.g.
+`gr/test_gr_shocktube_cpu.py:78` "Can't compare reference against reference",
+`multigrid/test_mg_binary_gravity_cpu.py:99` "Prerequisite tests did not run").
+So the 15 is NOT a measure of GPU coverage, and nothing in the suite has ever
+exercised a GPU — see "Performance and GPU status" below.
 
 Bugs found and fixed along the way (see each task's log for full detail):
 `history.cpp`'s volume diagnostic and `derived_variables.cpp`'s `mhd_divb`
@@ -36,14 +46,14 @@ session-wide full-suite re-run, not the coordinates suite alone).
 below (SMR/AMR for curvilinear, WENOZ/TENO curvilinear reconstruction, full
 3D polar-axis handling, non-separable coordinate mappings) was explicitly
 out of scope from the start and remains so unless the user asks to revisit
-it. No commits have been made — see "Working tree state" below.
+it. A follow-on effort covering performance, GPU-readiness and upstream
+separation is tracked in "Performance and GPU status" below.
 
-**Working tree state**: nothing has been committed. All work is uncommitted
-changes in `/u/tlam/athenak_curvilinear` (a real git repo, branch
-`curvilinear_coordinate` — confirmed during the Task A3 incident, see
-"Incidents" below). Before committing anything, audit this whole file per
-the note at the top, and get explicit user sign-off per the global git
-commit instruction.
+**Working tree state**: the v2 plan landed on branch `curvilinear_coordinate`
+in three commits — `5d5f81d4` (core architecture, geometry, physics kernels),
+`202c67f8` (test suite), `0fa5ac13` (these development notes). Before
+committing anything further, audit this whole file per the note at the top,
+and get explicit user sign-off per the global git commit instruction.
 
 **How to resume verification**: `cd tst && python3 run_test_suite.py --cpu
 "-DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release
@@ -54,6 +64,205 @@ p.sakura -N 1 -n 1 -c 40 --time=<T> bash -c '...'` for a DEDICATED node,
 not directly on the login node (see "Testing on a shared cluster" below;
 the login node's load can exceed 30 from unrelated users, which looks
 exactly like a hang).
+
+## Performance and GPU status (as of 2026-08-16)
+
+### Measured CPU throughput
+
+Run with `tst/perf_benchmark_compare.sh <ref_commit>` on a dedicated node
+(`OMP_NUM_THREADS=8`, 3 reps, mean). The script measures two DIFFERENT things
+and it is important not to conflate them:
+
+**Axis A — regression.** Did adding curvilinear support slow down the
+*Cartesian* path? Same `coord=cartesian` orszag_tang input on a pristine build
+of the pre-feature base `190d482e` vs. the current tree. Run-to-run scatter on
+this machine is roughly +/-1 point, so two independent runs are quoted for the
+final state:
+
+| state | plm | ppm4 |
+|-------|-----|------|
+| as originally committed (`0fa5ac13`) | **23.46%** slower | 4.90% slower |
+| + PLM factors precomputed            | 18.45%            | 4.25%        |
+| + update-kernel invariant hoist      | 18.30%            | 3.88%        |
+| + uniform-spacing PLM path           | 5.81%             | 3.91%        |
+| + uniform-spacing PPM path (current) | **6.9% / 7.1%**   | **1.5% / 1.1%** |
+
+**Axis B — coordinate cost.** How much slower is curvilinear than Cartesian?
+Four inputs (`tst/inputs/perf_coord_*.athinput`, `ct_divb_test`, 400x400) that
+are byte-identical apart from the `coord =` line, all on the current build:
+
+| recon | cartesian | cylindrical | cylindrical_axisym | spherical_polar |
+|-------|-----------|-------------|--------------------|-----------------|
+| plm   | baseline  | 9.7%        | 9.8%               | 16.5%           |
+| ppm4  | baseline  | 4.2%        | 4.4%               | 5.2%            |
+
+### How to read these numbers
+
+Axis B was 2-3% before the optimization work and is 4-16% after. **That is not
+a regression.** Both sides of the comparison used to be equally slow, which
+flattered the ratio; Cartesian is now ~18% faster in absolute terms
+(3.37e6 -> 4.08e6 zc/cpu_s with plm) and the genuine cost of curvilinear
+geometry is finally visible. Axis A is the number that measures whether
+anything got worse, and it improved by a factor of ~3.5.
+
+The original 23.5% was almost entirely the generalized PLM limiter (Task B6):
+`PLMGeom()` did 7 divisions per cell per variable per direction where upstream
+`PLM()` does 1, in all three directions. ppm4's much smaller 4.9% was
+consistent — B7 traded 2 divisions for 10 cache-resident coefficient loads and
+roughly broke even. Three changes fixed it, in decreasing order of effect:
+
+1. **Uniform-spacing fast path** (the big one). Both limiters now take
+   upstream's original expression whenever a direction's coefficients are the
+   flat ones. Deliberately keyed on a per-direction *spacing* flag
+   (`GeomData::plm_uniform1/2/3`, `ppm_uniform1`) rather than on
+   `CoordinateGeneral`: the kernels still never branch on coordinate system, and
+   cylindrical/axisym get the fast path in their genuinely flat phi/z
+   directions too, which a "cartesian-only" path would not have given them. The
+   coefficients are snapped to the exact flat constants at construction, so the
+   fast path is **bitwise identical** to a pre-curvilinear build, not merely
+   equivalent. The branch is constant across a launch, hence predicted on CPU
+   and warp-coherent on GPU.
+2. **Precomputing the PLM factors** into `GeomData::plm_c1/c2/c3` (23.5 -> 18.5).
+   Every divisor in the limiter depends only on position, exactly as for B7's
+   PPM coefficients. This is what makes the *curvilinear* path fast; the fast
+   path in (1) never runs there.
+3. **Hoisting loop-invariant geometry** out of the update kernels' inner loop.
+   Measured as a wash (18.45 -> 18.30, within noise) — those factor arrays are
+   small enough to stay in L1, so the reload was nearly free. Kept because it
+   is strictly less work per cell and matters more on a GPU, where the
+   arithmetic is cheaper relative to memory. **Recorded here as a negative
+   result so nobody re-derives it.**
+
+The residual ~7% (plm) / ~1% (ppm4) is the area/volume-weighted flux divergence,
+the Stokes-form CT curl and the geometry-based CFL widths, none of which have a
+uniform fast path. Adding one would mean templating those kernels, which grows
+the upstream merge surface in exactly the files upstream edits most — not worth
+it for ~7% until there is a GPU measurement to justify it.
+
+### GPU status: NEVER COMPILED FOR A DEVICE
+
+This is the single biggest gap. To be explicit, because earlier versions of
+this file implied otherwise: **no part of this project has ever been through
+nvcc (or any device compiler).** Sakura has no GPU — `sinfo` reports
+`GRES=(null)` on all 237 nodes — and no `cuda` module exists (`find-module
+cuda` → "No module matching 'cuda' found"). There are also **no curvilinear
+`_gpu` tests**: all 16 modules under `tst/test_suite/coordinates/` are
+`_cpu`-named, so `run_test_suite.py --gpu` would today build with CUDA and run
+zero curvilinear cells.
+
+What a device-portability audit found in the committed code:
+
+*Structurally sound.* All `GeomData` arrays are `DvceArray2D<Real>` (device
+`Kokkos::View`) filled via `create_mirror_view` + `deep_copy`; nothing captures
+`this` or a host pointer (`pmy_pack` is isolated in `MeshGeometry`, deliberately
+kept out of `GeomData`); all nine accessors are `KOKKOS_INLINE_FUNCTION`; the
+`(m, idx)` LayoutRight indexing is `i`-fastest and therefore coalesced, with
+`a1j(m,j)`/`a1k(m,k)` uniform across a warp; and coordinate dispatch is fully
+compile-time (`geometric_srcterms.cpp` switches host-side into distinct template
+instantiations, and `cartesian` launches no source-term kernel at all).
+
+*Two real defects were found.* Both are described below with their status.
+
+1. **Host-side calls to device accessors — FIXED.**
+   `pgen/unit_tests/geometry_curvilinear_test.cpp` called `geom.Area1(...)` /
+   `CenterWidth2/3(...)` from plain host `for` loops in nine places. Those
+   accessors are `KOKKOS_INLINE_FUNCTION`, i.e. `__host__ __device__`, so the
+   calls compile cleanly and then dereference a device pointer at runtime.
+   Invisible on a CPU-only build, fatal on CUDA.
+   Fixed structurally rather than site-by-site: `GeomDataHost` +
+   `MirrorGeomData()` (mesh_geometry.hpp) provide a host mirror with the same
+   nine accessors, deliberately NOT annotated, so a device-side call to them is
+   a compile error. **Any future host-side geometry code should use that**, and
+   the nine call sites now do.
+2. **Oversized kernel capture — NOT FIXED, still open.** `GeomData` is ~46
+   `View` handles (~1.8 kB) and is captured whole into every geometry-touching
+   kernel. Kokkos' `ConstantMemoryUseThreshold` is 512 B
+   (`kokkos/core/src/Cuda/Kokkos_Cuda_Instance.hpp`), so all of these kernels
+   are pushed off the fast kernel-argument launch path onto the `__constant__`
+   path, which costs an extra `cudaMemcpyToSymbolAsync` plus a serializing
+   semaphore per launch. Nothing breaks (the limit that would break is
+   `KernelArgumentLimit`, 4096), but it is per-launch overhead a Cartesian-only
+   build did not pay. The intended fix is to split `GeomData` into per-consumer
+   sub-structs (flux / edge / recon / cfl / srcterm) so each kernel captures
+   only what it uses — `hydro_update` needs 12 of the handles, `mhd_ct` 15.
+   Deliberately deferred: it is pure launch-overhead tuning, it cannot be
+   measured on this machine, and the rank-3 `plm_c1/c2/c3` layout chosen in the
+   performance work above already avoided the worst of it (3 handles instead of
+   the 21 that seven rank-2 arrays per direction would have cost).
+
+### Curvilinear GPU tests now exist
+
+`tst/test_suite/coordinates/` gained `test_geom_curvilinear_construction_gpu.py`,
+`test_ct_divb_gpu.py` and `test_recon_exact_gpu.py` (14 tests). They cover the
+three distinct groups of `GeomData` arrays — position tables, area/volume/length
+tables, and reconstruction coefficient tables (including the rank-3 `plm_c*`,
+whose shape is unlike anything else in `GeomData`). Before these, every
+coordinates test was `_cpu`-named and `--gpu` would have exercised zero
+curvilinear cells.
+
+**These have never been executed** — there is no GPU here. They are collected
+correctly (`pytest --collect-only -k _gpu` finds 14) and their inputs and
+resolution overrides are valid, but the first real run of them will be the first
+run of this code on a device. Expect to fix things.
+
+### Device build recipe (for whoever has GPU access)
+
+```bash
+cd tst && python3 run_test_suite.py --gpu "-DKokkos_ARCH_<GPUARCH>=On"
+```
+`--gpu` already forces `-DKokkos_ENABLE_CUDA=On` (`run_test_suite.py`), so a
+non-NVIDIA target (e.g. Aurora's Intel PVC, which needs the Kokkos SYCL backend)
+needs that hardcoding relaxed first. Note also `CMakeLists.txt` sets
+`Kokkos_ENABLE_CUDA_LAMBDA` automatically when CUDA is on.
+
+One hazard to watch for specifically: at `x1min=0` the spherical factory sets
+`a1i(is)` to exactly `0`, and `mhd_ct.cpp` divides by `Area1`. Correctness relies
+on the numerator vanishing there too. If it ever does not, the result is a
+silent NaN rather than a trap — so a `div(B)` check that comes back NaN (rather
+than merely large) points at that division, not at the CT stencil.
+
+## Upstream separation and merge surface
+
+This branch is meant to stay easy to merge with `upstream/main`
+(`https://github.com/IAS-Astrophysics/athenak.git`, added as remote `upstream`;
+`git config rerere.enabled true` is set so repeated conflict resolutions are
+replayed automatically). The guiding rule: **new logic goes in new files;
+upstream-owned files carry the smallest possible diff.**
+
+Two extractions were done on 2026-08-16 specifically to shrink the surface:
+
+- `src/reconstruct/recon_geom.hpp` (new) now holds `PLMGeom`/`PPM4Geom`/
+  `PPMXGeom`. These were previously extra overloads bolted into upstream's
+  `plm.hpp` (+65 lines) and `ppm.hpp` (+161 lines). **Both files are now at
+  ZERO diff against upstream.** Distinct names (not overloads) are used so
+  resolution never depends on which headers are in scope.
+- `src/coordinates/coord_general.{hpp,cpp}` (new) now holds the
+  `CoordinateGeneral` enum, `ParseCoordGeneral()` and the definition of
+  `Mesh::ValidateCoordGeneral()`. `mesh.cpp` went **99 -> 6 lines** and
+  `mesh.hpp` **32 -> 3**.
+
+Net effect: 27 modified upstream files / 641 added lines -> **25 files / 311
+added lines**.
+
+### Touchpoint inventory (current)
+
+Regenerate with:
+`git diff --stat --diff-filter=M $(git merge-base HEAD upstream/main) -- src/`
+(note `--diff-filter` must come BEFORE `--`, or it is silently parsed as a
+pathspec and every file is listed).
+
+| Category | Files | Lines | Conflict risk |
+|---|---|---|---|
+| Hot-loop physics | `recon.hpp` (87), `mhd_ct.cpp` (38), `hydro_update.cpp` (29), `mhd_update.cpp` (24), `{hydro,mhd}_fluxes.cpp` (20), `{hydro,mhd}_newdt.cpp` (18), `dyn_grmhd_fluxes.cpp` (14) | 230 | **Medium-high** — the same loops upstream actively develops. Irreducible: the area/volume-weighted divergence, the Stokes-form CT curl and the geometry-aware reconstruction dispatch have to live inside these kernels. |
+| Registration / plumbing | `CMakeLists.txt` (19), `pgen.cpp` (24), `pgen.hpp` (12), `meshblock_pack.{cpp,hpp}` (17), `coordinates.cpp` (13), `{hydro,mhd}.cpp` (22), `{hydro,mhd}_tasks.cpp` (8), `build_tree.cpp` (8), `mesh_refinement.cpp` (8), `mesh.{cpp,hpp}` (9) | 140 | **Low** — mostly additive lines (a new member, a factory call, a guard, a list entry). Conflicts here are mechanical. |
+| Independent bug fixes | `history.cpp` (8), `derived_variables.cpp` (15) | 23 | **None, and these should leave.** Both fix pre-existing upstream bugs (flat `dx` weighting in the history mass/energy output and in the `mhd_divb` derived variable) that are wrong on Cartesian too. They are separately PR-able and should be upstreamed on their own so they stop being part of this branch's merge surface. |
+
+### Merge procedure
+
+`git fetch upstream && git merge upstream/main`, then rebuild and run the full
+CPU suite. Do this often — a small, frequent merge is far cheaper than a large,
+rare one, and `rerere` only helps if conflicts recur. **Do not push to
+`upstream`.**
 
 ## History
 
@@ -472,6 +681,24 @@ Files: `tst/inputs/perf_cartesian_benchmark.athinput`,
   reconstruction+Riemann-solve+divergence pipeline, consistent with the
   factor arrays being tiny and cache-resident (Architecture Decisions,
   "Geometry storage" section).
+- **!! THIS 0.55% RESULT IS STALE AND WAS ALSO PROBABLY NEVER VALID. DO NOT
+  CITE IT. !!** Two independent problems, both found on 2026-08-16:
+  1. *Stale*: it was measured on 2026-08-04, i.e. after A2-A4 only. B5 (CFL),
+     B6 (PLM), B7 (PPM), C1/C2 (source terms), D1 (CT) and G1 all landed
+     afterwards and were never re-measured. B6 in particular is where nearly
+     all of the real cost is. The remeasured figure for the same Cartesian
+     benchmark is **23.46% slower** with plm, not 0.55%.
+  2. *Probably never valid*: the script did all its arithmetic in `bc`, which
+     cannot parse the scientific notation AthenaK prints
+     (`zone-cycles/cpu_second = 4.479700e+06`). `bc` emits a syntax error on
+     stderr and an empty result on stdout, so sums/averages silently collapse
+     to 0. This was rediscovered the hard way when the rewritten matrix
+     version of the script printed `0.0000e+00` in every cell. How the
+     4.4797e6/4.4551e6 pair above was obtained is therefore unclear; it may
+     have been read off individual run output rather than computed. All
+     arithmetic in the script is now awk-based.
+  See "Performance and GPU status" near the top of this file for the current
+  numbers and methodology.
 - Packaged the procedure as `tst/perf_benchmark_compare.sh` (parameterized
   by reference commit, defaults to `HEAD`) rather than a pytest, since
   automating a diff-build-and-compare inside pytest is a materially

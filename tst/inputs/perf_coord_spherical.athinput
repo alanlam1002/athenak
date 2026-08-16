@@ -1,0 +1,77 @@
+# AthenaK input file: coordinate-system throughput benchmark, spherical_polar.
+#
+# One of four files (perf_coord_{cartesian,cylindrical,axisym,spherical}.athinput) that
+# are IDENTICAL except for the single line "coord = ...". Grid extents and boundary
+# conditions are deliberately chosen to be simultaneously legal in all four systems
+# (x1 in [1,2] avoids the r=0 origin; x2 in [0.3,2.8] fits inside spherical_polar's
+# required [0,pi] theta range), so that the ONLY difference between the four runs is the
+# coordinate system itself. That makes the zone-cycles/cpu_second ratio between them a
+# clean measure of "how much slower is curvilinear than Cartesian", which is the question
+# these files exist to answer.
+#
+# Uses pgen_name=ct_divb_test because it is the one problem generator in this project
+# that runs unchanged in all four coordinate systems. Note this pgen does NOT exist at
+# the pre-feature base commit, so these files measure the coordinate-cost axis only --
+# the before/after regression axis uses perf_cartesian_benchmark.athinput (orszag_tang),
+# which does exist on both sides. See tst/perf_benchmark_compare.sh.
+#
+# Fixed cycle count, no <output> block (no I/O), single MeshBlock, so the measurement is
+# pure compute throughput of the reconstruction/Riemann/flux-divergence/CT pipeline.
+# Reconstruction is varied from the command line, e.g.
+#   athena -i perf_coord_cartesian.athinput mesh/nghost=4 mhd/reconstruct=ppm4
+
+<comment>
+problem   = CT div(B) advection (coordinate throughput benchmark, spherical_polar)
+
+<job>
+basename  = PerfCoord
+
+<mesh>
+nghost    = 2
+coord     = spherical_polar
+nx1       = 400
+x1min     = 1.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 400
+x2min     = 0.3
+x2max     = 2.8
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 400
+nx2       = 400
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.4
+nlim       = 50
+tlim       = 1.0e10
+ndiag      = 1000
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.4
+
+<problem>
+pgen_name = ct_divb_test
+amp       = 0.3
+dens      = 1.0
+pgas      = 1.0
+v0        = 0.1

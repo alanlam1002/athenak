@@ -14,6 +14,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/mesh_geometry.hpp"
 #include "bvals.hpp"
 
 //----------------------------------------------------------------------------------------
@@ -43,6 +44,24 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
   auto &rbuf = recvbuf;
   auto &one_d = pmy_pack->pmesh->one_d;
   auto &two_d = pmy_pack->pmesh->two_d;
+
+  // Edge-length-weighted EMF restriction: the coarse edge receives
+  // sum(Len_f*E_f)/sum(Len_f), because what the CT update integrates around a face is
+  // the line integral E*Len, not the pointwise E (see mhd_ct.cpp, which already writes
+  // the interior update in exactly that Stokes form). An unweighted mean therefore
+  // mismatches the coarse and fine sides of a level boundary wherever the two child
+  // edges have unequal length, which breaks both div(B)=0 and flux conservation there.
+  //
+  // Only this (fine) block's geometry is needed: a coarse edge is exactly the union of
+  // its two child edges, so Len_coarse == sum(Len_fine) to roundoff -- asserted directly
+  // by coarse_geometry_test.cpp. Each EMF component is integrated along its OWN
+  // direction, so the component index and the Len index always match: x1e<->Len1 summed
+  // over i, x2e<->Len2 over j, x3e<->Len3 over k.
+  //
+  // Kept as an AVERAGE rather than a sum so the receive side, which accumulates and then
+  // re-averages, stays drop-in.
+  auto &geom = pmy_pack->pgeom->geom_data;
+  const bool uni = geom.cells_uniform;
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(3 field components)
   Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), Kokkos::AUTO);
@@ -106,9 +125,15 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               if (one_d) {
                 rflx = flx.x2e(m,0,0,fi);
               } else if (two_d) {
-                rflx = 0.5*(flx.x2e(m,0,fj,fi) + flx.x2e(m,0,fj+1,fi));
+                rflx = uni ?
+                  0.5*(flx.x2e(m,0,fj,fi) + flx.x2e(m,0,fj+1,fi)) :
+                  WeightedMean(geom.Len2(m,0,fj  ,fi), flx.x2e(m,0,fj  ,fi),
+                               geom.Len2(m,0,fj+1,fi), flx.x2e(m,0,fj+1,fi));
               } else {
-                rflx = 0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi));
+                rflx = uni ?
+                  0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi)) :
+                  WeightedMean(geom.Len2(m,fk,fj  ,fi), flx.x2e(m,fk,fj  ,fi),
+                               geom.Len2(m,fk,fj+1,fi), flx.x2e(m,fk,fj+1,fi));
               }
             }
             // copy directly into recv buffer if MeshBlocks on same rank
@@ -130,7 +155,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               } else if (two_d) {
                 rflx = flx.x3e(m,0,fj,fi);
               } else {
-                rflx = 0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi));
+                rflx = uni ?
+                  0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi)) :
+                  WeightedMean(geom.Len3(m,fk  ,fj,fi), flx.x3e(m,fk  ,fj,fi),
+                               geom.Len3(m,fk+1,fj,fi), flx.x3e(m,fk+1,fj,fi));
               }
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
@@ -160,9 +188,15 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
             // if neighbor is at coarser level, restrict x1e
             } else {
               if (two_d) {
-                rflx = 0.5*(flx.x1e(m,0,fj,fi) + flx.x1e(m,0,fj,fi+1));
+                rflx = uni ?
+                  0.5*(flx.x1e(m,0,fj,fi) + flx.x1e(m,0,fj,fi+1)) :
+                  WeightedMean(geom.Len1(m,0,fj,fi  ), flx.x1e(m,0,fj,fi  ),
+                               geom.Len1(m,0,fj,fi+1), flx.x1e(m,0,fj,fi+1));
               } else {
-                rflx = 0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1));
+                rflx = uni ?
+                  0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1)) :
+                  WeightedMean(geom.Len1(m,fk,fj,fi  ), flx.x1e(m,fk,fj,fi  ),
+                               geom.Len1(m,fk,fj,fi+1), flx.x1e(m,fk,fj,fi+1));
               }
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
@@ -180,7 +214,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               if (two_d) {
                 rflx = flx.x3e(m,0,fj,fi);
               } else {
-                rflx = 0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi));
+                rflx = uni ?
+                  0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi)) :
+                  WeightedMean(geom.Len3(m,fk  ,fj,fi), flx.x3e(m,fk  ,fj,fi),
+                               geom.Len3(m,fk+1,fj,fi), flx.x3e(m,fk+1,fj,fi));
               }
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
@@ -211,7 +248,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               if (two_d) {
                 rflx = flx.x3e(m,0,fj,fi);
               } else {
-                rflx = 0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi));
+                rflx = uni ?
+                  0.5*(flx.x3e(m,fk,fj,fi) + flx.x3e(m,fk+1,fj,fi)) :
+                  WeightedMean(geom.Len3(m,fk  ,fj,fi), flx.x3e(m,fk  ,fj,fi),
+                               geom.Len3(m,fk+1,fj,fi), flx.x3e(m,fk+1,fj,fi));
               }
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
@@ -240,7 +280,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               rflx = flx.x1e(m,k,j,i);
             // if neighbor is at coarser level, restrict x1e
             } else {
-              rflx = 0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1));
+              rflx = uni ?
+                0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1)) :
+                WeightedMean(geom.Len1(m,fk,fj,fi  ), flx.x1e(m,fk,fj,fi  ),
+                             geom.Len1(m,fk,fj,fi+1), flx.x1e(m,fk,fj,fi+1));
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
               rbuf[dn].flux(dm, ndat*v + i-il + ni*(j-jl)) = rflx;
@@ -254,7 +297,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               rflx = flx.x2e(m,k,j,i);
             // if neighbor is at coarser level, restrict x2e
             } else {
-              rflx = 0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi));
+              rflx = uni ?
+                0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi)) :
+                WeightedMean(geom.Len2(m,fk,fj  ,fi), flx.x2e(m,fk,fj  ,fi),
+                             geom.Len2(m,fk,fj+1,fi), flx.x2e(m,fk,fj+1,fi));
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
               rbuf[dn].flux(dm, ndat*v + i-il + ni*(j-jl)) = rflx;
@@ -280,7 +326,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               rflx = flx.x2e(m,k,j,i);
             // if neighbor is at coarser level, restrict x2e
             } else {
-              rflx = 0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi));
+              rflx = uni ?
+                0.5*(flx.x2e(m,fk,fj,fi) + flx.x2e(m,fk,fj+1,fi)) :
+                WeightedMean(geom.Len2(m,fk,fj  ,fi), flx.x2e(m,fk,fj  ,fi),
+                             geom.Len2(m,fk,fj+1,fi), flx.x2e(m,fk,fj+1,fi));
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
               rbuf[dn].flux(dm, ndat*v + (j-jl)) = rflx;
@@ -306,7 +355,10 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
               rflx = flx.x1e(m,k,j,i);
             // if neighbor is at coarser level, restrict x1e
             } else {
-              rflx = 0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1));
+              rflx = uni ?
+                0.5*(flx.x1e(m,fk,fj,fi) + flx.x1e(m,fk,fj,fi+1)) :
+                WeightedMean(geom.Len1(m,fk,fj,fi  ), flx.x1e(m,fk,fj,fi  ),
+                             geom.Len1(m,fk,fj,fi+1), flx.x1e(m,fk,fj,fi+1));
             }
             if (nghbr.d_view(m,n).rank == my_rank) {
               rbuf[dn].flux(dm, ndat*v + i-il) = rflx;
@@ -797,6 +849,27 @@ void MeshBoundaryValuesFC::ZeroFluxesAtBoundaryWithFiner(DvceEdgeFld4D<Real> &fl
 //! \fn  void MeshBoundaryValuesFC::AverageBoundaryFluxes
 //! \brief Applies appropriate average to summed boundary fluxes, depending on number of
 //! elements being averaged together.
+
+//! DELIBERATELY NOT GEOMETRY-WEIGHTED (curvilinear SMR/AMR Phase 2). Unlike the
+//! restriction on the send side, every division here averages contributions that are
+//! DUPLICATE COMPUTATIONS OF ONE AND THE SAME EDGE, never contributions covering
+//! different spatial sub-intervals -- and averaging duplicates is geometry-independent.
+//! Concretely, the three cases are:
+//!   * same-level face interior (`*= 0.5`): this block and its neighbour each computed
+//!     the shared edge, and SumBoundaryFluxes added the neighbour's on top of the local
+//!     one. Two estimates of one edge.
+//!   * face shared with a FINER neighbour (`*= 0.5` on the single middle row/column):
+//!     the coarse face is tiled by 2 (or 4) fine blocks, and the row at the seam between
+//!     them is the last row of one fine block and the first row of the other, so BOTH
+//!     restricted and sent it. Again two estimates of one edge -- the non-seam rows get
+//!     exactly one contribution and are correctly left alone. Note this row is a seam
+//!     between fine BLOCKS, not the two child edges of a coarse edge; those are combined
+//!     on the send side, where the Len weighting lives.
+//!   * corner/edge buffers (`/= nflx`): nflx counts how many blocks contributed to that
+//!     one edge. Same argument.
+//! If this reasoning were wrong, the div(B) acceptance gate would catch it: an
+//! unweighted combination of unequal sub-intervals cannot preserve the Stokes identity
+//! that mhd_ct.cpp integrates.
 
 void MeshBoundaryValuesFC::AverageBoundaryFluxes(DvceEdgeFld4D<Real> &flx,
                                                  DvceArray2D<int> &nflx) {

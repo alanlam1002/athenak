@@ -134,6 +134,22 @@ Real TotalMass(MeshBlockPack *pmbp) {
   return mass;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn A3Fn()
+//! \brief the edge-centred vector potential B is built from.
+//!
+//! A free KOKKOS_INLINE_FUNCTION rather than a KOKKOS_LAMBDA captured into the kernels
+//! below: nvcc restricts extended lambdas nested inside other extended lambdas, and this
+//! branch has not been through a device compiler yet. Matches the convention upstream's
+//! own pgen/tests/divb_amr.cpp uses for exactly this job.
+KOKKOS_INLINE_FUNCTION
+Real A3Fn(const Real xa, const Real xb, const Real amp,
+          const Real x1min, const Real dx1, const Real x2min, const Real dx2) {
+  Real u = (xa - x1min)/dx1;
+  Real v = (xb - x2min)/dx2;
+  return amp*sin(2.0*M_PI*u)*sin(2.0*M_PI*v);
+}
+
 } // namespace
 
 //----------------------------------------------------------------------------------------
@@ -258,12 +274,6 @@ void ProblemGenerator::AMRDivBTest(ParameterInput *pin, const bool restart) {
   // range. A single kernel over (ks..ke+1, js..je+1, is..ie+1) is wrong: in 2D the x1f
   // and x2f arrays have only ncells3 == 1 in k, so writing k == ke+1 runs off the end of
   // them. (Found the hard way -- it silently corrupted x3f and left div(B) at 2.5e-01.)
-  auto A3fn = KOKKOS_LAMBDA(Real xa, Real xb) {
-    Real u = (xa - x1min_mesh)/dx1;
-    Real v = (xb - x2min_mesh)/dx2;
-    return amp*std::sin(2.0*M_PI*u)*std::sin(2.0*M_PI*v);
-  };
-
   par_for("amr_divb_b1", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real ar1 = geom.Area1(m,k,j,i);
@@ -272,8 +282,10 @@ void ProblemGenerator::AMRDivBTest(ParameterInput *pin, const bool restart) {
       Real x2f = LeftEdgeX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
       Real x2fp = LeftEdgeX(j+1-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
       // circulation of A3 along the two x3-edges bounding this x1-face
-      Real a_lo = A3fn(x1f, x2f )*geom.Len3(m,k,j  ,i);
-      Real a_hi = A3fn(x1f, x2fp)*geom.Len3(m,k,j+1,i);
+      Real p_lo = A3Fn(x1f, x2f , amp, x1min_mesh, dx1, x2min_mesh, dx2);
+      Real p_hi = A3Fn(x1f, x2fp, amp, x1min_mesh, dx1, x2min_mesh, dx2);
+      Real a_lo = p_lo*geom.Len3(m,k,j  ,i);
+      Real a_hi = p_hi*geom.Len3(m,k,j+1,i);
       b0.x1f(m,k,j,i) = (ar1 > 0.0) ? (a_hi - a_lo)/ar1 : 0.0;
     } else {
       // 1D: the only divergence-free radial field has Area1*B1 = const
@@ -288,8 +300,10 @@ void ProblemGenerator::AMRDivBTest(ParameterInput *pin, const bool restart) {
       Real x1f = LeftEdgeX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
       Real x1fp = LeftEdgeX(i+1-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
       Real x2f = LeftEdgeX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
-      Real b_lo = A3fn(x1f , x2f)*geom.Len3(m,k,j,i  );
-      Real b_hi = A3fn(x1fp, x2f)*geom.Len3(m,k,j,i+1);
+      Real p_lo = A3Fn(x1f , x2f, amp, x1min_mesh, dx1, x2min_mesh, dx2);
+      Real p_hi = A3Fn(x1fp, x2f, amp, x1min_mesh, dx1, x2min_mesh, dx2);
+      Real b_lo = p_lo*geom.Len3(m,k,j,i  );
+      Real b_hi = p_hi*geom.Len3(m,k,j,i+1);
       b0.x2f(m,k,j,i) = (ar2 > 0.0) ? -(b_hi - b_lo)/ar2 : 0.0;
     } else {
       b0.x2f(m,k,j,i) = 0.0;
@@ -308,7 +322,7 @@ void ProblemGenerator::AMRDivBTest(ParameterInput *pin, const bool restart) {
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
     Real s = (x1v - x1min_mesh)/(x1max_mesh - x1min_mesh);
-    Real d = d0*(1.0 + 0.5*std::sin(2.0*M_PI*s));
+    Real d = d0*(1.0 + 0.5*sin(2.0*M_PI*s));
     u0(m,IDN,k,j,i) = d;
     u0(m,IM1,k,j,i) = 0.0;
     u0(m,IM2,k,j,i) = 0.0;

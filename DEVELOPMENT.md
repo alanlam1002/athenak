@@ -159,10 +159,9 @@ This is the single biggest gap. To be explicit, because earlier versions of
 this file implied otherwise: **no part of this project has ever been through
 nvcc (or any device compiler).** Sakura has no GPU — `sinfo` reports
 `GRES=(null)` on all 237 nodes — and no `cuda` module exists (`find-module
-cuda` → "No module matching 'cuda' found"). There are also **no curvilinear
-`_gpu` tests**: all 16 modules under `tst/test_suite/coordinates/` are
-`_cpu`-named, so `run_test_suite.py --gpu` would today build with CUDA and run
-zero curvilinear cells.
+cuda` → "No module matching 'cuda' found"). Curvilinear `_gpu` tests have since
+been added (see below), but adding a test is not running it: they have still
+never executed.
 
 What a device-portability audit found in the committed code:
 
@@ -206,34 +205,77 @@ instantiations, and `cartesian` launches no source-term kernel at all).
 
 ### Curvilinear GPU tests now exist
 
-`tst/test_suite/coordinates/` gained `test_geom_curvilinear_construction_gpu.py`,
-`test_ct_divb_gpu.py` and `test_recon_exact_gpu.py` (14 tests). They cover the
-three distinct groups of `GeomData` arrays — position tables, area/volume/length
-tables, and reconstruction coefficient tables (including the rank-3 `plm_c*`,
-whose shape is unlike anything else in `GeomData`). Before these, every
-coordinates test was `_cpu`-named and `--gpu` would have exercised zero
-curvilinear cells.
+`tst/test_suite/coordinates/` now has **5 `_gpu` modules, 21 test functions**:
+`test_geom_curvilinear_construction_gpu.py` (4), `test_recon_exact_gpu.py` (6),
+`test_ct_divb_gpu.py` (4), `test_amr_conservation_gpu.py` (3) and
+`test_amr_divb_gpu.py` (4). They cover the three distinct groups of `GeomData`
+arrays — position tables, area/volume/length tables, and reconstruction
+coefficient tables (including the rank-3 `plm_c*`, whose shape is unlike anything
+else in `GeomData`) — plus both SMR/AMR phases. Before these, every coordinates
+test was `_cpu`-named and `--gpu` would have exercised zero curvilinear cells.
 
-**These have never been executed** — there is no GPU here. They are collected
-correctly (`pytest --collect-only -k _gpu` finds 14) and their inputs and
-resolution overrides are valid, but the first real run of them will be the first
-run of this code on a device. Expect to fix things.
+**None of them has ever been executed** — there is no GPU here. They are collected
+correctly and their inputs and resolution overrides are valid, but the first real
+run will be the first run of this code on a device. Expect to fix things.
 
-### Device build recipe (for whoever has GPU access)
+### Stage 5 transfer checklist (for whoever has GPU access)
+
+`run_test_suite.py --gpu` no longer hardcodes CUDA: it injects
+`-DKokkos_ENABLE_CUDA=On` only when the caller has not already named a Kokkos
+device backend, so non-NVIDIA targets now work through the same entry point.
 
 ```bash
-cd tst && python3 run_test_suite.py --gpu "-DKokkos_ARCH_<GPUARCH>=On"
+cd tst
+# NVIDIA (unchanged default)
+python3 run_test_suite.py --gpu "-DKokkos_ARCH_<ARCH>=On"
+# Intel PVC / Aurora
+python3 run_test_suite.py --gpu "-DKokkos_ENABLE_SYCL=On -DKokkos_ARCH_INTEL_PVC=ON"
+# AMD
+python3 run_test_suite.py --gpu "-DKokkos_ENABLE_HIP=On -DKokkos_ARCH_<AMDARCH>=ON"
 ```
-`--gpu` already forces `-DKokkos_ENABLE_CUDA=On` (`run_test_suite.py`), so a
-non-NVIDIA target (e.g. Aurora's Intel PVC, which needs the Kokkos SYCL backend)
-needs that hardcoding relaxed first. Note also `CMakeLists.txt` sets
-`Kokkos_ENABLE_CUDA_LAMBDA` automatically when CUDA is on.
+`CMakeLists.txt` sets `Kokkos_ENABLE_CUDA_LAMBDA` automatically when CUDA is on.
+Start with `-k _gpu` on `test_suite/coordinates/` alone (21 tests) before the
+full suite; a device compile of the whole tree is slow and the curvilinear
+kernels are what is actually unverified.
 
-One hazard to watch for specifically: at `x1min=0` the spherical factory sets
-`a1i(is)` to exactly `0`, and `mhd_ct.cpp` divides by `Area1`. Correctness relies
-on the numerator vanishing there too. If it ever does not, the result is a
-silent NaN rather than a trap — so a `div(B)` check that comes back NaN (rather
-than merely large) points at that division, not at the CT stencil.
+**Ranked risks, most likely first.**
+
+1. *Compile-time, in the pgens.* Device compilers are stricter than g++ about
+   what may appear in a `KOKKOS_LAMBDA`. The convention this branch follows is
+   upstream's: a free `KOKKOS_INLINE_FUNCTION` taking a POD, never a
+   `KOKKOS_LAMBDA` captured into another one (nvcc restricts nested extended
+   lambdas). `amr_divb_test.cpp`'s `A3Fn` was rewritten for exactly this reason
+   before transfer. If a new pgen fails to compile, check for that pattern first.
+2. *`GeomData` capture size — measured, 2048 bytes* (51 `Kokkos::View` handles at
+   40 B each). That is **exactly 4x** CUDA's 512 B `ConstantMemoryUseThreshold`,
+   so every geometry kernel passes its closure through global rather than
+   constant memory. This is a performance risk, not a correctness one, and it is
+   the first thing to look at if curvilinear kernels are disproportionately slow
+   on device relative to the ~7% CPU cost. The fix is per-consumer sub-structs
+   (reconstruction needs `plm_c*` + centroids; the update kernels need
+   `Area`/`Vol`; prolongation needs the `fcN_d` centroids) so no kernel captures
+   all 51. Deliberately not done blind — it is a real refactor and there has been
+   nothing to measure against.
+3. *Division by a legitimately zero area.* At `x1min=0` the spherical factory sets
+   `a1i(is)` to exactly `0`, and `mhd_ct.cpp` divides by `Area1`. Correctness
+   relies on the numerator vanishing too. If it ever does not, the result is a
+   silent NaN rather than a trap — so a `div(B)` check returning NaN (rather than
+   merely large) points at that division, not at the CT stencil. The SMR/AMR
+   Phase 2 kernels guard their own divides (`WeightedMean`, `ToB`), so a NaN from
+   those is a genuine surprise worth tracing.
+4. *Reductions.* The acceptance gates use `Kokkos::parallel_reduce` with
+   `Sum<Real>` / `Max<Real>` over the whole pack. These are the only reductions in
+   the curvilinear test code and they have only ever run on OpenMP/Serial;
+   different reduction ordering on device changes the last few digits, so if a
+   gate misses by an ulp or two that is expected, not a defect. The div(B) gate
+   has six orders of margin and should be insensitive.
+
+**What "verified" means for this stage.** The 21 curvilinear `_gpu` tests pass,
+AND the Cartesian AMR tests still pass on device, AND a device-vs-host comparison
+of one curvilinear AMR MHD run agrees to reduction-ordering tolerance. Passing
+only the first is not enough — the fast paths (`cells_uniform`, `cubic_cells`)
+are host-computed booleans captured into device kernels, and a mis-set flag would
+silently route device runs down the wrong branch.
 
 ## Upstream separation and merge surface
 

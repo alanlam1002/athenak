@@ -154,33 +154,37 @@ void ProlongFCSharedX1FaceOwned(const int m, const int nnghbr,
                                 const int my_lev, const bool multi_d,
                                 const bool three_d, const RegionIndcs &indcs,
                                 const DualArray2D<NeighborBlock> &nghbr,
+                                const DvceArray2D<Real> &ct1,
+                                const DvceArray2D<Real> &ct2,
+                                const DvceArray2D<Real> &t1,
+                                const DvceArray2D<Real> &t2,
+                                const bool uniform,
                                 const DvceArray4D<Real> &cbx1f,
                                 const DvceArray4D<Real> &bx1f) {
-  Real dvar2 = 0.0;
+  // increments shared with the regrid-path kernel in mesh/prolongation.hpp -- see
+  // FCSharedIncrements() there for the derivation and for why the two must not diverge
+  Real d2m = 0.0, d2p = 0.0;
   if (multi_d) {
-    Real dl = cbx1f(m,k,j  ,i) - cbx1f(m,k,j-1,i);
-    Real dr = cbx1f(m,k,j+1,i) - cbx1f(m,k,j  ,i);
-    dvar2 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    FCSharedIncrements(cbx1f(m,k,j-1,i), cbx1f(m,k,j,i), cbx1f(m,k,j+1,i),
+                       ct1, t1, m, j, fj, uniform, d2m, d2p);
   }
-
-  Real dvar3 = 0.0;
+  Real d3m = 0.0, d3p = 0.0;
   if (three_d) {
-    Real dl = cbx1f(m,k  ,j,i) - cbx1f(m,k-1,j,i);
-    Real dr = cbx1f(m,k+1,j,i) - cbx1f(m,k  ,j,i);
-    dvar3 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    FCSharedIncrements(cbx1f(m,k-1,j,i), cbx1f(m,k,j,i), cbx1f(m,k+1,j,i),
+                       ct2, t2, m, k, fk, uniform, d3m, d3p);
   }
 
   StoreProlongatedFCFace(m, nnghbr, 0, fk, fj, fi, ox1, ox2, ox3,
-                         my_lev, indcs, nghbr, cbx1f(m,k,j,i) - dvar2 - dvar3, bx1f);
+                         my_lev, indcs, nghbr, cbx1f(m,k,j,i) + d2m + d3m, bx1f);
   if (multi_d) {
     StoreProlongatedFCFace(m, nnghbr, 0, fk, fj+1, fi, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) + dvar2 - dvar3, bx1f);
+                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) + d2p + d3m, bx1f);
   }
   if (three_d) {
     StoreProlongatedFCFace(m, nnghbr, 0, fk+1, fj, fi, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) - dvar2 + dvar3, bx1f);
+                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) + d2m + d3p, bx1f);
     StoreProlongatedFCFace(m, nnghbr, 0, fk+1, fj+1, fi, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) + dvar2 + dvar3, bx1f);
+                           my_lev, indcs, nghbr, cbx1f(m,k,j,i) + d2p + d3p, bx1f);
   }
 }
 
@@ -192,28 +196,31 @@ void ProlongFCSharedX2FaceOwned(const int m, const int nnghbr,
                                 const int my_lev, const bool three_d,
                                 const RegionIndcs &indcs,
                                 const DualArray2D<NeighborBlock> &nghbr,
+                                const DvceArray2D<Real> &ct1,
+                                const DvceArray2D<Real> &ct2,
+                                const DvceArray2D<Real> &t1,
+                                const DvceArray2D<Real> &t2,
+                                const bool uniform,
                                 const DvceArray4D<Real> &cbx2f,
                                 const DvceArray4D<Real> &bx2f) {
-  Real dl = cbx2f(m,k,j,i  ) - cbx2f(m,k,j,i-1);
-  Real dr = cbx2f(m,k,j,i+1) - cbx2f(m,k,j,i  );
-  Real dvar1 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
-
-  Real dvar3 = 0.0;
+  Real d1m, d1p;
+  FCSharedIncrements(cbx2f(m,k,j,i-1), cbx2f(m,k,j,i), cbx2f(m,k,j,i+1),
+                     ct1, t1, m, i, fi, uniform, d1m, d1p);
+  Real d3m = 0.0, d3p = 0.0;
   if (three_d) {
-    dl = cbx2f(m,k  ,j,i) - cbx2f(m,k-1,j,i);
-    dr = cbx2f(m,k+1,j,i) - cbx2f(m,k  ,j,i);
-    dvar3 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    FCSharedIncrements(cbx2f(m,k-1,j,i), cbx2f(m,k,j,i), cbx2f(m,k+1,j,i),
+                       ct2, t2, m, k, fk, uniform, d3m, d3p);
   }
 
   StoreProlongatedFCFace(m, nnghbr, 1, fk, fj, fi, ox1, ox2, ox3,
-                         my_lev, indcs, nghbr, cbx2f(m,k,j,i) - dvar1 - dvar3, bx2f);
+                         my_lev, indcs, nghbr, cbx2f(m,k,j,i) + d1m + d3m, bx2f);
   StoreProlongatedFCFace(m, nnghbr, 1, fk, fj, fi+1, ox1, ox2, ox3,
-                         my_lev, indcs, nghbr, cbx2f(m,k,j,i) + dvar1 - dvar3, bx2f);
+                         my_lev, indcs, nghbr, cbx2f(m,k,j,i) + d1p + d3m, bx2f);
   if (three_d) {
     StoreProlongatedFCFace(m, nnghbr, 1, fk+1, fj, fi, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx2f(m,k,j,i) - dvar1 + dvar3, bx2f);
+                           my_lev, indcs, nghbr, cbx2f(m,k,j,i) + d1m + d3p, bx2f);
     StoreProlongatedFCFace(m, nnghbr, 1, fk+1, fj, fi+1, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx2f(m,k,j,i) + dvar1 + dvar3, bx2f);
+                           my_lev, indcs, nghbr, cbx2f(m,k,j,i) + d1p + d3p, bx2f);
   }
 }
 
@@ -225,28 +232,31 @@ void ProlongFCSharedX3FaceOwned(const int m, const int nnghbr,
                                 const int my_lev, const bool multi_d,
                                 const RegionIndcs &indcs,
                                 const DualArray2D<NeighborBlock> &nghbr,
+                                const DvceArray2D<Real> &ct1,
+                                const DvceArray2D<Real> &ct2,
+                                const DvceArray2D<Real> &t1,
+                                const DvceArray2D<Real> &t2,
+                                const bool uniform,
                                 const DvceArray4D<Real> &cbx3f,
                                 const DvceArray4D<Real> &bx3f) {
-  Real dl = cbx3f(m,k,j,i  ) - cbx3f(m,k,j,i-1);
-  Real dr = cbx3f(m,k,j,i+1) - cbx3f(m,k,j,i  );
-  Real dvar1 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
-
-  Real dvar2 = 0.0;
+  Real d1m, d1p;
+  FCSharedIncrements(cbx3f(m,k,j,i-1), cbx3f(m,k,j,i), cbx3f(m,k,j,i+1),
+                     ct1, t1, m, i, fi, uniform, d1m, d1p);
+  Real d2m = 0.0, d2p = 0.0;
   if (multi_d) {
-    dl = cbx3f(m,k,j  ,i) - cbx3f(m,k,j-1,i);
-    dr = cbx3f(m,k,j+1,i) - cbx3f(m,k,j  ,i);
-    dvar2 = 0.125*(SIGN(dl) + SIGN(dr))*fmin(fabs(dl), fabs(dr));
+    FCSharedIncrements(cbx3f(m,k,j-1,i), cbx3f(m,k,j,i), cbx3f(m,k,j+1,i),
+                       ct2, t2, m, j, fj, uniform, d2m, d2p);
   }
 
   StoreProlongatedFCFace(m, nnghbr, 2, fk, fj, fi, ox1, ox2, ox3,
-                         my_lev, indcs, nghbr, cbx3f(m,k,j,i) - dvar1 - dvar2, bx3f);
+                         my_lev, indcs, nghbr, cbx3f(m,k,j,i) + d1m + d2m, bx3f);
   StoreProlongatedFCFace(m, nnghbr, 2, fk, fj, fi+1, ox1, ox2, ox3,
-                         my_lev, indcs, nghbr, cbx3f(m,k,j,i) + dvar1 - dvar2, bx3f);
+                         my_lev, indcs, nghbr, cbx3f(m,k,j,i) + d1p + d2m, bx3f);
   if (multi_d) {
     StoreProlongatedFCFace(m, nnghbr, 2, fk, fj+1, fi, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx3f(m,k,j,i) - dvar1 + dvar2, bx3f);
+                           my_lev, indcs, nghbr, cbx3f(m,k,j,i) + d1m + d2p, bx3f);
     StoreProlongatedFCFace(m, nnghbr, 2, fk, fj+1, fi+1, ox1, ox2, ox3,
-                           my_lev, indcs, nghbr, cbx3f(m,k,j,i) + dvar1 + dvar2, bx3f);
+                           my_lev, indcs, nghbr, cbx3f(m,k,j,i) + d1p + d2p, bx3f);
   }
 }
 
@@ -256,104 +266,40 @@ void ProlongFCInternalOwned(const int m, const int nnghbr, const int fk, const i
                             const int my_lev, const bool three_d,
                             const RegionIndcs &indcs,
                             const DualArray2D<NeighborBlock> &nghbr,
+                            const GeomData &geom, const bool cubic,
                             const DvceFaceFld4D<Real> &b) {
+  // Boundary-path twin of ProlongFCInternal: identical values, but each store is routed
+  // through the write-ownership check. The Toth-Roe arithmetic itself now lives in ONE
+  // place (ProlongFCInternalValues, mesh/prolongation.hpp) rather than being duplicated
+  // here, which is how the regrid and boundary paths previously came to risk diverging.
+  Real v1[4], v2[4], v3[4];
+  ProlongFCInternalValues(m, fk, fj, fi, three_d, geom, cubic, b, v1, v2, v3);
+
+  StoreProlongatedFCFace(m, nnghbr, 0, fk, fj  , fi+1, ox1, ox2, ox3, my_lev,
+                         indcs, nghbr, v1[0], b.x1f);
+  StoreProlongatedFCFace(m, nnghbr, 0, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
+                         indcs, nghbr, v1[1], b.x1f);
+  StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi  , ox1, ox2, ox3, my_lev,
+                         indcs, nghbr, v2[0], b.x2f);
+  StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
+                         indcs, nghbr, v2[1], b.x2f);
   if (three_d) {
-    Real Uxx  = 0.0, Vyy  = 0.0, Wzz  = 0.0;
-    Real Uxyz = 0.0, Vxyz = 0.0, Wxyz = 0.0;
-    for (int jj=0; jj<2; jj++) {
-      int jsgn = 2*jj - 1;
-      int fjj  = fj + jj, fjp = fj + 2*jj;
-      for (int ii=0; ii<2; ii++) {
-        int isgn = 2*ii - 1;
-        int fii = fi + ii, fip = fi + 2*ii;
-        Uxx += isgn*(jsgn*(b.x2f(m,fk  ,fjp,fii) + b.x2f(m,fk+1,fjp,fii)) +
-                          (b.x3f(m,fk+2,fjj,fii) - b.x3f(m,fk  ,fjj,fii)));
-
-        Vyy += jsgn*(     (b.x3f(m,fk+2,fjj,fii) - b.x3f(m,fk  ,fjj,fii)) +
-                     isgn*(b.x1f(m,fk  ,fjj,fip) + b.x1f(m,fk+1,fjj,fip)));
-
-        Wzz +=       isgn*(b.x1f(m,fk+1,fjj,fip) - b.x1f(m,fk  ,fjj,fip)) +
-                     jsgn*(b.x2f(m,fk+1,fjp,fii) - b.x2f(m,fk  ,fjp,fii));
-
-        Uxyz += isgn*jsgn*(b.x1f(m,fk+1,fjj,fip) - b.x1f(m,fk  ,fjj,fip));
-        Vxyz += isgn*jsgn*(b.x2f(m,fk+1,fjp,fii) - b.x2f(m,fk  ,fjp,fii));
-        Wxyz += isgn*jsgn*(b.x3f(m,fk+2,fjj,fii) - b.x3f(m,fk  ,fjj,fii));
-      }
-    }
-    Uxx *= 0.125;  Vyy *= 0.125;  Wzz *= 0.125;
-    Uxyz *= 0.0625; Vxyz *= 0.0625; Wxyz *= 0.0625;
-
-    StoreProlongatedFCFace(m, nnghbr, 0, fk, fj, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2))
-                           + Uxx - Vxyz - Wxyz, b.x1f);
-    StoreProlongatedFCFace(m, nnghbr, 0, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk,fj+1,fi) + b.x1f(m,fk,fj+1,fi+2))
-                           + Uxx - Vxyz + Wxyz, b.x1f);
-    StoreProlongatedFCFace(m, nnghbr, 0, fk+1, fj, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk+1,fj,fi) + b.x1f(m,fk+1,fj,fi+2))
-                           + Uxx + Vxyz - Wxyz, b.x1f);
+    StoreProlongatedFCFace(m, nnghbr, 0, fk+1, fj  , fi+1, ox1, ox2, ox3, my_lev,
+                           indcs, nghbr, v1[2], b.x1f);
     StoreProlongatedFCFace(m, nnghbr, 0, fk+1, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk+1,fj+1,fi) + b.x1f(m,fk+1,fj+1,fi+2))
-                           + Uxx + Vxyz + Wxyz, b.x1f);
-
-    StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk,fj,fi) + b.x2f(m,fk,fj+2,fi))
-                           + Vyy - Uxyz - Wxyz, b.x2f);
-    StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk,fj,fi+1) + b.x2f(m,fk,fj+2,fi+1))
-                           + Vyy - Uxyz + Wxyz, b.x2f);
-    StoreProlongatedFCFace(m, nnghbr, 1, fk+1, fj+1, fi, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk+1,fj,fi) + b.x2f(m,fk+1,fj+2,fi))
-                           + Vyy + Uxyz - Wxyz, b.x2f);
+                           indcs, nghbr, v1[3], b.x1f);
+    StoreProlongatedFCFace(m, nnghbr, 1, fk+1, fj+1, fi  , ox1, ox2, ox3, my_lev,
+                           indcs, nghbr, v2[2], b.x2f);
     StoreProlongatedFCFace(m, nnghbr, 1, fk+1, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk+1,fj,fi+1) + b.x2f(m,fk+1,fj+2,fi+1))
-                           + Vyy + Uxyz + Wxyz, b.x2f);
-
-    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj, fi, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x3f(m,fk+2,fj,fi) + b.x3f(m,fk,fj,fi))
-                           + Wzz - Uxyz - Vxyz, b.x3f);
-    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x3f(m,fk+2,fj,fi+1) + b.x3f(m,fk,fj,fi+1))
-                           + Wzz - Uxyz + Vxyz, b.x3f);
-    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj+1, fi, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x3f(m,fk+2,fj+1,fi) + b.x3f(m,fk,fj+1,fi))
-                           + Wzz + Uxyz - Vxyz, b.x3f);
+                           indcs, nghbr, v2[3], b.x2f);
+    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj  , fi  , ox1, ox2, ox3, my_lev,
+                           indcs, nghbr, v3[0], b.x3f);
+    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj  , fi+1, ox1, ox2, ox3, my_lev,
+                           indcs, nghbr, v3[1], b.x3f);
+    StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj+1, fi  , ox1, ox2, ox3, my_lev,
+                           indcs, nghbr, v3[2], b.x3f);
     StoreProlongatedFCFace(m, nnghbr, 2, fk+1, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x3f(m,fk+2,fj+1,fi+1) + b.x3f(m,fk,fj+1,fi+1))
-                           + Wzz + Uxyz + Vxyz, b.x3f);
-  } else {
-    Real tmp1 = 0.25*(b.x2f(m,fk,fj+2,fi+1) - b.x2f(m,fk,fj,  fi+1)
-                    - b.x2f(m,fk,fj+2,fi  ) + b.x2f(m,fk,fj,  fi  ));
-    Real tmp2 = 0.25*(b.x1f(m,fk,fj,  fi  ) - b.x1f(m,fk,fj,  fi+2)
-                    - b.x1f(m,fk,fj+1,fi  ) + b.x1f(m,fk,fj+1,fi+2));
-    StoreProlongatedFCFace(m, nnghbr, 0, fk, fj, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2)) + tmp1,
-                           b.x1f);
-    StoreProlongatedFCFace(m, nnghbr, 0, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x1f(m,fk,fj+1,fi) + b.x1f(m,fk,fj+1,fi+2)) + tmp1,
-                           b.x1f);
-    StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk,fj,fi) + b.x2f(m,fk,fj+2,fi)) + tmp2,
-                           b.x2f);
-    StoreProlongatedFCFace(m, nnghbr, 1, fk, fj+1, fi+1, ox1, ox2, ox3, my_lev,
-                           indcs, nghbr,
-                           0.5*(b.x2f(m,fk,fj,fi+1) + b.x2f(m,fk,fj+2,fi+1)) + tmp2,
-                           b.x2f);
+                           indcs, nghbr, v3[3], b.x3f);
   }
 }
 
@@ -613,6 +559,13 @@ void MeshBoundaryValuesFC::FillCoarseInBndryFC(DvceFaceFld4D<Real> &b,
   // Restrict data into coarse array in any boundary filled with data from the same
   // level. (Only needed in multidimensions)
 
+  // Area-weighted, for the same reason as MeshRefinement::RestrictFC -- this is the
+  // second, independent copy of face-centered restriction (the per-stage boundary path
+  // rather than the regrid path), and the two must agree or the prolongation stencil
+  // reads coarse data that disagrees with what a regrid would have produced.
+  auto &geom = pmy_pack->pgeom->geom_data;
+  const bool uni = geom.cells_uniform;
+
   if (multi_d) {
     int nmnv = 3*nmb*nnghbr;
     auto &rbuf = recvbuf;
@@ -659,12 +612,23 @@ void MeshBoundaryValuesFC::FillCoarseInBndryFC(DvceFaceFld4D<Real> &b,
           // restrict in 2D
           if (!(three_d)) {
             if (v==0) {
-              cb.x1f(m,kl,j,i) = 0.5*(b.x1f(m,kl,fj,fi) + b.x1f(m,kl,fj+1,fi));
+              cb.x1f(m,kl,j,i) = uni ?
+                0.5*(b.x1f(m,kl,fj,fi) + b.x1f(m,kl,fj+1,fi)) :
+                WeightedMean(geom.Area1(m,kl,fj  ,fi), b.x1f(m,kl,fj  ,fi),
+                             geom.Area1(m,kl,fj+1,fi), b.x1f(m,kl,fj+1,fi));
             } else if (v==1) {
-              cb.x2f(m,kl,j,i) = 0.5*(b.x2f(m,kl,fj,fi) + b.x2f(m,kl,fj,fi+1));
+              cb.x2f(m,kl,j,i) = uni ?
+                0.5*(b.x2f(m,kl,fj,fi) + b.x2f(m,kl,fj,fi+1)) :
+                WeightedMean(geom.Area2(m,kl,fj,fi  ), b.x2f(m,kl,fj,fi  ),
+                             geom.Area2(m,kl,fj,fi+1), b.x2f(m,kl,fj,fi+1));
             } else {
-              Real b3c = 0.25*(b.x3f(m,kl,fj  ,fi) + b.x3f(m,kl,fj  ,fi+1)
-                             + b.x3f(m,kl,fj+1,fi) + b.x3f(m,kl,fj+1,fi+1));
+              Real b3c = uni ?
+                0.25*(b.x3f(m,kl,fj  ,fi) + b.x3f(m,kl,fj  ,fi+1)
+                    + b.x3f(m,kl,fj+1,fi) + b.x3f(m,kl,fj+1,fi+1)) :
+                WeightedMean(geom.Area3(m,kl,fj  ,fi  ), b.x3f(m,kl,fj  ,fi  ),
+                             geom.Area3(m,kl,fj  ,fi+1), b.x3f(m,kl,fj  ,fi+1),
+                             geom.Area3(m,kl,fj+1,fi  ), b.x3f(m,kl,fj+1,fi  ),
+                             geom.Area3(m,kl,fj+1,fi+1), b.x3f(m,kl,fj+1,fi+1));
               cb.x3f(m,kl  ,j,i) = b3c;
               cb.x3f(m,kl+1,j,i) = b3c;
             }
@@ -672,14 +636,29 @@ void MeshBoundaryValuesFC::FillCoarseInBndryFC(DvceFaceFld4D<Real> &b,
           // restrict in 3D
           } else {
             if (v==0) {
-              cb.x1f(m,k,j,i) = 0.25*(b.x1f(m,fk  ,fj,fi) + b.x1f(m,fk  ,fj+1,fi)
-                                    + b.x1f(m,fk+1,fj,fi) + b.x1f(m,fk+1,fj+1,fi));
+              cb.x1f(m,k,j,i) = uni ?
+                0.25*(b.x1f(m,fk  ,fj,fi) + b.x1f(m,fk  ,fj+1,fi)
+                    + b.x1f(m,fk+1,fj,fi) + b.x1f(m,fk+1,fj+1,fi)) :
+                WeightedMean(geom.Area1(m,fk  ,fj  ,fi), b.x1f(m,fk  ,fj  ,fi),
+                             geom.Area1(m,fk  ,fj+1,fi), b.x1f(m,fk  ,fj+1,fi),
+                             geom.Area1(m,fk+1,fj  ,fi), b.x1f(m,fk+1,fj  ,fi),
+                             geom.Area1(m,fk+1,fj+1,fi), b.x1f(m,fk+1,fj+1,fi));
             } else if (v==1) {
-              cb.x2f(m,k,j,i) = 0.25*(b.x2f(m,fk  ,fj,fi) + b.x2f(m,fk  ,fj,fi+1)
-                                    + b.x2f(m,fk+1,fj,fi) + b.x2f(m,fk+1,fj,fi+1));
+              cb.x2f(m,k,j,i) = uni ?
+                0.25*(b.x2f(m,fk  ,fj,fi) + b.x2f(m,fk  ,fj,fi+1)
+                    + b.x2f(m,fk+1,fj,fi) + b.x2f(m,fk+1,fj,fi+1)) :
+                WeightedMean(geom.Area2(m,fk  ,fj,fi  ), b.x2f(m,fk  ,fj,fi  ),
+                             geom.Area2(m,fk  ,fj,fi+1), b.x2f(m,fk  ,fj,fi+1),
+                             geom.Area2(m,fk+1,fj,fi  ), b.x2f(m,fk+1,fj,fi  ),
+                             geom.Area2(m,fk+1,fj,fi+1), b.x2f(m,fk+1,fj,fi+1));
             } else {
-              cb.x3f(m,k,j,i) = 0.25*(b.x3f(m,fk,fj  ,fi) + b.x3f(m,fk,fj  ,fi+1)
-                                    + b.x3f(m,fk,fj+1,fi) + b.x3f(m,fk,fj+1,fi+1));
+              cb.x3f(m,k,j,i) = uni ?
+                0.25*(b.x3f(m,fk,fj  ,fi) + b.x3f(m,fk,fj  ,fi+1)
+                    + b.x3f(m,fk,fj+1,fi) + b.x3f(m,fk,fj+1,fi+1)) :
+                WeightedMean(geom.Area3(m,fk,fj  ,fi  ), b.x3f(m,fk,fj  ,fi  ),
+                             geom.Area3(m,fk,fj  ,fi+1), b.x3f(m,fk,fj  ,fi+1),
+                             geom.Area3(m,fk,fj+1,fi  ), b.x3f(m,fk,fj+1,fi  ),
+                             geom.Area3(m,fk,fj+1,fi+1), b.x3f(m,fk,fj+1,fi+1));
             }
           }
         });
@@ -708,6 +687,16 @@ void MeshBoundaryValuesFC::ProlongateFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Re
   // Prolongate b.x1f/b.x2f/b.x3f at all shared coarse/fine cell edges
   // Code here is based on MeshRefinement::ProlongateSharedFieldX1/2/3() and
   // MeshRefinement::ProlongateInternalField() in C++ version
+
+  // Area-weighted transverse face centroids for the conservative prolongation. Must
+  // match what MeshRefinement::RefineFC passes on the regrid path, or the per-stage
+  // boundary values and the post-regrid values disagree at a level boundary.
+  auto &geom = pmy_pack->pgeom->geom_data;
+  auto &cgeom = pmy_pack->pgeom->coarse_geom_data;
+  const bool uni = geom.cells_uniform;
+  // the internal-face (Toth-Roe) operator keys on cubic_cells instead -- see
+  // ProlongFCInternal in mesh/prolongation.hpp
+  const bool cubic = geom.cubic_cells;
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(three field components)
   {int nmnv = 3*nmb*nnghbr;
@@ -752,13 +741,19 @@ void MeshBoundaryValuesFC::ProlongateFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Re
         // by calling inlined prolongation operator for FC variables
         if (v==0) {
           ProlongFCSharedX1FaceOwned(m,nnghbr,k,j,i,fk,fj,fi,ox1,ox2,ox3,my_lev,
-                                     multi_d,three_d,indcs,nghbr,cb.x1f,b.x1f);
+                                     multi_d,three_d,indcs,nghbr,
+                                     cgeom.fc1_2,cgeom.fc1_3,geom.fc1_2,geom.fc1_3,uni,
+                                     cb.x1f,b.x1f);
         } else if (v==1) {
           ProlongFCSharedX2FaceOwned(m,nnghbr,k,j,i,fk,fj,fi,ox1,ox2,ox3,my_lev,
-                                     three_d,indcs,nghbr,cb.x2f,b.x2f);
+                                     three_d,indcs,nghbr,
+                                     cgeom.fc2_1,cgeom.fc2_3,geom.fc2_1,geom.fc2_3,uni,
+                                     cb.x2f,b.x2f);
         } else {
           ProlongFCSharedX3FaceOwned(m,nnghbr,k,j,i,fk,fj,fi,ox1,ox2,ox3,my_lev,
-                                     multi_d,indcs,nghbr,cb.x3f,b.x3f);
+                                     multi_d,indcs,nghbr,
+                                     cgeom.fc3_1,cgeom.fc3_2,geom.fc3_1,geom.fc3_2,uni,
+                                     cb.x3f,b.x3f);
         }
       });
     }
@@ -811,15 +806,20 @@ void MeshBoundaryValuesFC::ProlongateFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Re
         int fk = (k - indcs.cks)*2 + indcs.ks;   // fine k
 
         if (one_d) {
-          // In 1D, interior face field is trivial
+          // In 1D, interior face field is trivial. Averaging the two bracketing FLUXES
+          // rather than the two fields -- see ProlongFCInternal1D.
+          Real a_l = geom.Area1(m,fk,fj,fi  );
+          Real a_r = geom.Area1(m,fk,fj,fi+2);
+          Real a_c = geom.Area1(m,fk,fj,fi+1);
+          Real val = (cubic || !(a_c > 0.0)) ?
+              0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2)) :
+              0.5*(a_l*b.x1f(m,fk,fj,fi) + a_r*b.x1f(m,fk,fj,fi+2))/a_c;
           StoreProlongatedFCFace(m, nnghbr, 0, fk, fj, fi+1, ox1, ox2, ox3,
-                                 my_lev, indcs, nghbr,
-                                 0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2)),
-                                 b.x1f);
+                                 my_lev, indcs, nghbr, val, b.x1f);
         } else {
           // in multi-D call inlined prolongation operator for FC fields at internal faces
           ProlongFCInternalOwned(m,nnghbr,fk,fj,fi,ox1,ox2,ox3,my_lev,
-                                 three_d,indcs,nghbr,b);
+                                 three_d,indcs,nghbr,geom,cubic,b);
         }
       });
     }

@@ -1163,6 +1163,14 @@ void MeshRefinement::RefineFC(DualArray1D<int> &n2o, DvceFaceFld4D<Real> &b,
   bool &three_d = pmy_mesh->three_d;
   auto &ngids_ = new_gids_eachrank[global_variable::my_rank];
 
+  // Area-weighted transverse face centroids, coarse and fine, for the conservative
+  // prolongation (see ProlongFCSharedX1Face). Unlike restriction, prolongation genuinely
+  // needs the COARSE geometry: at a fine/coarse boundary the coarse data comes from a
+  // coarser neighbour where no fine cells exist to derive it from.
+  auto &geom = pmy_mesh->pmb_pack->pgeom->geom_data;
+  auto &cgeom = pmy_mesh->pmb_pack->pgeom->coarse_geom_data;
+  const bool uni = geom.cells_uniform;
+
   // Prolongate x1f
   par_for("RefineFC1",DevExeSpace(), 0,(new_nmb-1), cks,cke, cjs,cje, cis,cie+1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1171,7 +1179,9 @@ void MeshRefinement::RefineFC(DualArray1D<int> &n2o, DvceFaceFld4D<Real> &b,
       int fi = (i - cis)*2 + is;                   // fine i
       int fj = (multi_d)? ((j - cjs)*2 + js) : j;  // fine j
       int fk = (three_d)? ((k - cks)*2 + ks) : k;  // fine k
-      ProlongFCSharedX1Face(m,k,j,i,fk,fj,fi,multi_d,three_d,cb.x1f,b.x1f);
+      ProlongFCSharedX1Face(m,k,j,i,fk,fj,fi,multi_d,three_d,
+                            cgeom.fc1_2,cgeom.fc1_3,geom.fc1_2,geom.fc1_3,uni,
+                            cb.x1f,b.x1f);
     }
   });
 
@@ -1183,7 +1193,9 @@ void MeshRefinement::RefineFC(DualArray1D<int> &n2o, DvceFaceFld4D<Real> &b,
       int fi = (i - cis)*2 + is;                   // fine i
       int fj = (multi_d)? ((j - cjs)*2 + js) : j;  // fine j
       int fk = (three_d)? ((k - cks)*2 + ks) : k;  // fine k
-      ProlongFCSharedX2Face(m,k,j,i,fk,fj,fi,three_d,cb.x2f,b.x2f);
+      ProlongFCSharedX2Face(m,k,j,i,fk,fj,fi,three_d,
+                            cgeom.fc2_1,cgeom.fc2_3,geom.fc2_1,geom.fc2_3,uni,
+                            cb.x2f,b.x2f);
     }
   });
 
@@ -1195,12 +1207,16 @@ void MeshRefinement::RefineFC(DualArray1D<int> &n2o, DvceFaceFld4D<Real> &b,
       int fi = (i - cis)*2 + is;                   // fine i
       int fj = (multi_d)? ((j - cjs)*2 + js) : j;  // fine j
       int fk = (three_d)? ((k - cks)*2 + ks) : k;  // fine k
-      ProlongFCSharedX3Face(m,k,j,i,fk,fj,fi,multi_d,cb.x3f,b.x3f);
+      ProlongFCSharedX3Face(m,k,j,i,fk,fj,fi,multi_d,
+                            cgeom.fc3_1,cgeom.fc3_2,geom.fc3_1,geom.fc3_2,uni,
+                            cb.x3f,b.x3f);
     }
   });
 
   // Second prolongate face-centered fields at internal faces of fine cells using
-  // divergence-preserving operator of Toth & Roe (2002)
+  // divergence-preserving operator of Toth & Roe (2002). Note this one keys on
+  // cubic_cells, not cells_uniform -- see the comment on ProlongFCInternal.
+  const bool cubic = geom.cubic_cells;
   bool &one_d = pmy_mesh->one_d;
   par_for("RefineFC-int",DevExeSpace(), 0,(new_nmb-1), cks,cke, cjs,cje, cis,cie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1212,10 +1228,10 @@ void MeshRefinement::RefineFC(DualArray1D<int> &n2o, DvceFaceFld4D<Real> &b,
 
       if (one_d) {
         // In 1D, interior face field is trivial
-        b.x1f(m,fk,fj,fi+1) = 0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2));
+        ProlongFCInternal1D(m,fk,fj,fi,geom,cubic,b);
       } else {
         // in multi-D call inlined prolongation operator for FC fields at internal faces
-        ProlongFCInternal(m,fk,fj,fi,three_d,b);
+        ProlongFCInternal(m,fk,fj,fi,three_d,geom,cubic,b);
       }
     }
   });
@@ -1242,6 +1258,9 @@ void MeshRefinement::RepairAMRFC(DvceFaceFld4D<Real> &b) {
   bool &one_d = pmy_mesh->one_d;
   bool &three_d = pmy_mesh->three_d;
   auto &repair = fc_amr_repair;
+  // third call site of the internal-face operator, easy to miss -- see RefineFC
+  auto &geom = pmy_mesh->pmb_pack->pgeom->geom_data;
+  const bool cubic = geom.cubic_cells;
 
   par_for("RepairAMRFC",DevExeSpace(), 0,(nmb-1), cks,cke, cjs,cje, cis,cie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -1251,9 +1270,9 @@ void MeshRefinement::RepairAMRFC(DvceFaceFld4D<Real> &b) {
       int fk = (k - cks)*2 + ks;
 
       if (one_d) {
-        b.x1f(m,fk,fj,fi+1) = 0.5*(b.x1f(m,fk,fj,fi) + b.x1f(m,fk,fj,fi+2));
+        ProlongFCInternal1D(m,fk,fj,fi,geom,cubic,b);
       } else {
-        ProlongFCInternal(m,fk,fj,fi,three_d,b);
+        ProlongFCInternal(m,fk,fj,fi,three_d,geom,cubic,b);
       }
     }
   });
@@ -1273,7 +1292,8 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
   // and written in place), but the volume weighting below reads geometry arrays sized to
   // the real block count. Without this clamp the weighted branch reads past the end of
   // geom.vi; a Kokkos bounds-checked build aborts on it, while a Release build silently
-  // reads adjacent heap and still produces plausible numbers.
+  // reads adjacent heap and still produces plausible numbers. See the matching clamp in
+  // RestrictFC.
   int nmb  = std::min(u.extent_int(0), pmy_mesh->pmb_pack->nmb_thispack);
   int nvar = u.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
 
@@ -1381,7 +1401,15 @@ void MeshRefinement::RestrictCC(DvceArray5D<Real> &u, DvceArray5D<Real> &cu,
 //! \brief Restricts face-centered variables to coarse mesh
 
 void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb) {
-  int nmb  = b.x1f.extent_int(0);  // TODO(@user): 1st idx from L of in array must be NMB
+  // Clamp to the number of MeshBlocks that actually EXIST, not the array capacity.
+  // Unlike the per-stage call from mhd_tasks.cpp, the call from
+  // RedistAndRefineMeshBlocks (Step 3, derefinement) sees b0 already resized to
+  // <mesh_refinement>/max_nmb_per_rank, so extent(0) can be hundreds of times the real
+  // block count. That was harmless while this kernel touched only b/cb -- the surplus
+  // slots hold garbage that is read and written in place -- but the geometry arrays
+  // below are sized to the real count, so iterating over the capacity reads off the end
+  // of them and segfaults on the first derefinement.
+  int nmb  = std::min(b.x1f.extent_int(0), pmy_mesh->pmb_pack->nmb_thispack);
 
   auto &cis = pmy_mesh->mb_indcs.cis;
   auto &cie = pmy_mesh->mb_indcs.cie;
@@ -1389,6 +1417,23 @@ void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb)
   auto &cje = pmy_mesh->mb_indcs.cje;
   auto &cks = pmy_mesh->mb_indcs.cks;
   auto &cke = pmy_mesh->mb_indcs.cke;
+
+  // Area-weighted conservative restriction: cb = sum(A_f*b_f)/sum(A_f). The magnetic
+  // flux through a face, A*B_n, is the conserved quantity -- not the pointwise B_n -- so
+  // an unweighted mean loses flux across a level jump wherever the child faces have
+  // unequal area, which is everywhere in cylindrical/spherical. As for RestrictCC, only
+  // the FINE geometry is needed, because a coarse face is exactly the union of its
+  // children and therefore A_coarse == sum(A_fine) to roundoff (asserted by
+  // coarse_geometry_test.cpp). Reduces to the previous 0.5/0.25 constants for
+  // equal-area children.
+  //
+  // The x1f value in 1D and the "extra face" cases below are pure injection/coincident
+  // faces, which need no weighting at all: the coarse face IS a fine face there.
+  auto &geom = pmy_mesh->pmb_pack->pgeom->geom_data;
+  // cells_uniform, not cubic_cells: restriction only needs the children of a given face
+  // to have EQUAL area, which uniformity alone gives. (The Toth-Roe internal-face kernel
+  // is the one that additionally needs the three areas equal to each other.)
+  const bool uni = geom.cells_uniform;
 
   // restrict in 1D
   if (pmy_mesh->one_d) {
@@ -1401,11 +1446,19 @@ void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb)
         cb.x1f(m,cks,cjs,i+1) = b.x1f(m,cks,cjs,finei+2);
       }
       // restrict B2
-      Real b2coarse = 0.5*(b.x2f(m,cks,cjs,finei) + b.x2f(m,cks,cjs,finei+1));
+      Real b2coarse, b3coarse;
+      if (uni) {
+        b2coarse = 0.5*(b.x2f(m,cks,cjs,finei) + b.x2f(m,cks,cjs,finei+1));
+        b3coarse = 0.5*(b.x3f(m,cks,cjs,finei) + b.x3f(m,cks,cjs,finei+1));
+      } else {
+        b2coarse = WeightedMean(geom.Area2(m,cks,cjs,finei  ), b.x2f(m,cks,cjs,finei  ),
+                                geom.Area2(m,cks,cjs,finei+1), b.x2f(m,cks,cjs,finei+1));
+        b3coarse = WeightedMean(geom.Area3(m,cks,cjs,finei  ), b.x3f(m,cks,cjs,finei  ),
+                                geom.Area3(m,cks,cjs,finei+1), b.x3f(m,cks,cjs,finei+1));
+      }
       cb.x2f(m,cks,cjs  ,i) = b2coarse;
       cb.x2f(m,cks,cjs+1,i) = b2coarse;
       // restrict B3
-      Real b3coarse = 0.5*(b.x3f(m,cks,cjs,finei) + b.x3f(m,cks,cjs,finei+1));
       cb.x3f(m,cks  ,cjs,i) = b3coarse;
       cb.x3f(m,cks+1,cjs,i) = b3coarse;
     });
@@ -1416,23 +1469,52 @@ void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb)
     KOKKOS_LAMBDA(const int m, const int j, const int i) {
       int finei = 2*i - cis;  // correct when cis=is
       int finej = 2*j - cjs;  // correct when cjs=js
-      // restrict B1
-      cb.x1f(m,cks,j,i) = 0.5*(b.x1f(m,cks,finej,finei) + b.x1f(m,cks,finej+1,finei));
-      if (i==cie) {
-        cb.x1f(m,cks,j,i+1) =
-          0.5*(b.x1f(m,cks,finej,finei+2) + b.x1f(m,cks,finej+1,finei+2));
+      if (uni) {
+        // restrict B1
+        cb.x1f(m,cks,j,i) = 0.5*(b.x1f(m,cks,finej,finei) + b.x1f(m,cks,finej+1,finei));
+        if (i==cie) {
+          cb.x1f(m,cks,j,i+1) =
+            0.5*(b.x1f(m,cks,finej,finei+2) + b.x1f(m,cks,finej+1,finei+2));
+        }
+        // restrict B2
+        cb.x2f(m,cks,j,i) = 0.5*(b.x2f(m,cks,finej,finei) + b.x2f(m,cks,finej,finei+1));
+        if (j==cje) {
+          cb.x2f(m,cks,j+1,i) =
+            0.5*(b.x2f(m,cks,finej+2,finei) + b.x2f(m,cks,finej+2,finei+1));
+        }
+        // restrict B3
+        Real b3coarse = 0.25*(b.x3f(m,cks,finej  ,finei) + b.x3f(m,cks,finej  ,finei+1)
+                            + b.x3f(m,cks,finej+1,finei) + b.x3f(m,cks,finej+1,finei+1));
+        cb.x3f(m,cks  ,j,i) = b3coarse;
+        cb.x3f(m,cks+1,j,i) = b3coarse;
+      } else {
+        // restrict B1 (children tile the coarse x1-face in x2)
+        cb.x1f(m,cks,j,i) =
+          WeightedMean(geom.Area1(m,cks,finej  ,finei), b.x1f(m,cks,finej  ,finei),
+                       geom.Area1(m,cks,finej+1,finei), b.x1f(m,cks,finej+1,finei));
+        if (i==cie) {
+          cb.x1f(m,cks,j,i+1) =
+            WeightedMean(geom.Area1(m,cks,finej  ,finei+2), b.x1f(m,cks,finej  ,finei+2),
+                         geom.Area1(m,cks,finej+1,finei+2), b.x1f(m,cks,finej+1,finei+2));
+        }
+        // restrict B2 (children tile the coarse x2-face in x1)
+        cb.x2f(m,cks,j,i) =
+          WeightedMean(geom.Area2(m,cks,finej,finei  ), b.x2f(m,cks,finej,finei  ),
+                       geom.Area2(m,cks,finej,finei+1), b.x2f(m,cks,finej,finei+1));
+        if (j==cje) {
+          cb.x2f(m,cks,j+1,i) =
+            WeightedMean(geom.Area2(m,cks,finej+2,finei  ), b.x2f(m,cks,finej+2,finei  ),
+                         geom.Area2(m,cks,finej+2,finei+1), b.x2f(m,cks,finej+2,finei+1));
+        }
+        // restrict B3 (children tile the coarse x3-face in x1 and x2)
+        Real b3coarse =
+          WeightedMean(geom.Area3(m,cks,finej  ,finei  ), b.x3f(m,cks,finej  ,finei  ),
+                       geom.Area3(m,cks,finej  ,finei+1), b.x3f(m,cks,finej  ,finei+1),
+                       geom.Area3(m,cks,finej+1,finei  ), b.x3f(m,cks,finej+1,finei  ),
+                       geom.Area3(m,cks,finej+1,finei+1), b.x3f(m,cks,finej+1,finei+1));
+        cb.x3f(m,cks  ,j,i) = b3coarse;
+        cb.x3f(m,cks+1,j,i) = b3coarse;
       }
-      // restrict B2
-      cb.x2f(m,cks,j,i) = 0.5*(b.x2f(m,cks,finej,finei) + b.x2f(m,cks,finej,finei+1));
-      if (j==cje) {
-        cb.x2f(m,cks,j+1,i) =
-          0.5*(b.x2f(m,cks,finej+2,finei) + b.x2f(m,cks,finej+2,finei+1));
-      }
-      // restrict B3
-      Real b3coarse = 0.25*(b.x3f(m,cks,finej  ,finei) + b.x3f(m,cks,finej  ,finei+1)
-                          + b.x3f(m,cks,finej+1,finei) + b.x3f(m,cks,finej+1,finei+1));
-      cb.x3f(m,cks  ,j,i) = b3coarse;
-      cb.x3f(m,cks+1,j,i) = b3coarse;
     });
 
   // restrict in 3D
@@ -1442,32 +1524,81 @@ void MeshRefinement::RestrictFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real> &cb)
       int finei = 2*i - cis;  // correct when cis=is
       int finej = 2*j - cjs;  // correct when cjs=js
       int finek = 2*k - cks;  // correct when cks=ks
-      // restrict B1
-      cb.x1f(m,k,j,i) =
-        0.25*(b.x1f(m,finek  ,finej,finei) + b.x1f(m,finek  ,finej+1,finei)
-            + b.x1f(m,finek+1,finej,finei) + b.x1f(m,finek+1,finej+1,finei));
-      if (i==cie) {
-        cb.x1f(m,k,j,i+1) =
-          0.25*(b.x1f(m,finek  ,finej,finei+2) + b.x1f(m,finek  ,finej+1,finei+2)
-              + b.x1f(m,finek+1,finej,finei+2) + b.x1f(m,finek+1,finej+1,finei+2));
-      }
-      // restrict B2
-      cb.x2f(m,k,j,i) =
-        0.25*(b.x2f(m,finek  ,finej,finei) + b.x2f(m,finek  ,finej,finei+1)
-            + b.x2f(m,finek+1,finej,finei) + b.x2f(m,finek+1,finej,finei+1));
-      if (j==cje) {
-        cb.x2f(m,k,j+1,i) =
-          0.25*(b.x2f(m,finek  ,finej+2,finei) + b.x2f(m,finek  ,finej+2,finei+1)
-              + b.x2f(m,finek+1,finej+2,finei) + b.x2f(m,finek+1,finej+2,finei+1));
-      }
-      // restrict B3
-      cb.x3f(m,k,j,i) =
-        0.25*(b.x3f(m,finek,finej  ,finei) + b.x3f(m,finek,finej  ,finei+1)
-            + b.x3f(m,finek,finej+1,finei) + b.x3f(m,finek,finej+1,finei+1));
-      if (k==cke) {
-        cb.x3f(m,k+1,j,i) =
-          0.25*(b.x3f(m,finek+2,finej  ,finei) + b.x3f(m,finek+2,finej  ,finei+1)
-              + b.x3f(m,finek+2,finej+1,finei) + b.x3f(m,finek+2,finej+1,finei+1));
+      if (uni) {
+        // restrict B1
+        cb.x1f(m,k,j,i) =
+          0.25*(b.x1f(m,finek  ,finej,finei) + b.x1f(m,finek  ,finej+1,finei)
+              + b.x1f(m,finek+1,finej,finei) + b.x1f(m,finek+1,finej+1,finei));
+        if (i==cie) {
+          cb.x1f(m,k,j,i+1) =
+            0.25*(b.x1f(m,finek  ,finej,finei+2) + b.x1f(m,finek  ,finej+1,finei+2)
+                + b.x1f(m,finek+1,finej,finei+2) + b.x1f(m,finek+1,finej+1,finei+2));
+        }
+        // restrict B2
+        cb.x2f(m,k,j,i) =
+          0.25*(b.x2f(m,finek  ,finej,finei) + b.x2f(m,finek  ,finej,finei+1)
+              + b.x2f(m,finek+1,finej,finei) + b.x2f(m,finek+1,finej,finei+1));
+        if (j==cje) {
+          cb.x2f(m,k,j+1,i) =
+            0.25*(b.x2f(m,finek  ,finej+2,finei) + b.x2f(m,finek  ,finej+2,finei+1)
+                + b.x2f(m,finek+1,finej+2,finei) + b.x2f(m,finek+1,finej+2,finei+1));
+        }
+        // restrict B3
+        cb.x3f(m,k,j,i) =
+          0.25*(b.x3f(m,finek,finej  ,finei) + b.x3f(m,finek,finej  ,finei+1)
+              + b.x3f(m,finek,finej+1,finei) + b.x3f(m,finek,finej+1,finei+1));
+        if (k==cke) {
+          cb.x3f(m,k+1,j,i) =
+            0.25*(b.x3f(m,finek+2,finej  ,finei) + b.x3f(m,finek+2,finej  ,finei+1)
+                + b.x3f(m,finek+2,finej+1,finei) + b.x3f(m,finek+2,finej+1,finei+1));
+        }
+      } else {
+        // short aliases keep the weighted forms inside the 90-column limit
+        const int fk0 = finek, fk1 = finek+1;
+        const int fj0 = finej, fj1 = finej+1;
+        const int fi0 = finei, fi1 = finei+1;
+        // restrict B1 (children tile the coarse x1-face in x2 and x3)
+        cb.x1f(m,k,j,i) =
+          WeightedMean(geom.Area1(m,fk0,fj0,fi0), b.x1f(m,fk0,fj0,fi0),
+                       geom.Area1(m,fk0,fj1,fi0), b.x1f(m,fk0,fj1,fi0),
+                       geom.Area1(m,fk1,fj0,fi0), b.x1f(m,fk1,fj0,fi0),
+                       geom.Area1(m,fk1,fj1,fi0), b.x1f(m,fk1,fj1,fi0));
+        if (i==cie) {
+          int fip = finei+2;
+          cb.x1f(m,k,j,i+1) =
+            WeightedMean(geom.Area1(m,finek  ,finej  ,fip), b.x1f(m,finek  ,finej  ,fip),
+                         geom.Area1(m,finek  ,finej+1,fip), b.x1f(m,finek  ,finej+1,fip),
+                         geom.Area1(m,finek+1,finej  ,fip), b.x1f(m,finek+1,finej  ,fip),
+                         geom.Area1(m,finek+1,finej+1,fip), b.x1f(m,finek+1,finej+1,fip));
+        }
+        // restrict B2 (children tile the coarse x2-face in x3 and x1)
+        cb.x2f(m,k,j,i) =
+          WeightedMean(geom.Area2(m,fk0,fj0,fi0), b.x2f(m,fk0,fj0,fi0),
+                       geom.Area2(m,fk0,fj0,fi1), b.x2f(m,fk0,fj0,fi1),
+                       geom.Area2(m,fk1,fj0,fi0), b.x2f(m,fk1,fj0,fi0),
+                       geom.Area2(m,fk1,fj0,fi1), b.x2f(m,fk1,fj0,fi1));
+        if (j==cje) {
+          int fjp = finej+2;
+          cb.x2f(m,k,j+1,i) =
+            WeightedMean(geom.Area2(m,finek  ,fjp,finei  ), b.x2f(m,finek  ,fjp,finei  ),
+                         geom.Area2(m,finek  ,fjp,finei+1), b.x2f(m,finek  ,fjp,finei+1),
+                         geom.Area2(m,finek+1,fjp,finei  ), b.x2f(m,finek+1,fjp,finei  ),
+                         geom.Area2(m,finek+1,fjp,finei+1), b.x2f(m,finek+1,fjp,finei+1));
+        }
+        // restrict B3 (children tile the coarse x3-face in x1 and x2)
+        cb.x3f(m,k,j,i) =
+          WeightedMean(geom.Area3(m,fk0,fj0,fi0), b.x3f(m,fk0,fj0,fi0),
+                       geom.Area3(m,fk0,fj0,fi1), b.x3f(m,fk0,fj0,fi1),
+                       geom.Area3(m,fk0,fj1,fi0), b.x3f(m,fk0,fj1,fi0),
+                       geom.Area3(m,fk0,fj1,fi1), b.x3f(m,fk0,fj1,fi1));
+        if (k==cke) {
+          int fkp = finek+2;
+          cb.x3f(m,k+1,j,i) =
+            WeightedMean(geom.Area3(m,fkp,finej  ,finei  ), b.x3f(m,fkp,finej  ,finei  ),
+                         geom.Area3(m,fkp,finej  ,finei+1), b.x3f(m,fkp,finej  ,finei+1),
+                         geom.Area3(m,fkp,finej+1,finei  ), b.x3f(m,fkp,finej+1,finei  ),
+                         geom.Area3(m,fkp,finej+1,finei+1), b.x3f(m,fkp,finej+1,finei+1));
+        }
       }
     });
   }

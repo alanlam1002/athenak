@@ -109,10 +109,27 @@ def test_cylindrical_positive_x1min_succeeds():
         testutils.cleanup()
 
 
-def test_multilevel_with_curvilinear_fails():
+def test_multilevel_with_curvilinear_hydro_succeeds():
+    # Cell-centered restriction/prolongation/flux-correction are now volume- and
+    # area-weighted, so hydro + curvilinear + refinement is supported. This used to be
+    # rejected; the coverage is kept (rather than deleted) and inverted, so that a
+    # regression which re-broke conservation-safe refinement would be noticed.
     flags = ["mesh/coord=spherical_polar", "mesh_refinement/refinement=static"]
     try:
-        _run_fails(flags)
+        _run_ok(flags)
+    finally:
+        testutils.cleanup()
+
+
+def test_multilevel_with_curvilinear_mhd_fails():
+    # The face-centered half is NOT done: RestrictFC/ProlongFC* still average without
+    # Area weighting and flux_correct_fc.cpp averages EMFs without Len weighting, so MHD
+    # + curvilinear + refinement would break both conservation and div(B)=0. Must stay
+    # a hard error until that lands.
+    flags = ["mesh/coord=spherical_polar", "mesh_refinement/refinement=static"]
+    try:
+        with pytest.raises(RuntimeError):
+            testutils.run("inputs/ut_coord_validation_mhd.athinput", flags)
     finally:
         testutils.cleanup()
 

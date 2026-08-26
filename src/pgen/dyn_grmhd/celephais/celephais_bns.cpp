@@ -52,6 +52,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -118,6 +119,8 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   using export_utils::UY;
   using export_utils::UZ;
   using export_utils::NUM_QUANTS;
+  constexpr int VARSCAL = NUM_QUANTS;
+  constexpr int MAX_NUM_QUANTS = NUM_QUANTS + 1;
   // coord_vector / to_int / vec_ary_t / CoordFields live in the global namespace
   // (declared at file scope in coord_fields.hpp); resolved by unqualified lookup.
 
@@ -159,6 +162,8 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   }
 
   kadath_config<BIN_INFO> bconfig(fname);
+  const bool is_def = bconfig.is_def();
+  const int num_quants = NUM_QUANTS + static_cast<int>(is_def);
 
   const double h_cut      = bconfig.eos<double>(HCUT, BCO1);
   const std::string eos_file = bconfig.eos<std::string>(EOSFILE, BCO1);
@@ -187,9 +192,29 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   Scalar logh (space, fin);
   Scalar phi  (space, fin);
 
+  // DEF appends one scalar slot after phi.  For massless DEF this is physical
+  // varscal.  Massive DEF stores xiScal followed by the Sweight used when the
+  // dataset was written; recover physical varscal with that saved weight.
+  std::unique_ptr<Scalar> varscal;
+  if (is_def) {
+    Scalar scalar_slot(space, fin);
+    varscal = std::make_unique<Scalar>(scalar_slot);
+    if (bconfig.field(SWEIGHT)) {
+      Scalar sweight(space, fin);
+      for (int d = 0; d < space.get_nbr_domains(); ++d) {
+        Index pos(space.get_domain(d)->get_nbr_points());
+        do {
+          varscal->set_domain(d).set(pos) =
+              scalar_slot(d)(pos) * sweight(d)(pos);
+        } while (pos.inc());
+      }
+      varscal->std_base();
+    }
+  }
+
   // Build the quants array: references to const Scalar fields.
   std::vector<std::reference_wrapper<const Scalar>> quants;
-  quants.reserve(NUM_QUANTS);
+  quants.reserve(MAX_NUM_QUANTS);
   for (int i = 0; i < NUM_QUANTS; ++i)
     quants.push_back(std::cref(conf));  // placeholder, overwritten below
 
@@ -330,12 +355,15 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   quants[UX] = std::cref(vel_kad(1));
   quants[UY] = std::cref(vel_kad(2));
   quants[UZ] = std::cref(vel_kad(3));
+  if (is_def)
+    quants.push_back(std::cref(*varscal));  // physical varscal is the final lane
 
-  std::array<const Scalar*, NUM_QUANTS> quant_fields{};
-  for (int kq = 0; kq < NUM_QUANTS; ++kq)
+  std::array<const Scalar*, MAX_NUM_QUANTS> quant_fields{};
+  for (int kq = 0; kq < num_quants; ++kq)
     quant_fields[kq] = &quants[kq].get();
   bns_field_transfer::scalar_source_batch quant_batch(
-      std::span<const Scalar* const>(quant_fields.data(), quant_fields.size()));
+      std::span<const Scalar* const>(quant_fields.data(),
+                                     static_cast<std::size_t>(num_quants)));
   // Prepare all mutable coefficient state before the host-parallel fill.
   quant_batch.prepare_coefficients();
 
@@ -482,7 +510,7 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
     // Evaluate one field at four adjacent Cartesian points. Same-domain tiles
     // share the coefficient stream and expose four independent recurrences;
     // domain-crossing tiles retain exact scalar evaluation.
-    std::array<std::array<double, NUM_QUANTS>, point_lane_width> qv{};
+    std::array<std::array<double, MAX_NUM_QUANTS>, point_lane_width> qv{};
     std::array<double, point_lane_width> h_enth{};
     std::array<bool, point_lane_width> is_vacuum{};
     if (batch_fields) {
@@ -498,6 +526,13 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
           for (int lane = 0; lane < point_lane_width; ++lane)
             qv[lane][kq] = field_values[lane];
         }
+        // Unlike velocity, the DEF scalar has a physical exterior tail and
+        // must be evaluated even where the fluid enthalpy marks vacuum.
+        if (is_def) {
+          quant_batch.value_points4(located_ptrs, VARSCAL, field_values);
+          for (int lane = 0; lane < point_lane_width; ++lane)
+            qv[lane][VARSCAL] = field_values[lane];
+        }
         for (int lane = 0; lane < lane_count; ++lane) {
           h_enth[lane] = Kokkos::exp(qv[lane][H]);
           is_vacuum[lane] = (h_enth[lane] <= 1.);
@@ -507,7 +542,7 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
           }
         }
       } else {
-        for (int kq = 0; kq < NUM_QUANTS; ++kq) {
+        for (int kq = 0; kq < num_quants; ++kq) {
           quant_batch.value_points4(located_ptrs, kq, field_values);
           for (int lane = 0; lane < point_lane_width; ++lane)
             qv[lane][kq] = field_values[lane];
@@ -515,7 +550,7 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
       }
     } else {
       for (int lane = 0; lane < lane_count; ++lane)
-        for (int kq = 0; kq < NUM_QUANTS; ++kq)
+        for (int kq = 0; kq < num_quants; ++kq)
           qv[lane][kq] = quants[kq].get().val_point(points[lane]);
     }
 

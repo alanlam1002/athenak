@@ -46,6 +46,21 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto e2 = efld.x2e;
   auto e3 = efld.x3e;
   auto &geom = pmy_pack->pgeom->geom_data;
+  auto &mbsize = pmy_pack->pmb->mb_size;
+  const bool uniform = geom.cells_uniform;
+
+  // UNIFORM-SPACING FAST PATH, applied to each of the three curl kernels below. On a
+  // uniform grid the Stokes form reduces to upstream's flat-dx form ANALYTICALLY --
+  // Len3/Area1 == dx3/(dx2*dx3) == 1/dx2 -- but not in floating point: multiplying each
+  // EMF by an edge length and dividing the difference by a face area rounds twice where
+  // upstream rounds once. Taking upstream's expression verbatim keeps a cartesian run
+  // BITWISE identical to a pre-curvilinear build. Same predicate
+  // (GeomData::cells_uniform) and same reasoning as reconstruct/recon_geom.hpp and
+  // ProlongCC, where the branch already found that "mathematically equal but
+  // differently associated" was enough to
+  // break real tests. Here it moved the GR monopole horizon rotation rate from inside its
+  // 3% tolerance to 3.5%. The branch is on a kernel-wide constant, so it is hoisted
+  // out of the loop by the compiler and costs nothing per cell.
 
   //---- update B1 (only for 2D/3D problems)
   if (multi_d) {
@@ -53,13 +68,20 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
     auto bx1f_old = b1.x1f;
     par_for("CT-b1", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie+1,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      Real area1 = geom.Area1(m,k,j,i);
       bx1f(m,k,j,i) = gam0*bx1f(m,k,j,i) + gam1*bx1f_old(m,k,j,i);
-      bx1f(m,k,j,i) -= beta_dt*(geom.Len3(m,k,j+1,i)*e3(m,k,j+1,i)
-                                - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area1;
-      if (three_d) {
-        bx1f(m,k,j,i) += beta_dt*(geom.Len2(m,k+1,j,i)*e2(m,k+1,j,i)
-                                  - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area1;
+      if (uniform) {
+        bx1f(m,k,j,i) -= beta_dt*(e3(m,k,j+1,i) - e3(m,k,j,i))/mbsize.d_view(m).dx2;
+        if (three_d) {
+          bx1f(m,k,j,i) += beta_dt*(e2(m,k+1,j,i) - e2(m,k,j,i))/mbsize.d_view(m).dx3;
+        }
+      } else {
+        Real area1 = geom.Area1(m,k,j,i);
+        bx1f(m,k,j,i) -= beta_dt*(geom.Len3(m,k,j+1,i)*e3(m,k,j+1,i)
+                                  - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area1;
+        if (three_d) {
+          bx1f(m,k,j,i) += beta_dt*(geom.Len2(m,k+1,j,i)*e2(m,k+1,j,i)
+                                    - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area1;
+        }
       }
     });
   }
@@ -69,13 +91,20 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto bx2f_old = b1.x2f;
   par_for("CT-b2", DevExeSpace(), 0, nmb1, ks, ke, js, je+1, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real area2 = geom.Area2(m,k,j,i);
     bx2f(m,k,j,i) = gam0*bx2f(m,k,j,i) + gam1*bx2f_old(m,k,j,i);
-    bx2f(m,k,j,i) += beta_dt*(geom.Len3(m,k,j,i+1)*e3(m,k,j,i+1)
-                              - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area2;
-    if (three_d) {
-      bx2f(m,k,j,i) -= beta_dt*(geom.Len1(m,k+1,j,i)*e1(m,k+1,j,i)
-                                - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area2;
+    if (uniform) {
+      bx2f(m,k,j,i) += beta_dt*(e3(m,k,j,i+1) - e3(m,k,j,i))/mbsize.d_view(m).dx1;
+      if (three_d) {
+        bx2f(m,k,j,i) -= beta_dt*(e1(m,k+1,j,i) - e1(m,k,j,i))/mbsize.d_view(m).dx3;
+      }
+    } else {
+      Real area2 = geom.Area2(m,k,j,i);
+      bx2f(m,k,j,i) += beta_dt*(geom.Len3(m,k,j,i+1)*e3(m,k,j,i+1)
+                                - geom.Len3(m,k,j,i)*e3(m,k,j,i))/area2;
+      if (three_d) {
+        bx2f(m,k,j,i) -= beta_dt*(geom.Len1(m,k+1,j,i)*e1(m,k+1,j,i)
+                                  - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area2;
+      }
     }
   });
 
@@ -84,13 +113,20 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
   auto bx3f_old = b1.x3f;
   par_for("CT-b3", DevExeSpace(), 0, nmb1, ks, ke+1, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real area3 = geom.Area3(m,k,j,i);
     bx3f(m,k,j,i) = gam0*bx3f(m,k,j,i) + gam1*bx3f_old(m,k,j,i);
-    bx3f(m,k,j,i) -= beta_dt*(geom.Len2(m,k,j,i+1)*e2(m,k,j,i+1)
-                              - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area3;
-    if (multi_d) {
-      bx3f(m,k,j,i) += beta_dt*(geom.Len1(m,k,j+1,i)*e1(m,k,j+1,i)
-                                - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area3;
+    if (uniform) {
+      bx3f(m,k,j,i) -= beta_dt*(e2(m,k,j,i+1) - e2(m,k,j,i))/mbsize.d_view(m).dx1;
+      if (multi_d) {
+        bx3f(m,k,j,i) += beta_dt*(e1(m,k,j+1,i) - e1(m,k,j,i))/mbsize.d_view(m).dx2;
+      }
+    } else {
+      Real area3 = geom.Area3(m,k,j,i);
+      bx3f(m,k,j,i) -= beta_dt*(geom.Len2(m,k,j,i+1)*e2(m,k,j,i+1)
+                                - geom.Len2(m,k,j,i)*e2(m,k,j,i))/area3;
+      if (multi_d) {
+        bx3f(m,k,j,i) += beta_dt*(geom.Len1(m,k,j+1,i)*e1(m,k,j+1,i)
+                                  - geom.Len1(m,k,j,i)*e1(m,k,j,i))/area3;
+      }
     }
   });
 

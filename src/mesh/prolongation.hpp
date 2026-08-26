@@ -357,8 +357,31 @@ void ProlongFCInternalValues(const int m, const int fk, const int fj, const int 
   };
   // An internal face is strictly inside a coarse cell, so it never lands on r=0 or on
   // the polar axis and its area is positive; the guard is defensive only.
-  auto ToB = [&](const Real phi, const Real area) {
-    return (cubic || !(area > 0.0)) ? phi : phi/area;
+  //
+  // These take the INDICES and do the lookup inside the `cubic` test, rather than taking
+  // an already-evaluated area. That is load-bearing, not style: C++ evaluates a function
+  // argument before the callee runs, so a single `ToB(phi, geom.Area1(m,...))` helper
+  // reads GeomData even on the cubic fast path that never uses the value -- and that read
+  // is OUT OF BOUNDS on the regrid path. MeshRefinement::RefineFC indexes `geom` with NEW
+  // MeshBlock ids, but only the curvilinear systems take its `early_rebuild` branch which
+  // resizes the geometry first; for cartesian the arrays are still sized to the OLD,
+  // smaller block count. Measured on Aurora/PVC: a GPU page fault ("Segmentation fault
+  // from GPU ... NotPresent, Read") in every 3D cartesian AMR MHD test, while on CPU the
+  // same read silently returns adjacent heap and the suite stays green. Keep them lazy.
+  auto ToB1 = [&](const Real phi, const int kk, const int jj, const int ii) {
+    if (cubic) return phi;
+    const Real area = geom.Area1(m,kk,jj,ii);
+    return (area > 0.0) ? phi/area : phi;
+  };
+  auto ToB2 = [&](const Real phi, const int kk, const int jj, const int ii) {
+    if (cubic) return phi;
+    const Real area = geom.Area2(m,kk,jj,ii);
+    return (area > 0.0) ? phi/area : phi;
+  };
+  auto ToB3 = [&](const Real phi, const int kk, const int jj, const int ii) {
+    if (cubic) return phi;
+    const Real area = geom.Area3(m,kk,jj,ii);
+    return (area > 0.0) ? phi/area : phi;
   };
 
   // Prolongate internal fields in 3D
@@ -388,30 +411,30 @@ void ProlongFCInternalValues(const int m, const int fk, const int fj, const int 
     Uxx *= 0.125;  Vyy *= 0.125;  Wzz *= 0.125;
     Uxyz *= 0.0625; Vxyz *= 0.0625; Wxyz *= 0.0625;
 
-    v1[0] = ToB(0.5*(P1(fk  ,fj  ,fi  ) + P1(fk  ,fj  ,fi+2))
-              + Uxx - Vxyz - Wxyz, geom.Area1(m,fk  ,fj  ,fi+1));
-    v1[1] = ToB(0.5*(P1(fk  ,fj+1,fi  ) + P1(fk  ,fj+1,fi+2))
-              + Uxx - Vxyz + Wxyz, geom.Area1(m,fk  ,fj+1,fi+1));
-    v1[2] = ToB(0.5*(P1(fk+1,fj  ,fi  ) + P1(fk+1,fj  ,fi+2))
-              + Uxx + Vxyz - Wxyz, geom.Area1(m,fk+1,fj  ,fi+1));
-    v1[3] = ToB(0.5*(P1(fk+1,fj+1,fi  ) + P1(fk+1,fj+1,fi+2))
-              + Uxx + Vxyz + Wxyz, geom.Area1(m,fk+1,fj+1,fi+1));
-    v2[0] = ToB(0.5*(P2(fk  ,fj  ,fi  ) + P2(fk  ,fj+2,fi  ))
-              + Vyy - Uxyz - Wxyz, geom.Area2(m,fk  ,fj+1,fi  ));
-    v2[1] = ToB(0.5*(P2(fk  ,fj  ,fi+1) + P2(fk  ,fj+2,fi+1))
-              + Vyy - Uxyz + Wxyz, geom.Area2(m,fk  ,fj+1,fi+1));
-    v2[2] = ToB(0.5*(P2(fk+1,fj  ,fi  ) + P2(fk+1,fj+2,fi  ))
-              + Vyy + Uxyz - Wxyz, geom.Area2(m,fk+1,fj+1,fi  ));
-    v2[3] = ToB(0.5*(P2(fk+1,fj  ,fi+1) + P2(fk+1,fj+2,fi+1))
-              + Vyy + Uxyz + Wxyz, geom.Area2(m,fk+1,fj+1,fi+1));
-    v3[0] = ToB(0.5*(P3(fk+2,fj  ,fi  ) + P3(fk  ,fj  ,fi  ))
-              + Wzz - Uxyz - Vxyz, geom.Area3(m,fk+1,fj  ,fi  ));
-    v3[1] = ToB(0.5*(P3(fk+2,fj  ,fi+1) + P3(fk  ,fj  ,fi+1))
-              + Wzz - Uxyz + Vxyz, geom.Area3(m,fk+1,fj  ,fi+1));
-    v3[2] = ToB(0.5*(P3(fk+2,fj+1,fi  ) + P3(fk  ,fj+1,fi  ))
-              + Wzz + Uxyz - Vxyz, geom.Area3(m,fk+1,fj+1,fi  ));
-    v3[3] = ToB(0.5*(P3(fk+2,fj+1,fi+1) + P3(fk  ,fj+1,fi+1))
-              + Wzz + Uxyz + Vxyz, geom.Area3(m,fk+1,fj+1,fi+1));
+    v1[0] = ToB1(0.5*(P1(fk  ,fj  ,fi  ) + P1(fk  ,fj  ,fi+2))
+              + Uxx - Vxyz - Wxyz, fk  ,fj  ,fi+1);
+    v1[1] = ToB1(0.5*(P1(fk  ,fj+1,fi  ) + P1(fk  ,fj+1,fi+2))
+              + Uxx - Vxyz + Wxyz, fk  ,fj+1,fi+1);
+    v1[2] = ToB1(0.5*(P1(fk+1,fj  ,fi  ) + P1(fk+1,fj  ,fi+2))
+              + Uxx + Vxyz - Wxyz, fk+1,fj  ,fi+1);
+    v1[3] = ToB1(0.5*(P1(fk+1,fj+1,fi  ) + P1(fk+1,fj+1,fi+2))
+              + Uxx + Vxyz + Wxyz, fk+1,fj+1,fi+1);
+    v2[0] = ToB2(0.5*(P2(fk  ,fj  ,fi  ) + P2(fk  ,fj+2,fi  ))
+              + Vyy - Uxyz - Wxyz, fk  ,fj+1,fi);
+    v2[1] = ToB2(0.5*(P2(fk  ,fj  ,fi+1) + P2(fk  ,fj+2,fi+1))
+              + Vyy - Uxyz + Wxyz, fk  ,fj+1,fi+1);
+    v2[2] = ToB2(0.5*(P2(fk+1,fj  ,fi  ) + P2(fk+1,fj+2,fi  ))
+              + Vyy + Uxyz - Wxyz, fk+1,fj+1,fi);
+    v2[3] = ToB2(0.5*(P2(fk+1,fj  ,fi+1) + P2(fk+1,fj+2,fi+1))
+              + Vyy + Uxyz + Wxyz, fk+1,fj+1,fi+1);
+    v3[0] = ToB3(0.5*(P3(fk+2,fj  ,fi  ) + P3(fk  ,fj  ,fi  ))
+              + Wzz - Uxyz - Vxyz, fk+1,fj  ,fi);
+    v3[1] = ToB3(0.5*(P3(fk+2,fj  ,fi+1) + P3(fk  ,fj  ,fi+1))
+              + Wzz - Uxyz + Vxyz, fk+1,fj  ,fi+1);
+    v3[2] = ToB3(0.5*(P3(fk+2,fj+1,fi  ) + P3(fk  ,fj+1,fi  ))
+              + Wzz + Uxyz - Vxyz, fk+1,fj+1,fi);
+    v3[3] = ToB3(0.5*(P3(fk+2,fj+1,fi+1) + P3(fk  ,fj+1,fi+1))
+              + Wzz + Uxyz + Vxyz, fk+1,fj+1,fi+1);
 
   // Prolongate internal fields in 2D
   } else {
@@ -419,14 +442,10 @@ void ProlongFCInternalValues(const int m, const int fk, const int fj, const int 
                     - P2(fk,fj+2,fi  ) + P2(fk,fj,  fi  ));
     Real tmp2 = 0.25*(P1(fk,fj,  fi  ) - P1(fk,fj,  fi+2)
                     - P1(fk,fj+1,fi  ) + P1(fk,fj+1,fi+2));
-    v1[0] = ToB(0.5*(P1(fk,fj,  fi  ) + P1(fk,fj,  fi+2)) + tmp1,
-                geom.Area1(m,fk,fj  ,fi+1));
-    v1[1] = ToB(0.5*(P1(fk,fj+1,fi  ) + P1(fk,fj+1,fi+2)) + tmp1,
-                geom.Area1(m,fk,fj+1,fi+1));
-    v2[0] = ToB(0.5*(P2(fk,fj,  fi  ) + P2(fk,fj+2,fi  )) + tmp2,
-                geom.Area2(m,fk,fj+1,fi  ));
-    v2[1] = ToB(0.5*(P2(fk,fj,  fi+1) + P2(fk,fj+2,fi+1)) + tmp2,
-                geom.Area2(m,fk,fj+1,fi+1));
+    v1[0] = ToB1(0.5*(P1(fk,fj,  fi  ) + P1(fk,fj,  fi+2)) + tmp1, fk,fj  ,fi+1);
+    v1[1] = ToB1(0.5*(P1(fk,fj+1,fi  ) + P1(fk,fj+1,fi+2)) + tmp1, fk,fj+1,fi+1);
+    v2[0] = ToB2(0.5*(P2(fk,fj,  fi  ) + P2(fk,fj+2,fi  )) + tmp2, fk,fj+1,fi);
+    v2[1] = ToB2(0.5*(P2(fk,fj,  fi+1) + P2(fk,fj+2,fi+1)) + tmp2, fk,fj+1,fi+1);
   }
   return;
 }

@@ -7397,3 +7397,117 @@ src/cfc/
       validated AMR depth + `puncture_mass=1.0`, `star_center_x1=20.0`,
       `kappa≈5.731e-4`, `rhoc=3.24e-2`, `gamma=5/3`, `dfloor<=1e-24`) is
       the next, still-unstarted stage.
+
+54. **(2026-08-17/18) Phase B item 10 COMPLETE: a WD-like TOV star is
+    tidally disrupted by a BH puncture, end to end. Getting there required
+    rejecting the first (1e5 Msun) design over three problems, one of them
+    a silent correctness bug that short smoke tests structurally cannot
+    catch.** New fixture `inputs/dyn_grmhd/cfc_tde_wd_imbh.athinput`.
+    - **The rejected first attempt** (`cfc_tde_wd_20rg.athinput`, built and
+      run but deliberately NOT committed): 1e5 Msun BH + 0.7 Msun/1e4 km
+      star at `x=20 r_g`. Its initial data was provably *correct* (see the
+      `psi^6` test below), and it evolved 20 cycles cleanly -- yet it was
+      unusable, for three independent reasons:
+      1. **CORRECTNESS: the star falls out of its own refined box.** The
+         refinement was a static box centered on the star's *initial*
+         position (half-width 0.15) but the star has radius 0.069, leaving
+         only 0.081 of margin. Under free-fall from `r=20`
+         (`a ~ M/r^2 = 0.0025`) the star's leading edge exits the fine grid
+         at **t~8 M**, out of the **~96 M** needed to reach the tidal
+         radius -- after which it sits on root cells with `dx=1.0`, i.e.
+         **14x larger than the entire star**, and is silently erased. The
+         `nlim=20` test reached only `t=0.27`, which is precisely why this
+         never surfaced. **Lesson: for any infall/orbit problem, a smoke
+         test must run past the time the feature leaves its refined
+         region, or it validates nothing about the trajectory.**
+      2. **COST**: AthenaK has **no subcycling** (verified: no `subcycl`
+         anywhere in `src/`), so global `dt` is set by the finest level.
+         That config needed ~48-61k cycles, with ~96 of the ~99 M being
+         featureless free-fall buying no physics.
+      3. **SCIENCE**: `r_t = R_*(M_BH/M_*)^(1/3) = 3.5 r_g` is **inside the
+         ISCO (6 r_g)** -- these parameters sit essentially at the Hills
+         mass for a white dwarf, so the star is swallowed nearly whole
+         (a plunge with a narrow `3.5 -> 2 r_g` tidal window), producing no
+         debris streams or fallback curve. Resource-independent: no amount
+         of compute fixes it.
+    - **Redesign to a 1e4 Msun IMBH.** Same star, `M_BH` reduced by 10x.
+      Conversions via `rho_unit ~ M^-2`, `K_unit ~ M^(2(Gamma-1))` with
+      `lambda = M_BH/Msun = 1e4`: `rhoc = 3.24e-12*lambda^2 = 3.24e-4`,
+      `kappa = 2.66e3*lambda^(-4/3) = 1.2346626297e-2`, `gamma=5/3`,
+      `puncture_mass=1.0`, `star_center_x1=30.0`, `dfloor=1e-24`. This
+      simultaneously fixes all three: `r_t = 16.4 r_g` (well outside ISCO
+      -> genuine disruption), the star is now `0.677 r_g` in radius so only
+      **5** refinement levels are needed (inside the 5 validated long ago,
+      so item 53's 8-level result is not even load-bearing), and the cycle
+      count drops by ~10x.
+    - **Static "tube" refinement instead of dynamic AMR** -- the key design
+      move. A finest MeshBlock spans `16*dx_fine`, so tube cost collapses
+      as levels are removed: covering the whole trajectory costs ~8,800
+      finest blocks at the rejected config's level 8, but only ~4,350 at
+      level 5. So `<refined_region1>` is a tube `x1 in [-2,32]`,
+      `x2,x3 in [-2,2]` spanning the entire infall path *including the
+      puncture*, and the star never leaves the fine grid. **This
+      deliberately avoids `refinement = adaptive`, and with it item 38/39's
+      `SetNeighbors` registration bug, which item 42 records as still open
+      and unfixed** -- regridding is exactly what a falling star would
+      force every few cycles, so this removes the single biggest technical
+      risk in the TDE plan. Measured mesh: 8,608 MeshBlocks total, 4,352 at
+      the finest level (the proper-nesting multiplier is ~2.0, not the 3.5
+      first assumed).
+    - **`mg_threshold` 1e-10 -> 1e-9 is a 2.9x speedup for free**, found by
+      a controlled A/B over identical `t=40` runs. At `1e-10` the defect
+      *stalls* at a repeating `~1.08e-10`/`1.14e-10`, so every solve burned
+      all 40 V-cycles and still printed "Failed to converge" (**763**
+      occurrences, ~6/cycle -- i.e. the threshold sat below the achievable
+      floor). At `1e-9`: **zero** convergence failures and **9.9 vs 28.4
+      s/cycle**, with physics unchanged (`rho-max` agreed to `<5e-5`
+      relative, `t=0` mass to `1e-10`, mass conserved to `4.1e-9`). Item
+      51's `nlim` guard was what had been silently absorbing those
+      failures.
+    - **Initial-data validation** (`nlim=0`, 640 ranks): GR TOV integrator
+      gives `R_iso=0.690724`, `M=7.46932e-05` (= 0.747 Msun -- ratio 0.9999
+      vs the analytic target), `Mb=7.46966e-05`. The **`psi^6` identity is
+      a sharp test worth reusing**: the grid-integrated `.hst` mass exceeds
+      the TOV baryon mass purely by the conformal volume factor, and
+      `psi(30)^6 = (1+1/60)^6 = 1.10426` vs measured `1.10430` -- **0.003%
+      agreement**. (The same test explains the earlier, initially puzzling
+      1.16x gap at `x=20`: `psi(20)^6 = 1.1597` vs measured `1.1595`.)
+      Solver converged in one iteration, `1.4e-4 -> 2.1e-12`.
+    - **Trajectory validation -- the check whose absence hid problem 1**:
+      tracked the density peak's location *and its local `dx`* across
+      every output. `dx = 0.03125` (finest level) at the peak from `x=30`
+      all the way down to `x=6.9`. The star stayed fully resolved through
+      the entire infall and disruption.
+    - **Production result (job 253843, 16 nodes/640 ranks, 4,171 cycles,
+      stopped by the 12 h walltime at `t=191.4` of `tlim=200`)**: a clean
+      tidal disruption. `rho-max` rises to a peak of `4.189e-4` (**+30%**)
+      at `t=89.7` (star at `1.57 r_t`) as it is compressed, falls back
+      below its initial central density at `t=134`, and by `t=191.4` has
+      dropped **11.9x** from peak while the star has stretched into an
+      elongated debris cloud at `x=6.9` (`0.42 r_t`). Mass conserved to
+      `1.9e-7` relative over the whole run. Plots:
+      `rhomax_vs_time.png`, `star_snapshots.png` in
+      `/sakura/ptmp/tlam/athenak_run/cfc_tde_imbh_prod/`.
+    - **Two caveats on the science, recorded rather than papered over**:
+      (a) the star starts at `1.83 r_t`, where the tidal perturbation is
+      already `(1/1.83)^3 ~ 16%`, but it is constructed as an *isolated*
+      TOV equilibrium -- so an unknown part of the +30% pre-disruption
+      compression is the star relaxing into a tidal field it was not built
+      in, not physical tidal compression. Starting at `r~50` (`3 r_t`,
+      ~3.5% perturbation) is affordable now and would clean this up.
+      (b) `dt` fell from `0.0988` to `0.0257` over the run as the star fell
+      inward, so cycle counts estimated from a constant `dt` (or from
+      `cfl*dx_finest`, which was ~8x too pessimistic here since `gr_dt=true`
+      is far more permissive) are unreliable -- estimate from a measured
+      `dt` trajectory instead.
+    - Also fixed here, per plan: **restart checkpointing** (`file_type=rst`,
+      absent before and unacceptable for a multi-thousand-cycle run) and
+      **output cadence** (both `bin` outputs were `dcycle=1`, which would
+      have written ~4,000 dumps; now `dt`-based). Note restart files are
+      ~24 GB each -- the production directory reached 117 GB, so prune.
+    - **Minor, noted for future analysis work**: `vis/python/bin_convert.py`
+      splits header lines on *every* `=`, so an athinput `<comment>`
+      containing e.g. `x=20 r_g` crashes it (`split("=", 1)` would fix it).
+      A corrected standalone reader was used for all analysis here. Also,
+      atmosphere pressure `~1e-46` underflows float32 output and reads as
+      `0.0`; harmless but confusing.

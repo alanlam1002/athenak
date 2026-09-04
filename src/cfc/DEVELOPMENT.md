@@ -7511,3 +7511,104 @@ src/cfc/
       A corrected standalone reader was used for all analysis here. Also,
       atmosphere pressure `~1e-46` underflows float32 output and reads as
       `0.0`; harmless but confusing.
+
+55. **(2026-09-03/04) Tracked two-box AMR replaces the refinement tube, and
+    -- the actual point of the exercise -- the item 38/39 `SetNeighbors`
+    regrid bug does NOT bite this configuration.** New fixture
+    `inputs/dyn_grmhd/cfc_tde_wd_imbh_amr.athinput` plus `TDERefineTracker`
+    in `dyngr_tov.cpp`. User's observation that started this: refining the
+    space *between* the BH and the star is unnecessary.
+    - **The waste was real.** Item 54's tube spends ~90% of its
+      finest-level cost on space that is empty at any given instant: 4,352
+      finest MeshBlocks for the tube versus 1,024 for two boxes.
+    - **A moving box requires `refinement = adaptive`; there is no cheaper
+      route.** `<refined_regionN>` blocks are read only in
+      `BuildTreeFromScratch` (`build_tree.cpp:64-170`), and
+      `BuildTreeFromRestart` rebuilds the tree purely from the restart
+      file's stored logical-location list (`build_tree.cpp:431-434`), so
+      editing the parfile and restarting to reposition a box is **silently
+      a no-op**. That ruled out a "run in segments, move the box between
+      restarts" workaround.
+    - **z4c's `CompactObjectTracker` is unreachable from CFC**, so it was
+      not ported: it is owned by `Z4c` (`z4c.hpp:255`), and
+      `meshblock_pack.cpp:237-243` makes `<cfc>` and `<z4c>` mutually
+      exclusive with a fatal error, so `pz4c` is always `nullptr` here and
+      `ptracker`/`Z4c_AMR` never exist. The template actually used is
+      `dynbbh.cpp:1051-1119`'s `RefineTracker`, a pgen-local
+      `user_ref_func` needing no z4c object at all. (Note `dynbbh`'s
+      version writes `refine_flag.d_view` from a *host* loop, which works
+      only because the views alias on a CPU build; `TDERefineTracker` uses
+      `h_view` like `z4c_amr.cpp` does, which is also correct for GPU.)
+    - **Two design traps hit and fixed, both invisible in a short test:**
+      1. *Adaptive alone cannot build the mesh.* There is no initial-AMR
+         pass, and `CheckForRefinement`'s cooldown (`ncyc_since_ref`,
+         initialised to 0, vs `refinement_interval` --
+         `mesh_refinement.cpp:268`) blocks all refinement for the first
+         `refinement_interval` cycles and then allows only one level per
+         interval. From the root grid that is ~30 cycles to reach level 5,
+         during which the star (`R=0.677`) sits on `dx=1.0` cells and is
+         destroyed. First attempt duly reported "0 MeshBlocks created, 0
+         deleted by AMR". **Fix: pair `refinement = adaptive` with static
+         `<refined_regionN>` blocks that seed the initial mesh** -- the
+         pattern `kadath_bns.athinput` already uses.
+      2. *The analytic trajectory is not good enough.* The initial
+         implementation placed the star box using Schwarzschild radial
+         free-fall inverted by bisection. Checked against the production
+         run it is accurate to `<0.19` through `t~60` but drifts to `-2.4`
+         by `t~145` -- larger than the box half-width, so the box slides
+         off the star -- because the collapsing lapse slows coordinate
+         infall relative to the areal result. Widening the box is not an
+         escape: radius 4 costs ~4,096 finest blocks, i.e. the tube again.
+         **Fix: a real density-maximum tracker** (Kokkos `MaxLoc` reduction
+         over `w0(IDN)`, then `MPI_MAXLOC` on `{value, rank}` plus a
+         `Bcast` of the winning position so all ranks agree).
+    - **Gate result, run to the full `t=145` on 320 ranks (6h31m, 2,283
+      cycles)**: `5,019` MeshBlocks created and `5,019` deleted by AMR,
+      **zero `NANS_IN_CONS`**, load-balance efficiency `95.6%`, and the
+      star's density peak sat at `dx=0.03125` (finest level) in *every*
+      output dump -- i.e. the tracker never lost it. Against item 54's
+      static tube: `rho-max` agrees to `<=1.0e-3` throughout, and its
+      **peak** -- the physical observable, the +30% pre-disruption
+      compression -- matches to `8e-5` (`4.189522e-4` at `t=89.4` vs
+      `4.189184e-4` at `t=89.7`). Mass drift `1.7e-7` (tube: `1.9e-7`),
+      `alpha-min` drift `-2.8e-5`, `psi^6` identity `1.10430`. The
+      `rho-max` discrepancy stayed bounded near `1e-3` rather than
+      compounding with regrid count, which was the specific worry.
+    - **Measured cost at identical simulated time (`t=145`)**: two-box
+      2,283 cycles / 9.2M MeshBlock-cycles / **7.5M core-seconds**; tube
+      2,299 cycles / 19.8M MeshBlock-cycles / 14.9M core-seconds. **A 2.0x
+      saving.** Note the cycle counts are nearly identical: `dt` is set by
+      the finest level, which is 5 in both, so the saving is entirely in
+      block count and *not* in timestep.
+    - **Correcting an earlier overstatement in this same investigation**:
+      the "~10x" figure quoted while planning counted *finest-level* blocks
+      only (4,352 -> 1,024). Total block count, which is what actually
+      costs since every block is evolved, only improves 8,608 -> 4,016.
+      The proper-nesting staircase at levels 1-4 barely shrinks when the
+      fine regions get smaller, and it is now the dominant cost -- the
+      outer domain (`+/-32` transverse, out to `x=64`, far larger than the
+      physics needs) is the obvious next lever.
+    - **Scope limit, stated plainly**: this validates regridding through
+      the infall to the tidal radius. The genuinely hardest regime --
+      debris spreading and streaming into the puncture past `t=145`, where
+      the fine region must grow and the level topology gets irregular --
+      is **not** tested. Also note (from the same exploration) that
+      `SetNeighbors` runs on the *static* path too
+      (`build_tree.cpp:268`) and item 39g's reproducer is a pure static
+      case, so neither design is categorically immune; adaptive is simply
+      higher-exposure, and this run says that exposure did not materialise.
+    - **Also found, recorded in `TESTING_NOTES_GPU_MIGRATION.md` since it
+      is GPU-relevant**: `Mesh::ClearMeshUpdated()` (`mesh.hpp:177`) has
+      **no callers anywhere in `src/`**, so after the first regrid
+      `mesh_updated_` stays true for the rest of the run, permanently
+      rebuilding rank-packed bvals metadata and setting `needinit_` on
+      every `MultigridDriver::PrepareForAMR` call. Adaptive refinement pays
+      that forever; it did not stop this run being 2x cheaper, but it is
+      free performance left on the table.
+    - **Self-inflicted mistake worth recording** so it is not re-learned:
+      a first cluster attempt was OOM-killed 20s in because
+      `max_nmb_per_rank` had been left at `6000` from a single-rank
+      `athena -m` check. That parameter sizes the real physics arrays
+      (`mhd.cpp:59`, `bvals.cpp:67`, ... all use
+      `max(nmb_thispack, nmb_maxperrank)`), so on 160 ranks it asked for
+      ~40 GB/rank. It is a per-rank allocation knob, not a global cap.

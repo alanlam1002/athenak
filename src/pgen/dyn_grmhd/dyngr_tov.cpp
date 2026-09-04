@@ -45,6 +45,21 @@ static Real A2(const tov::TOVStar& tov_, const TOVEOS& eos, bool isotropic, Real
 // Prototypes for user-defined BCs and history
 void TOVHistory(HistoryData *pdata, Mesh *pm);
 
+// Prototype for the optional tracked-refinement criterion (<problem>
+// amr_condition = tde_track). See TDERefineTracker's own comment below.
+void TDERefineTracker(MeshBlockPack *pmbp);
+
+namespace {
+// Parameters for TDERefineTracker (<problem> amr_condition = tde_track).
+struct TDERefineParams {
+  Real r0;          // star's initial x-position (<problem> star_center_x1),
+                    // used only to seed x1_star before the first reduction
+  Real rad_bh;      // refinement radius around the (fixed) puncture at the origin
+  Real rad_star;    // refinement radius around the star
+};
+TDERefineParams tde_ref;
+} // namespace
+
 namespace {
 struct TOVParams {
   tov::TOVStar my_tov;
@@ -433,6 +448,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   pgen_final_func = &FinalizeTOV;
   pmbp->padm->SetADMVariables = &SetADMVariablesToTOV;
 
+  // Optional tracked refinement for the TDE setup (<problem> amr_condition).
+  // Default "none" leaves user_ref_func null, so every existing fixture -- all of
+  // which use static refinement -- is completely unaffected.
+  if (pin->GetOrAddString("problem", "amr_condition", "none") == "tde_track") {
+    tde_ref.r0       = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+    tde_ref.rad_bh   = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
+    tde_ref.rad_star = pin->GetOrAddReal("problem", "amr_radius_star", 2.0);
+    user_ref_func = &TDERefineTracker;
+  }
+
   // initialize primitive variables for restart
   if (restart) {
     if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_ideal) {
@@ -608,6 +633,120 @@ void SetADMVariablesToTOV(MeshBlockPack *pmbp) {
     adm.vK_dd(m,0,0,k,j,i) = adm.vK_dd(m,0,1,k,j,i) = adm.vK_dd(m,0,2,k,j,i) = 0.0;
     adm.vK_dd(m,1,1,k,j,i) = adm.vK_dd(m,1,2,k,j,i) = adm.vK_dd(m,2,2,k,j,i) = 0.0;
   });
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void TDERefineTracker(MeshBlockPack *pmbp)
+//! \brief Refinement criterion for the TDE setup: keep a fine box around the BH
+//! puncture (fixed at the origin) and a second one around the infalling star,
+//! instead of the single long static "tube" spanning the whole trajectory that
+//! wastes ~90% of its finest-level cost on space that is empty at any instant.
+//!
+//! Follows dynbbh.cpp's RefineTracker (an analytic-trajectory user_ref_func that
+//! needs no z4c object) rather than z4c's CompactObjectTracker, which is
+//! unreachable here: <cfc> and <z4c> are mutually exclusive (meshblock_pack.cpp),
+//! so pz4c is always nullptr in a CFC run and ptracker never exists.
+//!
+//! The star position comes from the analytic Schwarzschild radial free-fall from
+//! rest, r(t) = (r0/2)(1+cos eta) with t = sqrt(r0^3/2M)(eta+sin eta)/2, inverted
+//! by bisection. Checked against the production run: accurate to <0.19 code units
+//! through t~60, but it drifts badly later (-7 at t=180) because the collapsing
+//! lapse slows coordinate infall relative to the Schwarzschild areal result. So
+//! this is adequate for a short regrid-behaviour test, NOT for production -- a
+//! real run needs a genuine tracker (e.g. a density maximum).
+//!
+//! Note this writes refine_flag through h_view, not d_view. dynbbh.cpp's version
+//! writes d_view from a host loop, which happens to work only because the two
+//! views alias on a CPU-only build; z4c_amr.cpp's RefineTracker uses h_view, and
+//! that is the form that is also correct for a GPU build.
+
+void TDERefineTracker(MeshBlockPack *pmbp) {
+  Mesh *pmesh       = pmbp->pmesh;
+  auto &refine_flag = pmesh->pmr->refine_flag;
+  auto &size        = pmbp->pmb->mb_size;
+  int nmb           = pmbp->nmb_thispack;
+  int mbs           = pmesh->gids_eachrank[global_variable::my_rank];
+
+  // Locate the star as the global maximum of rest-mass density. (The earlier
+  // analytic Schwarzschild free-fall estimate was accurate to <0.19 through
+  // t~60 but drifts to ~-2.4 by t~145 -- larger than a sensible box half-width,
+  // so the box would slide off the star. Widening the box instead is not an
+  // option: radius 4 would cost ~4096 finest MeshBlocks, as much as the tube
+  // this design exists to replace.)
+  Real x1_star = tde_ref.r0, x2_star = 0.0, x3_star = 0.0;
+  {
+    auto &w0_    = pmbp->pmhd->w0;
+    auto &indcs  = pmesh->mb_indcs;
+    int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    const int nmkji = nmb*nkji;
+
+    using MaxLocR = Kokkos::MaxLoc<Real, int>;
+    typename MaxLocR::value_type mxl;
+    Kokkos::parallel_reduce("TDEStarLoc",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+      KOKKOS_LAMBDA(const int &idx, typename MaxLocR::value_type &lmx) {
+        int m = idx/nkji;
+        int k = (idx - m*nkji)/nji;
+        int j = (idx - m*nkji - k*nji)/nx1;
+        int i = (idx - m*nkji - k*nji - j*nx1) + is;
+        k += ks; j += js;
+        Real d = w0_(m,IDN,k,j,i);
+        if (d > lmx.val) { lmx.val = d; lmx.loc = idx; }
+      }, MaxLocR(mxl));
+
+    // Convert this rank's winning flat index back to coordinates.
+    int m = mxl.loc/nkji;
+    int k = (mxl.loc - m*nkji)/nji;
+    int j = (mxl.loc - m*nkji - k*nji)/nx1;
+    int i = (mxl.loc - m*nkji - k*nji - j*nx1);
+    Real xl = CellCenterX(i, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    Real yl = CellCenterX(j, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+    Real zl = CellCenterX(k, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+
+#if MPI_PARALLEL_ENABLED
+    // Pick the globally-densest cell, then broadcast its position from the
+    // owning rank. MPI_MAXLOC on {value, rank} identifies the owner.
+    struct { double val; int rank; } lin, gout;
+    lin.val = static_cast<double>(mxl.val);
+    lin.rank = global_variable::my_rank;
+    MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    Real pos[3] = {xl, yl, zl};
+    MPI_Bcast(pos, 3, MPI_ATHENA_REAL, gout.rank, MPI_COMM_WORLD);
+    xl = pos[0]; yl = pos[1]; zl = pos[2];
+#endif
+    x1_star = xl; x2_star = yl; x3_star = zl;
+  }
+
+  const Real r2_bh   = SQR(tde_ref.rad_bh);
+  const Real r2_star = SQR(tde_ref.rad_star);
+
+  for (int m = 0; m < nmb; ++m) {
+    Real &x1min = size.h_view(m).x1min;
+    Real &x1max = size.h_view(m).x1max;
+    Real &x2min = size.h_view(m).x2min;
+    Real &x2max = size.h_view(m).x2max;
+    Real &x3min = size.h_view(m).x3min;
+    Real &x3max = size.h_view(m).x3max;
+
+    // Distance from each target to the closest point of this MeshBlock's AABB
+    // (0 when the target is inside it), matching z4c_amr.cpp's RefineTracker.
+    auto dist2_to_block = [&](Real px, Real py, Real pz) -> Real {
+      Real cx = std::fmax(x1min, std::fmin(px, x1max));
+      Real cy = std::fmax(x2min, std::fmin(py, x2max));
+      Real cz = std::fmax(x3min, std::fmin(pz, x3max));
+      return SQR(px - cx) + SQR(py - cy) + SQR(pz - cz);
+    };
+
+    bool near_bh   = (dist2_to_block(0.0, 0.0, 0.0)     < r2_bh);
+    bool near_star = (dist2_to_block(x1_star, x2_star, x3_star) < r2_star);
+
+    refine_flag.h_view(m + mbs) = (near_bh || near_star) ? 1 : -1;
+  }
+
+  refine_flag.template modify<HostMemSpace>();
+  refine_flag.template sync<DevExeSpace>();
 }
 
 // Cleanup at the end of the run

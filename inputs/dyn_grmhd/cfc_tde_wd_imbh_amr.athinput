@@ -1,0 +1,192 @@
+# Athena++ (Kokkos version) input file: TDE with TRACKED two-box AMR --
+# a 1e4 Msun IMBH puncture plus a 0.7 Msun WD-like TOV star released from rest at
+# x = 30 r_g. Physics is identical to cfc_tde_wd_imbh.athinput (same EOS, star,
+# domain); the ONLY difference is how the fine grid is placed.
+#
+# WHY: cfc_tde_wd_imbh.athinput refines a single static level-5 "tube" spanning
+# the whole trajectory, which spends ~90% of its finest-level cost on space that
+# is empty at any given instant. Here two level-5 boxes are used instead -- one
+# fixed on the puncture, one following the star -- driven by TDERefineTracker in
+# dyngr_tov.cpp (<problem> amr_condition = tde_track).
+#
+# MEASURED SAVING (both runs to t=145, item 55): 2,283 cycles / 9.2M
+# MeshBlock-cycles / 7.5M core-seconds here, versus 2,299 cycles / 19.8M
+# MeshBlock-cycles / 14.9M core-seconds for the tube -- a clean 2.0x. Note the
+# cycle counts are nearly identical because dt is set by the finest level, which
+# is 5 in both. The saving is in block count (4,016 vs 8,608), NOT in dt.
+# The 10x suggested by finest-level counts alone (1,024 vs 4,352) does NOT
+# materialise: the proper-nesting staircase at levels 1-4 barely shrinks, and it
+# is now the dominant cost -- the outer domain size is the next lever.
+#
+# THE STATIC REGIONS BELOW ARE REQUIRED, not redundant with adaptive. There is no
+# initial-AMR pass in AthenaK, and CheckForRefinement's cooldown
+# (ncyc_since_ref, initialised to 0, vs refinement_interval -- mesh_refinement.cpp
+# :268) means adaptive climbs only one level per refinement_interval cycles from
+# the root grid: ~30 cycles to reach level 5, during which the star (R=0.677)
+# would sit on dx=1.0 cells and be destroyed. The regions seed the initial mesh;
+# the tracker moves it thereafter. Same pattern as inputs/dyn_grmhd/kadath_bns.
+#
+# VALIDATED (item 55) against the static tube over the full t=145: 5,019
+# MeshBlocks created and 5,019 deleted by AMR, zero NANS_IN_CONS, rho-max agreeing
+# to <=1.0e-3 with its PEAK (the physical observable) matching to 8e-5, mass drift
+# 1.7e-7, load-balance efficiency 95.6%. So the item 38/39 SetNeighbors regrid bug
+# does NOT bite this configuration through infall to the tidal radius. The
+# debris-spreading phase beyond t=145 is NOT yet tested.
+
+<comment>
+problem  = Tidal disruption of a 0.7 Msun WD-like TOV star by a 1e4 Msun IMBH (Phase B item 10)
+
+<job>
+basename = cfc_tde_wd_imbh_amr
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 96       # 6 MeshBlocks in x1-direction (root level), dx=1.0
+x1min  = -32.0    # minimum x1
+x1max  = 64.0     # maximum x1 -- star starts at x=30, ample buffer beyond
+ix1_bc = diode    # inner boundary -- full domain, no reflection symmetry
+ox1_bc = diode    # outer boundary
+
+nx2    = 64       # 4 MeshBlocks in x2-direction (root level), dx=1.0
+x2min  = -32.0    # minimum x2
+x2max  = 32.0     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 64       # 4 MeshBlocks in x3-direction (root level), dx=1.0
+x3min  = -32.0    # minimum x3
+x3max  = 32.0     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive
+max_nmb_per_rank    = 120
+num_levels          = 6
+ncycle_check        = 1
+refinement_interval = 5
+
+# NOTE: no <refined_regionN> blocks -- refinement is driven entirely by
+# <problem> amr_condition = tde_track (TDERefineTracker in dyngr_tov.cpp).
+# An <amr_criterion> block is still required (refinement_criteria.cpp errors
+# out if none exist); method=user routes to pgen->user_ref_func.
+<amr_criterion1>
+method = user
+
+# Initial mesh: two static level-5 boxes, one at the puncture and one at the
+# star's starting position. These are read on the adaptive path too
+# (build_tree.cpp:64-67), and they are REQUIRED here: there is no initial-AMR
+# pass, and CheckForRefinement's cooldown (ncyc_since_ref < refinement_interval,
+# mesh_refinement.cpp:268, with ncyc_since_ref initialised to 0) means adaptive
+# would otherwise climb only one level per 5 cycles from the root grid -- ~30
+# cycles during which the star (R=0.677) would sit on dx=1.0 cells and be
+# destroyed. Same pattern as inputs/dyn_grmhd/kadath_bns.athinput.
+<refined_region1>
+level = 5
+x1min = -2.0
+x1max = 2.0
+x2min = -2.0
+x2max = 2.0
+x3min = -2.0
+x3max = 2.0
+
+<refined_region2>
+level = 5
+x1min = 28.0
+x1max = 32.0
+x2min = -2.0
+x2max = 2.0
+x3min = -2.0
+x3max = 2.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 145        # t(30 -> r_t=16.1) = 145 M, plus disruption aftermath
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false     # matches every off-center TOV fixture to date (item 46/48)
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-24    # atmosphere floor (as requested)
+tfloor      = 1.0e-22    # matches the established 100x-above-dfloor ratio
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 1.6666666666666667  # 5/3, per the WD-like polytrope
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-9   # NOT 1e-10: measured A/B over a t=40 run showed 1e-10 is
+mg_poisson_threshold = 1.0e-9  # below the achievable defect floor, so every solve
+                          # burned all 40 V-cycles and still reported "Failed to
+                          # converge" (763 occurrences, ~6/cycle) while stalling at a
+                          # repeating ~1.08e-10. At 1e-9: ZERO convergence failures and
+                          # 2.9x faster (9.9 vs 28.4 s/cycle), with physics unchanged --
+                          # rho-max agreed to <5e-5 relative, t=0 mass to 1e-10.
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH = 1e4 Msun, fixed at the coordinate origin
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 3.24e-4   # converted from 3.24e-12 (Msun=1 units) via lambda^2
+kappa       = 1.2346626297e-2  # converted from 2.66e3 (Msun=1 units) via lambda^(-4/3)
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 2e-4      # npoints*dr = 2.0, ~3x the star's own R_*=0.677
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 30.0    # ~1.9x the tidal radius (16.1) -- starts outside it, at rest
+star_center_x2 = 0.0     # puncture always fixed at the origin
+star_center_x3 = 0.0
+amr_condition   = tde_track   # enrol TDERefineTracker
+amr_radius_bh   = 2.0         # fine box around the fixed puncture
+amr_radius_star = 2.0         # fine box around the infalling star
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 0.1
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- psi/alpha near the puncture and star
+variable    = adm
+dt          = 1.0      # ~200 dumps over tlim=200 (NOT dcycle=1: that would be ~11,600)
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- density, to follow the star and its debris
+variable    = mhd_w_bcc
+dt          = 1.0
+slice_x3    = 0.0
+id = prim_xy
+
+
+<output4>
+file_type   = rst
+dcycle      = 400

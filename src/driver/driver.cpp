@@ -492,8 +492,22 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         }
       }
 
-      // AMR
-      if (pmesh->adaptive) {pmesh->pmr->AdaptiveMeshRefinement(this, pin);}
+      // AMR.  Guard nlim across the regrid for the same reason the per-cycle task
+      // lists above are guarded: a regrid re-solves the metric (CFC::Reinitialize-
+      // MetricForAMR, called from InitBoundaryValuesAndPrimitives with
+      // is_amr_regrid=true), and MultigridDriver::SolveIterative sets
+      // pdriver->nlim = pmy_mesh_->ncycle on ANY solve that misses its iteration
+      // cap -- a "gracefully truncate the run" safety valve.  Without this, a
+      // single marginal non-convergence during a regrid silently ends the run.
+      // Observed doing exactly that: one miss at defect 1.75e-9 against a 1e-9
+      // threshold terminated a t=300 run at t=159.  This path is only reachable
+      // with refinement=adaptive, which is why the guard added around the task
+      // lists did not already cover it.
+      if (pmesh->adaptive) {
+        int saved_nlim_amr = nlim;
+        pmesh->pmr->AdaptiveMeshRefinement(this, pin);
+        nlim = saved_nlim_amr;
+      }
       // compute new timestep AFTER all Meshblocks refined/derefined
       pmesh->NewTimeStep(tlim);
 

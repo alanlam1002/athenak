@@ -56,6 +56,10 @@ struct TDERefineParams {
                     // used only to seed x1_star before the first reduction
   Real rad_bh;      // refinement radius around the (fixed) puncture at the origin
   Real rad_star;    // refinement radius around the star
+  Real rad_bh_fine; // inner, higher-level radius around the puncture (0 disables)
+  int  lev_bh;      // target level within rad_bh
+  int  lev_star;    // target level within rad_star
+  int  lev_bh_fine; // target level within rad_bh_fine (must exceed lev_bh)
 };
 TDERefineParams tde_ref;
 } // namespace
@@ -453,8 +457,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // which use static refinement -- is completely unaffected.
   if (pin->GetOrAddString("problem", "amr_condition", "none") == "tde_track") {
     tde_ref.r0       = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
-    tde_ref.rad_bh   = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
-    tde_ref.rad_star = pin->GetOrAddReal("problem", "amr_radius_star", 2.0);
+    tde_ref.rad_bh      = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
+    tde_ref.rad_star    = pin->GetOrAddReal("problem", "amr_radius_star", 2.0);
+    tde_ref.rad_bh_fine = pin->GetOrAddReal("problem", "amr_radius_bh_fine", 0.0);
+    tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
+    tde_ref.lev_star    = pin->GetOrAddInteger("problem", "amr_level_star", 5);
+    tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
     user_ref_func = &TDERefineTracker;
   }
 
@@ -719,8 +727,9 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     x1_star = xl; x2_star = yl; x3_star = zl;
   }
 
-  const Real r2_bh   = SQR(tde_ref.rad_bh);
-  const Real r2_star = SQR(tde_ref.rad_star);
+  const Real r2_bh      = SQR(tde_ref.rad_bh);
+  const Real r2_star    = SQR(tde_ref.rad_star);
+  const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
 
   for (int m = 0; m < nmb; ++m) {
     Real &x1min = size.h_view(m).x1min;
@@ -739,10 +748,27 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
       return SQR(px - cx) + SQR(py - cy) + SQR(pz - cz);
     };
 
-    bool near_bh   = (dist2_to_block(0.0, 0.0, 0.0)     < r2_bh);
-    bool near_star = (dist2_to_block(x1_star, x2_star, x3_star) < r2_star);
+    // Per-target requested levels, compared against this block's CURRENT level
+    // (the z4c_amr.cpp:84 pattern). A single "refine or derefine" flag is not
+    // enough once different targets want different depths: the puncture needs a
+    // deeper level than the star, to widen the gap between the excision surface
+    // and the horizon, while refining the STAR that deep would halve dt (the
+    // star sits where alpha~1, so it is what sets the global timestep).
+    int level = pmesh->lloc_eachmb[m + mbs].level - pmesh->root_level;
+    Real d2_bh = dist2_to_block(0.0, 0.0, 0.0);
+    Real d2_st = dist2_to_block(x1_star, x2_star, x3_star);
 
-    refine_flag.h_view(m + mbs) = (near_bh || near_star) ? 1 : -1;
+    int want = -1;
+    if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }
+    if (r2_bh_fine > 0.0 && d2_bh < r2_bh_fine) { want = std::max(want, tde_ref.lev_bh_fine); }
+    if (d2_st < r2_star)                        { want = std::max(want, tde_ref.lev_star); }
+
+    int flag;
+    if (want < 0)             { flag = -1; }        // outside every target
+    else if (level < want)    { flag =  1; }
+    else if (level == want)   { flag =  0; }
+    else                      { flag = -1; }
+    refine_flag.h_view(m + mbs) = flag;
   }
 
   refine_flag.template modify<HostMemSpace>();

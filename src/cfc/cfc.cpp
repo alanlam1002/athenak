@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -25,6 +27,7 @@
 #include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "cfc.hpp"
+#include "geodesic-grid/spherical_grid.hpp"
 #include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
 
@@ -291,6 +294,18 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // non-TDE run is a bit-for-bit no-op.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  accrete_to_puncture_ = pin->GetOrAddBoolean("cfc", "accrete_to_puncture", true);
+  puncture_mass_init_ = puncture_mass_;
+
+  // ADM-mass extraction radii, discovered by existence (<cfc> adm_mass_r0, _r1, ...).
+  for (int n = 0; n < 8; ++n) {
+    std::string key = "adm_mass_r" + std::to_string(n);
+    if (pin->DoesParameterExist("cfc", key)) {
+      adm_mass_radii_.push_back(pin->GetReal("cfc", key));
+    }
+  }
+  adm_mass_dr_   = pin->GetOrAddReal("cfc", "adm_mass_dr", 1.0);
+  adm_mass_nlev_ = pin->GetOrAddInteger("cfc", "adm_mass_nlev", 3);
   r_com_mass_[0] = r_com_mass_[1] = r_com_mass_[2] = 0.0;
   r_com_X_[0] = r_com_X_[1] = r_com_X_[2] = 0.0;
   r_com_beta_[0] = r_com_beta_[1] = r_com_beta_[2] = 0.0;
@@ -1131,7 +1146,149 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   AssembleADM();
+  AccreteExcisedMass(pdriver, stage);
+  if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeADMMass()
+//! \brief Surface-integral ADM mass on coordinate spheres, reported at each requested
+//! radius.  This is the only INDEPENDENT check that mass transferred to the puncture
+//! by AccreteExcisedMass actually appears in the spacetime -- the excision tally and
+//! M_BH itself are internal bookkeeping that could be self-consistently wrong.
+//!
+//! For a conformally-flat slice, psi -> 1 + M/(2r), and
+//!     M_ADM = -(1/2pi) * closed_integral( grad(psi) . dS )
+//!           = -(r^2/2pi) * sum_ang( w * dpsi/dr ),   sum_ang(w) = 4pi.
+//! Two things are reported per radius:
+//!   M_surf : the surface integral above, using a centred difference between spheres
+//!            at r-dr and r+dr.  Exact in the continuum.
+//!   M_mono : 2r(<psi> - 1), the monopole estimate.  Cheaper and needs no derivative,
+//!            but carries an O(1/r) error from higher multipoles.
+//! Agreement between the two, AND radius-independence of each, is the real test --
+//! a single number at a single radius proves nothing.
+//!
+//! The spheres are rebuilt on every call rather than cached: SphericalGrid stores
+//! interpolation indices/weights tied to the CURRENT MeshBlock layout, which any AMR
+//! regrid invalidates.  Rebuilding is ~nangles*nmb index lookups (92 points at the
+//! default nlev=3), i.e. negligible against a V-cycle.
+//!
+//! psi is reassembled as delta_psi + psi0, since CFC stores the residual.
+
+void CFC::ComputeADMMass() {
+  if (adm_mass_radii_.empty()) { return; }
+
+  for (size_t n = 0; n < adm_mass_radii_.size(); ++n) {
+    const Real rad = adm_mass_radii_[n];
+    Real psi_at[2] = {0.0, 0.0};   // solid-angle-averaged psi at r-dr, r+dr
+    for (int side = 0; side < 2; ++side) {
+      Real r = rad + (side == 0 ? -adm_mass_dr_ : +adm_mass_dr_);
+      SphericalGrid sph(pmy_pack, adm_mass_nlev_, r);
+      sph.InterpolateToSphere(1, delta_psi);
+      Real sum_dpsi = 0.0, wtot = 0.0;
+      for (int ip = 0; ip < sph.nangles; ++ip) {
+        Real w = sph.solid_angles.h_view(ip);
+        sum_dpsi += w*sph.interp_vals.h_view(ip,0);
+        wtot += w;
+      }
+      sph.InterpolateToSphere(1, u_psi0);
+      Real sum_psi0 = 0.0;
+      for (int ip = 0; ip < sph.nangles; ++ip) {
+        sum_psi0 += sph.solid_angles.h_view(ip)*sph.interp_vals.h_view(ip,0);
+      }
+      psi_at[side] = (sum_dpsi + sum_psi0)/wtot;   // <psi> on this shell
+    }
+
+    Real dpsi_dr = (psi_at[1] - psi_at[0])/(2.0*adm_mass_dr_);
+    Real m_surf  = -2.0*rad*rad*dpsi_dr;                 // -(r^2/2pi)*4pi*dpsi/dr
+    Real psi_avg = 0.5*(psi_at[0] + psi_at[1]);
+    Real m_mono  = 2.0*rad*(psi_avg - 1.0);
+
+    if (global_variable::my_rank == 0) {
+      std::streamsize prec0 = std::cout.precision();
+      std::cout << std::scientific << std::setprecision(8)
+                << "### CFC ADM mass: r=" << rad
+                << " M_surf=" << m_surf
+                << " M_mono=" << m_mono
+                << " M_BH=" << puncture_mass_
+                << " M_accreted=" << accreted_mass_ << std::endl;
+      std::cout.unsetf(std::ios_base::floatfield);
+      std::cout.precision(prec0);
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::AccreteExcisedMass(Driver *pdriver, int stage)
+//! \brief Drain the excision tally once per cycle and add it to the running totals.
+//!
+//! CFC's metric comes from elliptic constraints sourced by the INSTANTANEOUS matter
+//! distribution, so it has no memory: excising matter also removes its gravity in the
+//! same step, and the black hole would lose the mass it just swallowed.  (Z4c is not
+//! affected -- its hyperbolic evolution keeps that information in the metric.)  The
+//! energy banked here is therefore destined for puncture_mass_.
+//!
+//! Drained on the LAST RK stage only, but the tally itself accumulates across every
+//! stage, because each stage's reset genuinely removes that energy from u0.
+
+void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
+  if (stage != pdriver->nexp_stages) { return; }
+  if (!pmy_pack->pcoord->coord_data.bh_excise) { return; }
+
+  Real tot[5];
+  pmy_pack->pcoord->DrainExcisedTally(tot);
+  accreted_mass_  += tot[0];
+  accreted_mom_[0] += tot[1];
+  accreted_mom_[1] += tot[2];
+  accreted_mom_[2] += tot[3];
+
+  // Hand the swallowed energy to the puncture.  Gated on puncture_enabled_ (there is
+  // no hole to grow otherwise) and on accrete_to_puncture_, so the tally can be run as
+  // a pure diagnostic for comparison.
+  if (puncture_enabled_ && accrete_to_puncture_ && tot[0] != 0.0) {
+    puncture_mass_ += tot[0];
+
+    // All three copies of M_BH must move together.  The two multigrid drivers read
+    // their own copies from <cfc> at construction and feed them to
+    // FillPunctureCoefficients on every Solve(); if only one were updated, psi's
+    // coarse levels would use the new mass while alpha's used the old.  Updated here,
+    // at the END of the last stage, so the change is in place before any of the next
+    // cycle's solves rather than part-way through this one.
+    if (pmgd_psi != nullptr) { pmgd_psi->SetPunctureMass(puncture_mass_); }
+    if (pmgd_alpha != nullptr) { pmgd_alpha->SetPunctureMass(puncture_mass_); }
+
+    // Re-derive the analytic background at the new mass.  Cheap: one ghost-inclusive
+    // par_for with a root-find per cell, against the ~4.5 finest-grid-equivalent
+    // sweeps the per-level coefficient fills already do every stage.
+    FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
+                           a0_dd, a0_sq, grad_ap6_0);
+
+    // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
+    // this would make the PHYSICAL psi jump by delta(psi0) everywhere at once.
+    // Clearing the seed flags makes the next solve re-derive the residual from the
+    // unchanged ADM fields minus the NEW background (cfc.cpp's seed blocks), which
+    // keeps the physical metric continuous and lets the mass change enter through the
+    // elliptic solve instead of as a step.  It also avoids the multigrid warm start
+    // being a guess for the old background, which would otherwise spike V-cycles.
+    psi_seeded_ = false;
+    alpha_psi_seeded_ = false;
+  }
+
+  if (cfc_init_verbose_ && global_variable::my_rank == 0 && tot[0] != 0.0) {
+    // NB high precision: M_BH changes are many orders below its O(1) value, so at
+    // default stream precision the growth is invisible.
+    std::streamsize prec0 = std::cout.precision();
+    std::cout << std::scientific << std::setprecision(10)
+              << "### CFC accretion: dM_adm=" << tot[0]
+              << " dM_raw=" << tot[4]
+              << " <1/psi>=" << (tot[4] != 0.0 ? tot[0]/tot[4] : 0.0)
+              << " M_accreted=" << accreted_mass_
+              << " M_BH-M0=" << (puncture_mass_ - puncture_mass_init_)
+              << " dPx=" << tot[1] << std::endl;
+    std::cout.unsetf(std::ios_base::floatfield);
+    std::cout.precision(prec0);
+  }
 }
 
 //----------------------------------------------------------------------------------------

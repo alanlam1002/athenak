@@ -24,6 +24,7 @@
 #include "mesh/mesh.hpp"
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
+#include "cfc/cfc.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/compact_object_tracker.hpp"
 #include "z4c/z4c.hpp"
@@ -198,6 +199,17 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   }
   pin->SetInteger(out_params.block_name, "file_number", out_params.file_number);
   pin->SetReal(out_params.block_name, "last_time", out_params.last_time);
+
+  // Persist the CFC puncture mass.  It is NOT a static input parameter once excision
+  // is active: CFC grows it by the energy of the matter the hole swallows (see
+  // CFC::AccreteExcisedMass -- necessary because CFC's elliptic metric has no memory,
+  // so deleting matter would otherwise delete its gravity too).  The restart file
+  // carries a copy of the parameter deck, so without writing the CURRENT value back
+  // here a restart would silently reset the hole to its t=0 mass and discard every
+  // gram accreted so far.  Same mechanism used for file_number/last_time just above.
+  if (pm->pmb_pack->pcfc != nullptr) {
+    pin->SetReal("cfc", "puncture_mass", pm->pmb_pack->pcfc->puncture_mass_);
+  }
 
   // create string holding input parameters (copy of input file)
   std::stringstream ost;

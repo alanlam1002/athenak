@@ -69,12 +69,36 @@ class Coordinates {
   DvceArray4D<bool> excision_floor;  // cell-centered mask for C2P flooring about horizon
   DvceArray4D<bool> excision_flux;   // cell-centered mask for FOFC about horizon
 
+  // Running tally of what excision has REMOVED from the grid, per MeshBlock:
+  // column 0 = energy (ADM-weighted, see below), columns 1-3 = momentum P_i.
+  // Accumulated by DynGRMHDPS::ConsToPrim at the reset site and drained once per
+  // cycle.  This exists because CFC recovers the metric from ELLIPTIC constraints
+  // sourced by the instantaneous matter distribution -- it has no memory -- so
+  // deleting matter also deletes its gravity in the same step and the hole would
+  // lose the mass it just swallowed.  (Z4c does not need this: its hyperbolic
+  // evolution retains the information in the metric.)  The energy column is
+  // weighted by 1/psi so that it is the matter's ADM-mass contribution
+  // int(psi^5 E)dV, NOT the raw conserved energy int(psi^6 E)dV -- see
+  // Coordinates::DrainExcisedTally's comment for the derivation.
+  // column 4 additionally banks the RAW conserved energy int(psi^6 E)dV (no 1/psi).
+  // It is never fed to the puncture; it exists so the accounting can be validated
+  // like-for-like against the history file's own conserved sums, and so the ratio
+  // col0/col4 = <1/psi> reports the effective psi at which matter is being absorbed
+  // -- i.e. exactly the size of the psi^5-vs-psi^6 weighting difference.
+  DvceArray2D<Real> excised_tally;
+
   // functions
   void CoordSrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos, const Real dt,
                      DvceArray5D<Real> &u0);
   void CoordSrcTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc,
                      const EOS_Data &eos, const Real dt, DvceArray5D<Real> &u0);
   void SetExcisionMasks(DvceArray4D<bool> &floor, DvceArray4D<bool> &flux);
+
+  // Sum excised_tally over MeshBlocks and MPI ranks, ZERO it, and return the totals
+  // in tot[4] = {dM, dPx, dPy, dPz}.  Collective: every rank gets the same answer
+  // (MPI_Allreduce, not Reduce), because every rank must then apply the same updated
+  // puncture mass.  Call once per cycle.
+  void DrainExcisedTally(Real tot[5]);
 
   void UpdateExcisionMasks();
 

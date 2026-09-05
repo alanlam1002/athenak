@@ -31,6 +31,7 @@
 #include "mg_cfc_vector_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
+#include <vector>
 
 class MeshBlockPack;
 class ParameterInput;
@@ -98,6 +99,29 @@ class CFC {
   // for -- see cfc.cpp's constructor for both.
   bool puncture_enabled_;
   Real puncture_mass_;
+
+  // Running totals of what excision has removed from the grid over the whole run.
+  // accreted_mass_ is ADM-weighted (int psi^5 E dV) and is what Step 3 hands to
+  // puncture_mass_; accreted_mom_ is a DIAGNOSTIC only -- the puncture is fixed at
+  // the origin and non-spinning by design, so the swallowed momentum is discarded,
+  // and this records how much recoil that neglects.
+  Real accreted_mass_ = 0.0;
+  Real accreted_mom_[3] = {0.0, 0.0, 0.0};
+  // <cfc> accrete_to_puncture (default true when puncture_enabled): actually grow
+  // M_BH by the swallowed energy.  Set false to keep the tally as a pure diagnostic,
+  // which is how the psi^5-vs-psi^6 weighting A/B is run.
+  bool accrete_to_puncture_;
+  Real puncture_mass_init_ = 0.0;  // for reporting M_BH growth
+
+  // ADM-mass surface integral (<cfc> adm_mass_r0, adm_mass_r1, ... ; adm_mass_dr,
+  // adm_mass_nlev).  The INDEPENDENT check that mass handed to the puncture actually
+  // shows up in the spacetime: everything else (the excision tally, M_BH itself) is
+  // internal bookkeeping that could be self-consistently wrong.
+  std::vector<Real> adm_mass_radii_;
+  Real adm_mass_dr_ = 1.0;
+  int  adm_mass_nlev_ = 3;
+  void ComputeADMMass();
+  void AccreteExcisedMass(Driver *pdriver, int stage);
 
   // Mass-weighted centroid of pmy_pack->pmhd->u0(IDN), recomputed every
   // SolveConformalFactor() call and reused by SolveLapse() the same stage (Sec 3.10

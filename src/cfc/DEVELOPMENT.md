@@ -7612,3 +7612,157 @@ src/cfc/
       (`mhd.cpp:59`, `bvals.cpp:67`, ... all use
       `max(nmb_thispack, nmb_maxperrank)`), so on 160 ranks it asked for
       ~40 GB/rank. It is a per-rank allocation knob, not a global cap.
+
+56. **(2026-09-04/05) Excision-buffer widening for the accreting TDE run, and a
+    second instance of item 51's `nlim`-truncation bug -- this time on the AMR
+    path, which item 51's guard does not cover.**
+    - **Prompted by a user question that turned out to be well-founded**: is
+      the default `excise_lapse = 0.25` too close to the horizon, and how many
+      cells actually separate them? Verified against the code's own trumpet
+      formulas (`cfc_puncture.hpp`: `alpha = sqrt(1 - 2/rho + 1.6875/rho^4)`,
+      `TrumpetArealToIso`): the lapse at the horizon (areal `R=2M`) is exactly
+      `3*sqrt(3)/16 = 0.324760` (analytic value reproduced to 6 digits), and
+      `alpha` decreases inward, so **`alpha < 0.3248` is the inside-horizon
+      condition** and `0.25` sits at `0.924` of the horizon radius --
+      correctly inside, confirming item 52's inherited claim. But the *buffer*
+      was thin: `r_iso` 0.5917 to 0.7793, only **6.0 cells** at level 5,
+      against `nghost=4` with `ppmx` reconstruction.
+    - **Fix, both parts of a user "do both" choice**: `excise_lapse` 0.25 ->
+      0.20 (surface to `0.881` of the horizon radius) *and* a level-6 shell
+      within `r<1.0` of the puncture, giving **~19 cells** of separation.
+    - **Two things that made this non-obvious.** (a) A static
+      `<refined_regionN>` **cannot** be added on restart -- those blocks are
+      read only by `BuildTreeFromScratch`, and `BuildTreeFromRestart` rebuilds
+      the tree from the restart file's stored logical locations. Adaptive
+      refinement had to build it instead, which required teaching
+      `TDERefineTracker` to request *different levels for different targets*
+      (comparing each block's current level against a target, the
+      `z4c_amr.cpp:84` pattern); the previous binary refine/derefine flag could
+      not express "level 6 at the BH, level 5 at the star". Note `num_levels`
+      *does* take effect on restart (`build_tree.cpp:380`), unlike the regions.
+      (b) The level-6 request had to be confined to `r<1.0`: at the full
+      radius-2.0 sphere it would have cost ~4,096 finest blocks, re-creating
+      the very tube the two-box design removed.
+    - **Confirmed free in `dt`**, as predicted: `dt` *rose* 0.021 -> 0.030
+      after the change. `dt` is set by the star's region (`alpha~1`), not the
+      puncture, where `alpha=0.20` and `psi^2~3` put the local CFL limit at
+      ~0.06, far above the global `dt`.
+    - **The `nlim` bug, found the hard way.** A `tlim=300` run terminated at
+      `t=159.25` reporting `nlim=2768`. Item 51 guards `nlim` around the
+      per-cycle task lists (`driver.cpp:440-462`), but
+      `AdaptiveMeshRefinement` is at `:496`, **outside that window** -- and a
+      regrid re-solves the metric via `CFC::ReinitializeMetricForAMR`, so
+      `MultigridDriver::SolveIterative` can still clobber `nlim` there.
+      Exactly **one** non-convergence occurred in 486 cycles (defect
+      `1.752e-9` against a `1e-9` threshold, a 1.75x miss) and it ended the
+      run. Only reachable with `refinement=adaptive` **plus** CFC, which is
+      why item 51's guard sufficed until now. Fixed by wrapping the AMR call
+      in the same save/restore. **This is the second instance of the same
+      hazard; the durable fix is probably to guard `nlim` centrally inside
+      `SolveIterative` rather than at each call site.**
+    - Note item 55's `mg_threshold=1e-9` makes this *more* likely to bite, not
+      less: the achievable defect floor sits right around there, so misses are
+      by small factors rather than orders of magnitude.
+
+57. **(2026-09-05/06) `excision_scheme=lapse` was a silent no-op in every CFC
+    run; and fixing that alone is not enough, because CFC's elliptic metric has
+    no memory -- excised matter must be handed to the puncture or the hole
+    loses the mass it swallowed.** The second half is the user's insight and is
+    the substantive part.
+    - **The no-op.** `DynGRMHD::UpdateExcisionMasks` is queued only inside
+      `if (pz4c == nullptr && padm->is_dynamic == true)`
+      (`dyn_grmhd.cpp:232`), but every CFC fixture leaves `<adm>` empty so
+      `is_dynamic` defaults **false** (`adm.cpp:34`); and `Coordinates` fills
+      the mask at construction only for `excision_scheme == fixed`
+      (`coordinates.cpp:113`). So `excision_floor` was allocated and never
+      written, and the reset block never fired. Measured directly in a TDE
+      run: density inside the nominal excision radius sat at `1.9e-9` instead
+      of `dexcise=1e-24`, velocities there were nonzero (`W=4.4` at
+      `r=0.258`), and grid mass never dropped.
+      **This retroactively weakens item 52 / commit `ac50abc5`'s claim that
+      excision was "validated".** What that test actually showed was
+      with/without-excision runs agreeing bit-for-bit, which is equally
+      consistent with "the mask is never populated" -- and that is the true
+      explanation. It could not have distinguished them: the star sat 60 r_g
+      away and nothing ever approached the boundary. Fixed by queueing the
+      refresh for the else-branch too, gated on excision being on with a
+      dynamic scheme. **Not** by setting `<adm> dynamic=true`: that same
+      branch also queues `DynGRMHD::SetADMVariables`, which would overwrite
+      CFC's solved metric with the pgen's analytic TOV data every cycle.
+    - **Why naive excision is still wrong for CFC.** CFC recovers the metric
+      from elliptic constraints on the *instantaneous* matter distribution, so
+      deleting matter deletes its gravity in the same step. Z4c is unaffected
+      -- its hyperbolic evolution keeps that information in the metric. The
+      fix is `M_BH -> M_BH + dM`. This is self-consistent *within* CFC rather
+      than a new approximation: CFC already drops all metric time derivatives,
+      so there is no `d_t Q0` term to pick up, and the trumpet is an exact
+      vacuum solution for each instantaneous `M_BH`. (The plan doc's
+      "time-independent" assertions are caching claims, not physical ones.)
+    - **How much mass to transfer -- the easy way to get this subtly wrong.**
+      The conserved energy is densitized, `cons(IEN)+cons(IDN) = sqrt(g)E =
+      psi^6 E` (CFC's own `u_tilde`, `cfc.cpp:1333`). But the Hamiltonian
+      constraint is `Delta psi = -2pi psi^5 E - ...`, so the ADM mass is
+      `int(psi^5 E)dV`. The correct transfer is therefore **`(D+tau)/psi`, not
+      `(D+tau)`**. Measured in situ: the code now reports `<1/psi>` each
+      cycle and it sits at **0.4550** (psi ~ 2.198), i.e. handing the hole the
+      raw conserved energy would over-credit it by **2.20x**. An a-priori
+      estimate of psi at the excision surface gave 1.92; the true
+      mass-weighted value is larger because the absorbed matter sits deeper.
+    - **Implementation**: per-MeshBlock `Coordinates::excised_tally` filled by
+      atomic adds at the reset site (where `cons_pt_old` still holds the
+      pre-reset state), drained once per cycle by `CFC::AccreteExcisedMass`,
+      which updates **all three** copies of `M_BH` together (`CFC` plus the
+      psi and lapse multigrid drivers, via new `SetPunctureMass` setters --
+      updating only one would leave psi's coarse levels on the new mass and
+      alpha's on the old), refills the analytic background, and clears
+      `psi_seeded_`/`alpha_psi_seeded_`. That last step matters: the stored
+      fields are residuals (`delta_psi = psi - psi0`), so raising `psi0`
+      without re-anchoring would make the *physical* psi jump everywhere at
+      once; re-seeding re-derives the residual from the unchanged ADM fields
+      minus the new background, keeping the metric continuous.
+      Three double-counting traps are guarded: the C2P kernel sweeps ghost
+      zones, `ConToPrimBC` re-enters it on boundary strips, and
+      `dyn_grmhd_fofc.cpp` calls it with `floors_only=true` writing nothing
+      back.
+    - **Momentum is tallied but discarded** (columns 1-3, no `1/psi` -- `psi^6
+      S_i` is already the momentum-constraint source). The puncture is fixed
+      at the origin and non-spinning by design, so the recoil cannot be
+      absorbed; recording it turns an unquantified approximation into a
+      measured one.
+    - **Restart persistence**: `puncture_mass` is written back into the
+      parameter deck at dump time (`restart.cpp`), since the restart file
+      carries a copy of the deck and would otherwise silently reset the hole
+      to its `t=0` mass.
+    - **ADM surface integral** (`CFC::ComputeADMMass`, `<cfc> adm_mass_r0..`),
+      the only *independent* check -- everything else is internal bookkeeping
+      that could be self-consistently wrong. Reports both the true surface
+      integral `M_surf = -(r^2/2pi)*closed_integral(grad psi . dS)` (centred
+      difference between spheres at `r+/-dr`) and the monopole estimate
+      `M_mono = 2r(<psi>-1)`. Validated on a full domain with the star far
+      outside every sphere, where the answer must be `M_BH=1`: `M_surf` gives
+      `1.0730 / 1.0254 / 1.0093` at `r = 6 / 10 / 16`, i.e. clean **~1/r^2**
+      convergence to 1.0; `M_mono` is worse and non-monotonic, as its O(1/r)
+      multipole error predicts, so `M_surf` is the estimator to use.
+      Spheres are rebuilt per call because `SphericalGrid` caches
+      interpolation indices tied to the current MeshBlock layout, which any
+      regrid invalidates.
+    - **Honest limit on that check**: absolute accuracy is ~1% at `r=16`,
+      while the accreted mass here is `5e-9` -- and even a whole disrupted
+      star is `~1e-4` of `M_BH`. So the integral **cannot** confirm the
+      transfer from its absolute value. What it can do is the differential
+      test: the finite-radius error is systematic and nearly constant in time,
+      so `M_surf(t) - M_surf(0)` should stay flat if mass is conserved and
+      drift if the `psi^6` weighting were used. That is the test to run on the
+      TDE fixture, and it is not yet done.
+    - **Not yet validated on a case where real debris crosses the surface.**
+      Everything above is verified on a fixture whose star sits 60 r_g away,
+      so only trace atmosphere is excised (`M_accreted ~ 1.7e-8`). That
+      validates the machinery, not the physics.
+    - Separately: `<cfc> accrete_to_puncture` (default true) lets the tally run
+      as a pure diagnostic without feeding back, which is how the
+      `psi^5`-vs-`psi^6` comparison is run against an identical evolution.
+    - **Left deliberately unused**: `smooth_excision`/`tdamp`
+      (`dyn_grmhd.cpp:676-698`) is a real damping-sink alternative that removes
+      matter over a timescale rather than instantly -- gentler for an elliptic
+      source -- but it makes C2P run everywhere including deep inside the
+      horizon, and has zero test coverage in this tree.

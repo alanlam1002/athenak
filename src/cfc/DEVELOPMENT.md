@@ -7891,3 +7891,67 @@ src/cfc/
       reduces to the flat one); this is flagged in a comment at the site.
       `adm_mass_center = com` is rejected at startup unless
       `puncture_enabled_`, since `r_com_mass_` is only ever filled on that path.
+
+59. **(2026-09-06) The `Ahat^2` term also changes on excision, so transferring
+    `psi^5 E` alone does not conserve `M_ADM`.** User observation, and correct:
+    item 57's scheme is incomplete. Added `CFC::ComputeResidualMassVolume()`,
+    which measures the omission instead of leaving it acknowledged.
+    - **The gap.** With `K=0` the Hamiltonian constraint is
+      `Delta psi = -2pi psi^5 E - (1/8) psi^-7 Ahat^2`
+      (`ConformalFactorRHS`, `mg_cfc_conformal_factor.cpp:160`, whose
+      `2pi`/`0.125` coefficients fix the normalisation), so
+      `M_ADM = M_punct + int(psi^5 E)dV + (1/16pi) int(psi^-7 Ahat^2)dV`.
+      `AccreteExcisedMass` transfers the middle term and silently drops the
+      change in the third. `Ahat` is *solved* from the momentum constraint
+      sourced by `S_i`, not evolved, so deleting matter drops `S_i` and the
+      next elliptic solve returns a smaller `Ahat` with nothing absorbing the
+      difference.
+    - **What it actually is.** The dropped energy is the *energy face of the
+      momentum the pinned, non-spinning puncture already discards by design*
+      -- one approximation with two faces, not two independent errors. The
+      existing `accreted_mom_` tally already tracks the momentum side.
+    - **The diagnostic is not blind to it.** `M_res = -2 r^2 d<delta_psi>/dr`
+      measures the residual FIELD, so it contains the `Ahat` contribution
+      alongside `psi^5 E` -- the surface integral does not care how the source
+      decomposes. Any `M_total` drift is therefore the signature of this term,
+      and item 58's extraction measures it rather than assuming it away.
+    - **Implementation.** Two reductions in the `ComputeMassCentroid` shape,
+      reported as `I_E`, `I_A`, `I_sum` whenever the surface integral is on.
+      NUMERICS: near the puncture `psi0 -> inf` and `Ahat0^2` diverges, so
+      forming `psi^-7 Ahat^2 - psi0^-7 Ahat0^2` directly is catastrophic
+      cancellation. Regrouped as
+      `psi^-7 (Ahat^2 - Ahat0^2) + Ahat0^2 (psi^-7 - psi0^-7)` with the second
+      difference evaluated as `psi0^-7 * expm1(-7*log1p(delta_psi/psi0))`, so
+      it stays accurate exactly where the two physically cancel.
+    - **Measured (offcenter-TOV, single run, both routes):**
+      | quantity | value |
+      |---|---|
+      | `I_E` | 3.0259534e-01 |
+      | `I_A` | -1.26247e-04 |
+      | `I_sum` | 3.0246909e-01 |
+      | `M_res` (surface, com-centered, r=24) | 3.0280759e-01 |
+      Volume and surface agree to **0.11%** -- the independent
+      volume-vs-surface check on the extraction that item 57/58 lacked. `I_E`
+      alone reproduces the surface binding fraction (2.09% vs 2.02%).
+      `I_A < 0` has the expected sign: added matter raises `psi` everywhere,
+      pushing `psi^-7` below `psi0^-7` precisely where `Ahat0^2` is largest.
+    - **This fixture CANNOT answer the question, and the numbers must not be
+      read as if it did.** `|I_A|/I_E = 4.2e-4`, while the surface extraction
+      drifts `1.5e-3` between `r=20` and `r=24` on the same run -- the
+      systematic to be resolved is ~5x smaller than the extraction's own
+      radius-dependence. Adding `I_A` moves `I_sum` *away* from the r=24
+      surface value (0.070% -> 0.112%), but that is far inside the error bar
+      and is evidence for nothing. More fundamentally the star is released
+      from rest and run for 2 cycles, so `S_i ~ 0` and `Ahat ~ Ahat0`: `I_A`
+      is small here *because there is no matter momentum to source it*. The
+      fixture is structurally incapable of testing the term. `I_A` scales
+      with matter momentum, so the TDE run is where it discriminates.
+    - **No apparent-horizon finder is needed** (user, correcting an earlier
+      suggestion of mine). At `M_*/M_BH ~ 8e-5` the horizon distortion is of
+      that order, so the analytic trumpet horizon at areal `R = 2 M_BH` serves
+      as the AH to ~1e-4 and any horizon flux can be evaluated on it directly.
+    - **Still undecided, deliberately**: whether to also TRANSFER `I_A` to
+      `M_BH`. Doing so would conserve `M_ADM` by construction but converts
+      recoil energy into hole mass, normally wrong -- though at this mass ratio
+      the true recoil is `v ~ P/M_BH ~ 1e-4` and the hole cannot meaningfully
+      move, so it may be closer to right than discarding it. Measure first.

@@ -1230,8 +1230,113 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //!     behaviour, not a regression -- bg_num only validates M_BH for origin-centered
 //!     spheres.
 
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeResidualMassVolume(Real *i_e, Real *i_a)
+//! \brief The two volume integrals that the residual surface integral must equal.
+//!
+//! With K=0 the Hamiltonian constraint is  Delta psi = -2pi psi^5 E - (1/8) psi^-7 Ahat^2
+//! (see ConformalFactorRHS, mg_cfc_conformal_factor.cpp:160, whose 2pi/0.125 coefficients
+//! fix this normalisation), so integrating against the puncture-split field gives
+//!
+//!     M_res = int(psi^5 E) dV  +  (1/16pi) int[psi^-7 Ahat^2 - psi0^-7 Ahat0^2] dV
+//!             \______i_e______/    \______________i_a______________________________/
+//!
+//! i_e is exactly the quantity AccreteExcisedMass transfers to the puncture on excision.
+//! i_a is NOT transferred: Ahat is *solved* from the momentum constraint sourced by S_i,
+//! so deleting matter drops S_i and the next elliptic solve returns a smaller Ahat, with
+//! nothing absorbing the difference.  That omission is the energy face of the momentum
+//! the pinned, non-spinning puncture already discards by design -- one approximation with
+//! two faces, not two independent ones.  Reporting i_e and i_a separately turns it from
+//! an acknowledged approximation into a measured one, and (i_e + i_a) vs M_res is an
+//! independent volume-vs-surface check on the extraction itself.
+//!
+//! NUMERICS: near the puncture psi0 -> inf and Ahat0^2 diverges, so forming
+//! psi^-7 Ahat^2 - psi0^-7 Ahat0^2 by direct subtraction is catastrophic cancellation of
+//! two large nearly-equal numbers.  It is regrouped as
+//!     psi^-7 (Ahat^2 - Ahat0^2)  +  Ahat0^2 (psi^-7 - psi0^-7)
+//! with the second difference evaluated as psi0^-7 * [(1+r)^-7 - 1], r = delta_psi/psi0,
+//! via expm1/log1p so it stays accurate when r << 1 -- which is exactly the regime near
+//! the puncture, where the physical answer is that the two cancel.
+
+void CFC::ComputeResidualMassVolume(Real *i_e, Real *i_a) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+
+  auto &utilde_ = u_tilde;      // psi^6 E  (cons(IEN)+cons(IDN))
+  auto &dpsi_   = delta_psi;    // psi - psi0
+  auto &psi0_   = u_psi0;       // psi0
+  auto &asq_    = a_sq;         // Ahat^2   (total)
+  auto &a0sq_   = a0_sq;        // Ahat0^2  (background)
+
+  DvceArray2D<Real> partial("cfc_resmass_partial", nmb, 2);
+  par_for("cfc_residual_mass_volume", DevExeSpace(), 0, nmb-1,
+  KOKKOS_LAMBDA(const int m) {
+    Real dx1 = (size.d_view(m).x1max - size.d_view(m).x1min)/static_cast<Real>(indcs.nx1);
+    Real dx2 = (size.d_view(m).x2max - size.d_view(m).x2min)/static_cast<Real>(indcs.nx2);
+    Real dx3 = (size.d_view(m).x3max - size.d_view(m).x3min)/static_cast<Real>(indcs.nx3);
+    Real vol = dx1*dx2*dx3;
+    Real se = 0.0, sa = 0.0;
+    for (int k = ks; k <= ke; ++k) {
+      for (int j = js; j <= je; ++j) {
+        for (int i = is; i <= ie; ++i) {
+          Real p0 = psi0_(m,0,k,j,i);
+          Real dp = dpsi_(m,0,k,j,i);
+          Real psi = p0 + dp;
+          // psi^5 E = (psi^6 E)/psi.  Same weighting AccreteExcisedMass uses.
+          if (psi > 0.0) { se += (utilde_(m,0,k,j,i)/psi)*vol; }
+          // Extrinsic-curvature term, regrouped to avoid cancelling large numbers.
+          if (psi > 0.0 && p0 > 0.0) {
+            Real ipsi7  = 1.0/(psi*psi*psi*psi*psi*psi*psi);
+            Real ipsi07 = 1.0/(p0*p0*p0*p0*p0*p0*p0);
+            Real r = dp/p0;
+            Real dinv7 = (r > -1.0) ? ipsi07*Kokkos::expm1(-7.0*Kokkos::log1p(r))
+                                    : (ipsi7 - ipsi07);
+            sa += (ipsi7*(asq_(m,0,k,j,i) - a0sq_(m,0,k,j,i))
+                   + a0sq_(m,0,k,j,i)*dinv7)*vol;
+          }
+        }
+      }
+    }
+    partial(m,0) = se;
+    partial(m,1) = sa;
+  });
+
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  Real totals[2] = {};
+  for (int m = 0; m < nmb; ++m) {
+    totals[0] += partial_h(m,0);
+    totals[1] += partial_h(m,1);
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, totals, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  *i_e = totals[0];
+  *i_a = totals[1]/(16.0*M_PI);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+
 void CFC::ComputeADMMass() {
   if (adm_mass_radii_.empty()) { return; }
+
+  // Volume counterparts, for comparison against the surface integral below.
+  Real i_e = 0.0, i_a = 0.0;
+  ComputeResidualMassVolume(&i_e, &i_a);
+  if (global_variable::my_rank == 0) {
+    std::streamsize prec0 = std::cout.precision();
+    std::cout << std::scientific << std::setprecision(8)
+              << "### CFC residual volume: I_E=" << i_e
+              << " I_A=" << i_a
+              << " I_sum=" << (i_e + i_a) << std::endl;
+    std::cout.unsetf(std::ios_base::floatfield);
+    std::cout.precision(prec0);
+  }
 
   // Extraction center.  nullptr => origin-centered, the historical behaviour.
   const Real *ctr = adm_mass_center_com_ ? r_com_mass_ : nullptr;

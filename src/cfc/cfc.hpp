@@ -128,6 +128,15 @@ class CFC {
   // does and does not change.
   bool adm_mass_center_com_ = false;
   void ComputeADMMass();
+  // Volume-integral counterparts of the ADM surface integral, split into the two
+  // sources the Hamiltonian constraint actually has.  Exact identity being tested:
+  //     M_res = int(psi^5 E) dV + (1/16pi) int[psi^-7 Ahat^2 - psi0^-7 Ahat0^2] dV
+  // The first term is what AccreteExcisedMass hands to the puncture; the second is
+  // the extrinsic-curvature energy, which changes when excision removes the matter
+  // momentum that sources Ahat and which is currently NOT transferred.  Comparing
+  // the sum against M_res both quantifies that omission and validates the surface
+  // integral against an independent volume integral.
+  void ComputeResidualMassVolume(Real *i_e, Real *i_a);
   void AccreteExcisedMass(Driver *pdriver, int stage);
 
   // Mass-weighted centroid of pmy_pack->pmhd->u0(IDN), recomputed every

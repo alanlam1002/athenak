@@ -7749,8 +7749,12 @@ src/cfc/
       |---|---|---|---|
       | full-psi error | 7.3e-2 | 2.5e-2 | 9.3e-3 |
       | split, error in `M_total` | 1.0e-4 | 1.3e-4 | 5.7e-4 |
-      i.e. **40-700x better**. The error on the hole alone had been two orders
-      of magnitude larger than the entire star (`~1e-2` against `7.5e-5`).
+      i.e. **40-700x better**. (Those numbers are from the offcenter-TOV test
+      fixture, whose star is `0.289` -- comparable to the hole. In the *TDE
+      production* case the split is not an improvement but a necessity: a
+      0.7 Msun star against a 1e4 Msun hole is `7e-5` in units of `M_BH`, so
+      the old method's `~1e-2` error on the hole alone would have been two
+      orders of magnitude larger than the entire object being measured.)
       The `bg_num` diagnostic (the same integral applied to `psi0` alone, NOT
       used in `M_total`) reproduces the old full-psi numbers to 4-5 digits,
       which confirms both that the background integrates to the analytic
@@ -7767,12 +7771,12 @@ src/cfc/
     - **Remaining systematic, now visible because the background no longer
       masks it**: `M_res` does not converge to zero with radius on the test
       fixture (`-1.0e-4 -> -5.7e-4` from `r=6` to `r=16`), where the true
-      answer is 0 since the star lies outside every sphere. Most likely the
-      coarse root grid (`dx=1.0`, so `dr=1.6` spans ~1.6 cells at `r=16`) plus
-      the star's weak far field. An extraction-parameter issue, not a
-      formulation one; `adm_mass_dr`/`adm_mass_nlev` should be tuned against
-      radius before absolute values are trusted. The differential test
-      (`M_res(t) - M_res(0)`) is unaffected, the bias being static.
+      answer is 0 since the star lies outside every sphere. Attributed here to
+      the coarse root grid and `dr` spanning too few cells -- **that
+      attribution was wrong, see item 58**, which measures it, identifies the
+      real cause (an off-center extraction sphere), and fixes it. The
+      differential test (`M_res(t) - M_res(0)`) is unaffected either way, the
+      bias being static.
       Spheres are rebuilt per call because `SphericalGrid` caches
       interpolation indices tied to the current MeshBlock layout, which any
       regrid invalidates.
@@ -7788,3 +7792,70 @@ src/cfc/
       matter over a timescale rather than instantly -- gentler for an elliptic
       source -- but it makes C2P run everywhere including deep inside the
       horizon, and has zero test coverage in this tree.
+
+58. **(2026-09-06) The ADM extraction sphere needs its own center; item 57's
+    "extraction parameters" attribution was wrong.** `SphericalGrid` gains an
+    optional Cartesian center and CFC gains `<cfc> adm_mass_center =
+    origin|com`, defaulting to `origin`. Backward compatibility is **verified,
+    not assumed**: re-running the unmodified `drscan_1.6` deck against the new
+    binary reproduces the pre-change output bit-for-bit in every printed digit
+    on both cycles (the center is added as `+ 0.0`, which is exact).
+    - **What was actually wrong.** Item 57 recorded `M_res` failing to converge
+      to zero with radius on the offcenter-TOV fixture and blamed the coarse
+      root grid plus `dr` spanning too few cells. A scan over
+      `adm_mass_dr = 1.6/3.2/6.4` refutes that: a 4x change in `dr` moves
+      `M_res` by ~10%, not the 4x that differencing noise demands.
+      | `dr` | r=6 | r=10 | r=16 |
+      |---|---|---|---|
+      | 1.6 | -1.047e-4 | -1.289e-4 | -5.746e-4 |
+      | 3.2 | -1.189e-4 | -1.456e-4 | -5.593e-4 |
+      | 6.4 | -1.126e-4 | -2.147e-4 | -5.195e-4 |
+      The signal is in the field, not in how the radial derivative is taken.
+    - **The real cause, and the analysis that pins it.** The spheres were
+      origin-centered while all the matter sat at `x=60`, i.e. *outside* every
+      sphere. By the mean-value property a source-free interior makes
+      `<psi>` independent of `r`, so the exact answer is 0 at every radius and
+      the measured `-1e-4 .. -1.1e-3` was pure angular-quadrature leakage from
+      the star's `l>=1` structure across the sphere -- which is why it grows
+      monotonically as the sphere reaches toward the star
+      (`-1.05e-4, -1.29e-4, -5.75e-4, -1.01e-3, -1.10e-3` at
+      `r=6/10/16/20/24`) and why `dr` barely matters.
+    - **Guard against the natural misreading.** Recentering is *not* a
+      first-order correction to the monopole. The same mean-value property says
+      `-2 r^2 d<psi>/dr` returns the enclosed mass regardless of where inside
+      the shell that mass sits *or* where the shell is centered. What
+      recentering changes is (a) what is enclosed at all, and (b) how much
+      high-`l` power the finite quadrature must cancel. This is written into
+      `ComputeADMMass`'s header comment so the next reader does not
+      re-derive it.
+    - **Result.** Centered on `r_com_mass_` -- the same centroid
+      `SolveConformalFactor()` already feeds `SetRobinCenter()`, so diagnostic
+      and solver share an origin -- the centroid locates the star (`x=59.98`)
+      and `M_res` becomes a real measurement:
+      | r | 6 | 10 | 16 | 20 | 24 |
+      |---|---|---|---|---|---|
+      | `M_res` | 0.1027 | 0.2715 | 0.3055 | 0.3043 | 0.3028 |
+      | `bg_num` | 7e-9 | 1.2e-7 | 2.8e-6 | 1.3e-5 | 4.5e-5 |
+      It rises while the sphere still cuts the star (isotropic radius 11.82),
+      then is **flat to 0.9% across `r=16..24`** -- the radius-independence the
+      diagnostic never had. `bg_num` collapsing to ~0 is the predicted
+      corollary, not a regression: `psi0`'s puncture is at the origin, now
+      outside the sphere. **`bg_num` only validates `M_BH` for
+      origin-centered spheres**, and both modes remain useful for that reason.
+    - **Accuracy, stated honestly.** `M_res(r=24) = 0.30281` against the grid's
+      own conserved rest mass `0.30904` is a 2.0% binding fraction; the
+      analytic TOV solution gives `0.289107/0.292601`, 1.19%. The absolute
+      offset is dominated by the *grid*, not the extraction: the discretized
+      star already carries 5.6% more rest mass than the analytic TOV baryon
+      mass on this coarse root grid. Angular resolution is not the limiter --
+      `adm_mass_nlev` 3->4 moves `M_res` by `<=1e-4` (by 2e-7 at `r=16`),
+      25x smaller than the residual `r`-drift of 2.6e-3 over `r=16..24`.
+    - **Scope of the `SphericalGrid` change.** One external caller
+      (`pgen/tests/gr_monopole.cpp:645`), positional and unaffected by a
+      trailing defaulted argument. `SetCenter()` is provided for recentering in
+      place. The Kerr-Schild branch of `SetInterpolationCoordinates` places the
+      sphere in the spheroidal coordinates of a hole *at the origin*, so a
+      nonzero center is only unambiguous when `bh_spin == 0` (where that branch
+      reduces to the flat one); this is flagged in a comment at the site.
+      `adm_mass_center = com` is rejected at startup unless
+      `puncture_enabled_`, since `r_com_mass_` is only ever filled on that path.

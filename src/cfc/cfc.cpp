@@ -306,6 +306,26 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   }
   adm_mass_dr_   = pin->GetOrAddReal("cfc", "adm_mass_dr", 1.0);
   adm_mass_nlev_ = pin->GetOrAddInteger("cfc", "adm_mass_nlev", 3);
+  {
+    std::string ctr = pin->GetOrAddString("cfc", "adm_mass_center", "origin");
+    if (ctr == "origin") {
+      adm_mass_center_com_ = false;
+    } else if (ctr == "com") {
+      adm_mass_center_com_ = true;
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> adm_mass_center = '" << ctr
+                << "' not recognized; must be 'origin' or 'com'" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (adm_mass_center_com_ && !puncture_enabled_) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> adm_mass_center = com requires the puncture "
+                << "background: r_com_mass_ is only computed when puncture is enabled"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
   r_com_mass_[0] = r_com_mass_[1] = r_com_mass_[2] = 0.0;
   r_com_X_[0] = r_com_X_[1] = r_com_X_[2] = 0.0;
   r_com_beta_[0] = r_com_beta_[1] = r_com_beta_[2] = 0.0;
@@ -1166,9 +1186,10 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //!     M_total = M_BH  +  ( -2 r^2 d<delta_psi>/dr ).
 //! Integrating the full psi would throw away the entire point of the puncture split.
 //! The background carries almost all the mass, so its truncation error swamps the
-//! quantity of interest: at r=16 the full-psi integral is ~1% accurate, i.e. ~1e-2
-//! absolute, while the whole star is ~7.5e-5 -- the error on the hole alone is two
-//! orders of magnitude larger than the object being measured.  Splitting makes the
+//! quantity of interest: at r=16 the full-psi integral is only ~1% accurate, i.e. ~1e-2
+//! absolute.  In the TDE case this is fatal -- a 0.7 Msun star against a 1e4 Msun hole
+//! is 7e-5 in units of M_BH, so the error on the hole alone would be two orders of
+//! magnitude larger than the entire object being measured.  Splitting makes the
 //! numerical error scale with the RESIDUAL's size instead, which is the same reason
 //! the puncture background is split out of the evolution in the first place.
 //!
@@ -1185,9 +1206,35 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //! default nlev=3), i.e. negligible against a V-cycle.
 //!
 //! psi is reassembled as delta_psi + psi0, since CFC stores the residual.
+//!
+//! EXTRACTION CENTER (<cfc> adm_mass_center = origin | com).  With "com" the spheres are
+//! centered on r_com_mass_, the same centroid SolveConformalFactor() hands to
+//! SetRobinCenter(), so the diagnostic and the solver's outer BC share an origin.  Be
+//! precise about what that does and does not buy, because the naive expectation is wrong:
+//!
+//!   - It is NOT a first-order correction to the monopole.  By the mean-value property,
+//!     the spherical average of a harmonic field over a shell equals 1/r times the
+//!     enclosed mass no matter WHERE inside the shell that mass sits, and no matter where
+//!     the shell is centered.  For the exact solution, -2 r^2 d<psi>/dr returns the same
+//!     enclosed mass either way.  Recentering does not fix a bias in an otherwise correct
+//!     extraction.
+//!   - What it changes is (a) WHAT IS ENCLOSED and (b) how much high-l power the finite
+//!     quadrature has to cancel.  The nlev geodesic quadrature is exact only up to some
+//!     multipole degree; a sphere centered where the residual is most nearly monopolar
+//!     leaks least.  Centered on the origin with the star far off-center, the residual's
+//!     dominant structure across the sphere is l>=1, and the extraction is measuring
+//!     quadrature leakage rather than mass.
+//!   - Corollary: with "com", bg_num stops being a check on M_BH.  psi0's puncture sits
+//!     at the ORIGIN, so once the sphere is centered elsewhere and no longer encloses it,
+//!     the same mean-value property drives bg_num toward zero.  That is correct
+//!     behaviour, not a regression -- bg_num only validates M_BH for origin-centered
+//!     spheres.
 
 void CFC::ComputeADMMass() {
   if (adm_mass_radii_.empty()) { return; }
+
+  // Extraction center.  nullptr => origin-centered, the historical behaviour.
+  const Real *ctr = adm_mass_center_com_ ? r_com_mass_ : nullptr;
 
   for (size_t n = 0; n < adm_mass_radii_.size(); ++n) {
     const Real rad = adm_mass_radii_[n];
@@ -1196,7 +1243,7 @@ void CFC::ComputeADMMass() {
     Real psi0_at[2] = {0.0, 0.0};
     for (int side = 0; side < 2; ++side) {
       Real r = rad + (side == 0 ? -adm_mass_dr_ : +adm_mass_dr_);
-      SphericalGrid sph(pmy_pack, adm_mass_nlev_, r);
+      SphericalGrid sph(pmy_pack, adm_mass_nlev_, r, -1, ctr);
 
       sph.InterpolateToSphere(1, delta_psi);
       Real s_d = 0.0, wtot = 0.0;
@@ -1227,7 +1274,12 @@ void CFC::ComputeADMMass() {
                 << " M_BH=" << puncture_mass_
                 << " M_total=" << m_total
                 << " M_accreted=" << accreted_mass_
-                << " [bg_num=" << m_bg_num << "]" << std::endl;
+                << " [bg_num=" << m_bg_num;
+      if (adm_mass_center_com_) {
+        std::cout << " ctr=(" << r_com_mass_[0] << "," << r_com_mass_[1] << ","
+                  << r_com_mass_[2] << ")";
+      }
+      std::cout << "]" << std::endl;
       std::cout.unsetf(std::ios_base::floatfield);
       std::cout.precision(prec0);
     }

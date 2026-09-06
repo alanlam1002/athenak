@@ -120,6 +120,13 @@ class CFC {
   std::vector<Real> adm_mass_radii_;
   Real adm_mass_dr_ = 1.0;
   int  adm_mass_nlev_ = 3;
+  // <cfc> adm_mass_center = origin (default) | com.  With "com" the extraction spheres
+  // are centered on r_com_mass_, the SAME centroid SolveConformalFactor() already hands
+  // to MultigridDriver::SetRobinCenter() -- so the diagnostic and the solver agree on
+  // where the residual's 1/r falloff is anchored.  Requires puncture_enabled_, since
+  // r_com_mass_ is only ever filled on that path.  See ComputeADMMass() for what this
+  // does and does not change.
+  bool adm_mass_center_com_ = false;
   void ComputeADMMass();
   void AccreteExcisedMass(Driver *pdriver, int stage);
 

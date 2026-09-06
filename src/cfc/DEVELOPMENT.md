@@ -7850,6 +7850,38 @@ src/cfc/
       mass on this coarse root grid. Angular resolution is not the limiter --
       `adm_mass_nlev` 3->4 moves `M_res` by `<=1e-4` (by 2e-7 at `r=16`),
       25x smaller than the residual `r`-drift of 2.6e-3 over `r=16..24`.
+    - **`ComputeADMMass` was silently wrong on more than one rank.** Found while
+      sizing the TDE validation run, not by any test. `InterpolateToSphere`
+      leaves `interp_vals` ZERO for every angle whose stencil is off-rank, so
+      the host sums were PARTIAL and rank 0 printed its own share --
+      roughly `1/nranks` of the answer. Every validation up to this point had
+      used the serial build, which is exactly why it survived: item 57's
+      `40-700x` table, the `dr` scan, and the `origin`/`com` comparison are all
+      single-rank and all unaffected. Fixed with one `MPI_Allreduce` covering
+      all radii at once (one collective per call, not four per radius),
+      following Z4c's wave-extraction convention
+      (`z4c_wave_extr.cpp:115`). `solid_angles` is deliberately NOT reduced: it
+      is the complete geodesic weight set on every rank, so `wtot` is already
+      `4*pi` locally. Verified both directions -- serial output bit-for-bit
+      unchanged, and an 8-rank run of the same deck now agrees with serial to 7
+      significant figures (`-1.04700696e-4` vs `-1.04700714e-4` at `r=6`), the
+      residual being reduction-order rounding.
+    - **GPU status: correct by inspection, not compile-tested.** Sakura is
+      CPU-only, so no CUDA build exists to check against. The reduction is
+      host-side throughout and therefore GPU-safe for the reasons that matter:
+      `part` is a `std::vector<Real>` in host memory (no GPU-aware MPI needed),
+      `interp_vals.h_view` is valid because `InterpolateToSphere` ends with
+      `modify<DevExeSpace>()`/`sync<HostMemSpace>()`
+      (`spherical_grid.cpp:277`), and `solid_angles.h_view` is filled on the
+      host in the `GeodesicGrid` constructor (`geodesic_grid.cpp:199`). The
+      center change is host-only for the same reason, and
+      `InterpolateToSphere` captures views by value rather than `this`.
+      **Performance, however, is a GPU question mark**: `ComputeADMMass`
+      constructs `2*nrad` `SphericalGrid`s per cycle and
+      `InterpolateToSphere` does a `Kokkos::realloc` plus a device->host copy
+      of `interp_vals` on every call, so the per-cycle host/device round trips
+      will cost relatively more on GPU than they do here. Cheap fix if it
+      bites: cache the spheres and rebuild only on regrid.
     - **Scope of the `SphericalGrid` change.** One external caller
       (`pgen/tests/gr_monopole.cpp:645`), positional and unaffected by a
       trailing defaulted argument. `SetCenter()` is provided for recentering in

@@ -1236,30 +1236,54 @@ void CFC::ComputeADMMass() {
   // Extraction center.  nullptr => origin-centered, the historical behaviour.
   const Real *ctr = adm_mass_center_com_ ? r_com_mass_ : nullptr;
 
-  for (size_t n = 0; n < adm_mass_radii_.size(); ++n) {
+  // InterpolateToSphere leaves interp_vals ZERO for every angle whose interpolation
+  // stencil does not live on this rank, so the host sums below are PARTIAL sums and
+  // must be reduced -- same pattern as Z4c's wave extraction (z4c_wave_extr.cpp:115).
+  // All radii are accumulated into one buffer so this costs a single collective per
+  // call rather than four per radius.  solid_angles is deliberately NOT reduced: it is
+  // the full geodesic-grid weight array, identical and complete on every rank, so wtot
+  // is already 4*pi locally.
+  const size_t nrad = adm_mass_radii_.size();
+  std::vector<Real> part(4*nrad, 0.0);   // [4n+0,+1] = <delta_psi> at r-dr, r+dr
+  Real wtot = 0.0;                       // [4n+2,+3] = <psi0>      at r-dr, r+dr
+
+  for (size_t n = 0; n < nrad; ++n) {
     const Real rad = adm_mass_radii_[n];
-    // Solid-angle averages of the RESIDUAL and of the BACKGROUND, kept separate.
-    Real dpsi_at[2] = {0.0, 0.0};
-    Real psi0_at[2] = {0.0, 0.0};
     for (int side = 0; side < 2; ++side) {
       Real r = rad + (side == 0 ? -adm_mass_dr_ : +adm_mass_dr_);
       SphericalGrid sph(pmy_pack, adm_mass_nlev_, r, -1, ctr);
 
       sph.InterpolateToSphere(1, delta_psi);
-      Real s_d = 0.0, wtot = 0.0;
+      Real s_d = 0.0;
+      Real w_here = 0.0;
       for (int ip = 0; ip < sph.nangles; ++ip) {
         Real w = sph.solid_angles.h_view(ip);
         s_d += w*sph.interp_vals.h_view(ip,0);
-        wtot += w;
+        w_here += w;
       }
+      // Every sphere shares the same nlev, hence the same complete 4*pi weight set;
+      // assign rather than accumulate so the value is independent of loop trip count.
+      wtot = w_here;
       sph.InterpolateToSphere(1, u_psi0);
       Real s_0 = 0.0;
       for (int ip = 0; ip < sph.nangles; ++ip) {
         s_0 += sph.solid_angles.h_view(ip)*sph.interp_vals.h_view(ip,0);
       }
-      dpsi_at[side] = s_d/wtot;
-      psi0_at[side] = s_0/wtot;
+      part[4*n + side]     = s_d;
+      part[4*n + 2 + side] = s_0;
     }
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, part.data(), static_cast<int>(part.size()),
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  for (size_t n = 0; n < nrad; ++n) {
+    const Real rad = adm_mass_radii_[n];
+    // Solid-angle averages of the RESIDUAL and of the BACKGROUND, kept separate.
+    Real dpsi_at[2] = {part[4*n + 0]/wtot, part[4*n + 1]/wtot};
+    Real psi0_at[2] = {part[4*n + 2]/wtot, part[4*n + 3]/wtot};
 
     // M = -(r^2/2pi) * closed_integral(grad psi . dS) = -2 r^2 d<psi>/dr.
     Real m_res    = -2.0*rad*rad*(dpsi_at[1] - dpsi_at[0])/(2.0*adm_mass_dr_);

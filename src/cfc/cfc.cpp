@@ -1425,15 +1425,46 @@ void CFC::ComputeADMMass() {
 //! affected -- its hyperbolic evolution keeps that information in the metric.)  The
 //! energy banked here is therefore destined for puncture_mass_.
 //!
-//! Drained on the LAST RK stage only, but the tally itself accumulates across every
-//! stage, because each stage's reset genuinely removes that energy from u0.
+//! RK-STAGE WEIGHTING (item 60).  The excision reset fires on EVERY RK stage, and
+//! naively summing those removals over-counts by ~2x.  The reason is the SSP-RK3
+//! register: each stage forms u0 = gam0*u0 + gam1*u1 + beta*dt*L, and u1 still holds
+//! the START-of-cycle state, so every stage RE-INJECTS a fraction of the matter that
+//! the previous stage already excised, and the next reset removes it again.
+//!
+//! What is physically removed over the cycle is the influx F, once.  A removal applied
+//! at the end of stage s reaches the final state with weight
+//!     w_s = prod_{j>s} gam0_j,     w_last = 1,
+//! i.e. (1/6, 2/3, 1) for rk3 (gam0 = 0, 1/4, 2/3; driver.cpp:120-129).  Draining each
+//! stage separately and combining with those weights returns exactly F: with per-stage
+//! removals (F, F/4, 2F/3) the weighted sum is F/6 + F/6 + 2F/3 = F, where the naive
+//! sum gives 1.92F.  That predicted 1.92x is what the t=145->230 TDE run measured as
+//! 1.95x (M_accreted 1.9176e-4 against a peak residual mass of 9.83e-5).
+//!
+//! Draining every stage costs one extra MPI_Allreduce per stage on a 5-element buffer,
+//! against the elliptic solves in the same stage -- negligible.
 
 void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
-  if (stage != pdriver->nexp_stages) { return; }
   if (!pmy_pack->pcoord->coord_data.bh_excise) { return; }
+  const int ns = pdriver->nexp_stages;
+  if (stage < 1 || stage > ns) { return; }
 
+  // Drain THIS stage's removals into its own slot.  DrainExcisedTally zeroes the
+  // device tally, so the slots are disjoint by construction.
   Real tot[5];
   pmy_pack->pcoord->DrainExcisedTally(tot);
+  for (int c = 0; c < 5; ++c) { stage_tally_[stage-1][c] = tot[c]; }
+
+  if (stage != ns) { return; }
+
+  // Combine the stages with their propagation weights to the final state.
+  Real w[4];
+  w[ns-1] = 1.0;
+  for (int s = ns-2; s >= 0; --s) { w[s] = pdriver->gam0[s+1]*w[s+1]; }
+  for (int c = 0; c < 5; ++c) {
+    tot[c] = 0.0;
+    for (int s = 0; s < ns; ++s) { tot[c] += w[s]*stage_tally_[s][c]; }
+  }
+
   accreted_mass_  += tot[0];
   accreted_mom_[0] += tot[1];
   accreted_mom_[1] += tot[2];

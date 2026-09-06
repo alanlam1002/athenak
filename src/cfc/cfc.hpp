@@ -107,6 +107,12 @@ class CFC {
   // and this records how much recoil that neglects.
   Real accreted_mass_ = 0.0;
   Real accreted_mom_[3] = {0.0, 0.0, 0.0};
+  // Per-RK-stage excision removals, [stage][{dM_adm, dPx, dPy, dPz, dM_raw}].  Drained
+  // once per stage and combined on the last stage with the RK propagation weights
+  // w_s = prod_{j>s} gam0_j -- summing them raw over-counts by ~2x, because the SSP-RK
+  // u1 register re-injects matter a previous stage already excised.  See
+  // AccreteExcisedMass and item 60.  Sized for Driver::gam0[4], the max stage count.
+  Real stage_tally_[4][5] = {};
   // <cfc> accrete_to_puncture (default true when puncture_enabled): actually grow
   // M_BH by the swallowed energy.  Set false to keep the tally as a pure diagnostic,
   // which is how the psi^5-vs-psi^6 weighting A/B is run.

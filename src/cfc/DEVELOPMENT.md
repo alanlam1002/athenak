@@ -7955,3 +7955,51 @@ src/cfc/
       recoil energy into hole mass, normally wrong -- though at this mass ratio
       the true recoil is `v ~ P/M_BH ~ 1e-4` and the hole cannot meaningfully
       move, so it may be closer to right than discarding it. Measure first.
+
+60. **(2026-09-06) The excision tally over-counted by 1.92x: it summed removals
+    across RK stages without the propagation weights.** Found by the first TDE
+    run that actually accreted (t=145->230), not by any fixture.
+    - **Mechanism.** The excision reset fires on EVERY RK stage. Each stage
+      forms `u0 = gam0*u0 + gam1*u1 + beta*dt*L`, and `u1` still holds the
+      START-of-cycle state, so every stage RE-INJECTS a fraction of the matter
+      the previous stage already excised, and the next reset removes it again.
+      `AccreteExcisedMass` correctly *applied* only on the last stage, but the
+      device tally accumulated all three, so the sum counted the same influx
+      about twice.
+    - **The correct weighting.** A removal applied at the end of stage `s`
+      reaches the final state with weight `w_s = prod_{j>s} gam0_j`, `w_last=1`
+      -- i.e. **(1/6, 2/3, 1)** for rk3 (`gam0 = 0, 1/4, 2/3`,
+      `driver.cpp:120-129`). With per-stage removals `(F, F/4, 2F/3)` the
+      weighted sum is `F/6 + F/6 + 2F/3 = F`, the true influx, where the naive
+      sum gives `F(1 + 1/4 + 2/3) = 1.9167 F`.
+    - **Fix.** Drain the tally EVERY stage into its own slot (`stage_tally_`),
+      combine on the last stage with `w_s` computed from `pdriver->gam0`. Costs
+      one extra 5-element `MPI_Allreduce` per stage, negligible against the
+      elliptic solves in the same stage. Generic in the integrator: the weights
+      are read from the driver, not hard-coded.
+    - **Confirmed three independent ways.**
+      | evidence | predicted | measured |
+      |---|---|---|
+      | whole-run `M_accreted` / peak `M_res` | 1.92 | 1.95 |
+      | per-cycle `dM_adm` old/new, same restart | 1.9167 | **1.915** |
+      The per-cycle ratio was steady at 1.915 over successive cycles
+      (`1.994, 1.915, 1.915, 1.915, 1.914`; the first differs because the
+      restart's stage-1 register state is not identical).
+    - **It is a real conservation fix, not just a cosmetic one.** Over the same
+      25 cycles from the same mid-accretion restart, `M_total` drift fell from
+      `5.370e-06` to `1.600e-07` -- **33.6x** -- i.e. from 6.3% of the star's
+      mass to 0.19%.
+    - **What the unfixed run cost.** The completed t=145->230 TDE run grew
+      `M_BH` by `1.9176e-4` where the star's residual mass never exceeded
+      `9.83e-5`, ending at `M_total = 1.00019176` from `1.00008145`. That run's
+      accretion totals must NOT be quoted; its infall phase (below) is still
+      informative.
+    - **Two defects remain, deliberately separate from this one:**
+      (a) `I_A` is measured but still not transferred -- at mid-accretion
+      `I_A = +5.96e-6` against `I_E = 8.01e-5`, i.e. **7.4%** of the budget, and
+      including it improves volume-vs-surface agreement from 7.5% to 0.67% (an
+      11x improvement). Item 59's question is now answered: the term matters.
+      (b) `M_total` rose by ~21% of the star's mass during PURE INFALL, before
+      any excision at all (`1.0000814 -> 1.0000985`, monotonic). Neither the RK
+      bug nor `I_A` explains that; it is the fixed-puncture background acting as
+      an energy reservoir, and it is the next thing to chase.

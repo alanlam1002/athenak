@@ -7735,25 +7735,47 @@ src/cfc/
       to its `t=0` mass.
     - **ADM surface integral** (`CFC::ComputeADMMass`, `<cfc> adm_mass_r0..`),
       the only *independent* check -- everything else is internal bookkeeping
-      that could be self-consistently wrong. Reports both the true surface
-      integral `M_surf = -(r^2/2pi)*closed_integral(grad psi . dS)` (centred
-      difference between spheres at `r+/-dr`) and the monopole estimate
-      `M_mono = 2r(<psi>-1)`. Validated on a full domain with the star far
-      outside every sphere, where the answer must be `M_BH=1`: `M_surf` gives
-      `1.0730 / 1.0254 / 1.0093` at `r = 6 / 10 / 16`, i.e. clean **~1/r^2**
-      convergence to 1.0; `M_mono` is worse and non-monotonic, as its O(1/r)
-      multipole error predicts, so `M_surf` is the estimator to use.
+      that could be self-consistently wrong. Uses
+      `M = -(1/2pi)*closed_integral(grad psi . dS) = -2 r^2 d<psi>/dr`, via a
+      centred difference between spheres at `r+/-dr`.
+    - **Applied to the RESIDUAL, with the background taken analytically:**
+      `M_total = M_BH + (-2 r^2 d<delta_psi>/dr)`. This was a user correction
+      to a first version that integrated the *full* psi, and it matters a lot.
+      Integrating the full field throws away the whole point of the puncture
+      split: the background carries essentially all the mass, so its truncation
+      error swamps the quantity of interest. Measured, same fixture, same
+      radii `r = 6/10/16`:
+      | quantity | r=6 | r=10 | r=16 |
+      |---|---|---|---|
+      | full-psi error | 7.3e-2 | 2.5e-2 | 9.3e-3 |
+      | split, error in `M_total` | 1.0e-4 | 1.3e-4 | 5.7e-4 |
+      i.e. **40-700x better**. The error on the hole alone had been two orders
+      of magnitude larger than the entire star (`~1e-2` against `7.5e-5`).
+      The `bg_num` diagnostic (the same integral applied to `psi0` alone, NOT
+      used in `M_total`) reproduces the old full-psi numbers to 4-5 digits,
+      which confirms both that the background integrates to the analytic
+      `m_bh` as assumed, and that *all* of the old method's error was
+      background truncation rather than anything in the residual.
+    - **Correcting the earlier conclusion in this same item**: the first
+      version recorded that the integral "cannot confirm the transfer from its
+      absolute value", treating ~1% as intrinsic to surface extraction. It was
+      not intrinsic -- it followed from integrating the variable whose mass is
+      already known exactly. With the split the accreted mass becomes
+      resolvable in principle. The same reasoning that motivates splitting the
+      puncture background out of the *evolution* applies to the *diagnostics*,
+      and was not carried across on the first attempt.
+    - **Remaining systematic, now visible because the background no longer
+      masks it**: `M_res` does not converge to zero with radius on the test
+      fixture (`-1.0e-4 -> -5.7e-4` from `r=6` to `r=16`), where the true
+      answer is 0 since the star lies outside every sphere. Most likely the
+      coarse root grid (`dx=1.0`, so `dr=1.6` spans ~1.6 cells at `r=16`) plus
+      the star's weak far field. An extraction-parameter issue, not a
+      formulation one; `adm_mass_dr`/`adm_mass_nlev` should be tuned against
+      radius before absolute values are trusted. The differential test
+      (`M_res(t) - M_res(0)`) is unaffected, the bias being static.
       Spheres are rebuilt per call because `SphericalGrid` caches
       interpolation indices tied to the current MeshBlock layout, which any
       regrid invalidates.
-    - **Honest limit on that check**: absolute accuracy is ~1% at `r=16`,
-      while the accreted mass here is `5e-9` -- and even a whole disrupted
-      star is `~1e-4` of `M_BH`. So the integral **cannot** confirm the
-      transfer from its absolute value. What it can do is the differential
-      test: the finite-radius error is systematic and nearly constant in time,
-      so `M_surf(t) - M_surf(0)` should stay flat if mass is conserved and
-      drift if the `psi^6` weighting were used. That is the test to run on the
-      TDE fixture, and it is not yet done.
     - **Not yet validated on a case where real debris crosses the surface.**
       Everything above is verified on a fixture whose star sits 60 r_g away,
       so only trace atmosphere is excised (`M_accreted ~ 1.7e-8`). That

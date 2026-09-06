@@ -1159,15 +1159,25 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
 //! M_BH itself are internal bookkeeping that could be self-consistently wrong.
 //!
 //! For a conformally-flat slice, psi -> 1 + M/(2r), and
-//!     M_ADM = -(1/2pi) * closed_integral( grad(psi) . dS )
-//!           = -(r^2/2pi) * sum_ang( w * dpsi/dr ),   sum_ang(w) = 4pi.
-//! Two things are reported per radius:
-//!   M_surf : the surface integral above, using a centred difference between spheres
-//!            at r-dr and r+dr.  Exact in the continuum.
-//!   M_mono : 2r(<psi> - 1), the monopole estimate.  Cheaper and needs no derivative,
-//!            but carries an O(1/r) error from higher multipoles.
-//! Agreement between the two, AND radius-independence of each, is the real test --
-//! a single number at a single radius proves nothing.
+//!     M_ADM = -(1/2pi) * closed_integral( grad(psi) . dS ) = -2 r^2 d<psi>/dr.
+//!
+//! CRUCIALLY this is applied to the RESIDUAL, not the full psi, and the background's
+//! contribution is taken analytically:
+//!     M_total = M_BH  +  ( -2 r^2 d<delta_psi>/dr ).
+//! Integrating the full psi would throw away the entire point of the puncture split.
+//! The background carries almost all the mass, so its truncation error swamps the
+//! quantity of interest: at r=16 the full-psi integral is ~1% accurate, i.e. ~1e-2
+//! absolute, while the whole star is ~7.5e-5 -- the error on the hole alone is two
+//! orders of magnitude larger than the object being measured.  Splitting makes the
+//! numerical error scale with the RESIDUAL's size instead, which is the same reason
+//! the puncture background is split out of the evolution in the first place.
+//!
+//! Reported per radius: M_res (the residual surface integral -- the matter's own ADM
+//! contribution), M_BH (analytic), M_total = sum, and bg_num.  The last is the same
+//! surface integral applied to psi0 alone: it should reproduce M_BH, and is carried
+//! only to verify that the background's ADM mass really is the analytic value -- it
+//! is NOT used in M_total.  Radius-independence of M_res is the real test; a single
+//! number at a single radius proves nothing.
 //!
 //! The spheres are rebuilt on every call rather than cached: SphericalGrid stores
 //! interpolation indices/weights tied to the CURRENT MeshBlock layout, which any AMR
@@ -1181,38 +1191,43 @@ void CFC::ComputeADMMass() {
 
   for (size_t n = 0; n < adm_mass_radii_.size(); ++n) {
     const Real rad = adm_mass_radii_[n];
-    Real psi_at[2] = {0.0, 0.0};   // solid-angle-averaged psi at r-dr, r+dr
+    // Solid-angle averages of the RESIDUAL and of the BACKGROUND, kept separate.
+    Real dpsi_at[2] = {0.0, 0.0};
+    Real psi0_at[2] = {0.0, 0.0};
     for (int side = 0; side < 2; ++side) {
       Real r = rad + (side == 0 ? -adm_mass_dr_ : +adm_mass_dr_);
       SphericalGrid sph(pmy_pack, adm_mass_nlev_, r);
+
       sph.InterpolateToSphere(1, delta_psi);
-      Real sum_dpsi = 0.0, wtot = 0.0;
+      Real s_d = 0.0, wtot = 0.0;
       for (int ip = 0; ip < sph.nangles; ++ip) {
         Real w = sph.solid_angles.h_view(ip);
-        sum_dpsi += w*sph.interp_vals.h_view(ip,0);
+        s_d += w*sph.interp_vals.h_view(ip,0);
         wtot += w;
       }
       sph.InterpolateToSphere(1, u_psi0);
-      Real sum_psi0 = 0.0;
+      Real s_0 = 0.0;
       for (int ip = 0; ip < sph.nangles; ++ip) {
-        sum_psi0 += sph.solid_angles.h_view(ip)*sph.interp_vals.h_view(ip,0);
+        s_0 += sph.solid_angles.h_view(ip)*sph.interp_vals.h_view(ip,0);
       }
-      psi_at[side] = (sum_dpsi + sum_psi0)/wtot;   // <psi> on this shell
+      dpsi_at[side] = s_d/wtot;
+      psi0_at[side] = s_0/wtot;
     }
 
-    Real dpsi_dr = (psi_at[1] - psi_at[0])/(2.0*adm_mass_dr_);
-    Real m_surf  = -2.0*rad*rad*dpsi_dr;                 // -(r^2/2pi)*4pi*dpsi/dr
-    Real psi_avg = 0.5*(psi_at[0] + psi_at[1]);
-    Real m_mono  = 2.0*rad*(psi_avg - 1.0);
+    // M = -(r^2/2pi) * closed_integral(grad psi . dS) = -2 r^2 d<psi>/dr.
+    Real m_res    = -2.0*rad*rad*(dpsi_at[1] - dpsi_at[0])/(2.0*adm_mass_dr_);
+    Real m_bg_num = -2.0*rad*rad*(psi0_at[1] - psi0_at[0])/(2.0*adm_mass_dr_);
+    Real m_total  = puncture_mass_ + m_res;
 
     if (global_variable::my_rank == 0) {
       std::streamsize prec0 = std::cout.precision();
       std::cout << std::scientific << std::setprecision(8)
                 << "### CFC ADM mass: r=" << rad
-                << " M_surf=" << m_surf
-                << " M_mono=" << m_mono
+                << " M_res=" << m_res
                 << " M_BH=" << puncture_mass_
-                << " M_accreted=" << accreted_mass_ << std::endl;
+                << " M_total=" << m_total
+                << " M_accreted=" << accreted_mass_
+                << " [bg_num=" << m_bg_num << "]" << std::endl;
       std::cout.unsetf(std::ios_base::floatfield);
       std::cout.precision(prec0);
     }

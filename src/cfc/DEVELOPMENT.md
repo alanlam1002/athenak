@@ -25,6 +25,41 @@ its Riemann solver and conserved-to-primitive conversion.
 - `src/gravity/{gravity,mg_gravity}.{hpp,cpp}` — the structural template this module
   mirrors (a thin physics orchestrator + Multigrid/MultigridDriver subclass pairs).
 
+## Run-directory artifacts (2026-09-07 scratch cleanup)
+
+Items below cite run directories under `/sakura/ptmp/tlam/` as evidence. A
+storage cleanup on 2026-09-07 (`/sakura/ptmp` was at 98%) deleted completed,
+already-analyzed diagnostic runs — ~870 GB, almost all of it restart dumps,
+which are sized by mesh rather than by run duration (several one-cycle sanity
+checks were sitting on 30–56 GB each). **Logs, `.hst` history, parfiles, and
+job scripts from every deleted directory were preserved** in four archives
+totalling 1.9 MB:
+
+| Archive | Location | Covers |
+|---|---|---|
+| `cfc_tov_migration_diagnostics_archive.tar.gz` | `athenak_run/` | 10 `cfc_tov_migration_*` diagnostic dirs |
+| `cfc_stability_bu8_archive.tar.gz` | `athenak_run/` | 18 `cfc_stability*`/`cfc_bu8*`/`cfc_bu0*` dirs |
+| `grass_obsolete_dirs_archive.tar.gz` | `athenak_run/` | 10 superseded `grass_*` dirs |
+| `run_cfc_archive.tar.gz` | `/sakura/ptmp/tlam/` | all 26 `run_cfc_*` dirs (the pre-`athenak_run/` generation) |
+
+Nine cited paths in this file are consequently dangling —
+`athenak_run/{cfc_bu8_surffix_check,cfc_stability_v2}` and the seven
+`run_cfc_tov_full_2x*` variants. Every one is recoverable from the archives
+above; only bulk field output (`rst/`, `bin/`) is unrecoverable. Deliberately
+**kept intact**: `cfc_tov_migration_test` (flagged in item 28 as the live
+production dir), the three incomplete BU8/stability restart chains
+(`cfc_bu8_stability_test_v2`/`_v3`, `cfc_stability_v6` — still resumable), the
+20-dir `cfc_tov_amr_*` cluster (items 32–38 are not fully closed), and both
+GRASS initial-data sources.
+
+Two general cautions this cleanup surfaced, both worth applying to future
+entries in this file:
+1. **Restart dumps are not evidence; `.hst` files are.** A finding worth
+   citing should be reproducible from the history/log files, which are ~MB.
+2. **Re-running a test in place silently invalidates the entry that cites
+   it.** See the 2026-07-23 BU8 production-run bullet (item 23) for a case
+   where this happened and the artifact note added to explain it.
+
 ## Status: feature-complete (all equation bodies implemented); the original
 ## boundary NaN is fixed (item 9, rounds 6-7). Both the `psi` O(1) corner-error
 ## bug (item 9, rounds 8-15) and the `alpha`/lapse non-convergence bug (rounds
@@ -3834,6 +3869,24 @@ src/cfc/
       transient, not the small perturbation response a converged equilibrium
       should show); a third, more serious ID bug (missing Lorentz factor) was
       found and fixed as a result.
+      - **Artifact note (2026-09-07): every number in this bullet now
+        disagrees with the files in `cfc_bu8_stability_test/`. Read the
+        "Final production run (jobs 248477 + 248639)" bullet at the end of
+        this item before trusting anything here.** This bullet's run was
+        superseded three bugs later, and the final run reused the same
+        directory, overwriting `cfc_bu8_stability.{out,mhd.hst}`. What is on
+        disk now — `M0=1.825610932873623`, max `|M(t)-M0|/M0 = 1.186e-8` over
+        203 rows, terminating at cycle **2121**, `.out`/`.mhd.hst` written 9 s
+        apart (19:06:38/19:06:47) — is that *final* run, and is already
+        recorded correctly in the closing bullet. None of this bullet's values
+        (`1.377519325298131`, `1.377487860418838`, `2.284e-5`, cycle 2321,
+        "~75 min") survive anywhere on disk; the closing bullet's contrast
+        against "`2.28e-5` for the earlier, still-buggy 'successful' run,
+        item 23's first pass" is now their only record. **Nothing here was
+        wrong when written** — this is a forward-reference gap, not a
+        correction, and the cross-check that matters (post-fix `M0` vs. XNS's
+        own `REST MASS=1.8255846452192752`, `0.0014%` off) lives in the
+        closing bullet.
     - **Third bug found and fixed: missing Lorentz factor in the velocity
       primitive (2026-07-23, user diagnostic review)**. `XNSInterpToADMAndPrim`
       set `w0(IVX/IVY/IVZ)` directly to the Eulerian-observer coordinate-basis

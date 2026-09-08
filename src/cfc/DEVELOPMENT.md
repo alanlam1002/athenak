@@ -363,6 +363,11 @@ other in-progress work is still pinned to `intel/2024.0` for this project.
 
 Full physics verification (BU0/BU8, open item 5) is the next milestone — it was
 blocked only on getting a working binary, which now exists.
+**STALE as written (audit 2026-09-07): BU0/BU8 were subsequently run — see items
+28 (BU8 with the psi^5 formulation), 50 and 51 (off-center BU8 stability). What
+remains unclear from the log is whether the quantitative comparison against the
+Gmunu paper's published numbers was ever completed, as distinct from "the tests
+run and are stable". Treat open item 5 as partially done, not untouched.**
 
 **First actual run attempted**, `inputs/dyn_grmhd/cfc_tov.athinput` (new file,
 based on `whisky_tov.athinput`: `isotropic=true` so `dyngr_tov.cpp` sets up the
@@ -873,8 +878,11 @@ src/cfc/
    for the full per-field rationale (which fields need exchange and why).
 5. Verify against the Gmunu paper's BU0/BU8 test cases now that all equation bodies
    exist — the next real milestone, and now unblocked: `~/athenak_cfc/cfc_sakura.sh`
-   produces a working `athena` binary (see "Status" above and item 7). Not started
-   yet. The findings E/H above (new, unexercised numerics) are the highest-risk
+   produces a working `athena` binary (see "Status" above and item 7). ~~Not
+   started yet.~~ **Superseded in part — see items 28, 50, 51, which run BU8 and
+   establish stability. Whether the quantitative match to the paper's published
+   values was closed out is not recorded anywhere in this log; that is the piece
+   still genuinely open.** The findings E/H above (new, unexercised numerics) are the highest-risk
    places to re-check by hand first, since a clean compile+link doesn't validate
    the physics. `inputs/dyn_grmhd/whisky_tov.athinput` (ADM-only, no `<z4c>` block,
    `<mhd>` present) is the natural base input file to add a `<cfc>` block to for a
@@ -1794,9 +1802,9 @@ src/cfc/
        out to `i=128`, then a *sharp* jump to `psi=2` at `i=131` (`=ie`, the true
        last interior cell) -- a 3-cell-wide anomaly, not a gradual departure.
        Comparing all four multigrid solvers' `RetrieveResult` calls:
-       `gravity/mg_gravity.cpp:242` and `cfc/mg_cfc_vector_poisson.cpp:242` both
+       `gravity/mg_gravity.cpp:242` and `cfc/mg_cfc_vector_poisson.cpp:292` both
        correctly pass the *mesh's* `NGHOST` (`indcs.ng`, e.g. 4); `cfc/mg_cfc_
-       conformal_factor.cpp:358` and `cfc/mg_cfc_lapse.cpp:296` (alpha's
+       conformal_factor.cpp:660` and `cfc/mg_cfc_lapse.cpp:575` (alpha's
        identical bug) both instead passed `mglevels_->GetGhostCells()` -- this
        solver's own, generally much shallower, internal ghost depth (`ngh_=1` for
        this test). `RetrieveResult`'s copy offset is `dst_off = ngh - ngh_`;
@@ -7784,6 +7792,14 @@ src/cfc/
       Everything above is verified on a fixture whose star sits 60 r_g away,
       so only trace atmosphere is excised (`M_accreted ~ 1.7e-8`). That
       validates the machinery, not the physics.
+      **UPDATE (item 60): now validated on real debris, and doing so
+      immediately exposed a 1.92x over-count that this static fixture could
+      never have shown -- the tally summed removals across RK stages. Every
+      accretion number in this item predates that fix. They remain correct as
+      written, because at `M_accreted ~ 1.7e-8` the bug is far below any
+      quoted digit, but the METHOD they validate was incomplete.** Two further
+      omissions the fixture could not expose: the `Ahat^2` term (item 59) and
+      `M_ADM` non-conservation intrinsic to CFC (item 61).
     - Separately: `<cfc> accrete_to_puncture` (default true) lets the tally run
       as a pure diagnostic without feeding back, which is how the
       `psi^5`-vs-`psi^6` comparison is run against an identical evolution.
@@ -7872,7 +7888,7 @@ src/cfc/
       `part` is a `std::vector<Real>` in host memory (no GPU-aware MPI needed),
       `interp_vals.h_view` is valid because `InterpolateToSphere` ends with
       `modify<DevExeSpace>()`/`sync<HostMemSpace>()`
-      (`spherical_grid.cpp:277`), and `solid_angles.h_view` is filled on the
+      (`spherical_grid.cpp:304-305`), and `solid_angles.h_view` is filled on the
       host in the `GeodesicGrid` constructor (`geodesic_grid.cpp:199`). The
       center change is host-only for the same reason, and
       `InterpolateToSphere` captures views by value rather than `this`.
@@ -7995,11 +8011,80 @@ src/cfc/
       accretion totals must NOT be quoted; its infall phase (below) is still
       informative.
     - **Two defects remain, deliberately separate from this one:**
-      (a) `I_A` is measured but still not transferred -- at mid-accretion
+      (a) `I_A` is measured but still not transferred. At mid-accretion
       `I_A = +5.96e-6` against `I_E = 8.01e-5`, i.e. **7.4%** of the budget, and
       including it improves volume-vs-surface agreement from 7.5% to 0.67% (an
-      11x improvement). Item 59's question is now answered: the term matters.
+      11x improvement). Item 59's question is answered -- the term matters --
+      but **treat 7.4% as provisional**: it was measured on `cfc_tde_newdiag`,
+      which ran the PRE-fix binary, so the state it describes had `M_BH`
+      already over-inflated by this item's bug. The clean rerun gives
+      `I_A/I_E = -0.075%` at `t=145` rising to `+0.69%` at `t=194`, tracking
+      the momentum build-up; the mid-accretion value must be re-derived from it.
       (b) `M_total` rose by ~21% of the star's mass during PURE INFALL, before
-      any excision at all (`1.0000814 -> 1.0000985`, monotonic). Neither the RK
-      bug nor `I_A` explains that; it is the fixed-puncture background acting as
-      an energy reservoir, and it is the next thing to chase.
+      any excision at all (`1.0000814 -> 1.0000985`, monotonic). That figure IS
+      valid despite coming from the pre-fix run, because nothing was being
+      accreted then, so the RK bug could not affect the state. Neither the RK
+      bug nor `I_A` explains it -- see item 61, which identifies the cause and
+      corrects an earlier wrong attribution recorded here.
+
+61. **(2026-09-07) CFC does NOT conserve `M_ADM`, and the claim that it should
+    was wrong.** Item 60(b) attributed the pure-infall `M_total` drift to "the
+    fixed-puncture background acting as an energy reservoir". That attribution
+    is **retracted**; so is the reasoning behind it ("CFC radiates nothing,
+    therefore `M_ADM` is constant"). User challenge, and correct to make.
+    - **Why the conservation theorem does not transfer.** In full GR `M_ADM` is
+      defined at spatial infinity, is slice-independent, and is strictly
+      constant -- radiation reduces the *Bondi* mass at null infinity, not the
+      ADM mass. But CFC is not a solution of Einstein's equations, so the
+      theorem simply does not apply. With maximal slicing and
+      `gamma_ij = psi^4 gammatilde_ij` the exact Hamiltonian constraint is
+      `Deltatilde psi = (1/8) psi Rtilde - 2pi psi^5 E - (1/8) psi^-7 Ahat^2`,
+      and CFC sets `gammatilde_ij = f_ij`, so **`Rtilde == 0` by fiat**.
+      Integrating with a puncture,
+      `M_ADM = M_punct + int(psi^5 E) + (1/16pi) int(psi^-7 Ahat^2)
+               - (1/16pi) int(psi Rtilde)`,
+      and that last term -- nonzero and time-dependent in full GR, part of what
+      balances the books -- is exactly what CFC discards.
+    - **The deeper reason.** In full GR the contracted Bianchi identity
+      `grad_mu G^{mu nu} == 0` TOGETHER WITH the evolution equations propagates
+      the constraints and conserves the integral charges. CFC keeps only the 4
+      constraint equations and discards the 6 evolution equations for
+      `gammatilde_ij`, replacing them with `d_t gammatilde_ij = 0`. So
+      `G^{ij} != 8pi T^{ij}`, while the matter is still evolved with
+      `grad_mu T^{mu nu} = 0` on that metric -- and `grad_mu T^{mu nu} = 0` is
+      compatible only with the FULL Einstein system. The mismatch acts as an
+      effective energy source. It is a constrained system in which the
+      constraint forces do work.
+    - **Do not confuse this with constraint satisfaction.** The literature's
+      "CFC solves all constraints and thus cannot violate them" is a statement
+      about each instant, which is true and which this code does exactly. It
+      says nothing about conservation of `M_ADM` in TIME.
+    - **The bookkeeping correction.** Freezing `M_punct` does not inject
+      anything: `psi = psi0 + delta_psi` is a SPLIT, `delta_psi` absorbs
+      whatever the constraint requires, and `M_punct + M_res` is the true ADM
+      mass of the solved slice however it is labelled. During pure infall the
+      hole genuinely is not growing, so a frozen `M_punct` is correct. The
+      drift is a property of the solved field, i.e. of the CFC system itself.
+    - **What IS exactly conserved: rest mass.** The continuity equation
+      `d_t(sqrt(gamma) rho W) + d_i(...) = 0` involves no metric evolution
+      equation. Observed: grid mass flat to `1e-8` while `M_ADM` drifts ~7%.
+      The quantity with a clean conservation law is protected; the one without
+      is not -- a useful internal consistency check.
+    - **Magnitude is consistent with CFC being the whole story.** CFC is exact
+      through 1PN, with errors entering at 2PN, i.e. relative `O(v^2)`. Infall
+      velocity runs ~0.24 -> ~0.5 over `t=145..194`, so `v^2` runs 0.06 -> 0.25.
+      Measured `I_E` rise over that window is **+5.4%** (`8.19644e-5 ->
+      8.63500e-5`), squarely in range. "Consistent with" is not "demonstrated",
+      so this is NOT yet a conclusion.
+    - **The decisive test (not yet run).** CFC is EXACT in spherical symmetry --
+      every spherically symmetric 3-slice is conformally flat -- so there
+      `M_ADM` must be conserved up to pure numerics. Run spherically symmetric
+      accretion (a spherical shell or overdensity falling radially onto the
+      puncture; same EOS, resolution, excision settings). Near-zero drift =>
+      the TDE drift is genuine CFC approximation error and should be documented
+      as the method's accuracy floor rather than chased. Comparable drift => it
+      is in this implementation, and the spherical case is far easier to debug.
+      Needs no new code.
+    - Refs: [Quality of CFC, MPA Garching](
+      https://www.mpa-garching.mpg.de/180577/Quality-of-CFC); CFC+
+      (arXiv:astro-ph/0412611); Cordero-Carrion et al. (arXiv:0809.2325).

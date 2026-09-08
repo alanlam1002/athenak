@@ -8088,3 +8088,58 @@ src/cfc/
     - Refs: [Quality of CFC, MPA Garching](
       https://www.mpa-garching.mpg.de/180577/Quality-of-CFC); CFC+
       (arXiv:astro-ph/0412611); Cordero-Carrion et al. (arXiv:0809.2325).
+
+62. **(2026-09-07/08) Clean TDE rerun with all fixes: the excision scheme is
+    validated end-to-end, and the accretion totals are finally quotable.**
+    Restart from the `t=145` checkpoint with the binary at `fa980ef4`
+    (`cfc_tde_excise_v2`, 8 nodes / 320 ranks, 16.5 h, 5,920 cycles to
+    `t=229.93`). Supersedes the pre-fix run of item 60 in every number.
+    - **The headline.** `M_accreted = 9.9505e-5`, against `1.9176e-4` for the
+      identical physics before the RK fix -- ratio **1.927**, matching the
+      predicted `1.9167` to 0.5%. It is now physically sensible: the star's
+      residual mass peaked at `1.028e-4` and the hole swallowed `9.95e-5`,
+      where previously it swallowed roughly twice what ever existed.
+    - **`M_ADM` budget over the whole run.**
+      | | `M_total` | drift vs `t=145`, as % of star mass |
+      |---|---|---|
+      | `t=145` (start) | 1.00008145 | -- |
+      | end of pure infall | 1.00009096 | +11.5% |
+      | peak (mid-accretion) | 1.00010516 | +28.7% |
+      | `t=230` (final) | 1.00009951 | **+21.9%** |
+      Against **+133%** for the pre-fix run. A 6x improvement, and note the
+      drift is NOT monotonic -- it peaks mid-accretion and relaxes back, which
+      the old run's numbers were too corrupted to show.
+    - **What the residual 21.9% is.** It is now dominated by the pure-infall
+      drift (+11.5% before a single cell was excised), i.e. by item 61's CFC
+      approximation error, not by excision bookkeeping. The excision accounting
+      is no longer the leading error term. Whether the remainder is CFC's
+      accuracy floor is exactly what item 61's spherical-symmetry test decides.
+    - **`I_A` resolved, and item 60(a)'s provisional 7.4% replaced.** Clean
+      trajectory, tracking momentum build-up then decaying as matter is
+      consumed:
+      | phase | `I_E` | `I_A` | `I_A/I_E` |
+      |---|---|---|---|
+      | `t=145` coasting | 8.196e-5 | -6.16e-8 | -0.075% |
+      | infall | 8.562e-5 | +4.10e-7 | +0.48% |
+      | peak accretion | 9.643e-5 | +5.68e-6 | **+5.9%** |
+      | star consumed | 7.6e-13 | +6.28e-9 | dominant |
+      At peak, including `I_A` improves volume-vs-surface agreement from 6.2%
+      to **0.67%** (9.3x). After the star is gone `I_A` exceeds `I_E` by four
+      orders of magnitude and `I_sum = 6.28e-9` still tracks the surface
+      `M_res = 6.26e-9` -- with no matter left, essentially the entire residual
+      field is extrinsic-curvature energy. Direct confirmation that the term is
+      real and, in that regime, everything.
+    - **Excision behaved exactly as designed.** `<1/psi> = 0.5184` (psi=1.93)
+      held to 4 digits across the whole accretion phase, against `sqrt(1.762/
+      0.478) = 1.92` predicted from the excision radius measured independently
+      off the density field (largest radius at `dfloor`: `0.478` isotropic).
+      Star fully consumed: `rho_max 3.24e-4 -> 5.15e-14`, `M_res -> 6.3e-9`.
+    - **Solver health.** 6,962 iteration-cap misses, rate roughly doubling
+      during accretion (0.9/cycle before, 1.7/cycle after), ALL absorbed by
+      `d129b195`'s `nlim` guard -- without it this run would have died the way
+      `exc300b` did at `t=159`. Worst defect over the entire run was `5.99e-9`
+      against a `1e-9` threshold, and the typical miss is `~1.001e-9`, so the
+      solver never degraded; it simply cannot reach `1e-9` exactly, which is
+      the same floor that motivated `mg_threshold=1e-9` over `1e-10`.
+    - **Still open**: `I_A` is measured but not transferred (the physics choice
+      of item 59); item 61's spherical test is unrun.

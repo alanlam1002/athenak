@@ -836,7 +836,7 @@ src/cfc/
      afterward (`p_x`/`eta_x`/`p_beta`/`eta_beta`, alongside `x_u`/`psi`/
      `alpha_psi` which were already mesh-`NGHOST`-deep) must be sized at
      mesh-`NGHOST` depth, not this solver's own `ngh_` — confirmed from
-     `Multigrid::RetrieveResult`'s actual body (`multigrid.cpp:420-449`), which
+     `Multigrid::RetrieveResult`'s actual body (`multigrid.cpp:435-466`), which
      already accepts an arbitrary caller depth via its `ngh` parameter and offsets
      correctly. **Required a small fix to already-committed item-2 code**:
      `MGCFCVectorPoissonDriver::RetrieveSolution`/`MGCFCScalarPoissonDriver::
@@ -857,7 +857,7 @@ src/cfc/
      difference). **Required a second fix to already-committed item-3 code**: all
      four functions gained an explicit `int ngh` parameter and now use the same
      offset-aware indexing `Multigrid::LoadCoefficients` (the generic base-class
-     version, `multigrid.cpp:327`) already established, instead of assuming their
+     version, `multigrid.cpp:342`) already established, instead of assuming their
      argument matches this driver's own `ngh_` exactly. Every "physical" CFC field
      (everything except `u_p_src`/`eta_src`, which stay `ngh_`-deep — pure
      `LoadSource` inputs, never differentiated or ghost-exchanged) is now
@@ -902,9 +902,9 @@ src/cfc/
      // multigrid.hpp, in class Multigrid's public section, after GetCurrentCoefficient()
      DualArray5D<Real>& CoeffAtLevel(int lev) { return coeff_[lev]; }
      ```
-     No other changes needed — all eight call sites (`mg_cfc_conformal_factor.cpp:
-     282, 303, 340, 366`, `mg_cfc_lapse.cpp:249, 270, 302, 328`) already assumed
-     exactly this signature.
+     No other changes needed — all nine call sites (`mg_cfc_conformal_factor.cpp:
+     412, 435, 482, 509, 567, 1050`, `mg_cfc_lapse.cpp:295, 336, 363`) already
+     assumed exactly this signature.
    - **Pre-existing bug in `multigrid.hpp`, not introduced by CFC — reported to,
      and now fixed with, the module owner's sign-off**: `Multigrid::Smooth`
      (was `multigrid.hpp:305-329`, templated on `<ViewType, StencilOp>`, defined
@@ -1352,7 +1352,7 @@ src/cfc/
      runs -- so it sees `pmbp->pmhd->u0`/`w0`/`padm->adm` exactly as
      `ProblemGenerator` left them. It manually calls all ~35 of `cfc::CFC`'s
      public task methods once, by hand, in the exact order `QueueCFCTasks()`
-     queues them (`cfc.cpp:271-361`, a call sequence that is already a valid
+     queues them (`cfc.cpp:286-387`, a call sequence that is already a valid
      topological order of the dependency graph, so replaying it literally in
      source order is correct), bypassing `MHD_C2P` entirely (`RescaleSrcTask`'s
      real dependency) since `w0` at this point is already exactly the pgen's
@@ -1570,10 +1570,10 @@ src/cfc/
        reviewing this round -- see round 13's note below for the full reasoning):
        `SolveConformalFactor` (`cfc.cpp`, called by `SolvePsiTask`) ends with
        `AssembleConformalMetric(pmy_pack, psi)`, which takes `psi` as
-       `const DvceArray5D<Real>&` (`cfc_reconstruct.cpp:137`) and never writes
+       `const DvceArray5D<Real>&` (`cfc_reconstruct.cpp:156`) and never writes
        back into it -- so `psi` is fully determined once `SolvePsiTask` returns,
        strictly *before* `CFC_RestPsi`/`SendPsi`/`RecvPsi`/`ProlongPsi` (later,
-       separate nodes in `QueueCFCTasks()`, `cfc.cpp:318-325`) ever run. Every
+       separate nodes in `QueueCFCTasks()`, `cfc.cpp:328-331`) ever run. Every
        `psi_maxerr` measurement in rounds 9-13 was taken by replaying only up
        through `SolvePsiTask` and reading `psi` back immediately after, so that
        post-solve exchange was never even exercised by any of these diagnostics
@@ -1607,7 +1607,7 @@ src/cfc/
      below), but the prior rounds' version of that diagnostic was never committed
      and had already been reverted out of the working tree, so it isn't preserved
      anywhere -- **reconstructed from scratch** this round, directly off
-     `cfc.cpp`'s `QueueCFCTasks()` ordering (`cfc.cpp:271-361`) rather than
+     `cfc.cpp`'s `QueueCFCTasks()` ordering (`cfc.cpp:286-387`) rather than
      memory: replays `SolveVecXTask` through `ComputeADualTask` (the full
      X-vector-potential chain `Ahat^2` depends on) then `SolvePsiTask`, skipping
      `MHD_C2P`/`RescaleSrcTask`/`SolveLapseTask`/the shift solve entirely (not
@@ -1783,7 +1783,7 @@ src/cfc/
        exactly, uniformly, at the corner cell *and* its immediate neighbors (both
        interior and ghost) -- a suspiciously round number. Prompted by the user's
        question about the initial guess for `u`: confirmed `psi` is correctly
-       initialized to `1.0` at construction (`cfc.cpp:178`, with a comment
+       initialized to `1.0` at construction (`cfc.cpp:163-167`, with a comment
        explicitly flagging this exact concern), so `u=1.0` wasn't simply an
        untouched initial guess -- something moved it there. The radial trace
        (`i=4` to `i=128`, stepping by 4) showed a smooth profile tracking the
@@ -1791,9 +1791,9 @@ src/cfc/
        out to `i=128`, then a *sharp* jump to `psi=2` at `i=131` (`=ie`, the true
        last interior cell) -- a 3-cell-wide anomaly, not a gradual departure.
        Comparing all four multigrid solvers' `RetrieveResult` calls:
-       `gravity/mg_gravity.cpp:242` and `cfc/mg_cfc_vector_poisson.cpp:242` both
+       `gravity/mg_gravity.cpp:242` and `cfc/mg_cfc_vector_poisson.cpp:292` both
        correctly pass the *mesh's* `NGHOST` (`indcs.ng`, e.g. 4); `cfc/mg_cfc_
-       conformal_factor.cpp:358` and `cfc/mg_cfc_lapse.cpp:296` (alpha's
+       conformal_factor.cpp:457` and `cfc/mg_cfc_lapse.cpp:317` (alpha's
        identical bug) both instead passed `mglevels_->GetGhostCells()` -- this
        solver's own, generally much shallower, internal ghost depth (`ngh_=1` for
        this test). `RetrieveResult`'s copy offset is `dst_off = ngh - ngh_`;
@@ -4309,7 +4309,7 @@ src/cfc/
       multipole is never actually selected for them), but
       `MGCFCVectorPoissonDriver` (the merged `P_i`/`eta` solve for both `X^i`
       and `beta^i`, `nvar_=4`) defaults `mg_poisson_outer_bc` to `"multipole"`
-      (`mg_cfc_vector_poisson.cpp:210-216`, `autompo_=false`, fixed origin at
+      (`mg_cfc_vector_poisson.cpp:194-199`, `autompo_=false`, fixed origin at
       the coordinate origin) -- this driver's octets, created whenever *any*
       CFC AMR run refines at all, hit this exact gap whenever refinement
       reaches the domain boundary.
@@ -5436,8 +5436,8 @@ src/cfc/
       `padm != nullptr`** (a same-day follow-up correction, prompted by the
       user asking whether this transfer is actually needed when z4c is
       active). Read `Driver::InitBoundaryValuesAndPrimitives`
-      (`driver.cpp:603-687`) directly to check -- it contains, at lines
-      662-669:
+      (`driver.cpp:606-697`) directly to check -- it contains, at lines
+      666-679:
       ```cpp
       if (pdyngr == nullptr) {
         (void) pmhd->ConToPrim(this, 0);
@@ -5551,9 +5551,9 @@ src/cfc/
       unconditional infinite recursion).
     - **Verified against the actual code before implementing** (not assumed):
       `RunXPsiSolvePass`'s only conserved-variable read
-      (`AssembleVectorSource(false)`, `cfc.cpp:1025`) and
+      (`AssembleVectorSource(false)`, `cfc.cpp:1144`) and
       `RunLapseShiftAssemblePass`'s only primitive read
-      (`RescaleMatterSources`, `cfc.cpp:1194`) are both confirmed
+      (`RescaleMatterSources`, `cfc.cpp:1217`) are both confirmed
       **interior-only** (`is..ie,js..je,ks..ke`), confirming an interior-only
       con2prim pass between them is sufficient. `padm->u_adm`'s own ghost
       exchange (`RestADMTask`/`SendADMTask`/`RecvADMTask`/`ProlongADMTask`
@@ -5575,10 +5575,10 @@ src/cfc/
       different Picard-iteration algorithm is needed instead) from being
       called during a regrid -- fixed by adding a `bool is_amr_regrid =
       false` parameter, defaulted `false` at the t=0 call site
-      (`driver.cpp:316`, unchanged) and passed `true` at the regrid call site
+      (`driver.cpp:317`, unchanged) and passed `true` at the regrid call site
       (`mesh_refinement.cpp`).
     - **Implementation**: `driver.cpp`'s MHD/dyn_grmhd dispatch
-      (`driver.cpp:662-669` before this item) restructured to
+      (`driver.cpp:666-679` before this item) restructured to
       `if (pz4c != nullptr) {...} else if ((pcfc != nullptr) &&
       is_amr_regrid) { pcfc->ReinitializeMetricForAMR(this); } else {
       pdyngr->ConToPrim(this, 0); }` -- the final `else` covers both
@@ -5681,10 +5681,10 @@ src/cfc/
       `ProlongateCC`'s stencil needs a `FillCoarseInBndryCC` call
       immediately beforehand to correctly populate the coarse scratch
       array's transverse padding at same-level-neighbor-adjacent corners --
-      Hydro/MHD both call it (`hydro_tasks.cpp:378`, `mhd_tasks.cpp:527-528`),
+      Hydro/MHD both call it (`hydro_tasks.cpp:380`, `mhd_tasks.cpp:529-530`),
       z4c doesn't need to (its `is_z4c=true` path fills the same role via an
       extra same-level payload baked into the send/recv step itself,
-      `z4c_tasks.cpp:273`'s call is explicitly commented out for this
+      `z4c_tasks.cpp:281`'s call is explicitly commented out for this
       reason). CFC was missing this call entirely on all six fields --
       added at all six `Prolong*Task` call sites in `cfc.cpp`, mirroring
       Hydro/MHD's exact placement. This is real, correct, and independent

@@ -46,7 +46,26 @@ class Coordinates;
 // virtually every library allows this limit to be exceeded. As of 2025, the Intel MPI
 // library provided the most stringent limit of 20 bits per tag. Six bits are needed to
 // store the buffer ID, leaving NUM_BITS_LID=14
-#define NUM_BITS_LID 14
+//
+// 2026-09: lowered 14 -> 12. Aurora's MPICH reports MPI_TAG_UB = 262143, i.e. only 18
+// bits, not the 20 the note above assumes. With NUM_BITS_LID=14 and bufid up to 56
+// neighbours the tag reaches 933,887, so every bufid >= 16 produced "Fatal error in
+// internal_Irecv: Invalid tag" and killed the job in the first boundary exchange. At 12
+// bits the maximum tag is 56<<12 | 4095 = 233,471, which fits 18 bits, and the cap on
+// MeshBlocks per rank is still 4096 -- against a <mesh>/max_nmb_per_rank of 100 in
+// production. Tags are message labels only, so this changes no computed value: results
+// stay bit-identical, and 18-bit tags are valid on every library that accepted 20.
+//
+// Measured 2026-09-09 in real 12-rank jobs on BOTH Aurora images: MPI_TAG_UB is 262143
+// on the old image too -- it did NOT change. What changed is enforcement. The old MPICH
+// (5.0.0b1) silently accepted out-of-range tags (verified up to 1048576); the new one
+// (5.1.0a1, next-eval) correctly rejects anything above MPI_TAG_UB. So AthenaK was
+// already out of spec on the old image, merely unpunished, and this fix is required
+// machine-wide once the new MPICH rolls out -- not just on next-eval. The failure is
+// transport-independent (reproduced with MPICH_GPU_SUPPORT_ENABLED=0 and with no
+// gpu_tile_compact.sh), and there is no environment workaround:
+// MPIR_CVAR_CH4_OFI_TAG_BITS at 20/22/24/28 all leave MPI_TAG_UB at 262143.
+#define NUM_BITS_LID 12
 
 #define SQR(x) ( (x)*(x) )
 #define SIGN(x) ( ((x) < 0.0) ? -1.0 : 1.0 )

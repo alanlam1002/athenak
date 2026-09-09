@@ -40,6 +40,14 @@ class MultigridBoundaryValues;
 
 enum class MGVariable {src, u, coeff};
 enum class MGNormType {max, l1, l2};
+// legacy: CalculateDefectNorm's l1/l2 reductions are unweighted (a pre-existing
+// bug -- the per-cell dV it computes is discarded, so the norm is
+// rms(defect)/sqrt(dV) and silently tightens as the mesh refines) and
+// SolveIterative sums the per-channel norms over nvar_, over-penalizing
+// nvar_>1 solvers. rms: each cell is weighted by its own physical volume
+// (correct under AMR/SMR, where a pack's blocks span different levels) and
+// channels are combined by max instead of sum. See <cfc>/mg_norm.
+enum class MGNormScaling {legacy, rms};
 
 //----------------------------------------------------------------------------------------
 // LogicalLocation hash and equality for std::unordered_map
@@ -423,6 +431,15 @@ class MultigridDriver {
   virtual void Solve(Driver *pdriver, int step, Real dt = 0.0) = 0;
   void PrepareForAMR();
   int GetCoffset() const { return coffset_; }
+  // Lets Multigrid::CalculateDefectNorm (which only holds pmy_driver_, not the
+  // input-file-facing subclass) see which norm convention is active -- same
+  // reach-through-the-driver idiom GetCoffset() already establishes.
+  MGNormScaling GetNormScaling() const { return norm_mode_; }
+  // Combines the nvar_ per-channel L2 norms into one convergence quantity.
+  // legacy: sum (today's behavior -- gives an nvar_=4 solver an effectively
+  // 4x tighter bar than an nvar_=1 one). rms: max (each channel independently
+  // meets tolerance; nvar_=1 is unaffected).
+  Real TotalDefectNorm();
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -558,6 +575,13 @@ class MultigridDriver {
   int fprolongation_;
   int fshowdef_;
   int mg_verbose_;
+  // See MGNormScaling's comment. Both default to today's behavior: an unset
+  // norm_mode_ (MGNormScaling::legacy) and rtol_ <= 0 reproduce the exact
+  // pre-existing arithmetic bit-for-bit. Set only by the CFC drivers via
+  // <cfc>/mg_norm, mg_rtol, mg_poisson_rtol -- MGGravityDriver never touches
+  // these, so gravity is unaffected regardless of what CFC does.
+  MGNormScaling norm_mode_;
+  Real rtol_;
 
   bool full_multigrid_;
   int fmg_ncycle_;

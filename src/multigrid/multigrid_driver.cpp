@@ -46,6 +46,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
     niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0),
     fprolongation_(0), mg_verbose_(0),
+    norm_mode_(MGNormScaling::legacy), rtol_(0.0),
     nb_rank_(0), ncoeff_(0),
     octets_(nullptr), octetmap_(nullptr), octetbflag_(nullptr), noctets_(nullptr),
     oct_u_buf_(nullptr), oct_def_buf_(nullptr),
@@ -740,12 +741,32 @@ void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmoo
 //! \brief Multigrid (MG) solve using V-cycles
 
 void MultigridDriver::SolveMG(Driver *pdriver) {
-  if (eps_ >= 0.0) {
+  if (eps_ >= 0.0 || rtol_ > 0.0) {
     SolveIterative(pdriver);
   } else {
     SolveIterativeFixedTimes(pdriver);
   }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::TotalDefectNorm()
+//! \brief Combine the nvar_ per-channel L2 defect norms into one convergence
+//! quantity. See MGNormScaling's comment (multigrid.hpp) for why this needs a
+//! mode at all: with norm_mode_ == legacy this is the original "+=" sum over
+//! channels (bit-identical to the pre-existing behavior), which gives an
+//! nvar_=4 solver (the vector-Poisson X^i/beta^i drivers) an effectively 4x
+//! tighter bar than an nvar_=1 one (psi/alpha_psi) at the same eps_. With
+//! norm_mode_ == rms the channels are combined by max instead, so each
+//! channel independently meets tolerance regardless of nvar_.
+
+Real MultigridDriver::TotalDefectNorm() {
+  Real def = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    Real d = CalculateDefectNorm(MGNormType::l2, v);
+    def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;
+  }
+  return def;
 }
 
 //----------------------------------------------------------------------------------------
@@ -801,25 +822,34 @@ void MultigridDriver::SolveFMGCoarser() {
 //! \brief Solve iteratively until defect norm drops below eps_
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
-  Real def = 0.0;
-  for (int v = 0; v < nvar_; ++v) {
-    def += CalculateDefectNorm(MGNormType::l2, v);
-  }
+  Real def = TotalDefectNorm();
+  // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
+  // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
+  // "converged" solve may be; rtol_ <= 0.0 reproduces the original eps_-only
+  // behavior exactly). Orthogonal to norm_mode_: a relative target is
+  // invariant under any constant rescaling of the norm, so it is what
+  // sidesteps needing to re-derive an absolute eps_ for every mesh/norm
+  // combination -- see the migration note in DEVELOPMENT.md.
+  Real target = eps_;
+  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * def);
   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
     std::cout << "MG initial defect = " << def << std::endl;
+    if (rtol_ > 0.0) {
+      std::cout << "MG relative target = " << target << std::endl;
+    }
   }
   int n = 0;
-  while (def > eps_) {
+  while (def > target) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     Real olddef = def;
-    def = 0.0;
-    for (int v = 0; v < nvar_; ++v) {
-      def += CalculateDefectNorm(MGNormType::l2, v);
-    }
+    def = TotalDefectNorm();
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
     if (def/olddef > 0.9) {
+      // Keyed on the literal eps_ == 0.0 ("iterate until stalling") mode, not
+      // on target -- rtol_ > 0.0 must not silently disable stall detection
+      // for an eps_ == 0.0 run.
       if (eps_ == 0.0) break;
       if (fshowdef_ >= 1 && global_variable::my_rank == 0) {
         std::cout << "### WARNING in MultigridDriver::SolveIterative" << std::endl
@@ -831,7 +861,9 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       if (global_variable::my_rank == 0) {
         std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
                   << "Failed to converge after " << n << " iterations (defect = "
-                  << def << ", threshold = " << eps_ << ")" << std::endl;
+                  << def << ", threshold = " << eps_;
+        if (rtol_ > 0.0) std::cout << ", effective target = " << target;
+        std::cout << ")" << std::endl;
       }
       pdriver->nlim = pmy_mesh_->ncycle;
       break;
@@ -848,10 +880,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
 
 void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
   if (fshowdef_ >= 2) {
-    Real def = 0.0;
-    for (int v = 0; v < nvar_; ++v) {
-      def += CalculateDefectNorm(MGNormType::l2, v);
-    }
+    Real def = TotalDefectNorm();
     if (global_variable::my_rank == 0) {
       std::cout << "MG initial defect = " << def << std::endl;
     }
@@ -859,10 +888,7 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
   for (int n = 0; n < niter_; ++n) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     if (fshowdef_ >= 2) {
-      Real def = 0.0;
-      for (int v = 0; v < nvar_; ++v) {
-        def += CalculateDefectNorm(MGNormType::l2, v);
-      }
+      Real def = TotalDefectNorm();
       if (global_variable::my_rank == 0) {
         std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
       }

@@ -708,6 +708,37 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
 
   Real norm = 0.0;
 
+  // See MGNormScaling's comment (multigrid.hpp). wvol selects the corrected,
+  // volume-weighted reduction; when false (the default -- every gravity run,
+  // and every CFC run unless <cfc>/mg_norm = "rms") the code below is the
+  // original unweighted kernel, unchanged, so the legacy path stays
+  // bit-identical rather than merely value-identical (the gravity test suite
+  // asserts absolute defect values down to 1e-10; branching, not multiplying
+  // by a 1.0 weight, keeps that guarantee trivial to see by inspection).
+  // A volume weight is meaningless for max, which also always early-returns
+  // below before defscale_ -- unaffected either way.
+  const bool wvol = (pmy_driver_ != nullptr) &&
+                    (pmy_driver_->GetNormScaling() == MGNormScaling::rms) &&
+                    (nrm != MGNormType::max);
+  // Per-block physical cell volume at this MG level, scaled up from the
+  // finest-level dx1/dx2/dx3 exactly as CalculateAverage (multigrid.cpp) scales
+  // block_rdx_ -- except this reads mb_size directly (the src/outputs/
+  // history.cpp:132 idiom) rather than block_rdx_, because block_rdx_ only
+  // stores the x1 width and assumes physically cubic cells (Multigrid only
+  // requires *logically* cubic MeshBlocks, checked in the ctor), and because
+  // rdx_/rdy_/rdz_ are a single per-PACK scalar taken from MeshBlock 0
+  // (multigrid.cpp's ctor and UpdateBlockDx) -- wrong under AMR/SMR, where a
+  // pack's blocks span different refinement levels and therefore different
+  // physical cell sizes. have_mb is false only for the root object
+  // (pmy_pack_ == nullptr, one "block" covering the whole root grid, no
+  // per-block array to index), which falls back to dV -- computed above for
+  // exactly this purpose. In current usage this fallback is unreached
+  // (MultigridDriver::CalculateDefectNorm only ever calls mglevels_'s, never
+  // mgroot_'s), kept so this function is correct standing on its own.
+  const bool have_mb = (pmy_pack_ != nullptr);
+  const Real lfac3 = static_cast<Real>((1 << ll) * (1 << ll) * (1 << ll));
+  const Real dV_root = dV;
+
   if (on_host_) {
     auto &def = def_[current_level_].h_view;
     if (nrm == MGNormType::max) {
@@ -720,22 +751,66 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {
-      Kokkos::parallel_reduce("MG::DefectNorm_L1",
-        Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
-            {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
-        KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
-                       const int i, Real &local_sum) {
-          local_sum += Kokkos::fabs(def(m, v, k, j, i));
-        }, Kokkos::Sum<Real>(norm));
+      if (wvol && have_mb) {
+        auto &mb_size = pmy_pack_->pmb->mb_size;
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real w = mb_size.h_view(m).dx1 * mb_size.h_view(m).dx2
+                   * mb_size.h_view(m).dx3 * lfac3;
+            local_sum += w * Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      } else if (wvol) {
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            local_sum += dV_root * Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      } else {
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            local_sum += Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      }
     } else {
-      Kokkos::parallel_reduce("MG::DefectNorm_L2",
-        Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
-            {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
-        KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
-                       const int i, Real &local_sum) {
-          Real val = def(m, v, k, j, i);
-          local_sum += val * val;
-        }, Kokkos::Sum<Real>(norm));
+      if (wvol && have_mb) {
+        auto &mb_size = pmy_pack_->pmb->mb_size;
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            Real w = mb_size.h_view(m).dx1 * mb_size.h_view(m).dx2
+                   * mb_size.h_view(m).dx3 * lfac3;
+            local_sum += w * val * val;
+          }, Kokkos::Sum<Real>(norm));
+      } else if (wvol) {
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            local_sum += dV_root * val * val;
+          }, Kokkos::Sum<Real>(norm));
+      } else {
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<HostExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            local_sum += val * val;
+          }, Kokkos::Sum<Real>(norm));
+      }
     }
   } else {
     auto &def = def_[current_level_].d_view;
@@ -749,22 +824,66 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {
-      Kokkos::parallel_reduce("MG::DefectNorm_L1",
-        Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
-            {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
-        KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
-                       const int i, Real &local_sum) {
-          local_sum += Kokkos::fabs(def(m, v, k, j, i));
-        }, Kokkos::Sum<Real>(norm));
+      if (wvol && have_mb) {
+        auto &mb_size = pmy_pack_->pmb->mb_size;
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real w = mb_size.d_view(m).dx1 * mb_size.d_view(m).dx2
+                   * mb_size.d_view(m).dx3 * lfac3;
+            local_sum += w * Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      } else if (wvol) {
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            local_sum += dV_root * Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      } else {
+        Kokkos::parallel_reduce("MG::DefectNorm_L1",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            local_sum += Kokkos::fabs(def(m, v, k, j, i));
+          }, Kokkos::Sum<Real>(norm));
+      }
     } else {
-      Kokkos::parallel_reduce("MG::DefectNorm_L2",
-        Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
-            {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
-        KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
-                       const int i, Real &local_sum) {
-          Real val = def(m, v, k, j, i);
-          local_sum += val * val;
-        }, Kokkos::Sum<Real>(norm));
+      if (wvol && have_mb) {
+        auto &mb_size = pmy_pack_->pmb->mb_size;
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            Real w = mb_size.d_view(m).dx1 * mb_size.d_view(m).dx2
+                   * mb_size.d_view(m).dx3 * lfac3;
+            local_sum += w * val * val;
+          }, Kokkos::Sum<Real>(norm));
+      } else if (wvol) {
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            local_sum += dV_root * val * val;
+          }, Kokkos::Sum<Real>(norm));
+      } else {
+        Kokkos::parallel_reduce("MG::DefectNorm_L2",
+          Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<5>>(
+              {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
+          KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
+                         const int i, Real &local_sum) {
+            Real val = def(m, v, k, j, i);
+            local_sum += val * val;
+          }, Kokkos::Sum<Real>(norm));
+      }
     }
   }
   norm *= defscale_;

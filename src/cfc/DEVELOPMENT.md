@@ -7620,3 +7620,127 @@ src/cfc/
       source depends on velocity via the stress-energy tensor, so a changed
       `vu` naturally perturbs the solved `alpha` slightly. No NaN/inf, no
       other regressions.
+
+60. **(2026-09-08/09) R3: give the multigrid defect norm its missing volume
+    weight, plus an optional relative convergence criterion** -- new opt-in
+    keys, default behavior unchanged.
+    - **The problem being fixed**: `Multigrid::CalculateDefectNorm`
+      (`src/multigrid/multigrid.cpp`) computes a per-cell volume `dV = dx*dy*dz`
+      and never uses it -- the L1/L2 reductions accumulate a bare `|d|`/`d*d`.
+      The driver's `norm /= vol; norm = sqrt(norm);` (`vol` = the root-box
+      volume) is already correct math for turning a volume *integral* into a
+      volume *average* (`sum(dV) == V_box` exactly, since leaf MeshBlocks tile
+      the domain once); what's missing is the per-cell weight *inside* the sum.
+      Net effect: the norm compared against `mg_threshold` is
+      `L2 = sqrt(sum(d^2)/V_box) = RMS(d)/sqrt(dV)`, which grows as the mesh
+      refines -- a fixed threshold demands progressively more accuracy at
+      higher resolution (textbook multigrid should be h-independent). Second,
+      separate defect: `SolveIterative` sums the `nvar_` per-channel norms, so
+      the vector-Poisson solvers (X^i, beta^i, `nvar_=4`) face an effectively
+      4x tighter bar than the scalar solvers (psi, alpha_psi, `nvar_=1`) at the
+      same `eps_`.
+    - **Fix**: new enum `MGNormScaling {legacy, rms}` plus a `MultigridDriver`
+      member `norm_mode_` (default `legacy`) and a new
+      `MultigridDriver::TotalDefectNorm()` helper that both `SolveIterative`
+      and `SolveIterativeFixedTimes` now call instead of their old inline
+      per-channel loop. `legacy` reproduces the "+=" sum bit-identically (the
+      existing kernel body, untouched, in its own branch -- not a "multiply by
+      1.0" trick, so bit-identity doesn't depend on FP-optimizer behavior).
+      `rms` weights each cell by its physical volume (read from
+      `mb_size.{h,d}_view(m)`, scaled `(1<<ll)^3` for the MG level -- *not*
+      `rdx_`/`block_rdx_`, which are respectively a single per-pack scalar from
+      MeshBlock 0 (wrong under AMR) and a physically-cubic-cell assumption
+      Multigrid doesn't actually enforce) and combines the `nvar_` channels by
+      `max` instead of `+=`, so a 4-channel solver faces the same bar as a
+      1-channel one. New input keys (block `<cfc>`, shared by all three CFC
+      drivers via the existing `mg_threshold`/`mg_verbose`/`mg_outer_bc`
+      sharing precedent): `mg_norm` (`"legacy"`/`"rms"`, default `"legacy"`),
+      `mg_rtol`/`mg_poisson_rtol` (Real, default `0.0` = disabled; `> 0`
+      additionally accepts `max(eps_, rtol_*initial_defect)`, invariant to the
+      `mg_norm` choice). `src/gravity/mg_gravity.cpp` deliberately untouched --
+      it never assigns `norm_mode_`/`rtol_`, so it can't regress.
+    - **Verified** (on `~/athenak_cfc`, the `cfc` branch): (1) bit-identity --
+      pre-fix vs. post-fix binaries on `cfc_bu8_stability`-derived fixtures
+      with default keys produce identical defect traces (1230 `MG ` lines
+      each, single-rank CPU serial -- GPU `parallel_reduce`+`MPI_Allreduce`
+      summation order isn't run-to-run reproducible, so this check is
+      CPU-only by design). (2) Gravity regression suite: found 3 pre-existing
+      failures (`test_jeans_solve_iterative_{cpu,gpu}`,
+      `test_selfgravity_decomposition_consistency_gpu`) -- confirmed
+      unrelated to this fix by building a clean pre-fix binary from a
+      separate git worktree at the same commit and reproducing the *exact
+      same* failure values (ratio `0.0525`, defect `1.277e-08`, `[5.634483e-09,
+      5.634107e-09, 5.634132e-09, 5.634132e-09]`) on both binaries; the other
+      38 tests pass on both. (3) h-independence ladder (`cfc_bu8_stability`,
+      `num_levels` 2-5): with the fixture's native absolute `mg_threshold`,
+      L3/L4 V-cycles/solve are flat (~7-8 avg) and zero FATAL-cap hits in
+      *both* `legacy` and `rms` mode -- the intended result. L2 hits the
+      40-iteration cap in both modes identically (a genuine, pre-existing
+      solver limitation at that coarse a resolution, not fix-related); L5
+      crashes in both modes identically with `Kokkos ERROR: Host memory space
+      failed to allocate 1.678e+07 TiB (label="lb recv data")` -- a
+      pre-existing bug in the mesh load-balancer at 7279 MeshBlocks/single-rank,
+      unrelated to this fix (fails during mesh setup, before any multigrid
+      solve runs). (4) GPU (Aurora `next-eval` queue, PE 26.26.0): both smoke
+      tests (`mg_norm` unset and `mg_norm=rms`) and the 15-test GPU gravity
+      suite pass cleanly -- this was initially blocked by an unrelated,
+      pre-existing, machine-wide bug (`NUM_BITS_LID` producing MPI tags beyond
+      Aurora's real `MPI_TAG_UB`; fixed separately, `NUM_BITS_LID` 14->12, see
+      the batchtools agent notes) that the new image's stricter MPICH started
+      enforcing; once that binary was rebuilt, both GPU smoke tests completed
+      normally (`rc=0`) with no MPI errors.
+    - **Caveat found during verification, worth remembering**: pairing
+      `mg_rtol`/`mg_poisson_rtol` with `mg_threshold`/`mg_poisson_threshold`
+      set to `-1.0` (no absolute floor) is risky inside CFC's Picard
+      iteration (`CFC::InitializeMetric`) -- later outer iterations start
+      from an already-small residual, so `rtol_ * initial_defect` can shrink
+      to ~1e-19-1e-20, below double-precision noise, causing repeated
+      40-V-cycle FATAL-cap hits chasing an unreachable target (measured: 4-6
+      cap hits per ladder point in this regime, identical between `legacy`
+      and `rms`, so it's an `mg_rtol`-with-no-floor property, not a
+      `mg_norm`-specific one). `target = max(eps_, rtol_*def)` is by design a
+      no-op floor when `eps_` is negative (`max` never picks a more-negative
+      number over a positive target) -- **always pair `mg_rtol` with a small
+      positive absolute threshold, never `-1.0`**, if using both together.
+    - **Ported to `~/athenak_tde` (`proj/tde`)** the same day: applies cleanly
+      onto that tree's pre-existing MGTimers instrumentation (the
+      `CalculateDefectNorm`/`CalculateAverage` bodies are byte-identical
+      between branches, as expected; `TotalDefectNorm()` there additionally
+      wraps itself in the existing `MGScopedTimer(mg_timers_.defect_sec)`
+      pattern so timing instrumentation stays intact). Also carried the
+      `NUM_BITS_LID` 14->12 fix (see the batchtools agent notes) onto this
+      tree's `src/athena.hpp`, which hadn't been touched yet.
+    - **Performance re-verification (2026-09-09, Aurora `next-eval`, 2
+      nodes/24 ranks, matching the original baseline's own measurement
+      scale)**: ran the production `cfc_tde_wd_imbh.athinput` fixture at
+      `num_levels` 3-6, `nlim=20`, both `mg_norm` unset (legacy) and `=rms`,
+      reading `[MGTimers rank 0] <label> solves=N vcycles=M` (printed at
+      `Driver::Finalize()`, reset right after `CFC::InitializeMetric()`
+      returns so it only counts evolution-loop solves). The originally-quoted
+      baseline table above (1.00/1.33/1.33/2.00 for psi, 3.00/3.33/4.33/6.33
+      for beta^i) turned out to be **stale** -- it traces to a pre-existing,
+      pre-optimization measurement (`~/scratch/athenak_run/cfc_tde_gpu/
+      RESULTS.md`, job 8784330, Aug 27), and the production fixture has since
+      had several convergence-loosening changes (documented in its own header:
+      `mg_threshold` 1e-9->1e-8, `npresmooth`/`npostsmooth` fixed at 2,
+      `mg_poisson_mporder` 4->2, root grid changed to a power-of-2 cube) that
+      independently lower V-cycle counts -- not a code regression, just a
+      moved comparison target. The legacy-vs-rms comparison on the *current*
+      codebase is unaffected by that and is the result that actually matters:
+
+      | level | legacy beta^i V-cyc/solve | rms beta^i V-cyc/solve |
+      |---|---|---|
+      | 3 | 1.12 | 0.16 |
+      | 4 | 2.04 | 0.18 |
+      | 5 | 2.39 | 0.19 |
+      | 6 | 4.07 | 0.18 |
+
+      `legacy` grows 3.6x (1.12->4.07) from L3 to L6, reproducing the
+      resolution-dependence the fix targets; `rms` stays flat (~0.16-0.19,
+      ~15% spread) across the same range -- direct confirmation on the real
+      TDE production fixture that `mg_norm=rms` delivers h-independence, not
+      just on `~/athenak_cfc`'s own verification fixtures. (`psi`'s V-cycle
+      counts are near-floor at this optimized parfile's settings for both
+      modes, ~0.02-0.25, too saturated to be a useful h-independence signal
+      here -- `beta^i`, the nvar_=4 solver the channel-max combination
+      specifically targets, is the informative channel.)

@@ -57,22 +57,33 @@ problem  = Tidal disruption of a 0.7 Msun WD-like TOV star by a 1e4 Msun IMBH (P
 basename = cfc_tde_wd_imbh
 
 <mesh>
+# CUBIC POWER-OF-2 ROOT GRID. 128/16 = 8 root MeshBlocks per axis, so the
+# multigrid root hierarchy halves 8x8x8 -> 4x4x4 -> 2x2x2 -> 1x1x1: four root
+# levels and a genuine single-cell coarsest grid. The previous 96x64x64 domain
+# gave 6x4x4, which halves once to 3x2x2 and stops, so every run printed "The
+# root grid can not be reduced to a single cell" and the coarsest grid was
+# smoothed iteratively instead of solved. Measured on 2 Aurora nodes / 24 ranks:
+# 9.172 -> 7.793 s/cycle (-15%), total V-cycles 760 -> 599 (-21%), with the psi^6
+# identity unchanged at 1.104297 (analytic 1.104260) and zero convergence
+# failures. dx stays 1.0 at root and 0.03125 at the star, so dt and the star's
+# resolution are untouched; only the outer boundary moves 32 -> 64 r_g, which
+# also improves the Robin falloff BC.
 nghost = 4        # Number of ghost cells
-nx1    = 96       # 6 MeshBlocks in x1-direction (root level), dx=1.0
-x1min  = -32.0    # minimum x1
+nx1    = 128      # 8 MeshBlocks in x1-direction (root level), dx=1.0
+x1min  = -64.0    # minimum x1
 x1max  = 64.0     # maximum x1 -- star starts at x=30, ample buffer beyond
 ix1_bc = diode    # inner boundary -- full domain, no reflection symmetry
 ox1_bc = diode    # outer boundary
 
-nx2    = 64       # 4 MeshBlocks in x2-direction (root level), dx=1.0
-x2min  = -32.0    # minimum x2
-x2max  = 32.0     # maximum x2
+nx2    = 128      # 8 MeshBlocks in x2-direction (root level), dx=1.0
+x2min  = -64.0    # minimum x2
+x2max  = 64.0     # maximum x2
 ix2_bc = diode    # inner boundary
 ox2_bc = diode    # outer boundary
 
-nx3    = 64       # 4 MeshBlocks in x3-direction (root level), dx=1.0
-x3min  = -32.0    # minimum x3
-x3max  = 32.0     # maximum x3
+nx3    = 128      # 8 MeshBlocks in x3-direction (root level), dx=1.0
+x3min  = -64.0    # minimum x3
+x3max  = 64.0     # maximum x3
 ix3_bc = diode    # inner boundary
 ox3_bc = diode    # outer boundary
 
@@ -130,18 +141,34 @@ enforce_maximum = false
 <cfc>
 init_verbose = true
 init_omega   = 1.0
-mg_threshold   = 1.0e-9   # NOT 1e-10: measured A/B over a t=40 run showed 1e-10 is
-mg_poisson_threshold = 1.0e-9  # below the achievable defect floor, so every solve
-                          # burned all 40 V-cycles and still reported "Failed to
-                          # converge" (763 occurrences, ~6/cycle) while stalling at a
-                          # repeating ~1.08e-10. At 1e-9: ZERO convergence failures and
-                          # 2.9x faster (9.9 vs 28.4 s/cycle), with physics unchanged --
-                          # rho-max agreed to <5e-5 relative, t=0 mass to 1e-10.
-mg_npresmooth  = 3
-mg_npostsmooth = 3
+# Measured on 2 Aurora nodes / 24 ranks, 20 cycles, against the 1e-9 settings
+# this replaces: 7.80 -> 5.09 s/cycle (-35%), V-cycles 599 -> 292, zero
+# convergence failures. Accuracy verified rather than assumed:
+#   psi^6 identity unchanged at 1.104297 (analytic 1.104260, 0.0033%)
+#   rho-max worst deviation vs the 1e-9 run over 40 cycles: 4.0e-7 relative
+#   mass conservation: 1.7e-12 relative
+# The defect norm is absolute and unnormalised (multigrid.cpp:697-771 computes
+# dV and never applies it; the driver divides only by the constant box volume),
+# so mg_threshold is not "digits of accuracy" -- it tightens automatically as
+# the mesh refines. 1e-9 was therefore stricter than intended on this 6-level
+# mesh. 1e-7 was also measured (-50%) but is NOT used: psi then runs only 2
+# V-cycles across 60 solves, i.e. nearly every solve exits immediately, which
+# is a qualitative change in solver behaviour that 40 cycles cannot qualify.
+mg_threshold   = 1.0e-8
+mg_poisson_threshold = 1.0e-8
+# mporder 4 -> 2 is 5.4% for free: V-cycle counts are bit-for-bit unchanged
+# (599 both ways), so this is pure multipole-evaluation cost, no convergence
+# change; the psi^6 identity moves by 2e-12.
+mg_poisson_mporder = 2
+# 3 was wasted: SetMGTaskListToFiner/ToCoarser (multigrid_tasks.cpp:558,707)
+# build at most TWO red-black smoothing iterations per MeshBlock level, so any
+# value above 2 is honoured only on the octet and root levels. This is also
+# the explanation for DEVELOPMENT.md:2335-2344's open puzzle ("partial
+# improvement 1->3, none 3->6").
+mg_npresmooth  = 2
+mg_npostsmooth = 2
 puncture_enabled = true
 puncture_mass    = 1.0            # M_BH = 1e4 Msun, fixed at the coordinate origin
-
 <problem>
 isotropic   = true      # required: CFC solves for the isotropic-gauge metric
 rhoc        = 3.24e-4   # converted from 3.24e-12 (Msun=1 units) via lambda^2

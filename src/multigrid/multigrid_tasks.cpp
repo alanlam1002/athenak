@@ -153,16 +153,26 @@ TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
                         bc_ix3 == BoundaryFlag::mg_multipole ||
                         bc_ox3 == BoundaryFlag::mg_multipole);
 
-  // Copy multipole coefficients to device if needed
+  // Multipole coefficients: reuse the persistent d_mpcoeff_ that
+  // SyncMultipoleToDevice() already fills once per solve (see
+  // MGCFCVectorPoissonDriver::Solve, which calls it before SolveMG), exactly as
+  // MGRootBoundary does. This function runs 5x per mg_to_coarser/mg_to_finer
+  // list and those lists execute once per MeshBlock level per V-cycle, so the
+  // previous code did tens of device allocations plus blocking host->device
+  // copies per V-cycle -- for identical data. Only the two vector-Poisson
+  // solvers hit this path at all (psi/alpha_psi use Robin and never set a
+  // multipole face).
   DvceArray1D<Real> d_mpc;
   Real d_xo = 0.0, d_yo = 0.0, d_zo = 0.0;
   int d_order = 0;
   auto &mb_size = pmy_pack_->pmb->mb_size;
   if (has_multipole && mporder_ > 0) {
-    Kokkos::realloc(d_mpc, nvar_ * 25);
-    auto h_mpc = Kokkos::create_mirror_view(d_mpc);
-    for (int c = 0; c < nvar_ * 25; ++c) h_mpc(c) = mpcoeff_[c];
-    Kokkos::deep_copy(d_mpc, h_mpc);
+    // Lazily populate on the (unexpected) path where no Solve() has synced yet,
+    // so d_mpc is never a null view here -- the kernel below skips the multipole
+    // ghost fill entirely when d_mpc.data() == nullptr, which would silently
+    // change the boundary condition rather than just cost time.
+    if (d_mpcoeff_.extent(0) == 0) SyncMultipoleToDevice();
+    d_mpc = d_mpcoeff_;
     d_xo = mpo_[0]; d_yo = mpo_[1]; d_zo = mpo_[2];
     d_order = mporder_;
   }

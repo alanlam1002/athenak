@@ -230,6 +230,24 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
   // whose own natural magnitude can be small enough that the same absolute defect
   // threshold leaves it badly under-converged. A dedicated key keeps that separate.
   eps_ = pin->GetOrAddReal("cfc", "mg_poisson_threshold", 1.0e-10);
+  // mg_norm is shared with psi/alpha_psi (it defines the norm, not a
+  // tolerance -- see MGNormScaling's comment, multigrid.hpp). mg_poisson_rtol
+  // is its own key for the same reason mg_poisson_threshold is: this driver's
+  // nvar_=4 (X^i/beta^i packed together) makes "rms" mode's max-over-channels
+  // combination (MultigridDriver::TotalDefectNorm) matter here specifically,
+  // where the legacy sum gives an effectively 4x tighter bar than the nvar_=1
+  // psi/alpha_psi solvers face at the same eps_.
+  std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  if (norm_str == "legacy") {
+    norm_mode_ = MGNormScaling::legacy;
+  } else if (norm_str == "rms") {
+    norm_mode_ = MGNormScaling::rms;
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCVectorPoissonDriver" << std::endl
+              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  rtol_ = pin->GetOrAddReal("cfc", "mg_poisson_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;

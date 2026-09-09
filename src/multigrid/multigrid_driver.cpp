@@ -31,6 +31,34 @@
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
 
+// Registry of every constructed driver, so Driver::Finalize() can dump all
+// solvers' MGTimers in one place. Populated by the constructor below.
+std::vector<MultigridDriver*> MultigridDriver::mg_all_drivers_;
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::PrintAllTimers(double wall_sec)
+//! \brief Print the MG phase breakdown for every driver. No-op unless timing was
+//!        enabled via <cfc>/mg_verbose > 0.
+
+void MultigridDriver::PrintAllTimers(double wall_sec) {
+  for (auto *pd : mg_all_drivers_) {
+    if (pd != nullptr && pd->MGTimingOn()) {
+      pd->mg_timers_.Print(global_variable::my_rank, pd->mg_label_, wall_sec);
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::ResetAllTimers()
+//! \brief Zero every driver's MG phase timers. Called where Driver::run_time_ is
+//!        reset, so the two share a zero point and the percentages mean something.
+
+void MultigridDriver::ResetAllTimers() {
+  for (auto *pd : mg_all_drivers_) {
+    if (pd != nullptr) pd->mg_timers_.Reset();
+  }
+}
+
 // constructor, initializes data structures and parameters
 
 MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
@@ -44,6 +72,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     pmy_pack_(pmbp),
     pmy_mesh_(pmbp->pmesh),
     needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
+    norm_mode_(MGNormScaling::legacy), rtol_(0.0),
     niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0),
     fprolongation_(0), mg_verbose_(0),
     nb_rank_(0), ncoeff_(0),
@@ -65,6 +94,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     exit(EXIT_FAILURE);
     return;
   }
+  mg_all_drivers_.push_back(this);
   ranklist_  = new int[nbtotal_];
   int nv = nvar_*2;
   Kokkos::realloc(rootbuf_, nv, nbtotal_);
@@ -612,9 +642,14 @@ void MultigridDriver::FMGProlongate(Driver *pdriver) {
 //! \brief prolongation and smoothing one level
 
 void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
+  const bool tm = MGTimingOn();
   int ngh = mgroot_->ngh_;
   if (current_level_ == nrootlevel_ + nreflevel_ - 1) {
-    MGRootBoundary();
+    {
+      MGScopedTimer t(tm, mg_timers_.root_device_sec);
+      MGRootBoundary();
+    }
+    MGScopedTimer t(tm, mg_timers_.xfer_h2d_sec);
     TransferFromRootToBlocks(true);
   }
   if (current_level_ >= nrootlevel_ + nreflevel_ - 1) { // MeshBlocks
@@ -624,24 +659,37 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
     if (current_level_ == nrootlevel_ + nreflevel_ - 1) flag = 1;
 
     if (current_level_ == ntotallevel_ - 2) flag = 2;
-    SetMGTaskListToFiner(nsmooth, ngh, flag);
-    pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_finer", 0);
+    {
+      MGScopedTimer t(tm, mg_timers_.blk_device_sec);
+      SetMGTaskListToFiner(nsmooth, ngh, flag);
+      pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_finer", 0);
+    }
     current_level_++;
   } else if (current_level_ >= nrootlevel_ - 1) { // octets
     if (current_level_ == nrootlevel_ - 1) {
+      MGScopedTimer t(tm, mg_timers_.root_device_sec);
       MGRootBoundary();
     } else {
+      MGScopedTimer t(tm, mg_timers_.octet_other_sec);
       SetBoundariesOctets(true, true);
     }
-    ProlongateAndCorrectOctets();
+    {
+      MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+      ProlongateAndCorrectOctets();
+    }
     current_level_++;
     for (int n = 0; n < nsmooth; ++n) {
-      SetBoundariesOctets(false, false);
-      SmoothOctets(coffset_);
-      SetBoundariesOctets(false, false);
-      SmoothOctets(1 - coffset_);
+      { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+        SetBoundariesOctets(false, false); }
+      { MGScopedTimer t(tm, mg_timers_.octet_smooth_sec);
+        SmoothOctets(coffset_); }
+      { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+        SetBoundariesOctets(false, false); }
+      { MGScopedTimer t(tm, mg_timers_.octet_smooth_sec);
+        SmoothOctets(1 - coffset_); }
     }
   } else { // root grid
+    MGScopedTimer t(tm, mg_timers_.root_device_sec);
     MGRootBoundary();
     mgroot_->ProlongateAndCorrectPack();
     MarkRootDeviceModified();
@@ -664,31 +712,44 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
 //! \brief smoothing and restriction one level
 
 void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
+  const bool tm = MGTimingOn();
   int ngh = mgroot_->ngh_;
   if (current_level_ >= nrootlevel_ + nreflevel_) { // MeshBlocks
     pmg = mglevels_;
-    SetMGTaskListToCoarser(nsmooth, ngh);
-    pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_coarser", 0);
+    {
+      MGScopedTimer t(tm, mg_timers_.blk_device_sec);
+      SetMGTaskListToCoarser(nsmooth, ngh);
+      pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_coarser", 0);
+    }
     if (current_level_ == nrootlevel_ + nreflevel_) {
-      TransferFromBlocksToRoot(false);
+      { MGScopedTimer t(tm, mg_timers_.xfer_d2h_sec);
+        TransferFromBlocksToRoot(false); }
       if (nreflevel_ > 0) {
+        MGScopedTimer t(tm, mg_timers_.octet_other_sec);
         PreRestrictOctetU();
       }
     }
   } else if (current_level_ > nrootlevel_ - 1) { // octets
-    SetBoundariesOctets(false, false);
-    if (current_level_ < fmglevel_) {
-      StoreOldDataOctets();
-      CalculateFASRHSOctets();
-    }
+    { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+      SetBoundariesOctets(false, false);
+      if (current_level_ < fmglevel_) {
+        StoreOldDataOctets();
+        CalculateFASRHSOctets();
+      } }
     for (int n = 0; n < nsmooth; ++n) {
-      SmoothOctets(coffset_);
-      SetBoundariesOctets(false, false);
-      SmoothOctets(1 - coffset_);
-      SetBoundariesOctets(false, false);
+      { MGScopedTimer t(tm, mg_timers_.octet_smooth_sec);
+        SmoothOctets(coffset_); }
+      { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+        SetBoundariesOctets(false, false); }
+      { MGScopedTimer t(tm, mg_timers_.octet_smooth_sec);
+        SmoothOctets(1 - coffset_); }
+      { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+        SetBoundariesOctets(false, false); }
     }
-    RestrictOctets();
+    { MGScopedTimer t(tm, mg_timers_.octet_other_sec);
+      RestrictOctets(); }
   } else { // root grid
+    MGScopedTimer t(tm, mg_timers_.root_device_sec);
     MGRootBoundary();
     if (current_level_ < fmglevel_) {
       mgroot_->StoreOldData();
@@ -715,6 +776,8 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
 //! \brief Solve the V-cycle starting from the current level
 
 void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmooth) {
+  MGScopedTimer vt(MGTimingOn(), mg_timers_.vcycle_sec);
+  if (MGTimingOn()) ++mg_timers_.vcycle_count;
   int startlevel = current_level_;
   coffset_ ^= 1;
   while (current_level_ > 0) {
@@ -732,12 +795,36 @@ void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmoo
 //! \brief Multigrid (MG) solve using V-cycles
 
 void MultigridDriver::SolveMG(Driver *pdriver) {
-  if (eps_ >= 0.0) {
+  if (MGTimingOn()) ++mg_timers_.solve_count;
+  if (eps_ >= 0.0 || rtol_ > 0.0) {
     SolveIterative(pdriver);
   } else {
     SolveIterativeFixedTimes(pdriver);
   }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::TotalDefectNorm()
+//! \brief Combine the nvar_ per-channel L2 defect norms into one convergence
+//! quantity (ported from ~/athenak_cfc's R3 fix; ~cfc's DEVELOPMENT.md has the
+//! full rationale). With norm_mode_ == legacy this is the original "+=" sum
+//! over channels (bit-identical to the pre-existing behavior), which gives an
+//! nvar_=4 solver (the vector-Poisson X^i/beta^i drivers) an effectively 4x
+//! tighter bar than an nvar_=1 one (psi/alpha_psi) at the same eps_. With
+//! norm_mode_ == rms the channels are combined by max instead, so each
+//! channel independently meets tolerance regardless of nvar_. Wrapped in the
+//! same MGScopedTimer as the two call sites it replaces, so MGTimers'
+//! defect_sec accounting is unchanged.
+
+Real MultigridDriver::TotalDefectNorm() {
+  MGScopedTimer t(MGTimingOn(), mg_timers_.defect_sec);
+  Real def = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    Real d = CalculateDefectNorm(MGNormType::l2, v);
+    def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;
+  }
+  return def;
 }
 
 //----------------------------------------------------------------------------------------
@@ -793,25 +880,32 @@ void MultigridDriver::SolveFMGCoarser() {
 //! \brief Solve iteratively until defect norm drops below eps_
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
-  Real def = 0.0;
-  for (int v = 0; v < nvar_; ++v) {
-    def += CalculateDefectNorm(MGNormType::l2, v);
-  }
+  Real def = TotalDefectNorm();
+  // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
+  // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
+  // "converged" solve may be; rtol_ <= 0.0 reproduces the original eps_-only
+  // behavior exactly). Orthogonal to norm_mode_: a relative target is
+  // invariant under any constant rescaling of the norm.
+  Real target = eps_;
+  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * def);
   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
     std::cout << "MG initial defect = " << def << std::endl;
+    if (rtol_ > 0.0) {
+      std::cout << "MG relative target = " << target << std::endl;
+    }
   }
   int n = 0;
-  while (def > eps_) {
+  while (def > target) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     Real olddef = def;
-    def = 0.0;
-    for (int v = 0; v < nvar_; ++v) {
-      def += CalculateDefectNorm(MGNormType::l2, v);
-    }
+    def = TotalDefectNorm();
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
     if (def/olddef > 0.9) {
+      // Keyed on the literal eps_ == 0.0 ("iterate until stalling") mode, not
+      // on target -- rtol_ > 0.0 must not silently disable stall detection
+      // for an eps_ == 0.0 run.
       if (eps_ == 0.0) break;
       if (fshowdef_ >= 1 && global_variable::my_rank == 0) {
         std::cout << "### WARNING in MultigridDriver::SolveIterative" << std::endl
@@ -823,7 +917,9 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       if (global_variable::my_rank == 0) {
         std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
                   << "Failed to converge after " << n << " iterations (defect = "
-                  << def << ", threshold = " << eps_ << ")" << std::endl;
+                  << def << ", threshold = " << eps_;
+        if (rtol_ > 0.0) std::cout << ", effective target = " << target;
+        std::cout << ")" << std::endl;
       }
       pdriver->nlim = pmy_mesh_->ncycle;
       break;
@@ -840,10 +936,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
 
 void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
   if (fshowdef_ >= 2) {
-    Real def = 0.0;
-    for (int v = 0; v < nvar_; ++v) {
-      def += CalculateDefectNorm(MGNormType::l2, v);
-    }
+    Real def = TotalDefectNorm();
     if (global_variable::my_rank == 0) {
       std::cout << "MG initial defect = " << def << std::endl;
     }
@@ -851,10 +944,7 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
   for (int n = 0; n < niter_; ++n) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     if (fshowdef_ >= 2) {
-      Real def = 0.0;
-      for (int v = 0; v < nvar_; ++v) {
-        def += CalculateDefectNorm(MGNormType::l2, v);
-      }
+      Real def = TotalDefectNorm();
       if (global_variable::my_rank == 0) {
         std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
       }
@@ -870,6 +960,7 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
 //! \brief Solve the coarsest root grid
 
 void MultigridDriver::SolveCoarsestGrid() {
+  MGScopedTimer t(MGTimingOn(), mg_timers_.root_device_sec);
   pmg = mgroot_;
   int ni = (std::max(nrbx1_, std::max(nrbx2_, nrbx3_))
             >> (nrootlevel_-1));

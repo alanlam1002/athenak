@@ -394,6 +394,20 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     : MultigridDriver(pmbp, 1) {
   ncoeff_ = 6;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
+  // See MGCFCConformalFactorDriver's identical comment and MGNormScaling
+  // (multigrid.hpp) -- shares mg_norm/mg_rtol with the psi driver, mirroring
+  // how mg_threshold/mg_verbose/mg_outer_bc are already shared.
+  std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  if (norm_str == "legacy") {
+    norm_mode_ = MGNormScaling::legacy;
+  } else if (norm_str == "rms") {
+    norm_mode_ = MGNormScaling::rms;
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCLapseDriver" << std::endl
+              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;

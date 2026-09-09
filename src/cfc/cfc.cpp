@@ -245,6 +245,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
   pmgd_alpha     = new MGCFCLapseDriver(pmbp, pin);
+  // Labels only tag MGTimers output; the two vector-Poisson drivers are the same
+  // class, so they cannot be told apart from inside the constructor.
+  pmgd_pietax->mg_label_    = "X^i     ";
+  pmgd_pietabeta->mg_label_ = "beta^i  ";
+  pmgd_psi->mg_label_       = "psi     ";
+  pmgd_alpha->mg_label_     = "alpha_psi";
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp later differentiates, mirroring

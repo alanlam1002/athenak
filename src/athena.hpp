@@ -46,7 +46,21 @@ class Coordinates;
 // virtually every library allows this limit to be exceeded. As of 2025, the Intel MPI
 // library provided the most stringent limit of 20 bits per tag. Six bits are needed to
 // store the buffer ID, leaving NUM_BITS_LID=14
-#define NUM_BITS_LID 14
+//
+// 2026-09: lowered 14 -> 12 (ported from ~/athenak_cfc's fix, same day). Aurora's MPICH
+// reports MPI_TAG_UB = 262143, i.e. only 18 bits, not the 20 the note above assumes. With
+// NUM_BITS_LID=14 and bufid up to 56 neighbours the tag reaches 933,887, so every
+// bufid >= 16 produced "Fatal error in internal_Irecv: Invalid tag" and killed the job in
+// the first boundary exchange. At 12 bits the maximum tag is 56<<12 | 4095 = 233,471,
+// which fits 18 bits, and the cap on MeshBlocks per rank is still 4096 -- against a
+// <mesh>/max_nmb_per_rank of 400 in this tree's production TDE fixture. Tags are message
+// labels only, so this changes no computed value: results stay bit-identical.
+//
+// Machine-wide, not next-eval-specific: MPI_TAG_UB is 262143 on BOTH Aurora images --
+// it did NOT change. What changed is enforcement. The old MPICH (5.0.0b1) silently
+// accepted out-of-range tags; the new one (5.1.0a1, next-eval) correctly rejects them.
+// So this binary was already out of spec, merely unpunished until now.
+#define NUM_BITS_LID 12
 
 #define SQR(x) ( (x)*(x) )
 #define SIGN(x) ( ((x) < 0.0) ? -1.0 : 1.0 )

@@ -25,6 +25,7 @@
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
 #include "gravity/gravity.hpp"
+#include "multigrid/multigrid.hpp"
 #include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -377,6 +378,9 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
 
   //---- Step 4.  Initialize various counters, timers, etc.
   run_time_.reset();
+  // Same zero point for the MG phase timers, so their percentages are fractions
+  // of the evolution wall time and exclude initial-data setup.
+  MultigridDriver::ResetAllTimers();
   nmb_updated_ = 0;
 
   // allocate memory for stiff source terms with ImEx integrators
@@ -569,6 +573,10 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       std::cout << "cpu time used  = " << exe_time << std::endl;
       std::cout << "zone-cycles/cpu_second = " << zcps << std::endl;
       std::cout << "particle-updates/cpu_second = " << pups << std::endl;
+
+      // Multigrid phase breakdown. Silent unless <cfc>/mg_verbose > 0, which is
+      // also the switch that makes MGScopedTimer accumulate anything at all.
+      MultigridDriver::PrintAllTimers(exe_time);
     }
   }
   return;

@@ -418,6 +418,27 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
     : MultigridDriver(pmbp, 1) {
   ncoeff_ = 4;
   eps_ = pin->GetOrAddReal("cfc", "mg_threshold", 1.0e-10);
+  // See MGNormScaling's comment (multigrid.hpp). "legacy" reproduces the
+  // pre-existing unweighted, resolution-dependent norm exactly -- mg_threshold
+  // above keeps its established meaning unless this is changed. "rms" is the
+  // volume-weighted, h-independent norm; an existing mg_threshold tuned for
+  // "legacy" needs retuning (roughly by sqrt(dx1*dx2*dx3) at the finest level
+  // reached -- see src/cfc/DEVELOPMENT.md) or, better, paired with mg_rtol
+  // below, which is invariant to this choice.
+  std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  if (norm_str == "legacy") {
+    norm_mode_ = MGNormScaling::legacy;
+  } else if (norm_str == "rms") {
+    norm_mode_ = MGNormScaling::rms;
+  } else {
+    std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver" << std::endl
+              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  // <= 0 disables (the default): eps_ alone sets the stopping point, exactly as
+  // before. > 0: also accept a relative reduction from the initial defect (see
+  // MultigridDriver::SolveIterative), invariant to the mg_norm choice above.
+  rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;

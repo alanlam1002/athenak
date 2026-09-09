@@ -11,6 +11,7 @@
 // C headers
 
 // C++ headers
+#include <chrono>   // high_resolution_clock
 #include <cstdint>  // std::int64_t
 #include <cstdio> // std::size_t
 #include <cstring> // memcpy
@@ -40,6 +41,12 @@ class MultigridBoundaryValues;
 
 enum class MGVariable {src, u, coeff};
 enum class MGNormType {max, l1, l2};
+// legacy: today's convergence-norm reduction is missing a per-cell volume
+// weight, so it grows as the mesh refines -- a fixed threshold demands
+// progressively more accuracy at higher resolution. rms: the fixed,
+// volume-weighted, mesh-resolution-invariant norm. See DEVELOPMENT.md's R3
+// entry (ported from ~/athenak_cfc's R3 fix) for the full derivation.
+enum class MGNormScaling {legacy, rms};
 
 //----------------------------------------------------------------------------------------
 // LogicalLocation hash and equality for std::unordered_map
@@ -205,41 +212,92 @@ struct MultigridTaskIDs {
 
 struct MGTimers {
   using Clock = std::chrono::high_resolution_clock;
-  double pack_send_sec     = 0.0;
-  double recv_unpack_sec   = 0.0;
-  double allreduce_sec     = 0.0;
-  double vcycle_sec        = 0.0;
-  double smooth_sec        = 0.0;
-  double restrict_sec      = 0.0;
-  double prolongate_sec    = 0.0;
-  double prolongate_fc_sec = 0.0;
-  double fillfc_sec        = 0.0;
+
+  // Wall-clock accumulators (seconds) partitioning the time spent inside
+  // SolveVCycle.  Only accumulated when <cfc>/mg_verbose > 0; see MGScopedTimer.
+  // The DEVICE/HOST labels say where the work actually runs on a GPU build.
+  double vcycle_sec        = 0.0;  // total, all of SolveVCycle
+  double blk_device_sec    = 0.0;  // DEVICE: per-MeshBlock levels (mg_to_* lists)
+  double root_device_sec   = 0.0;  // DEVICE: root grid, incl. SolveCoarsestGrid
+  double octet_smooth_sec  = 0.0;  // HOST serial: SmoothOctets
+  double octet_other_sec   = 0.0;  // HOST serial: octet bvals/restrict/prolongate/FAS
+  double xfer_d2h_sec      = 0.0;  // TransferFromBlocksToRoot (D->H + global scatter)
+  double xfer_h2d_sec      = 0.0;  // TransferFromRootToBlocks (scatter + H->D)
+  double defect_sec        = 0.0;  // defect norm reduction + MPI_Allreduce
   int    msg_count         = 0;
   int64_t bytes_sent       = 0;
   int    vcycle_count      = 0;
+  int    solve_count       = 0;    // number of SolveMG() calls
 
   void Reset() {
-    pack_send_sec = recv_unpack_sec = allreduce_sec = 0.0;
-    vcycle_sec = smooth_sec = restrict_sec = prolongate_sec = 0.0;
-    prolongate_fc_sec = fillfc_sec = 0.0;
-    msg_count = 0; bytes_sent = 0; vcycle_count = 0;
+    vcycle_sec = blk_device_sec = root_device_sec = 0.0;
+    octet_smooth_sec = octet_other_sec = 0.0;
+    xfer_d2h_sec = xfer_h2d_sec = defect_sec = 0.0;
+    msg_count = 0; bytes_sent = 0; vcycle_count = 0; solve_count = 0;
   }
-  void Print(int rank) {
-    std::cout << "[Rank " << rank << "] MG timers:"
-              << " vcycles=" << vcycle_count
-              << " vcycle=" << vcycle_sec << "s"
-              << " pack_send=" << pack_send_sec << "s"
-              << " recv_unpack=" << recv_unpack_sec << "s"
-              << " allreduce=" << allreduce_sec << "s"
-              << " smooth=" << smooth_sec << "s"
-              << " restrict=" << restrict_sec << "s"
-              << " prolongate=" << prolongate_sec << "s"
-              << " prolongate_fc=" << prolongate_fc_sec << "s"
-              << " fillfc=" << fillfc_sec << "s"
-              << " msgs=" << msg_count
-              << " bytes=" << bytes_sent
+
+  void Print(int rank, const std::string &label, double wall_sec) {
+    const double host = octet_smooth_sec + octet_other_sec
+                      + xfer_d2h_sec + xfer_h2d_sec;
+    const double dev  = blk_device_sec + root_device_sec;
+    auto pct = [wall_sec](double t) {
+      return (wall_sec > 0.0) ? 100.0*t/wall_sec : 0.0;
+    };
+    std::cout << "[MGTimers rank " << rank << "] " << label
+              << " solves=" << solve_count
+              << " vcycles=" << vcycle_count << "\n"
+              << "    vcycle_total    = " << vcycle_sec << " s ("
+              << pct(vcycle_sec) << "% of wall)\n"
+              << "    DEVICE blocks   = " << blk_device_sec << " s ("
+              << pct(blk_device_sec) << "%)\n"
+              << "    DEVICE root     = " << root_device_sec << " s ("
+              << pct(root_device_sec) << "%)\n"
+              << "    HOST octet smth = " << octet_smooth_sec << " s ("
+              << pct(octet_smooth_sec) << "%)\n"
+              << "    HOST octet othr = " << octet_other_sec << " s ("
+              << pct(octet_other_sec) << "%)\n"
+              << "    XFER blk->root  = " << xfer_d2h_sec << " s ("
+              << pct(xfer_d2h_sec) << "%)\n"
+              << "    XFER root->blk  = " << xfer_h2d_sec << " s ("
+              << pct(xfer_h2d_sec) << "%)\n"
+              << "    defect+allred   = " << defect_sec << " s ("
+              << pct(defect_sec) << "%)\n"
+              << "    => device " << dev << " s (" << pct(dev)
+              << "%)  host-serial " << host << " s (" << pct(host) << "%)"
               << std::endl;
   }
+};
+
+//----------------------------------------------------------------------------------------
+//! \class MGScopedTimer
+//  \brief Accumulates the wall time of an enclosing scope into a MGTimers field.
+//
+//  Fences on both entry and exit so that device-asynchronous work is charged to
+//  the phase that launched it rather than to whichever phase happens to fence
+//  next.  Entirely inert (no fence, no clock read) when `on` is false, which is
+//  the default -- timing is enabled only by <cfc>/mg_verbose > 0.
+
+class MGScopedTimer {
+ public:
+  MGScopedTimer(bool on, double &acc) : on_(on), acc_(acc) {
+    if (on_) {
+      Kokkos::fence();
+      t0_ = MGTimers::Clock::now();
+    }
+  }
+  ~MGScopedTimer() {
+    if (on_) {
+      Kokkos::fence();
+      acc_ += std::chrono::duration<double>(MGTimers::Clock::now() - t0_).count();
+    }
+  }
+  MGScopedTimer(const MGScopedTimer &) = delete;
+  MGScopedTimer &operator=(const MGScopedTimer &) = delete;
+
+ private:
+  bool on_;
+  double &acc_;
+  MGTimers::Clock::time_point t0_;
 };
 
 //! \class Multigrid
@@ -423,6 +481,8 @@ class MultigridDriver {
   virtual void Solve(Driver *pdriver, int step, Real dt = 0.0) = 0;
   void PrepareForAMR();
   int GetCoffset() const { return coffset_; }
+  MGNormScaling GetNormScaling() const { return norm_mode_; }
+  Real TotalDefectNorm();
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -560,6 +620,8 @@ class MultigridDriver {
   int amr_seq_;  // tracks cumulative AMR events to detect mesh changes
   Real last_ave_;
   Real eps_;
+  MGNormScaling norm_mode_;   // legacy = today's unweighted, summed norm
+  Real rtol_;                 // <= 0 disables the relative criterion
   int niter_, npresmooth_, npostsmooth_;
   int os_, oe_;
   int coffset_;
@@ -572,6 +634,17 @@ class MultigridDriver {
 
  public:
   MGTimers mg_timers_;
+  // Human-readable name of this solver instance (psi / alpha_psi / X^i / beta^i),
+  // used only to label MGTimers output. Set by the subclass constructor.
+  std::string mg_label_ = "mg";
+  // True when <cfc>/mg_verbose > 0, i.e. when MGScopedTimer should do anything.
+  // Gating on this keeps the extra Kokkos::fence()es out of production runs.
+  bool MGTimingOn() const { return mg_verbose_ > 0; }
+  // Every constructed driver registers here so Driver::Finalize() can print all
+  // four CFC solvers' timers without reaching into cfc:: internals.
+  static std::vector<MultigridDriver*> mg_all_drivers_;
+  static void PrintAllTimers(double wall_sec);
+  static void ResetAllTimers();
 
  protected:
   // Source masking (zero source outside mask_radius_)

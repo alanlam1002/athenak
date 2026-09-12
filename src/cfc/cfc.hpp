@@ -163,6 +163,13 @@ class CFC {
   // call already lives with.
   bool cfc_init_freeze_conserved_;
 
+  // <cfc> solve_interval (default 0 = disabled): DEVELOPMENT.md item 6's
+  // "solve every Delta-n cycles" cadence control. <=0 solves every substage
+  // of every cycle (today's behavior). >=1 solves only on the last substage
+  // of every Nth cycle; other substages/cycles reuse the previous solve
+  // untouched, since padm->adm/psi/alpha_psi/beta are read-only downstream.
+  int cfc_solve_interval_;
+
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp differentiates (mirrors z4c::Z4c::pbval_u/
   // coarse_u0; is_z4c=true throughout, reusing z4c's higher-order Lagrange
@@ -284,6 +291,14 @@ class CFC {
   TaskStatus ClearRecvTask(Driver *pdriver, int stage);
 
  private:
+  // cfc_solve_interval_ gate: every task queued by QueueCFCTasks() calls this
+  // first and early-returns TaskStatus::complete when false, mirroring
+  // z4c_tasks.cpp's "only run on stage X" idiom -- a skipped task satisfies
+  // the task graph the same as a completed one. stage<1 (direct calls from
+  // InitializeMetric()/ReinitializeMetricForAMR, outside the normal 1..
+  // nexp_stages loop) always returns true; see cfc.cpp for why.
+  bool DoSolveThisStage(Driver *pdriver, int stage) const;
+
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's
   // source (eq. 72, from pmhd->u0) or beta^i's (eq. 75, from alpha/psi/Adual^ij/

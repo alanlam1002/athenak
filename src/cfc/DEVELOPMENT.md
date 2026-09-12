@@ -7744,3 +7744,69 @@ src/cfc/
       modes, ~0.02-0.25, too saturated to be a useful h-independence signal
       here -- `beta^i`, the nvar_=4 solver the channel-max combination
       specifically targets, is the informative channel.)
+
+## 61. Item 6 implemented: `<cfc> solve_interval` — Delta-n-cycle solve cadence
+(Gmunu sec. 2.6.2). Closes the TODO left at item 6 (line ~879 above). Motivated
+by the GRASS-fixture CFC-vs-Z4c comparison: CFC's cost is dominated by its 5
+elliptic solves running on **every RK substage** (3x/cycle for `rk3`), not
+once per cycle.
+
+**Design**: new integer key `<cfc> solve_interval`, default `0` (disabled --
+every `QueueCFCTasks()` task runs every substage, bit-identical to before).
+`N>=1`: the whole per-stage CFC chain runs only on the **last** substage of
+every Nth cycle (fully-updated end-of-cycle matter state, matching this
+codebase's usual "last substage" idiom and the standard NR lagged-metric
+convention); other (cycle, stage) combinations early-return
+`TaskStatus::complete`, leaving `padm->adm.*`/`psi`/`alpha_psi`/`beta`
+untouched. Safe because every consumer (Riemann solvers, con2prim, `NewTimeStep`)
+only ever *reads* this data, and a guarded skip already satisfies the task
+graph the same way real work would (the same idiom ~15 `z4c_tasks.cpp` tasks
+use). No bootstrap gap: `InitializeMetric()` always runs before cycle 0.
+
+**Implementation**: `cfc.hpp` adds `int cfc_solve_interval_` and a private
+`bool DoSolveThisStage(Driver*, int) const`; `cfc.cpp`'s constructor reads the
+key (`GetOrAddInteger`, same idiom as this class's other scalar controls),
+and every one of the 36 `TaskStatus CFC::*Task` functions gets
+`if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }` as
+its first line, including `InitRecvTask`/`ClearSendTask`/`ClearRecvTask` (the
+whole per-stage MPI Init/Send/Recv/Clear round-trip skips together, so no
+requests are left dangling).
+
+**Bug found and fixed during verification**: `InitializeMetric()`'s
+`RunXPsiSolvePass()` (and the shared tail `ReinitializeMetricForAMR()` also
+uses) call these same `*Task` wrappers directly with `stage=0` -- a
+placeholder, since these run once at t=0/per regrid, outside the main loop's
+`1..nexp_stages` range. The original gate treated `stage=0` like any other
+non-final substage and skipped it, silently no-op'ing `Send*Task` while
+`InitRecvXFields()`/`ClearXFields()` (unconditional, untouched by this
+feature) still waited on the matching receive -- every rank deadlocked in
+`ClearRecv()`'s `MPI_Wait`, confirmed via `addr2line` on the crashed binary
+(`InitializeMetric -> RunXPsiSolvePass -> ClearRecv`, blocked in `PMPI_Wait`).
+Reproduced deterministically (3/3 with the feature on, 0/1 off, same binary).
+**Fix**: `DoSolveThisStage` treats `stage < 1` as "not a normal substage,
+always run" -- mirroring this codebase's existing negative-stage-sentinel
+convention (e.g. `phydro->InitRecv(this, -1)`). No call-site changes needed.
+
+**Verified** at 1/2/8 nodes on next-eval after the fix (8 nodes: job 8822418,
+112 cycles, 0 NaN, clean wall-clock stop). A separate hang still reproduces
+on the `capacity` queue's older-image binary at 2 nodes even with the fix --
+not root-caused, confirmed absent on next-eval at 1/2/8 nodes, flagged as a
+lower-priority capacity-queue-specific issue, not blocking.
+
+**Performance** (same GRASS fixture, 8 nodes/96 ranks next-eval, stacked on
+R3+`gr_dt`): **15.93 s/cycle** at `solve_interval=1` (job 8822418) vs.
+46.67 s/cycle for R3+`gr_dt` alone (job 8818897) -- a 2.93x reduction, as
+expected from cutting the elliptic solve from 3 substages/cycle to 1.
+Total improvement over legacy-norm CFC (52.0 s/cycle / 2367 wall-s per
+code-time-unit): **4.25x** (556 wall-s per code-time-unit), closing the gap
+to Z4c's still-crashing clean-phase rate from ~142x to ~48x.
+
+**Accuracy-vs-N sweep** (N=0/1/2/4/8, `nlim=40`, all landing within 6e-6 of
+t=1.14498): relative deviation from the N=0 baseline even at N=8 is
+~4.4e-6 (rho-max), ~1.5e-5 (alpha-min), ~4.3e-9 (mass -- conservation
+essentially untouched); Bmax/divBmax show no trend with N at all, well under
+the ~1e-2 GPU-reduction-order noise already accepted on this codebase/
+hardware. No detectable accuracy cost up to N=8 at this integration point
+(t~1.14, 40 cycles) -- doesn't rule out slower cumulative drift over a much
+longer run. `solve_interval=1` looks safe to recommend as a new default for
+this fixture.

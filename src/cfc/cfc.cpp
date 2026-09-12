@@ -262,6 +262,30 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
     cfc_init_use_psi5_ = false;
   }
+
+  // DEVELOPMENT.md item 6's Delta-n-cycle solve cadence; see cfc.hpp. <=0
+  // (default) is a no-op: every task runs every substage, as before.
+  cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const
+//! \brief see cfc_solve_interval_'s comment in cfc.hpp.
+
+bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
+  // stage<1: a direct call from InitializeMetric()/ReinitializeMetricForAMR
+  // (e.g. RunXPsiSolvePass, stage=0), not a normal 1..nexp_stages substage --
+  // always run. Skipping these no-ops their Send while InitRecvXFields()/
+  // ClearXFields() still wait on the matching Recv, deadlocking every rank
+  // (reproduced and confirmed before adding this check).
+  if (stage < 1) {
+    return true;
+  }
+  if (cfc_solve_interval_ <= 0) {
+    return true;
+  }
+  return (pmy_pack->pmesh->ncycle % cfc_solve_interval_ == 0) &&
+         (stage == pdriver->nexp_stages);
 }
 
 //----------------------------------------------------------------------------------------
@@ -759,18 +783,22 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 // Lagrange restrict/prolong path -- see the constructor's comment above).
 
 TaskStatus CFC::RestPiEtaXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(u_p_x, coarse_u_pietax, true);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendPiEtaXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_pietax->PackAndSendCC(u_p_x, coarse_u_pietax);
 }
 TaskStatus CFC::RecvPiEtaXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_pietax->RecvAndUnpackCC(u_p_x, coarse_u_pietax);
 }
 TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     // Step 1: apply physical BCs to the coarse array so the prolongation stencil
     // reads valid data in coarse ghost zones at a physical boundary.
@@ -795,6 +823,7 @@ TaskStatus CFC::ProlongPiEtaXTask(Driver *pdriver, int stage) {
 //! coarse neighbor and a physical boundary read valid, already-prolongated data
 //! (mirrors z4c::Z4c::ApplyPhysicalBCs).
 TaskStatus CFC::BCSPiEtaXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCBCs(pmy_pack, u_p_x, 4, 1);
   }
@@ -802,18 +831,22 @@ TaskStatus CFC::BCSPiEtaXTask(Driver *pdriver, int stage) {
 }
 
 TaskStatus CFC::RestPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(delta_psi, coarse_psi, true);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_psi->PackAndSendCC(delta_psi, coarse_psi);
 }
 TaskStatus CFC::RecvPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_psi->RecvAndUnpackCC(delta_psi, coarse_psi);
 }
 TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_psi, 1, 1);
@@ -825,6 +858,7 @@ TaskStatus CFC::ProlongPsiTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCBCs(pmy_pack, delta_psi, 1, 1);
   }
@@ -832,18 +866,22 @@ TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
 }
 
 TaskStatus CFC::RestAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(delta_alpha_psi, coarse_alpha_psi, true);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_alpha_psi->PackAndSendCC(delta_alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::RecvAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_alpha_psi->RecvAndUnpackCC(delta_alpha_psi, coarse_alpha_psi);
 }
 TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_alpha_psi, 1, 1);
@@ -855,6 +893,7 @@ TaskStatus CFC::ProlongAlphaPsiTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::BCSAlphaPsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCBCs(pmy_pack, delta_alpha_psi, 1, 1);
   }
@@ -862,18 +901,22 @@ TaskStatus CFC::BCSAlphaPsiTask(Driver *pdriver, int stage) {
 }
 
 TaskStatus CFC::RestPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(u_p_beta, coarse_u_pietabeta, true);
   }
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_pietabeta->PackAndSendCC(u_p_beta, coarse_u_pietabeta);
 }
 TaskStatus CFC::RecvPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_pietabeta->RecvAndUnpackCC(u_p_beta, coarse_u_pietabeta);
 }
 TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     if (!(pmy_pack->pmesh->strictly_periodic)) {
       MeshBoundaryValues::CFCBCsCoarse(pmy_pack, coarse_u_pietabeta, 4, 1);
@@ -885,6 +928,7 @@ TaskStatus CFC::ProlongPiEtaBetaTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCBCs(pmy_pack, u_p_beta, 4, 1);
   }
@@ -896,6 +940,7 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
 // and z4c::Z4c; ADMBCs/ADMBCsCoarse (adm_bcs.cpp) are applied below by
 // ProlongADMTask/BCSADMTask.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
                                       true);
@@ -903,12 +948,15 @@ TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (pmy_pack->pmesh->multilevel) {
     // Step 1: apply physical BCs to the coarse array so the prolongation stencil
     // reads valid data in coarse ghost zones at a physical boundary.
@@ -928,6 +976,7 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
 //! (no neighbor block). Runs after ProlongADMTask so corner ghost zones between a
 //! coarse neighbor and a physical boundary read valid, already-prolongated data.
 TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
@@ -939,6 +988,7 @@ TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
 // z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
 // over CFC's 5 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->InitRecv(4);
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
@@ -947,6 +997,7 @@ TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->ClearSend();
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
@@ -955,6 +1006,7 @@ TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->ClearRecv();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
@@ -969,6 +1021,7 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 // AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveVectorPotential(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -977,6 +1030,7 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 // ghost exchange (CFC_BCSPiEtaX) completes -- X^i is never materialized.
 
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   ComputeADual();
   return TaskStatus::complete;
 }
@@ -984,6 +1038,7 @@ TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
 // step 3: psi (nonlinear), then the early psi4/g_dd write MHD_C2P depends on.
 
 TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveConformalFactor(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -992,6 +1047,7 @@ TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
 // recovered -- no con2prim call here, see RescaleMatterSources.
 
 TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   RescaleMatterSources(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -999,6 +1055,7 @@ TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
 // step 5: alpha*psi (nonlinear).
 
 TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveLapse(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -1008,6 +1065,7 @@ TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
 // psi/alpha_psi's own ghost exchange (both needed by the eq. 75 source term).
 
 TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveShift(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -1016,6 +1074,7 @@ TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
 // exchange has completed.
 
 TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   ReconstructShift();
   return TaskStatus::complete;
 }
@@ -1023,6 +1082,7 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 // final step: vK_dd/alpha/beta_u -> padm->u_adm.
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   AssembleADM();
   return TaskStatus::complete;
 }

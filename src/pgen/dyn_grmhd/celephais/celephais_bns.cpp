@@ -74,6 +74,7 @@
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_piecewise_poly.hpp"
 #include "utils/tov/tov_tabulated.hpp"
+#include "utils/tov/tov_zla_bag.hpp"
 
 // Celephais (BNS / BNS_nosym GR initial data)
 #include "For_Kadath/Kadath_point_h/kadath_bin_ns.hpp"
@@ -146,9 +147,23 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
   // Set up the 1D EOS
   TOVEOS eos{pin};
 
-  // Enable ye only if the EOS supports it AND nscalars > 0 (IYF slot exists).
+  // Composition support is detected from the 1D EOS itself, not by name:
+  //   UsesYe   -> a single Y_e slot   (tov::TabulatedEOS)
+  //   UsesFvol -> the ZLA-bag 4-species layout (tov::ZlaBagEOS)
+  // See tov::UsesYe / tov::UsesFvol in utils/tov/tov_utils.hpp.
   const bool use_ye = tov::UsesYe<TOVEOS>;
-  const bool read_ye = pin->GetOrAddInteger("mhd", "nscalars", 0) > 0;
+  const bool use_fvol = tov::UsesFvol<TOVEOS>;
+  const int nscal = pin->GetOrAddInteger("mhd", "nscalars", 0);
+  const bool read_ye = nscal > 0;
+  const bool read_fvol = (nscal == 4);
+  // Base offset of the passive scalars in w0 (== IYF for the dyn-GR MHD path).
+  const int nscal_base = pmbp->pmhd->nmhd;
+  if (use_fvol && !read_fvol) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "The ZLA bag EOS requires <mhd> nscalars = 4, but nscalars = "
+              << nscal << " was requested" << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
   // =========================================================================
   // Kadath BNS setup (inlined from export_bns.cpp / export_bns_nosym.cpp)
@@ -582,6 +597,27 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
         }
       }
 
+      // ZLA bag: initialize all four passive scalars from the 1D table's
+      // beta-equilibrium slice, Y = (f, Y_N, Y_N y_l,N, (1-Y_N) y_l,Q), which is
+      // the layout Primitive::EOSZlaBag::ConvertPrimitive() expects.  Vacuum
+      // cells (rho == 0) need no special case: the Get*FromRho() getters fall
+      // back to <mhd>/sN_atmosphere below the bottom of the table.
+      if constexpr (use_fvol) {
+        if (read_fvol) {
+          const Real rho = host_w0(m, IDN, k, j, i);
+          Real y0 = eos.template GetFvolFromRho<tov::LocationTag::Host>(rho);
+          Real y1 = eos.template GetYnFromRho<tov::LocationTag::Host>(rho);
+          Real y2 = eos.template GetYlnFromRho<tov::LocationTag::Host>(rho);
+          Real y3 = eos.template GetYlqFromRho<tov::LocationTag::Host>(rho);
+          // Y_N <= f is required by ResetFloorZlaBag::SpeciesLimits.
+          y1 = fmin(y0, y1);
+          host_w0(m, nscal_base + 0, k, j, i) = y0;
+          host_w0(m, nscal_base + 1, k, j, i) = y1;
+          host_w0(m, nscal_base + 2, k, j, i) = y2 * y1;
+          host_w0(m, nscal_base + 3, k, j, i) = y3 * (1.0 - y1);
+        }
+      }
+
       // Velocity: qv[UX..UZ] is the Eulerian three-velocity U^i; vacuum -> 0.
       Real vu[3];
       if (is_vacuum[lane]) {
@@ -663,6 +699,12 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
       if (read_ye)
         host_w0(dst_m, IYF, dst_k, dst_j, dst_i) =
             host_w0(src_m, IYF, src_k, src_j, src_i);
+    }
+    if constexpr (use_fvol) {
+      if (read_fvol)
+        for (int scalar = 0; scalar < 4; ++scalar)
+          host_w0(dst_m, nscal_base + scalar, dst_k, dst_j, dst_i) =
+              host_w0(src_m, nscal_base + scalar, src_k, src_j, src_i);
     }
     for (int component = 0; component < 3; ++component)
       host_w0(dst_m, IVX + component, dst_k, dst_j, dst_i) =
@@ -839,6 +881,8 @@ void DispatchBNSEOS(ParameterInput *pin, Mesh *pmy_mesh_, MeshBlockPack *pmbp) {
     SetupBNS<KadathSpace, tov::TabulatedEOS>(pin, pmy_mesh_);
   } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_piecewise_poly) {
     SetupBNS<KadathSpace, tov::PiecewisePolytropeEOS>(pin, pmy_mesh_);
+  } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_zla_bag) {
+    SetupBNS<KadathSpace, tov::ZlaBagEOS>(pin, pmy_mesh_);
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Unknown EOS requested for Kadath BNS problem" << std::endl;
@@ -883,14 +927,32 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
 //----------------------------------------------------------------------------------------
 //! \fn KadathBNSHistory()
-//! \brief History function: tracks maximum rest-mass density and minimum lapse
+//! \brief History function: tracks maximum rest-mass density and minimum lapse, plus
+//!        the ZLA-bag composition diagnostics (max lepton fraction for nucleons and
+//!        the range of the nucleonic volume fraction f).  The composition entries are
+//!        only meaningful for a 4-species EOS; they are skipped otherwise.
 void KadathBNSHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist    = 2;
+  pdata->nhist    = 6;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
+  pdata->label[2] = "Yl,N-max";
+  pdata->label[3] = "f-min";
+  pdata->label[4] = "f-max";
+  // Non-finite cell count. fmax/fmin below *ignore* NaN by IEEE rule, so a domain that
+  // has gone entirely NaN reports the reduction identities instead -- rho-max comes
+  // back as exactly dfloor and alpha-min as DBL_MAX, both of which look plausible.
+  // This column is the only thing in the history that can say the run is dead.
+  pdata->label[5] = "n-nonfinite";
 
   auto &w0_ = pm->pmb_pack->pmhd->w0;
   auto &adm = pm->pmb_pack->padm->adm;
+  // Yl,N (nvars_+2) and f (nvars_+0) are ZlaBag's 4-species layout -- guard against
+  // out-of-bounds reads for EOS policies with fewer scalars (e.g. dyn_eos=hybrid with
+  // nscalars=0).
+  int &nvars_    = pm->pmb_pack->pmhd->nmhd;
+  int nscal_     = pm->pmb_pack->pmhd->nscalars;
+  bool have_yln_ = (nscal_ > 2);
+  bool have_f_   = (nscal_ > 0);
 
   auto &indcs     = pm->pmb_pack->pmesh->mb_indcs;
   int is          = indcs.is;
@@ -905,11 +967,17 @@ void KadathBNSHistory(HistoryData *pdata, Mesh *pm) {
 
   Real rho_max   = std::numeric_limits<Real>::max();
   Real alpha_min = -rho_max;
+  Real yln_max   = rho_max;
+  Real f_min     = rho_max;
+  Real f_max     = -rho_max;
+  int  n_nonfin  = 0;
 
   Kokkos::parallel_reduce(
       "KadathBNSHistSums",
       Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-      KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min) {
+      KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min,
+                    Real &mb_yln_max, Real &mb_fmin, Real &mb_fmax,
+                    int &mb_nonfin) {
         int m = (idx) / nkji;
         int k = (idx - m * nkji) / nji;
         int j = (idx - m * nkji - k * nji) / nx1;
@@ -917,10 +985,23 @@ void KadathBNSHistory(HistoryData *pdata, Mesh *pm) {
         k += ks;
         j += js;
 
+        if (!isfinite(w0_(m, IDN, k, j, i)) || !isfinite(adm.alpha(m, k, j, i))) {
+          mb_nonfin++;
+        }
         mb_max     = fmax(mb_max, w0_(m, IDN, k, j, i));
         mb_alp_min = fmin(mb_alp_min, adm.alpha(m, k, j, i));
+        if (have_yln_) {
+          mb_yln_max = fmax(mb_yln_max, w0_(m, nvars_ + 2, k, j, i));
+        }
+        if (have_f_) {
+          Real f  = w0_(m, nvars_, k, j, i);
+          mb_fmin = fmin(mb_fmin, f);
+          mb_fmax = fmax(mb_fmax, f);
+        }
       },
-      Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min));
+      Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min),
+      Kokkos::Max<Real>(yln_max), Kokkos::Min<Real>(f_min),
+      Kokkos::Max<Real>(f_max), Kokkos::Sum<int>(n_nonfin));
 
 #if MPI_PARALLEL_ENABLED
   if (global_variable::my_rank == 0) {
@@ -928,18 +1009,40 @@ void KadathBNSHistory(HistoryData *pdata, Mesh *pm) {
                MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
                MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &f_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &f_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(MPI_IN_PLACE, &n_nonfin, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
   } else {
     MPI_Reduce(&rho_max, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0,
                MPI_COMM_WORLD);
     MPI_Reduce(&alpha_min, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
                MPI_COMM_WORLD);
+    MPI_Reduce(&yln_max, &yln_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(&f_min, &f_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(&f_max, &f_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0,
+               MPI_COMM_WORLD);
+    MPI_Reduce(&n_nonfin, &n_nonfin, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
     rho_max   = 0.;
     alpha_min = 0.;
+    yln_max   = 0.;
+    f_min     = 0.;
+    f_max     = 0.;
+    n_nonfin  = 0;
   }
 #endif
 
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
+  pdata->hdata[2] = yln_max;
+  pdata->hdata[3] = f_min;
+  pdata->hdata[4] = f_max;
+  pdata->hdata[5] = static_cast<Real>(n_nonfin);
 }
 
 //----------------------------------------------------------------------------------------

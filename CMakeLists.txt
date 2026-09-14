@@ -197,6 +197,9 @@ if (${PROBLEM} MATCHES "^dyn_grmhd/celephais/")
       "Celephais source tree used by the initial-data portals")
   set(CELEPHAIS_BINARY_DIR "${CELEPHAIS_SOURCE_DIR}/build" CACHE PATH
       "Celephais build tree containing generated private headers")
+  set(CELEPHAIS_INSTALL_DIR "${CELEPHAIS_BINARY_DIR}/install" CACHE PATH
+      "Celephais install prefix containing the CelephaisConfig.cmake package")
+  list(APPEND CMAKE_PREFIX_PATH "${CELEPHAIS_INSTALL_DIR}")
   find_package(Celephais CONFIG REQUIRED)
 
   if (NOT EXISTS "${CELEPHAIS_SOURCE_DIR}/include/For_Kadath/Scalar/scalar.hpp")

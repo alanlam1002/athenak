@@ -104,13 +104,19 @@ void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta
 //! rewritten here. beta_u is the solved residual b^i = beta^i-beta0^i; the analytic
 //! background beta0_u is added back here (Sec 5 Phase A item 7) -- zero everywhere
 //! unless <cfc> puncture_enabled, so this reduces to a copy-through by default.
+//! alpha_floor (<cfc> alpha_floor, default 0.0 = disabled) clamps the assembled
+//! lapse from below. A maximal-slicing trumpet has alpha0 -> 0 at the throat, so
+//! discretisation error can legitimately undershoot to a small negative value
+//! near the puncture (DEVELOPMENT.md item 59) -- not something the fluid update
+//! should ever see. Default 0.0 is a bit-for-bit no-op; set only for puncture runs.
 void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
                           const DvceArray5D<Real> &delta_alpha_psi,
                           const DvceArray5D<Real> &u_psi0,
                           const DvceArray5D<Real> &u_alpha0_psi0,
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
-                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u);
+                          const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
+                          Real alpha_floor);
 
 }  // namespace cfc
 

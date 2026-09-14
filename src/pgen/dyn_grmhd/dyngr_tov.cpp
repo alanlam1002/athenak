@@ -25,6 +25,7 @@
 #include "eos/eos.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "cfc/cfc.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
@@ -65,10 +66,19 @@ struct TOVParams {
 };
 
 TOVParams *ptov_params;
+Real track_radius_ = 4.0;  // set once in UserProblem() when tracking is enrolled
+// Fallback tracking center, used only before CFC's r_com_mass_ centroid has been
+// computed by a first solve (it starts at exactly {0,0,0} -- a real centroid
+// essentially never lands there, so that's a safe sentinel).
+Real track_fallback_x0_ = 0.0, track_fallback_y0_ = 0.0, track_fallback_z0_ = 0.0;
 } // namespace
 
 void SetADMVariablesToTOV(MeshBlockPack *pmbp);
 void FinalizeTOV(ParameterInput *pin, Mesh *pm);
+// AMR refinement condition that follows the star's mass centroid, analogous to
+// z4c's CompactObjectTracker-driven RefineTracker() in dynbbh.cpp. Only enrolled
+// when <problem> track_star_refinement=true.
+void RefineTOVTracker(MeshBlockPack *pmbp);
 
 template<class TOVEOS>
 void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
@@ -97,6 +107,24 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   Real x0 = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
   Real y0 = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
   Real z0 = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
+
+  // Uniform bulk (center-of-mass) boost of the whole star, for elliptic-orbit
+  // setups -- see scripts/tde_elliptical_orbit_ic.py. Distinct from v_pert above
+  // (a zero-net-momentum radial pulsation). Default 0.0: has_boost=false skips
+  // the Lorentz-factor multiply, keeping every non-boosted fixture bit-for-bit
+  // unchanged.
+  Real star_vel_x1 = pin->GetOrAddReal("problem", "star_vel_x1", 0.0);
+  Real star_vel_x2 = pin->GetOrAddReal("problem", "star_vel_x2", 0.0);
+  Real star_vel_x3 = pin->GetOrAddReal("problem", "star_vel_x3", 0.0);
+  bool has_boost = (star_vel_x1 != 0.0) || (star_vel_x2 != 0.0) || (star_vel_x3 != 0.0);
+  if (has_boost && !isotropic) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "star_vel_x1/2/3 (bulk boost) requires <problem>/isotropic=true "
+              << "(CFC's own gauge); the non-isotropic branch's metric assembly is not "
+              << "shifted to star_center and was never validated for this feature."
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
 
@@ -161,6 +189,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     Real vr = 0.;
     Real p_pert = 0.;
     Real ye = ye_atmo;
+    Real vbx = 0., vby = 0., vbz = 0.;
     auto &use_ye_ = use_ye;
     if (!isotropic) {
       tov_.GetPrimitivesAtPoint(eos_, r, rho, p, mass, alp);
@@ -180,6 +209,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       if (r_schw <= tov_.R_edge) {
         Real x = r_schw/tov_.R_edge;
         vr = 0.5*v_pert*(3.0*x - x*x*x);
+        vbx = star_vel_x1; vby = star_vel_x2; vbz = star_vel_x3;
         auto rand_gen = rand_pool64.get_state();
         p_pert = 2.0*p_pert*(rand_gen.frand() - 0.5);
         rand_pool64.free_state(rand_gen);
@@ -194,9 +224,31 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     //w0_(m,IPR,k,j,i) = fmax(p*(1. + p_pert), tov_.pfloor);
     w0_(m,IDN,k,j,i) = rho;
     w0_(m,IPR,k,j,i) = p*(1. + p_pert);
-    w0_(m,IVX,k,j,i) = vr*(x1v-x0)/r;
-    w0_(m,IVY,k,j,i) = vr*(x2v-y0)/r;
-    w0_(m,IVZ,k,j,i) = vr*(x3v-z0)/r;
+
+    // Bulk boost added to the v_pert radial pulsation before one combined
+    // Lorentz-factor conversion. vbx/vby/vbz are nonzero only inside the star
+    // (same gate v_pert uses), matching its atmosphere-stays-at-rest behavior.
+    Real vx_tot = vr*(x1v-x0)/r + vbx;
+    Real vy_tot = vr*(x2v-y0)/r + vby;
+    Real vz_tot = vr*(x3v-z0)/r + vbz;
+    if (has_boost) {
+      // gamma_ij = psi4*delta_ij (CFC gauge); psi4 of the star's own isolated TOV
+      // field -- same template as xns_rotstar.cpp's Wv assembly.
+      Real fmet_local = 1.;
+      if (r > 0) { fmet_local = r_schw/r; }
+      Real psi4_local = fmet_local*fmet_local;
+      Real vsq = psi4_local*(vx_tot*vx_tot + vy_tot*vy_tot + vz_tot*vz_tot);
+      vsq = fmin(vsq, 0.9999);
+      Real lorentz_w = 1.0/sqrt(1.0 - vsq);
+      w0_(m,IVX,k,j,i) = lorentz_w*vx_tot;
+      w0_(m,IVY,k,j,i) = lorentz_w*vy_tot;
+      w0_(m,IVZ,k,j,i) = lorentz_w*vz_tot;
+    } else {
+      // Bit-identical to the pre-boost expression: vx_tot == vr*(unit)+0.0.
+      w0_(m,IVX,k,j,i) = vx_tot;
+      w0_(m,IVY,k,j,i) = vy_tot;
+      w0_(m,IVZ,k,j,i) = vz_tot;
+    }
     auto &nvars = nvars_;
     auto &nscal = nscal_;
     if (use_ye && nscal >= 1) {
@@ -433,6 +485,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   pgen_final_func = &FinalizeTOV;
   pmbp->padm->SetADMVariables = &SetADMVariablesToTOV;
 
+  // Optional: track the star's mass centroid instead of a static box (see
+  // RefineTOVTracker below). Off by default; requires <mesh_refinement>
+  // refinement=adaptive and an <amr_criterionN> method=user block.
+  if (pin->GetOrAddBoolean("problem", "track_star_refinement", false)) {
+    user_ref_func = &RefineTOVTracker;
+    track_radius_ = pin->GetOrAddReal("problem", "track_radius", 4.0);
+    track_fallback_x0_ = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+    track_fallback_y0_ = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
+    track_fallback_z0_ = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
+  }
+
   // initialize primitive variables for restart
   if (restart) {
     if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_ideal) {
@@ -638,8 +701,11 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   const int nmkji = (pm->pmb_pack->nmb_thispack)*nx3*nx2*nx1;
   const int nkji = nx3*nx2*nx1;
   const int nji = nx2*nx1;
-  Real rho_max = std::numeric_limits<Real>::max();
-  Real alpha_min = -rho_max;
+  // Kokkos::Max/Min overwrite these with their own reduction identities regardless,
+  // but they were previously swapped (each seeded with the OTHER's identity) --
+  // written correctly here.
+  Real rho_max = std::numeric_limits<Real>::lowest();
+  Real alpha_min = std::numeric_limits<Real>::max();
   Kokkos::parallel_reduce("TOVHistSums",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min) {
     // compute n,k,j,i indices of thread
@@ -661,8 +727,12 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     MPI_Reduce(MPI_IN_PLACE, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
   } else {
-    MPI_Reduce(&rho_max, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&alpha_min, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    // Non-root: sendbuf/recvbuf must not alias (only MPI_IN_PLACE, root-side,
+    // may reuse the same buffer) -- send into a separate throwaway.
+    Real rho_max_out, alpha_min_out;
+    MPI_Reduce(&rho_max, &rho_max_out, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&alpha_min, &alpha_min_out, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
+               MPI_COMM_WORLD);
     rho_max = 0.;
     alpha_min = 0.;
   }
@@ -671,4 +741,70 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // store data in hdata array
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void RefineTOVTracker(MeshBlockPack *pmbp)
+//! \brief AMR refinement condition that keeps the refined region centered on the star's
+//! current mass centroid, instead of a pre-drawn static box. Pattern copied from
+//! RefineTracker() in dynbbh.cpp. The tracked center, pmbp->pcfc->r_com_mass_, is
+//! already computed every CFC solve (CFC::ComputeMassCentroid()), so no new reduction
+//! is needed.
+//!
+//! Each local MeshBlock is flagged +1 (refine) if any corner is within track_radius of
+//! the centroid, else -1 (derefine). AMR only moves one level per check, so blocks
+//! near the star ramp up over consecutive checks as long as they keep being flagged,
+//! and the region recedes behind the star as it moves on.
+void RefineTOVTracker(MeshBlockPack *pmbp) {
+  Mesh *pmesh = pmbp->pmesh;
+  auto &refine_flag = pmesh->pmr->refine_flag;
+  auto &size = pmbp->pmb->mb_size;
+  int nmb = pmbp->nmb_thispack;
+  int mbs = pmesh->gids_eachrank[global_variable::my_rank];
+
+  Real x0 = pmbp->pcfc->r_com_mass_[0];
+  Real y0 = pmbp->pcfc->r_com_mass_[1];
+  Real z0 = pmbp->pcfc->r_com_mass_[2];
+  if (x0 == 0.0 && y0 == 0.0 && z0 == 0.0) {
+    // No CFC solve has populated r_com_mass_ yet -- use the star's known initial
+    // center instead of tracking towards the coordinate origin.
+    x0 = track_fallback_x0_;
+    y0 = track_fallback_y0_;
+    z0 = track_fallback_z0_;
+  }
+  Real rad2 = SQR(track_radius_);
+
+  for (int m = 0; m < nmb; ++m) {
+    Real &x1min = size.h_view(m).x1min;
+    Real &x1max = size.h_view(m).x1max;
+    Real &x2min = size.h_view(m).x2min;
+    Real &x2max = size.h_view(m).x2max;
+    Real &x3min = size.h_view(m).x3min;
+    Real &x3max = size.h_view(m).x3max;
+
+    Real d2[8] = {
+      SQR(x1min-x0) + SQR(x2min-y0) + SQR(x3min-z0),
+      SQR(x1max-x0) + SQR(x2min-y0) + SQR(x3min-z0),
+      SQR(x1min-x0) + SQR(x2max-y0) + SQR(x3min-z0),
+      SQR(x1max-x0) + SQR(x2max-y0) + SQR(x3min-z0),
+      SQR(x1min-x0) + SQR(x2min-y0) + SQR(x3max-z0),
+      SQR(x1max-x0) + SQR(x2min-y0) + SQR(x3max-z0),
+      SQR(x1min-x0) + SQR(x2max-y0) + SQR(x3max-z0),
+      SQR(x1max-x0) + SQR(x2max-y0) + SQR(x3max-z0),
+    };
+    Real dmin2 = *std::min_element(&d2[0], &d2[8]);
+    bool contains_centroid = (x0 >= x1min && x0 <= x1max) &&
+                             (y0 >= x2min && y0 <= x2max) &&
+                             (z0 >= x3min && z0 <= x3max);
+
+    if (dmin2 < rad2 || contains_centroid) {
+      refine_flag.h_view(m + mbs) = 1;
+    } else {
+      refine_flag.h_view(m + mbs) = -1;
+    }
+  }
+
+  // sync host and device
+  refine_flag.template modify<HostMemSpace>();
+  refine_flag.template sync<DevExeSpace>();
 }

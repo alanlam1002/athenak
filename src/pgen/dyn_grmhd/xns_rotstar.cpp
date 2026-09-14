@@ -321,8 +321,11 @@ void XNSRotStarHistory(HistoryData *pdata, Mesh *pm) {
   const int nkji = nx3*nx2*nx1;
   const int nji = nx2*nx1;
 
-  Real rho_max = std::numeric_limits<Real>::max();
-  Real alpha_min = -rho_max;
+  // Reduction identities written the right way round (Kokkos::Max/Min overwrite
+  // these anyway, but they were swapped and read backwards) -- same fix as
+  // dyngr_tov.cpp's TOVHistory; see DEVELOPMENT.md item 59.
+  Real rho_max = std::numeric_limits<Real>::lowest();
+  Real alpha_min = std::numeric_limits<Real>::max();
   Real ang_mom = 0.0;
   Kokkos::parallel_reduce("XNSRotStarHistSums",
       Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
@@ -354,18 +357,20 @@ void XNSRotStarHistory(HistoryData *pdata, Mesh *pm) {
   }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min),
      Kokkos::Sum<Real>(ang_mom));
 
-  // Currently AthenaK only supports MPI_SUM operations between ranks, but we need
-  // MPI_MAX and MPI_MIN for rho_max/alpha_min -- same cheap hack TOVHistory uses
-  // (dyngr_tov.cpp): manually MAX/MIN-reduce those two onto rank 0, then zero every
-  // other rank's copy so the framework's own generic post-reduction MPI_SUM (over
-  // the whole hdata array, history.cpp) is a no-op for them.
+  // AthenaK's generic post-reduction only does MPI_SUM; MAX/MIN-reduce rho_max/
+  // alpha_min onto rank 0 manually first, then zero every other rank's copy so
+  // that generic MPI_SUM is a no-op for them (same as TOVHistory, dyngr_tov.cpp).
 #if MPI_PARALLEL_ENABLED
   if (global_variable::my_rank == 0) {
     MPI_Reduce(MPI_IN_PLACE, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(MPI_IN_PLACE, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
   } else {
-    MPI_Reduce(&rho_max, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
-    MPI_Reduce(&alpha_min, &alpha_min, 1, MPI_ATHENA_REAL, MPI_MIN, 0, MPI_COMM_WORLD);
+    // sendbuf must not alias recvbuf off-root (MPI forbids it; UB even though the
+    // receive buffer is ignored there) -- same fix as dyngr_tov.cpp.
+    Real rho_max_out, alpha_min_out;
+    MPI_Reduce(&rho_max, &rho_max_out, 1, MPI_ATHENA_REAL, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&alpha_min, &alpha_min_out, 1, MPI_ATHENA_REAL, MPI_MIN, 0,
+               MPI_COMM_WORLD);
     rho_max = 0.;
     alpha_min = 0.;
   }

@@ -1,0 +1,180 @@
+# Athena++ (Kokkos version) input file: tidal disruption of a WD-like TOV star by a
+# 1e4 Msun IMBH, ELLIPTIC (non-radial) ORBIT variant of cfc_tde_wd_imbh.athinput
+# (which released the star from rest for a purely radial plunge). Star starts at
+# x=30 r_g with an initial tangential kick star_vel_x2=0.135657, releasing it at
+# what is then the orbit's apoapsis; it swings through periapsis at R_sch=10 r_g
+# (t~349 M) -- inside the tidal radius r_t=16.4 r_g, outside the ISCO at r~6 --
+# before receding.
+#
+# WHY THIS VELOCITY: v^y=0.05/0.1 (both originally proposed) fall below the
+# Schwarzschild critical angular momentum for any periapsis to exist -- both are
+# pure plunges, not elliptic orbits. A naive Schwarzschild L=r0*v estimate for
+# periapsis=10 gives v~0.146, but omits this trumpet metric's own conformal and
+# Lorentz factors; the value below was solved two independent ways (closed-form
+# turning-point shooting and a full RK4 geodesic integration), agreeing to
+# <0.0001 r_g. Reproduce/refine via:
+#   python3 scripts/tde_elliptical_orbit_ic.py --periapsis 10.0
+#
+# MESH: the parent's 1D tube doesn't work here -- this orbit precesses ~90-130
+# degrees per radial period, sweeping most of the disk (x,y in [-10,30]) rather
+# than a line, so a full-disk region is required. A two-tier design (this disk
+# plus a finer periapsis patch) was tried and FOUND TO HANG AthenaK's multigrid
+# solver (isolated to the patch's block count specifically, not multi-level
+# refinement in general -- see DEVELOPMENT.md item 60, likely an O(N^2) octet
+# loop in MultigridDriver::InitializeOctets, not fixed here). Single-tier
+# level-4 disk instead: resolves the star at ~11 cells/radius throughout the
+# orbit (not ~21.5, as the two-tier design would have given at periapsis) --
+# validate this is adequate before trusting fine debris structure. 21288
+# MeshBlocks (measured; the naive block-count formula undercounts this box).
+#
+# tlim=500 (not the parent's 200): periapsis is at t~349 M (vs 145 M for the
+# parent's straight infall), so 500 gives ~150 M of post-periapsis evolution
+# to see debris dynamics begin.
+#
+# Everything else (WD/EOS, dfloor, coordinate/CFC/mg settings) is unchanged
+# from the parent fixture -- see its own header.
+
+<comment>
+problem  = Elliptic-orbit tidal disruption of a 0.7 Msun WD-like TOV star by a 1e4 Msun IMBH
+
+<job>
+basename = cfc_tde_wd_imbh_elliptic
+
+<mesh>
+# Same cubic power-of-2 root grid as the parent fixture (see its header for why):
+# 128/16=8 root MeshBlocks/axis, multigrid root hierarchy halves cleanly to 1x1x1.
+nghost = 4        # Number of ghost cells
+nx1    = 128      # 8 MeshBlocks in x1-direction (root level), dx=1.0
+x1min  = -64.0    # minimum x1
+x1max  = 64.0     # maximum x1 -- orbit stays within +/-30, ample buffer beyond
+ix1_bc = diode    # inner boundary -- full domain, no reflection symmetry
+ox1_bc = diode    # outer boundary
+
+nx2    = 128      # 8 MeshBlocks in x2-direction (root level), dx=1.0
+x2min  = -64.0    # minimum x2
+x2max  = 64.0     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 128      # 8 MeshBlocks in x3-direction (root level), dx=1.0
+x3min  = -64.0    # minimum x3
+x3max  = 64.0     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = static
+max_nmb_per_rank    = 400
+num_levels          = 5         # max_level=4 -- SINGLE-TIER only (see below); no level-5
+                                 # headroom left allocated, unlike the two-tier attempt.
+refinement_interval = 1
+
+<refined_region1>
+# SINGLE-TIER, level 4, FULL DISK -- see header for why (two-tier hangs
+# MultigridDriver::InitializeOctets; DEVELOPMENT.md item 60).
+level = 4        # dx = 1.0/2^4 = 0.0625 -> ~11 cells across the star
+x1min = -32.0
+x1max = 32.0
+x2min = -32.0
+x2max = 32.0
+x3min = -2.0
+x3max = 2.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 500        # periapsis at t~349 M (not the parent's 145 M for radial
+                         # infall) + ~150 M post-periapsis buffer to see debris
+                         # dynamics begin. See header note on why 200 is not enough.
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false     # matches every off-center TOV fixture to date (item 46/48)
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-24    # atmosphere floor (as requested)
+tfloor      = 1.0e-22    # matches the established 100x-above-dfloor ratio
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 1.6666666666666667  # 5/3, per the WD-like polytrope
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+# Same production-validated CFC solver settings as the parent fixture (see its
+# header for the full measurement trail): mg_threshold/mg_poisson_threshold=1e-8,
+# mg_poisson_mporder=2, mg_npresmooth/npostsmooth=2, mg_norm=rms (R3). Unrelated to
+# the velocity boost -- accuracy of these settings is independent of star_vel_x2.
+mg_threshold   = 1.0e-8
+mg_poisson_threshold = 1.0e-8
+mg_poisson_mporder = 2
+mg_npresmooth  = 2
+mg_npostsmooth = 2
+mg_norm = rms
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH = 1e4 Msun, fixed at the coordinate origin
+# alpha_floor: REQUIRED -- default 0.0 clamps a negative lapse to EXACTLY zero,
+# causing a 1/alpha singularity/NANS_IN_CONS cascade near the puncture (item 59,
+# same as the parent fixture). 1.0e-6 keeps alpha strictly positive there.
+alpha_floor = 1.0e-6
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric AND
+                         # is required by star_vel_x1/2/3 (see dyngr_tov.cpp)
+rhoc        = 3.24e-4   # converted from 3.24e-12 (Msun=1 units) via lambda^2
+kappa       = 1.2346626297e-2  # converted from 2.66e3 (Msun=1 units) via lambda^(-4/3)
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 2e-4      # npoints*dr = 2.0, ~3x the star's own R_*=0.677
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 30.0    # ~1.83x the tidal radius (r_t=16.4) -- release point
+star_center_x2 = 0.0     # puncture always fixed at the origin
+star_center_x3 = 0.0
+star_vel_x1    = 0.0     # ELLIPTIC ORBIT: purely tangential kick at release (see
+star_vel_x2    = 0.135657  # header). Solved for periapsis(areal)=10.0 r_g via
+star_vel_x3    = 0.0     # scripts/tde_elliptical_orbit_ic.py; both closed-form and
+                         # full ODE cross-check agree to <0.0001 r_g.
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 0.1
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- psi/alpha near the puncture and star
+variable    = adm
+dt          = 1.0      # ~500 dumps over tlim=500 (NOT dcycle=1: far too many)
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- density, to follow the star and its debris
+variable    = mhd_w_bcc
+dt          = 1.0
+slice_x3    = 0.0
+id = prim_xy
+
+<output4>
+file_type   = rst      # Restart dumps -- ~29,000 cycles (2.5x the parent's
+dcycle      = 1000     # ~11,600) will not finish in one allocation.

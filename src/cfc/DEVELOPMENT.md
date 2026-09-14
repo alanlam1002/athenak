@@ -7511,3 +7511,812 @@ src/cfc/
       A corrected standalone reader was used for all analysis here. Also,
       atmosphere pressure `~1e-46` underflows float32 output and reads as
       `0.0`; harmless but confusing.
+
+55. **(2026-08-27) First GPU bring-up and measurement campaign on Aurora
+    (Intel PVC / SYCL). Three predictions in the handoff note were measured
+    FALSE; the real cost centre is `beta^i`, and a config-only retune is
+    1.80x.** Full log: `~/scratch/athenak_run/cfc_tde_gpu/RESULTS.md`.
+    - **Build**: `build_aurora.sh gpu` -- `Kokkos_ENABLE_SYCL=ON`,
+      `Kokkos_ARCH_INTEL_PVC=ON`, RDC OFF, in-tree Kokkos 4.7.04,
+      `-DAthena_ENABLE_MPI=ON` (note `-DKokkos_ENABLE_MPI` is silently
+      ignored by this project). The TDE pgen had never been compiled for
+      any GPU backend: two bare `printf` calls in
+      `src/utils/tov/tov.hpp` inside `KOKKOS_INLINE_FUNCTION`
+      `GetPrimitivesAtIsoPoint` do not compile under SYCL (fix committed
+      later, in `becac862`; see item 56).
+    - **Gates pass on GPU, matching CPU**: `R_iso=0.690724`,
+      `M=7.46932e-05`, `Mb=7.46966e-05` digit-for-digit;
+      `max|delta psi|` `1.37626e-04 -> 0` in one Picard iteration; the
+      **`psi^6` identity** gives `1.104297` against analytic
+      `(1+1/60)^6 = 1.104260` (0.0033%) and CPU-measured `1.104300`
+      (0.0003%). That is the sharpest available test of device/host path
+      divergence in `MGRootBoundary`'s duplicated Robin/multipole blocks --
+      **there is none for this fixture.**
+    - One gate (`cfc_puncture_vacuum_small`, octant, 1 MeshBlock) did NOT
+      converge -- defect stalled at `1.71376e-04` at an outer-boundary
+      cell. **Attribution settled: not a GPU regression.** The CPU build
+      from the identical commit reproduces the *bit-identical* defect
+      sequence on the same node. It is a pre-existing property of that
+      fixture, and is not the TDE production configuration.
+    - **Refutes the "host-serial `MGOctet` will dominate on GPU" worry.**
+      Measured on the production fixture: elliptic solver 71.6% of wall, of
+      which **DEVICE 63.2% and HOST-serial only 6.4%** (octet work alone
+      5.7%). Porting `MGOctet` to device storage is NOT the gating work for
+      a GPU port. Amdahl is not the binding constraint here.
+    - **Inverts the "re-tune to 32^3 MeshBlocks for GPU" advice.** At
+      identical physical resolution, `dt` and cell count, 32^3 blocks are
+      **33-43% SLOWER** (12.162 vs 9.172 s/cycle; with convergence equalised
+      on a cubic root grid, 0.300 vs 0.141 s per V-cycle, 2.13x). Mechanism:
+      a V-cycle spends much of its time on the *coarse* levels of the
+      per-MeshBlock hierarchy, where each block contributes only 8^3, 4^3
+      then 2^3 cells -- at those levels **the number of MeshBlocks is the
+      only parallelism available**, and 47 blocks/rank starves the PVC tiles
+      where 358 does not. **For CFC multigrid on GPU, prefer many small
+      MeshBlocks. The existing 16^3 choice is already right.** (Side note
+      that settles the argument: 32^3 cuts host-serial work 6.4% -> 0.8% of
+      wall and is slower anyway.)
+    - **The real cost centre is `beta^i`** -- 6.3 V-cycles per solve against
+      2.0 for `psi`/`alpha_psi`, i.e. 380 of 760 V-cycles and 36.6% of wall
+      on its own.
+    - **GPU vs CPU on identical Aurora nodes, identical commit: 2.76x per
+      node** (24 GPU ranks 9.172 s/cycle vs 208 CPU ranks 25.601). Tile
+      scaling 12 -> 24 ranks is 1.51x (75% parallel efficiency), so the PVC
+      tiles are doing real work. A real win but a modest return on 6 PVCs
+      against 2 Xeons; the limit is parallelism at multigrid coarse levels.
+    - **Config-only retune, 1.80x total, adopted into the fixture**: cubic
+      power-of-2 root domain `96x64x64 -> 128^3` (the multigrid root
+      hierarchy then halves 8x8x8 -> ... -> 1x1x1 instead of stalling at
+      3x2x2; -15%, V-cycles 760 -> 599), `mg_threshold` and
+      `mg_poisson_threshold` `1e-9 -> 1e-8` (-35%, V-cycles -> 292, zero
+      convergence failures), `mg_poisson_mporder 4 -> 2` (bit-identical
+      V-cycle counts, pure multipole-evaluation cost),
+      `mg_npresmooth/mg_npostsmooth 3 -> 2` (`SetMGTaskListToFiner/ToCoarser`
+      build at most TWO red-black iterations per MeshBlock level, so any
+      value above 2 was silently wasted on that path -- this also explains
+      the open puzzle at DEVELOPMENT.md:2335-2344). Accuracy verified, not
+      assumed: `psi^6` unchanged at `1.104297`, `rho-max` worst deviation
+      `4.0e-7` relative over 40 cycles, mass conservation `1.7e-12`.
+      `1e-7` was measured (-50%) and **rejected**: `psi` then runs only 2
+      V-cycles across 60 solves, a qualitative change in solver behaviour
+      that 40 cycles cannot license for a ~4,000-cycle production run.
+    - **Noise floor is ~3%** (same binary, same fixture, two jobs: 4.724e6
+      vs 4.856e6 zone-cycles/s). Nothing smaller is a result.
+    - **Kokkos Tools produced no data**: `KOKKOS_TOOLS_LIBS` was set and the
+      run completed, but the `Multigrid::~Multigrid` teardown crash (items
+      46/48/51) kills the process before `Kokkos::finalize()` runs the
+      profiling hook. See item 57 -- this defeats every finalize-time
+      profiler and eventually had to be worked around.
+
+56. **(2026-09-09) `becac862`: MG phase timers, S3b, R3 defect-norm fix, the
+    `NUM_BITS_LID` MPI tag fix, and a TDE fixture retune.** Six topics
+    landed together because they touch the same small set of files.
+    - **MG phase timers** (`multigrid.hpp`, `multigrid_driver.cpp`,
+      `driver.cpp`, `cfc.cpp`): `MGTimers` struct + `MGScopedTimer` RAII
+      helper partitioning `SolveVCycle` into DEVICE (per-MeshBlock levels,
+      root grid) vs HOST-serial (octet smoothing/boundary/restrict/
+      prolongate/FAS, D<->H transfers, defect reduction). Every driver
+      self-registers into a static registry; `Driver::Finalize()` calls
+      `PrintAllTimers()` once. **Inert unless `<cfc>/mg_verbose > 0`** --
+      but note `MGScopedTimer` fences on BOTH entry and exit, so
+      `mg_verbose > 0` is not free: measured ~15% on the production fixture
+      (19.27 vs 16.38 s/cycle). Keep `mg_verbose = 0` in production.
+    - **S3b**: `MultigridDriver::PhysicalBoundary` no longer does a fresh
+      `Kokkos::realloc` + `create_mirror_view` + blocking `deep_copy` of the
+      multipole coefficient array on every call, for data
+      `SyncMultipoleToDevice()` already holds in the persistent `d_mpcoeff_`.
+      That path runs 5x per `mg_to_coarser`/`mg_to_finer` task list, once per
+      MeshBlock level per V-cycle. Only the two vector-Poisson solvers reach
+      it (`psi`/`alpha_psi` use Robin BCs and never set a multipole face).
+    - **SYCL compile fix**: the two bare `printf` calls in `tov.hpp` from
+      item 55.
+    - **R3 -- the defect norm's missing volume weight.**
+      `Multigrid::CalculateDefectNorm` computed a per-cell `dV` and never
+      used it, so the norm compared against `mg_threshold` grows as the mesh
+      refines -- a fixed threshold silently demands progressively more
+      accuracy at higher resolution. Separately `SolveIterative` summed the
+      `nvar_` per-channel norms, giving the vector-Poisson solvers
+      (`nvar_=4`) an effectively 4x tighter bar than the scalar ones at the
+      same `eps_`. New `MGNormScaling {legacy, rms}` enum + `norm_mode_` +
+      `TotalDefectNorm()`; new `<cfc>` keys `mg_norm` (default `legacy`) and
+      `mg_rtol`/`mg_poisson_rtol` (default 0.0 = disabled). `legacy`
+      reproduces the original `+=` sum **bit-identically** (own branch, kernel
+      body untouched, so the gravity suite's absolute-value assertions are
+      trivially safe); `rms` weights each cell by its physical volume read
+      from `mb_size` (NOT `rdx_` or `block_rdx_`, both AMR-unsafe) and
+      combines channels by max. `src/gravity/mg_gravity.cpp` deliberately
+      untouched.
+    - **`NUM_BITS_LID` 14 -> 12** (`athena.hpp`). Boundary-exchange tags are
+      built as `(bufid << NUM_BITS_LID) | lid`; at 14 with `bufid` up to 56
+      the tag reaches 933,887, but Aurora's `MPI_TAG_UB` is **262,143**
+      (18 bits, not the 20 the old comment assumed). This is machine-wide,
+      not next-eval-specific -- the old MPICH silently accepted out-of-range
+      tags where the new one correctly rejects them ("Fatal error in
+      internal_Irecv: Invalid tag"). At 12 the max tag is 233,471; the
+      MeshBlocks-per-rank cap stays 4096; results are bit-identical.
+      **Editing the header is not enough -- you must rebuild.**
+    - **Fixture retune**: the item 55 config-only changes, adopted.
+    - **R3 validated as a resolution-independence fix, on GPU**: a
+      `num_levels` 3->6 ladder (`~/scratch/athenak_run/cfc/tde_r3_ladder/`,
+      8 cases, 2 nodes/12 GPUs each, next-eval). Under `legacy` the
+      `beta^i` V-cycle count grows 3.6x across that range while `rms` stays
+      flat; wall clock (legacy -> rms) L3 439->293 s, L4 553->469 s,
+      L5 586->302 s, L6 1193->398 s. **The gap widening with refinement
+      depth is the signature of the bug**, not a generic speedup. Grid mass
+      agrees to `3.8e-7` relative between the two norms and the `psi^6`
+      identity is unchanged (`1.104296` vs `1.104297`).
+    - **Caveat carried forward, NOT resolved**: under `rms` at
+      `mg_threshold = 1e-8` the `X^i` solver runs **0 V-cycles across 57
+      solves** and `psi`/`alpha_psi` run 1. The two norms are empirically
+      proportional at fixed depth (ratio 156-180 measured across an ID
+      defect trace), so `1e-8` under `rms` is ~163x looser than under
+      `legacy`, and the calibrated equivalent would be `~6e-11`. Accuracy
+      over 20 cycles is unaffected (see above) and the production run in
+      item 58 is the length test, but "the elliptic solver barely runs" is
+      a property to re-examine before treating `rms` as settled.
+
+57. **(2026-09-09/10) Aurora's 2026-09 image ran AthenaK 6.4x slower; root
+    cause is ONE MPICH environment variable, not the code, the build, the
+    GPU, or anything in this repo.** Fix:
+    `export MPIR_CVAR_CH4_IPC_GPU_MAX_CACHE_ENTRIES=128`.
+    - **Symptom**: the same binary (md5-identical, glibc forward
+      compatibility makes the comparison possible) runs 2.56 s/cycle on the
+      old image and 16.04 s/cycle on the 2026-09 next-eval image, on the
+      production fixture at 2 nodes / 24 ranks. Two independently compiled
+      binaries agree on the new image to 2.1%, so the build environment
+      contributes nothing.
+    - **Eliminated by measurement, in order**: the September code (the old
+      image reproduces the Aug 27 number to 0.2% -- 5.06 vs 5.07 s/cycle);
+      convergence (V-cycle counts identical across images); every
+      user-tunable Level Zero env knob (`ZE_ENABLE_API_TRACING`, both
+      spellings of the immediate-command-list variable -- and toggling it
+      OFF is 9% *worse*, proving it is honoured and already on); rank->GPU
+      tile affinity (`ZE_AFFINITY_MASK` verified to give 12/12 distinct
+      device UUIDs on both images); GPU kernel execution (per-call times
+      within ~1%, and the new image is 4% FASTER); fences; host<->device
+      `deep_copy` (0.035 s total); allocation counts (identical); and
+      GPU-aware MPI (`MPICH_GPU_SUPPORT_ENABLED=0` reproduces the slow
+      baseline exactly).
+    - **The measurement that partitioned the problem**: at **1 rank** the
+      two images are identical (4.44 vs 4.43 s/cycle); at 12 ranks they
+      differ 18.5x. And 12 *independent, non-communicating* processes across
+      all 6 GPUs show no contention at all. The regression exists only when
+      ranks communicate. Cost grows **linearly** at a fixed ~1.6 s/cycle per
+      rank beyond the first device -- the signature of serialization.
+    - **Located with a PMPI interposer**: MPI time on rank 0 over 5 cycles
+      goes `0.80 s` (old image) -> `79.76 s` (new image), i.e. 13% -> 81% of
+      wall. Every call is hit, not one path: `Irecv` 1797x, `Waitall` 344x,
+      `Wait` 248x, `Allreduce` 141x (a **106 ms** intranode `Allreduce`
+      across 12 ranks on one node), `Isend` 90x. `MPI_Test`'s 25x call-count
+      inflation is a symptom -- AthenaK spinning on completions that do not
+      arrive.
+    - **The fix, measured at production scale** (L6, 9024 MeshBlocks, 2
+      nodes / 24 ranks): `MAX_CACHE_ENTRIES` default(16) 16.355 s/cycle ->
+      `=128` **2.548 s/cycle**, against an old-image reference of 2.56 --
+      **6.4x, full parity**. 512 and 2048 give nothing more (2.554, 2.553),
+      so **128 saturates**. Verified **inert on the old image** (2.578 vs
+      2.562 s/cycle, inside the 3% noise floor), so it is safe to set
+      unconditionally. With the fix, MPI time drops 79.76 -> 11.38 s.
+    - **The VALUE matters, not the act of setting it**: explicit 16, 17, 32
+      and 64 are all slow (91-96 s on a small probe); 128 is fast
+      (19.6-20.7 s). It is a **cliff between 64 and 128, not a capacity
+      curve**, and 64->128 has never been bisected.
+    - **MECHANISM UNKNOWN -- do not repeat "IPC handle cache thrashing".**
+      That hypothesis was falsified: a standalone MPI+SYCL ping-pong over
+      1..256 distinct device buffers degrades badly with buffer count but
+      shows ZERO sensitivity to this cvar at 16 / 128 / 1024. Whatever
+      AthenaK does to trigger this is not captured by repeated ping-pong.
+      Report the measurement, not a causal story.
+    - **Do NOT set** `MPIR_CVAR_CH4_IPC_GPU_CACHE_SIZE` (0 or 2) or
+      `MPIR_CVAR_CH4_IPC_GPU_HANDLE_CACHE=0` -- all three abort the run in
+      ~1 s, reproduced in two independent jobs.
+    - **Tooling note that cost real time**: `simple-kernel-timer` and `mpiP`
+      both report only at `Kokkos::finalize` / `MPI_Finalize`, and this code
+      dies in `~Multigrid` (items 46/48/51) with `rc=143` before either
+      runs, so BOTH produce zero output -- the same wall item 55 hit. Two
+      crash-proof replacements were written, flushing every 5 s and from a
+      signal handler: `~/kokkos-tools-custom/libkp_robust_timer.so` and
+      `~/mpi_probe/libpmpi_timer.so`. **The teardown crash is filed as
+      out-of-scope because it fires after results are written; that is true
+      for physics but false for tooling, and it has now blocked profiling
+      three times.** Worth reconsidering its priority.
+
+58. **(2026-09-10) GPU production confirmation run reproduces the CPU
+    disruption result on entirely different hardware, image, defect norm and
+    mesh.** `~/scratch/athenak_run/cfc/tde_prod_nexteval/`, next-eval,
+    2 nodes / 24 ranks, `build_gpu_pe2626`, fixture as committed plus
+    `mg_norm = rms`, `mg_verbose = 0`, chained 6 h segments.
+    - **Both independent checkpoints of item 54's CPU run reproduce**:
+      `rho-max` peaks at **`4.1807e-4` (+29.0%) at `t~88.9`** against the
+      CPU's `4.189e-4` (+30%) at `t=89.7` -- **0.2% in peak density** -- and
+      falls back below its initial central density at **`t=133.11`** against
+      the CPU's `t=134`.
+    - Mass conservation `1.21e-07` relative through `t=145` (CPU achieved
+      `1.9e-7` over its whole run). **Zero** "Failed to converge" and zero
+      `Invalid tag` across 7,900+ cycles. `psi^6` identity `1.104296`.
+    - **Cost**: 2.655 s/cycle at the start, rising to ~6.06 s/cycle around
+      peak compression and then *falling back* to ~5.88 as the debris
+      spreads -- the per-cycle cost tracks field steepness (more elliptic
+      work as the star compresses), not solver failure. Segment 1 reached
+      `t=122.5` in 5,597 cycles.
+    - This is also the length test item 55 asked for and could not license
+      on 40 cycles: `mg_threshold = 1e-8` AND `mg_norm = rms` both hold over
+      thousands of cycles, with mass drift better than the CPU reference.
+    - **Unchanged and still open**: item 54's caveat (a) -- the star starts
+      at `1.83 r_t` as an *isolated* TOV equilibrium, so part of the +29-30%
+      compression is relaxation into a tidal field it was not built in. Both
+      CPU and GPU reproduce the same number because they share that setup;
+      agreement between them does NOT resolve the caveat. Starting at
+      `r ~ 50` (`3 r_t`) remains the way to settle it.
+
+59. **(2026-09-10) The +30% "pre-disruption tidal compression" of items 54/58
+    is almost certainly NOT tidal -- it is a radial pulsation of the star,
+    excited by dropping an isolated TOV equilibrium into the puncture
+    spacetime. Item 54's caveat (a) said "an unknown part"; the trajectory
+    data says essentially all of it.** Also in this item: a lapse floor, and
+    two defects in the history reduction.
+    - **The evidence is the peak's position, not its size.** Tracking the
+      density peak per `prim_xy` dump over the item 58 run (`r_t = 16.4`):
+
+      | `t` | peak `x` | `x/r_t` | tide `(r_t/x)^3` | `rho-max` |
+      |---|---|---|---|---|
+      | 0   | 29.98 | 1.83 | 0.16 | 3.223e-4 |
+      | 89  | 25.89 | 1.58 | 0.25 | **4.177e-4 (peak)** |
+      | 133 | 20.36 | 1.24 | 0.52 | 3.242e-4 |
+      | 155 | 16.36 | 1.00 | 1.00 | 2.077e-4 |
+      | 176 | 11.42 | 0.70 | 2.97 | 9.54e-5 |
+
+      The central density peaks where the tidal field is only **a quarter**
+      of disruption strength, and then falls **monotonically while the tide
+      strengthens four-fold**. Genuine tidal compression would track the
+      tide upward. The star does not even reach `r_t` until `t~155`, i.e.
+      66 M *after* the density maximum.
+    - **The timescale confirms it.** `t_dyn ~ 1/sqrt(rho_c) = 55.7 M`, so
+      the fundamental radial mode of this star has a period of order
+      ~180 M -- a first maximum near `t~90` is exactly what an initial-data
+      mismatch would produce. The star is built as an isolated TOV solution
+      and then placed at `1.83 r_t` in the puncture spacetime, where the
+      tidal perturbation is already `(1/1.83)^3 ~ 16%`, so it is NOT in
+      equilibrium at `t=0` and rings.
+    - **Consequence for the science**: `rho-max(t)` on this fixture mixes a
+      relaxation oscillation with the real tidal response, and the two are
+      not separable from that curve alone. **The +29-30% number should not
+      be quoted as tidal compression.** CPU (item 54) and GPU (item 58)
+      agreeing to 0.2% does NOT resolve this -- they share the same initial
+      data, so they reproduce the same artifact. That agreement is a
+      code-verification result, nothing more.
+    - **What would settle it**, in increasing order of cost: (i) release
+      from `r ~ 50` (`3 r_t`, perturbation ~3.5%) as item 54 already
+      proposed -- weaker excitation, and the tidal phase is then better
+      separated in time from the ringing; (ii) run the same star at the
+      same radius with the puncture mass set so no disruption occurs, and
+      subtract the pure-oscillation baseline; (iii) construct the initial
+      data self-consistently in the puncture spacetime rather than
+      importing an isolated TOV solution.
+    - **Lapse floor added** (`<cfc> alpha_floor`, default `0.0`).
+      `user.hst`'s `alpha-min` is genuinely `min(adm.alpha)` and it is
+      **negative**: `-1.04e-6` at `t=0`, drifting to `-3.59e-6` by `t~175`.
+      A maximal-slicing trumpet has `alpha0 -> 0` at the throat, so cells
+      nearest the puncture legitimately carry a very small lapse and the
+      discretisation undershoots to a small negative value there. It is
+      tiny and did not destabilise this run, but a negative lapse is a
+      locally inverted slicing and is not something the fluid update should
+      ever be handed. `AssembleLapseShiftK` (`cfc_reconstruct.cpp`) now
+      applies `fmax(alpha, alpha_floor)`. Default `0.0` clamps only the
+      unphysical negative branch and is bit-for-bit identical wherever the
+      lapse is already positive, i.e. in every non-puncture run. Set a
+      small positive value for puncture runs if the undershoot ever grows.
+      **Note this treats the symptom** -- the undershoot itself is a
+      discretisation property near the puncture and has not been diagnosed.
+      **Verified** (`nlim=0` on the production fixture, 104 CPU ranks, the
+      rebuilt binary): initial data is unchanged digit-for-digit --
+      `R_iso=0.690724`, `M=7.46932e-05`, `Mb=7.46966e-05`,
+      `max|delta psi|` `1.37559e-04 -> 0` -- and `alpha-min` goes from
+      `-1.04e-6` to `0.0`. Note it lands at **exactly** `0.0`, i.e. cells
+      exist whose raw solved lapse was `<= 0` and are now pinned at the
+      floor. A vanishing lapse is safer than a negative one but still
+      degenerate, so a puncture production run probably wants a small
+      strictly-positive `alpha_floor` (e.g. `1e-8`); the `0.0` default is
+      chosen only because it is the bit-for-bit-safe value for every
+      existing non-puncture run.
+    - **Two defects in `TOVHistory` (`dyngr_tov.cpp`), both also present in
+      `xns_rotstar.cpp` and fixed there too:**
+      1. The reduction seeds were **swapped** -- `rho_max` initialised to
+         `+max` and `alpha_min` to `-max`, i.e. each with the other's
+         identity. Harmless in practice because `Kokkos::Max`/`Min`
+         overwrite them with their own identities, but it reads exactly
+         backwards. Now `lowest()` / `max()` respectively.
+      2. Off-root ranks called `MPI_Reduce(&x, &x, ...)`, aliasing send and
+         receive buffers. MPI forbids this (only root-side `MPI_IN_PLACE`
+         is permitted) and it is undefined behaviour, even though the
+         receive buffer is ignored off-root. Now reduces into a separate
+         throwaway.
+    - **Not fixed here, recorded for whoever owns them**: the identical
+      aliasing bug exists in four upstream BNS pgens --
+      `kadath/kadath_bns.cpp:549,551`, `sgrid/sgrid_bns.cpp:458,460`,
+      `elliptica/elliptica.cpp:978,979`, `lorene/lorene_bns.cpp:589,590`.
+      Left alone as out of this branch's scope. **`sgrid_bns.cpp:460` has a
+      worse, real bug on top of it: it reduces `alpha_min` with `MPI_MAX`
+      instead of `MPI_MIN`**, so that run's reported minimum lapse is wrong
+      under MPI (it reports the max over ranks of each rank's local min).
+    - Analysis tooling for all of the above now lives in the run directory
+      rather than a scratchpad: `.../tde_prod_nexteval/analysis/` holds
+      `rdbin.py` (the `split("=", 1)` fix for `bin_convert.py`'s crash on
+      this fixture's `<comment>`, see item 54's last bullet), `scan_dumps.py`
+      (caches per-dump peak position and local `dx`), `hstutil.py`
+      (segment-aware `.hst` concatenation), and the plotting scripts.
+      Plots in `.../tde_prod_nexteval/plots/`.
+    - **Resolution gate for item 58, passed**: all 177 dumps to `t=176` have
+      the density peak on a `dx = 0.03125` block -- the star never leaves
+      the static refinement tube, so item 54's `cfc_tde_wd_20rg` failure
+      mode does not recur here.
+
+60. **(2026-09-11) First elliptic-orbit TDE test setup. Multi-level static
+    refinement (two `<refined_regionN>` blocks at DIFFERENT levels
+    simultaneously) reproducibly HANGS `MultigridDriver::InitializeOctets`
+    once the finer level's octet count reaches into the tens of thousands --
+    not a fundamental limitation of the mechanism, a scale-triggered
+    pathology. Use single-tier (one `refined_region` block) refinement until
+    this is fixed.**
+    - **The setup**: give the star (`dyngr_tov.cpp`) a bulk initial velocity
+      instead of releasing it from rest, for a non-radial passage. New
+      `<problem>` keys `star_vel_x1/2/3` (default 0.0, every existing
+      fixture bit-for-bit unchanged), following exactly the `W v^i`
+      assembly template already used by `xns_rotstar.cpp`: pick the desired
+      Eulerian 3-velocity `v^i`, `v^2 = psi4*v^i*v^i` (conformally flat),
+      `W = 1/sqrt(1-v^2)`, write `W*v^i` into `w0_(IVX/IVY/IVZ)`. Verified
+      against `primitive_solver.hpp:556-613` and `dyn_grmhd.cpp:613-615`
+      that this **is** what AthenaK's primitives store (`W*v^i`, Eulerian,
+      upper index) -- notably, lapse and shift do NOT enter this relation at
+      all; only `gamma_ij` does. A user-proposed formula
+      (`v^i := u^i/u^t = (alpha/W)(gamma^ij u_j - beta^j/alpha)`) does not
+      match this and was not used -- it conflates the coordinate velocity
+      `u^i/u^t` with the Eulerian `v^i` and picks up a spurious `alpha`
+      factor and `beta^i` term either way. The existing `v_pert` radial
+      pulsation (same file) is NOT a template for this: it writes bare `v^i`
+      with no Lorentz factor at all, acceptable only because it is
+      perturbatively small -- copying that pattern for a bulk `v0~0.14`
+      boost would be a real, avoidable error.
+    - **The velocity value needed real verification, not just a Keplerian
+      check.** `v_kep(x0=30)=0.183`; the two values initially proposed
+      (`0.05`, then `0.1`) both pass "less than Keplerian" but give specific
+      angular momentum `L=r0*v` **below the Schwarzschild critical value**
+      `L_crit=2*sqrt(3)~3.464` -- below this, NO periapsis exists at all
+      (confirmed both analytically, the standard ISCO criterion, and
+      numerically, scanning the turning-point equation
+      `E^2=(1-2/r)(1+L^2/r^2)` from `r=30` to the horizon and finding it
+      monotonic). Both proposed values give a plunge indistinguishable in
+      character from the existing radial-infall fixture, not an "elliptic
+      orbit." Targeting periapsis=10 (comfortably inside `r_t=16.4`, outside
+      the ISCO at `r~6`) via the naive `L=r0*v` Schwarzschild estimate gives
+      `v~0.146` -- but this omits the trumpet metric's own conformal factor
+      (`psi0^4(r=30)~1.069`) and Lorentz factor (`W~1.012`), both of which
+      raise the true `L=psi0^4*W*r0*v` above the naive value at fixed `v`.
+      Solved precisely two independent ways -- closed-form Schwarzschild
+      turning-point shooting using the real trumpet `psi0/alpha0`
+      (`cfc_puncture.hpp`), and a full RK4 integration of the 3+1 geodesic
+      Hamiltonian in the actual trumpet gauge (evolving covariant momentum
+      `p_i=W v_i`, not `v_i` directly -- the naive `dv_i/dt` ODE silently
+      drops a product-rule term hiding inside `d(Wv_i)/dt`) -- both give
+      **`v0=0.135657`, periapsis 10.000/10.0001**, agreeing to <0.0001 r_g.
+      New script `scripts/tde_elliptical_orbit_ic.py` reproduces this and
+      integrates the full trajectory (used for mesh sizing below).
+      **One subtlety caught by the script's own consistency check**: `r0`'s
+      mapped areal radius is not always the largest turning-point root --
+      only when `v0` is sub-circular at `r0`. Fixed by explicitly locating
+      `r0`'s own root rather than assuming it is the largest, and erroring
+      clearly if `v0` turns out super-circular (out of this script's
+      intended use case) instead of silently misidentifying the periapsis.
+    - **The orbit precesses ~90-130 degrees per radial period** (periapsis
+      this close to the ISCO is strongly relativistic): the integrated
+      trajectory reaches `x` in `[-9.95,30.00]`, `y` in `[-9.95,18.80]` over
+      `t=[0,500]`, sweeping nearly the whole disk, not a line -- the
+      existing radial fixture's 1D refinement "tube" does not generalize.
+    - **Two-tier static refinement (level-4 disk + a level-5 patch
+      restoring full resolution just at periapsis) was designed, approved,
+      and then found to hang during implementation.** Isolated with a
+      three-arm diagnostic (2026-09-11), each arm sharing the identical
+      boost code so it is not implicated:
+      - Arm A: level-4 disk alone (single `refined_region`, 21,288
+        MeshBlocks -- notably more than the naive same-level block-count
+        formula's 16,384; that formula undercounts something about how a
+        single region snaps to the grid and should not be trusted for
+        planning without a check run). Builds and solves in ~2.5 min.
+      - Arm B: the real two-tier design (disk + a ~23,712-block level-5
+        patch, 48,560 total). **Hung indefinitely** -- confirmed on two
+        separate compute nodes/job submissions, one running its full
+        20-minute walltime with the log frozen at the identical point both
+        times: immediately after all four CFC solvers' `Multigrid` /
+        `MultigridDriver` objects finish constructing (each prints
+        `Multigrid root grid levels: N` / `Number of MeshBlocks in the
+        pack: M`; the log shows this trio exactly four times, once per
+        solver, then nothing further for the remainder of each job).
+      - Arm C: the SAME two-region structure, but the level-5 patch shrunk
+        to 8 MeshBlocks. **Succeeded, fast** -- reached `InitializeMetric`,
+        converged (`delta psi -> 0`), and completed to `cycle=0` cleanly.
+      - **Conclusion: having two differently-leveled regions is not itself
+        the problem -- it is specifically a LARGE octet count at the finer
+        level.** Likely root cause (identified by code inspection, not yet
+        confirmed by profiling): `MultigridDriver::InitializeOctets`
+        (`multigrid_driver.cpp:292-395`) contains a loop, for each octet at
+        level `l`, linearly scanning ALL octets at level `l+1` to determine
+        `fleaf` (whether any finer octet has it as a parent) --
+        `O(noctets_[l] * noctets_[l+1])`. This is the only genuinely
+        quadratic loop found in that function (the neighbor-precompute loop
+        immediately after it uses `octetmap_[l]` hash lookups, O(1)
+        amortized, and is not implicated). The finer level's octet count
+        scales with the patch's block count, consistent with Arm B's
+        ~23,712-block patch hanging while Arm C's 8-block patch does not.
+      - **Not fixed here** -- out of scope for setting up a physics test.
+        Whoever picks this up: instrument `InitializeOctets` directly (wall
+        time per level-pair) on a hung run rather than re-deriving from
+        first principles; the fleaf loop is the strongest lead but has not
+        been proven the sole cause.
+    - **Consequence for this fixture**: single-tier level-4 refinement over
+      the full disk (21,288 MeshBlocks, Arm A/above), resolving the star at
+      ~11 cells/radius throughout the orbit including periapsis -- coarser
+      than the radial fixture's ~21.5 cells/radius, and coarser than the
+      two-tier design would have restored at closest approach. Validate
+      this is adequate for gross disruption diagnostics before trusting
+      fine debris structure from this fixture (staged test plan, item 4).
+      Cheaper than either two-tier attempt would have been (40,096-48,560
+      by two different estimates) -- a byproduct of the fallback, not a
+      design goal.
+    - New fixture: `inputs/dyn_grmhd/cfc_tde_wd_imbh_elliptic.athinput`.
+      `nlim=0` ID check passes digit-for-digit against the established
+      reference (`R_iso=0.690724`, `Mb=7.46966e-05`, `delta psi -> 0`) with
+      the boost code active but the metric/mass unaffected, as expected
+      (velocity does not change `rho`/`p`). Regression check on the parent
+      (non-boosted) fixture with the new `dyngr_tov.cpp` code also confirmed
+      bit-for-bit unchanged.
+    - **Sanity run (nlim>0) then hit a real, separate bug: `NANS_IN_CONS` at
+      cycle 0, root-caused to `alpha_floor`'s default, not the boost code
+      itself or the mesh.** Full trail, since this cost real cluster time to
+      pin down cleanly:
+      - First evolution attempt (CPU debug queue, 208 ranks/1 node) cascaded
+        into 200,000+ `NANS_IN_CONS` messages at cycle 0. Isolated with a
+        battery of CPU arms (boost on/off, `gr_dt` true/false, a level-5
+        patch at the puncture, a level-5 patch at the star) -- **every arm
+        failed identically**, including a no-boost control. That pointed
+        at the mesh/environment rather than the boost.
+      - Escalated further: even the ALREADY-VALIDATED parent radial fixture
+        (unmodified mesh, unmodified code, rebuilt from a clean pre-session
+        HEAD checkout) hung indefinitely on this same CPU/208-rank/debug-queue
+        setup, stuck right after `CFC::InitializeMetric iteration 1: max|delta
+        psi| = 0`, confirmed with a 55-minute budget. That fixture's only
+        prior validation was a 2-node/12-rank-per-node **GPU** run on
+        next-eval (`tde_prod_nexteval/`) -- this exact CPU/208-rank
+        configuration had never actually been exercised before. Working
+        hypothesis at that point: the whole CPU-debug-queue campaign was
+        confounded by an untested/broken rank-count configuration, unrelated
+        to the elliptic fixture.
+      - **That hypothesis was wrong, but not fully wrong.** Delegated to the
+        `athenak-nexteval` agent to test on the real, validated GPU/next-eval
+        config (2 nodes x 12 ranks, PE 26.26.0/SYCL). First attempt reused a
+        stale binary (built 2026-09-09, predates the `star_vel_x1/2/3` boost
+        commit-in-progress) -- ran clean through 30 cycles, but silently
+        never exercised the boost at all (`ParameterInput` has no
+        unused-key warning). Rebuilt from the current working tree, verified
+        `strings <binary> | grep star_vel_x` non-empty this time, reran: the
+        REAL boost path **also** hit `NANS_IN_CONS` at cycle 0 on GPU/next-eval
+        -- so there are two independent problems, not one:
+        1. The CPU/208-rank/debug-queue config has its own genuine hang,
+           reproduced by the unmodified parent fixture, unrelated to any of
+           this session's code. Not investigated further; avoid that
+           config until someone chases it separately.
+        2. A real bug in the boost path, confirmed on the platform that
+           actually matters.
+      - **Root cause of (2), from the crash context**: first failing cell at
+        `(x1,x2,x3)=(-0.71875,0.84375,0.03125)` (`r~1.1`, close to the
+        puncture): `alp=0` **exactly**, `D=Sx=Sy=Sz=tau=-nan`,
+        `beta={-0.2766,0.3248,0.01203}`. `alp=0` exactly is the tell:
+        `AssembleLapseShiftK`'s `alpha_floor` (added item 59) defaults to
+        `0.0`, clamping a negative lapse to EXACTLY zero rather than to a
+        genuinely positive value -- and this fixture never set
+        `alpha_floor`. Item 59 was written for a tiny `-1e-6`-scale
+        undershoot near the puncture; here, the star's boosted momentum
+        sources the beta/alpha elliptic solves globally, and this mesh is
+        only level-4 at the puncture (vs. the parent's level-5 tube there),
+        so `alpha_val` undershoots far enough that clamping to exactly 0
+        produces a hard `1/alpha` singularity in the very first primitive
+        solve -- not the gentle clamp item 59 intended. Fix: set
+        `alpha_floor = 0.05` (an actual positive floor) in this fixture's
+        `<cfc>` block.
+      - **Confirmed fixed (2026-09-12, GPU/next-eval job 8822454, same
+        rebuilt binary, no rebuild needed -- `alpha_floor` is a runtime
+        parameter)**: `alpha_floor=0.05` ran 30/30 cycles clean, zero
+        `NANS_IN_CONS`, `dt` settling smoothly around `4.2e-2`. Reduced to
+        `alpha_floor=1.0e-6` (closer to item 59's own motivating undershoot
+        scale, far less perturbative to the physics away from the puncture)
+        and reconfirmed clean (job 8822502, 30/30 cycles, `dt~4.4e-2`) --
+        the crashing cell's `alpha_val` apparently only needed to clear the
+        exact-zero singularity, not a large floor. Shipped value:
+        `alpha_floor = 1.0e-6`. The single-tier level-4 elliptic fixture
+        with the real boost (`star_vel_x2=0.135657`) now evolves correctly
+        on the validated GPU/next-eval configuration. This closes the sanity
+        check's cycle-0 blocker; the staged validation plan's remaining
+        items (peak-trajectory match, early-time transient check, mesh
+        spot-check, full production run) are still open.
+      - **Process note**: this diagnostic campaign briefly had 3 redundant
+        `athenak-nexteval` subagents working the same next-eval job/case dir
+        simultaneously (stray duplicates, not intentionally spawned in
+        parallel) -- caught before any duplicate job submission or
+        concurrent build-tree collision, but worth flagging: always
+        `ListAgents` before assuming a single in-flight agent when resuming
+        a diagnostic thread after a long gap.
+
+## 61. Ported `<cfc> solve_interval` (Delta-n-cycle elliptic-solve cadence) from
+`~/athenak_cfc` commit `d4a47192` (its own item 61), and found/fixed a real
+`alpha_floor` regression along the way.
+
+**Port**: manual re-application onto this tree's diverged `cfc.hpp`/`cfc.cpp`
+(690/146 lines of divergence vs. the `cfc` tree's own `d4a47192`, mostly this
+tree's `becac862` MGTimers instrumentation interleaved through the same
+constructor/task functions -- a `git cherry-pick` was correctly not attempted).
+Same design as the source tree: `int cfc_solve_interval_` (`cfc.hpp`), read via
+`pin->GetOrAddInteger("cfc", "solve_interval", 0)` in the constructor, private
+`bool CFC::DoSolveThisStage(Driver*, int) const` gating all 36
+`TaskStatus CFC::*Task` functions (including `InitRecvTask`/`ClearSendTask`/
+`ClearRecvTask`) with `if (!DoSolveThisStage(pdriver, stage)) { return
+TaskStatus::complete; }` as each function's first line. The `stage<1` fix
+(direct calls from `InitializeMetric()`/`ReinitializeMetricForAMR()` must
+always run, or `InitRecvXFields()`/`ClearXFields()` deadlock in `MPI_Wait` --
+a real bug the source tree hit and fixed first) was applied from the start,
+not rediscovered.
+
+**MGTimers checked, no change needed**: the gate is the first line of
+`SolvePsiTask`/`SolveLapseTask`/`SolveShiftTask`, before `SolveConformalFactor`/
+`SolveLapse`/`SolveShift` (and therefore `MultigridDriver::Solve()` and its
+`mg_timers_.solve_count`/`vcycle_count` increments) are ever reached. A skipped
+stage leaves zero footprint in `MGTimers` -- `Print()`'s percentages are
+computed against genuine wall-clock time, not divided by cycle count, so a
+smaller `solve_count` on a `solve_interval>0` run is already correctly
+reflected, not misleadingly diluted by "0-cycle solves."
+
+**A real, unrelated regression surfaced while verifying, and needed fixing
+before verification could proceed**: running the actual production fixture
+(`cfc_tde_wd_imbh.athinput`, previously clean for 9148 cycles) with `solve_
+interval` unset (the supposed no-op baseline) hit an immediate cycle-0
+`NANS_IN_CONS` cascade -- and so did every other N tested (1/2/4/8), proving
+this had nothing to do with `solve_interval` (whose gate is provably inert
+when `<=0`, confirmed both by code inspection and by all five N values
+failing identically). Root cause: this was the first time the production
+fixture had actually been *evolved* (not just ID-checked) since this
+session's `alpha_floor` fix (elliptic-orbit work, this same file's item 60)
+landed, and its default (`0.0`) clamps a negative lapse to EXACTLY zero rather
+than to a positive value. This fixture's own `alpha` legitimately undershoots
+near the puncture (measured `-1e-6` drifting to `-3.6e-6` on this exact
+fixture BEFORE `alpha_floor` existed -- that original run left it as a tiny
+negative real number and ran 9148 cycles fine); the NEW clamp turns that
+benign undershoot into a hard `1/alpha` singularity at the very first
+primitive solve. Confirmed directly: cycle-0 `dt` with the bug present was
+`0.1189` (grossly wrong, and coincidentally IEEE-identical to a value seen
+during the elliptic-fixture debugging, since both fixtures share the same
+`nx1=128`/`x1min=-64/x1max=64` root grid -- a red herring, not the actual
+mechanism); with `alpha_floor=1.0e-6` added, cycle-0 `dt=2.187855e-02` matches
+the historical reference exactly, and the full 40-cycle `dt`/mass/rho-max
+trace reproduces it to the precision expected of build-to-build GPU-reduction
+noise. **Fixed**: `inputs/dyn_grmhd/cfc_tde_wd_imbh.athinput` now carries
+`alpha_floor = 1.0e-6` (previously only the elliptic-orbit sibling fixture
+had this). **Practical rule going forward: `alpha_floor` is REQUIRED, not
+optional, on any `puncture_enabled=true` fixture built from a tree that has
+this clamp -- its default is not a safe "off" state the way `<=0` genuinely
+is for `solve_interval`.**
+
+**Verified** (GPU/next-eval, 2 nodes x 12 ranks, same production fixture,
+`nlim=40`, `alpha_floor=1.0e-6` applied to all arms):
+- **Bit-identity**: `solve_interval` unset reproduces the pre-existing
+  production trace's `dt`/`time` to full precision through cycle 40 (once the
+  `alpha_floor` fix above is applied -- the unset-key path is otherwise
+  untouched by this port, as expected from the gate's structure).
+- **Performance**: baseline (N=0) 3.807 s/cycle; N=1 3.390 s/cycle (1.12x);
+  N=2 3.211 s/cycle (1.19x); N=4 3.129 s/cycle (1.22x); N=8 3.094 s/cycle
+  (1.23x). **Notably smaller than the source tree's 2.93x at N=1 on GRASS --
+  not assumed to transfer, and it didn't.** This fixture's non-elliptic-solve
+  costs (boundary exchange, hydro, puncture regularization) evidently make up
+  a much larger fraction of per-cycle wall time here than on GRASS, so cutting
+  the elliptic solve from 3x/cycle to 1x/cycle buys much less. Diminishing
+  returns beyond N=1 are clear (1.12 -> 1.19 -> 1.22 -> 1.23x for N=1/2/4/8).
+- **Accuracy-vs-N sweep** (N=0/1/2/4/8, `nlim=40`, all landing within ~1.2e-8
+  of `t=0.87514`): relative deviation from the N=0 baseline at N=8 is ~1.9e-7
+  (rho-max), ~1.2e-6 (mass) -- no monotonic trend with N (consistent with
+  GPU-reduction-order noise, not systematic drift). `alpha-min` is identical
+  (`1.0e-6`, exactly the floor) across every N. Same qualitative conclusion as
+  the source tree's item 61 ("no detectable cost up to N=8 at this
+  integration depth"), independently confirmed on different physics/mesh.
+
+**Recommendation**: `solve_interval=1` is safe to adopt for this fixture too,
+though the payoff (1.12x) is much more modest than GRASS's -- worth it mainly
+if stacked with other optimizations, not a standalone win on its own.
+
+**Addendum (2026-09-13) -- `solve_interval=10` on the BOOSTED elliptic
+fixture, 8 nodes.** Everything above was measured on the v=0 radial-infall
+production fixture; given item 62's finding that the elliptic solve is a
+much larger fraction of per-cycle cost on the boosted/disk-mesh fixture, the
+payoff there should be correspondingly bigger -- checked directly rather than
+assumed. Matched pair (`cfc_tde_wd_imbh_elliptic.athinput` as-is, 8 nodes/96
+ranks, fresh t=0, `nlim=40`, binary md5 `57444cc9a6970f2da359c494b8792e91` --
+note this is a DIFFERENT binary than the `f453402b...` one used throughout
+item 62's multigrid investigation; that one predates the `solve_interval`
+port entirely):
+
+- **Speedup: 3.65x** (mean s/cycle over cycles 1-39, excluding cycle-0 setup
+  and cycle-40's output-dump inflation: 9.834 -> 2.695 s/cycle). N=10's
+  per-cycle cost is strongly bimodal, not uniform -- a real ~15-17s solve
+  spike every 10th cycle (when `ncycle % 10 == 0` triggers the real solve),
+  ~1.0-1.3s for the 9 skipped cycles in between. The MEAN, not the median, is
+  the correct number for amortized throughput. Confirms the "bigger payoff on
+  this fixture" prediction: 3.65x at N=10 vs. 1.12-1.23x at N=1-8 on the
+  v=0 fixture above.
+- **Accuracy at cycle=40** (t=1.7689): rho-max relative deviation 1.845e-05,
+  mass relative deviation 2.492e-08, alpha-min identical (`1.0e-6`, exactly
+  the floor) between N=0 and N=10. Same `dt` trace to ~9 digits, identical
+  MeshBlock-cycles -- no detectable accuracy cost, consistent with every
+  other N tested on either fixture so far.
+- Both runs clean: zero NaN/FATAL/Invalid-tag, both next-eval guards present,
+  natural `Terminating on cycle limit` completion (the usual benign
+  post-completion `gpu_tile_compact.sh` teardown segfault noted in item 62
+  occurred on both, after all real output was already flushed).
+- Cases: `/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc/solveinterval10_8node_{N0,N10}/`
+  (jobs 8824632/8824633).
+
+## 62. Multigrid/node-count scaling investigation on the elliptic-orbit TDE
+fixture: two real findings, both confirmed with `<cfc> mg_verbose=1`
+diagnostics, not assumed.
+
+**Context**: continuing the elliptic-orbit sanity run (item 60) toward
+periapsis at increasing node counts surfaced two scaling puzzles: (1) why
+does this fixture run ~4.8x slower per cycle than the parent v=0 radial-
+infall fixture at the same 2-node config, far more than the 2.36x block-count
+ratio (21288 vs 9024) would suggest; and (2) why did a 4-node continuation
+segment run at ~16.5-17 s/cycle, ~60% slower than both the 2-node (~12.3
+s/cycle) and 16-node (~10.5 s/cycle) segments of the SAME physical run.
+
+**Finding 1 -- the extra ~2x slowdown vs. the v=0 fixture is multigrid
+WORKLOAD, not mesh structure.** A matched `mg_verbose=1` run of the v=0
+fixture (same 2 nodes, `nlim=20`) measured 2.51 s/cycle vs. this fixture's
+10.73 s/cycle -- 4.27x, against only 2.36x more blocks. The v=0 fixture
+actually has MORE refinement levels (5 vs. this fixture's 4) yet needs 6x
+fewer total V-cycles (8 vs. 48 across the 4 CFC elliptic fields) and a 6-9x
+smaller multigrid time-share (~4.4% vs. ~26-29% of wall time) -- directly
+falsifying "more levels/octets costs more." Three of the four CFC elliptic
+fields converge with ZERO V-cycles for radial infall (the extrapolated
+previous-solve guess is already good enough); all four need real iteration
+for the boosted/precessing case. **The tangential-velocity boost and
+periapsis dynamics make the elliptic solve itself genuinely harder to
+converge -- this is real, physics-driven cost, not an artifact.** A smaller,
+unexplained residual remains: non-multigrid time also scales slightly
+super-linearly (3.31x vs. 2.36x blocks), possibly boundary-exchange or
+tube-vs-disk geometry related; not pursued further (small next to the ~25x
+absolute multigrid-time gap).
+
+**Finding 2 -- a genuine, reproducible restart-at-4-nodes slowdown, NOT
+multigrid's fault and NOT job-allocation noise.** Isolated with an
+independent diagnostic (separate PBS job, separate node allocation,
+restarting the identical checkpoint at the identical 4-node/48-rank config):
+steady-state ~16.8-17.2 s/cycle, matching the production segment's own
+~16.4-17.0 s/cycle almost exactly, vs. a FRESH 4-node decomposition's
+~10.09 s/cycle (item 60's `mg_scaling_4node` sweep). Since this ran on
+completely different hardware than the production job, this rules out
+"noise from that specific allocation." **MGTimers shows the CFC elliptic
+solves account for only ~35.8% of wall time here** (X^i 10.5%, beta^i 10.2%,
+psi 7.6%, alpha_psi 7.6%, each >98% device-time, nothing unusual inside the
+solves) -- so the slowdown is NOT concentrated in the multigrid solver
+itself; it lives in the remaining ~64% (hydro/MHD RK3 stages, boundary/ghost
+exchange, con2prim, bookkeeping). MeshBlocks/rank is perfectly even (443-444,
+identical to the fresh-start case), so a leading, UNCONFIRMED hypothesis is
+that restarting from a checkpoint written at a different previous rank count
+(192 ranks at 16 nodes -> 48 ranks at 4 nodes here) redistributes WHICH
+MeshBlocks land on which rank in a way that breaks spatial/communication
+locality, rather than causing any block-count imbalance. Whoever picks this
+up: directly compare the actual rank<->MeshBlock spatial assignment between
+a fresh 4-node decomposition and this restarted one, rather than re-deriving
+from these timers alone.
+
+**Two self-inflicted diagnostic traps hit and fixed while chasing finding
+2, worth remembering for future restart work:**
+- **`nlim` is an ABSOLUTE target cycle count, not "N more cycles from
+  here."** Two attempts set `nlim=25`/`50` while restarting a segment at
+  cycle=2647; since `pmesh->ncycle < nlim` was already false, the main loop
+  never executed (`MeshBlock-cycles=0`, all-zero MGTimers), and
+  `driver.cpp`'s end-of-run message picker has no case for "loop condition
+  was already false before the first iteration," so it printed the
+  misleading fallback "Terminating on wall clock limit" even though
+  wall-clock was never actually the limiting factor. Fixed by using the
+  correct absolute target (restart cycle + desired additional cycles).
+- **Checkpoint I/O at this scale (59 GB / 21288 MeshBlocks) is itself slow
+  and separate from the per-cycle rate** -- cold reads measured ~350-365s,
+  `Driver::Finalize()`'s unconditional final checkpoint+output write ~384s.
+  Budget for this explicitly when sizing a short diagnostic segment's
+  WALLTIME after a restart; it is not part of the steady-state per-cycle
+  number and will misleadingly dominate a short run's total wall time if not
+  accounted for.
+
+**Also newly observed, unrelated to either finding above**: every
+`mg_scaling_*` arm that completed cleanly (2/4/8/16/32-node, item 60's
+sweep) hit an identical post-completion segfault during MPI teardown
+(`gpu_tile_compact.sh` crash, cascading SIGTERM) -- harmless (occurs after
+all real output/timers are flushed and `Terminating on cycle limit` has
+already printed), but a new failure signature at this binary/next-eval
+combination worth someone's attention if it recurs on a run where the
+output has NOT already been safely written.
+
+**Addendum to Finding 1 (2026-09-13) -- disentangled: it's the boost, not the
+disk-shaped mesh.** Finding 1 above conflated two variables that were never
+separately tested (disk-vs-tube mesh shape, and the nonzero tangential
+velocity) and, further, mislabeled the effect as "periapsis dynamics" even
+though `nlim=20` from `t=0` never gets anywhere near periapsis (`t~349`) --
+that comparison only ever exercised early-orbit motion. Ran the one missing
+cell: the elliptic fixture's own disk mesh (21288 blocks, level-4) with the
+boost turned OFF (`star_vel_x2=0.0`, same `mg_verbose=1`/`nlim=20`/2-node/
+fresh-`t=0` protocol, GPU/next-eval job 8824475):
+
+| | tube mesh, v=0 (9024 blocks) | disk mesh, v=0 (21288 blocks) | disk mesh, v=0.1357 (21288 blocks) |
+|---|---|---|---|
+| Total CFC V-cycles (4 fields) | 8 | **12** | 48 |
+| MG share of wall time | ~4.4% | **~4.3%** | ~26-29% |
+| s/cycle | 2.51 | **6.59** | 10.73 |
+
+With the boost off, the disk mesh converges just as trivially as the tube
+mesh (12 V-cycles, ~4.3% MG share -- the same "extrapolated guess is already
+good enough" regime as the v=0 tube case), and the disk-vs-tube slowdown at
+v=0 (6.59/2.51 = 2.6x) now tracks the 2.36x block-count ratio almost exactly
+-- no unexplained residual left for the no-boost comparison. Turning the
+boost back on at the SAME disk mesh (6.59 -> 10.73 s/cycle, 12 -> 48
+V-cycles) is where essentially all of the previously-unexplained extra cost
+actually lives. **Conclusion: the tangential-velocity boost itself is the
+driver of the elliptic solve's harder convergence, not the disk-shaped
+coarser mesh and not (as originally, imprecisely stated) periapsis
+dynamics, which was never actually tested here.** Whether periapsis passage
+itself (a real test would need a much longer/expensive run to reach
+`t~349`) adds a further, separate cost on top of this is still open and not
+cheaply testable -- flagged as genuine future work, not assumed either way.
+
+## 63. Star-tracking AMR refinement region (RefineTOVTracker) -- a genuine
+CompactObjectTracker analog for the TDE pgen, and a real host/device
+view-accessor bug caught by the next-eval smoke test, not the anticipated
+AMR risk.
+
+**Context**: the user asked for the refined region to follow the star, like
+z4c's `CompactObjectTracker` does for a puncture, instead of the pre-drawn
+static tube/disk both existing TDE fixtures use (item 60's header note).
+Implemented as `RefineTOVTracker(MeshBlockPack*)` in `dyngr_tov.cpp`, enrolled
+as `user_ref_func` only when `<problem> track_star_refinement=true` (every
+existing static-region fixture unaffected). It reads the star's live position
+directly from `pmbp->pcfc->r_com_mass_` -- CFC's own mass-weighted centroid,
+already computed every CFC solve (`CFC::ComputeMassCentroid()`, `cfc.cpp`) --
+needing no new reduction, and flags MeshBlocks within a `<problem>
+track_radius` for refinement, same corner-distance pattern as `dynbbh.cpp`'s
+`RefineTracker()`. New comparison fixture:
+`inputs/dyn_grmhd/cfc_tde_wd_imbh_elliptic_tracker.athinput` (`refinement=
+adaptive`, `<amr_criterion0> method=user`, a small level-4 seed box at the
+star's t=0 position instead of the production fixture's full static disk).
+
+Because this switches `refinement=adaptive` on for the TDE pgen for the
+first time, the real anticipated risk going in was the still-open
+`MeshBlock::SetNeighbors` edge/corner registration bug (items 38/39/42) --
+this is exactly why a small validation smoke test was run first (2 nodes,
+`nlim=80`) rather than committing straight to an 8-node production comparison.
+
+**What actually broke was a different, simpler bug -- confirmed directly, not
+that one.** The smoke test (job 8825419) crashed on all 24 ranks at cycle 0's
+very first AMR check with `Kokkos::View ERROR: attempt to access inaccessible
+memory space (label="rflag")`. Root cause: `RefineTOVTracker` wrote
+`refine_flag.d_view(m+mbs) = 1/-1` (device-space accessor) from host code,
+instead of `.h_view(m+mbs)` -- every writer in `mesh_refinement.cpp` itself
+uses `.h_view`. This exact anti-pattern was copied verbatim from `dynbbh.cpp`'s
+own `RefineTracker()` (and a sibling in `RefineAlphaMin`), which has the
+identical `d_view`-from-host-code bug and evidently has never been run on
+hardware with genuine host/device memory separation (silent on CPU/Serial
+Kokkos, where `d_view`/`h_view` alias) -- a real, pre-existing latent bug in
+shipped code, left as-is since fixing `dynbbh.cpp` is out of scope for this
+thread. Fixed in `dyngr_tov.cpp` (both branches, keeping the existing
+`.modify<HostMemSpace>()`/`.sync<DevExeSpace>()` calls, which were already
+correct). Rebuilt and re-verified compiling clean on CPU; re-running the
+next-eval smoke test with the fix is the immediate next step -- see this
+item's own follow-up addendum once that lands.
+
+**Process note**: the athenak-nexteval agent correctly treated this as a
+report-not-fix situation (fixing pgen C++ source is explicitly out of its
+scope) and did NOT launch the 8-node production comparison once Step B
+failed -- exactly the pre-agreed decision gate. The fix itself was made in
+this code-editing thread instead.

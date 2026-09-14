@@ -130,6 +130,10 @@ class PrimitiveSolverHydro {
       ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal",
                                          5.0/3.0));
       ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 4));
+      // Same <mhd>/yn_snap the EOS policy reads. Duplicated onto the error policy
+      // because ResetFloorZlaBag cannot see EOSPolicy members; kept in one parfile key
+      // so the two halves of the guard can never disagree.
+      ps.GetEOSMutable().SetQuarkSnapTol(pin->GetOrAddReal(block, "yn_snap", 1.0e-8));
       std::string units = pin->GetOrAddString(block, "units", "geometric_solar");
       if (!units.compare("geometric_solar")) {
         ps.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricSolar());
@@ -166,6 +170,21 @@ class PrimitiveSolverHydro {
   MeshBlockPack* pmy_pack;
   unsigned int nerrs;
   unsigned int errcap;
+  // Abort threshold for accumulated C2P errors; 0 disables. See <mhd>/c2pabort.
+  int errabort;
+
+  // ---- conserved-scalar write-back diagnostic (<mhd>/c2p_scal_diag) ----------------
+  // ConToPrim clamps the species fractions and, whenever anything was floored or
+  // adjusted, writes the resulting composition back into the CONSERVED variables. That
+  // path is not conservative: it can add or remove int(D*Y_n) without any compensating
+  // flux. scaldiag > 0 turns on accounting for how much it injects, reported every
+  // scaldiag cycles; 0 (default) makes all of this dead code at zero cost.
+  int scaldiag;
+  int y3cap;                 // max scal-3 bound warnings printed per rank
+  unsigned int ny3clamp;     // cumulative scal-3 clamps on this rank
+  Real wb_dY0, wb_dY3;       // cumulative volume-weighted injection, this rank
+  Real wb_cf, wb_sp, wb_pf, wb_ot;   // ... split by the stage that moved Y[3]
+  unsigned long long wb_cells;   // cumulative active-zone write-back cells, this rank
 
   PrimitiveSolverHydro(std::string block, MeshBlockPack *pp, ParameterInput *pin) :
 //        pmy_pack(pp), ps{&eos} {
@@ -178,6 +197,21 @@ class PrimitiveSolverHydro {
     ps.tol = pin->GetOrAddReal(block, "c2p_tol", 1e-15);
     ps.GetRootSolverMutable().iterations = pin->GetOrAddInteger(block, "c2p_iter", 50);
     errcap = pin->GetOrAddInteger(block, "c2perrs", 1000);
+    // Opt-in hard stop. errcap alone only silences *printing*: nerrs keeps
+    // accumulating and nothing acts on it, so a run whose conserved variables have
+    // gone NaN will grind on indefinitely producing output that looks like progress.
+    // Set <mhd>/c2pabort to a positive count to abort once that many C2P errors have
+    // accumulated on a rank. 0 (default) preserves the old never-abort behaviour.
+    errabort = pin->GetOrAddInteger(block, "c2pabort", 0);
+
+    // Write-back accounting. Value is the report interval in cycles (0 = off).
+    scaldiag = pin->GetOrAddInteger(block, "c2p_scal_diag", 0);
+    y3cap    = pin->GetOrAddInteger(block, "c2p_y3cap", 100);
+    ny3clamp = 0;
+    wb_dY0   = 0.0;
+    wb_dY3   = 0.0;
+    wb_cf = 0.0; wb_sp = 0.0; wb_pf = 0.0; wb_ot = 0.0;
+    wb_cells = 0;
 
     // Calculate maximum allowed velocity
     Real Wmax = pin->GetOrAddReal(block, "gamma_max", 50.0);
@@ -370,6 +404,12 @@ class PrimitiveSolverHydro {
     int &is = indcs.is;
     int &js = indcs.js;
     int &ks = indcs.ks;
+    // Active-zone upper bounds. The diagnostic must match the history integral, which
+    // sums active cells only -- ConsToPrim is called over the full range including
+    // ghosts, and ConToPrimBC over boundary strips.
+    const int ie_a = indcs.ie;
+    const int je_a = indcs.je;
+    const int ke_a = indcs.ke;
     auto &size = pmy_pack->pmb->mb_size;
 
     const int ni = (iu - il + 1);
@@ -380,6 +420,15 @@ class PrimitiveSolverHydro {
     const int rank = global_variable::my_rank;
     const int nerrs_ = nerrs;
     const int errcap_ = errcap;
+    const int scaldiag_ = scaldiag;
+    const int y3cap_ = y3cap;
+    const unsigned int ny3clamp_ = ny3clamp;
+    // Phase 0 attribution: which defect actually carries the clamp injection.
+    // nghbr/mb_lev are DualArrays (mesh/meshblock.hpp:40,43) so both are readable on
+    // device; NeighborBlock is POD (mesh/mesh.hpp:47).
+    auto nghbr_ = pmy_pack->pmb->nghbr;
+    auto mblev_ = pmy_pack->pmb->mb_lev;
+    const int nnghbr_ = pmy_pack->pmb->nnghbr;
 
     Real mb = eos_.GetBaryonMass();
 
@@ -394,9 +443,18 @@ class PrimitiveSolverHydro {
 
     // FIXME(JMF): We can short-circuit the primitive solve if FOFC is already enabled
     // due to a maximum principle violation.
-    int count_errs=0;
+    int count_errs=0, count_wb=0, count_y3=0;
+    Real sum_dY0=0.0, sum_dY3=0.0;
+    // Injection into int(D*Y_3) split by the stage that actually moved Y[3]:
+    // cf = ConservedFloor atmosphere reset, sp = SpeciesLimits clamp,
+    // pf = PrimitiveFloor atmosphere reset, ot = neither (a pure PrimToCon rewrite).
+    // Categories are exclusive with priority cf > pf > sp, since a cell can hit more
+    // than one stage; sum_dY3 remains the total and must equal cf+sp+pf+ot.
+    Real sum_cf=0.0, sum_sp=0.0, sum_pf=0.0, sum_ot=0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int &idx, int &sumerrs) {
+    KOKKOS_LAMBDA(const int &idx, int &sumerrs, int &sumwb, int &sumy3,
+                  Real &sdY0, Real &sdY3,
+                  Real &scf, Real &ssp, Real &spf, Real &sot) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -568,9 +626,80 @@ class PrimitiveSolverHydro {
 
         temperature(m,0,k,j,i) = prim_pt[PTM];
 
+        // ---- diagnostic: Y[3] was outside its EOS band and had to be adjusted -------
+        // Only count active cells, and only on the real solve: floors_only runs against
+        // the FOFC trial array utest_, whose write-backs are discarded.
+        const bool active_ = (i >= is && i <= ie_a) && (j >= js && j <= je_a) &&
+                             (k >= ks && k <= ke_a);
+        if (scaldiag_ && !floors_only && active_ && result.y3_clamped) {
+          sumy3 += 1;
+          if (static_cast<int>(ny3clamp_) + sumy3 <= y3cap_) {
+            Real &x1min = size.d_view(m).x1min;
+            Real &x1max = size.d_view(m).x1max;
+            Real &x2min = size.d_view(m).x2min;
+            Real &x2max = size.d_view(m).x2max;
+            Real &x3min = size.d_view(m).x3min;
+            Real &x3max = size.d_view(m).x3max;
+            // Does this block abut a finer one, and how far is this cell from a
+            // block face? The AMR flux correction rewrites only the shared face
+            // (bvals/flux_correct_cc.cpp), so a cell it can affect has edge == 0.
+            int finer_ = 0;
+            for (int nb = 0; nb < nnghbr_; ++nb) {
+              if (nghbr_.d_view(m,nb).gid >= 0 &&
+                  nghbr_.d_view(m,nb).lev > mblev_.d_view(m)) { finer_ = 1; break; }
+            }
+            int edge_ = i - is;
+            edge_ = (indcs.nx1 - 1 - (i - is) < edge_) ? (indcs.nx1 - 1 - (i - is)) : edge_;
+            if (indcs.nx2 > 1) {
+              int e2 = j - js;
+              if (indcs.nx2 - 1 - (j - js) < e2) { e2 = indcs.nx2 - 1 - (j - js); }
+              if (e2 < edge_) { edge_ = e2; }
+            }
+            if (indcs.nx3 > 1) {
+              int e3 = k - ks;
+              if (indcs.nx3 - 1 - (k - ks) < e3) { e3 = indcs.nx3 - 1 - (k - ks); }
+              if (e3 < edge_) { edge_ = e3; }
+            }
+            const Real vol_w = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+            Kokkos::printf("### WARNING scal-3 outside EOS bound, adjusted: "
+                   "Y3 %.9e -> %.9e  band [%.9e, %.9e]  (1-Y_N) %.9e  "
+                   "omYNpre %.9e  D %.9e  pos (%.6f, %.6f, %.6f)  mb %d rank %d "
+                   "finer %d edge %d vol %.9e sdetg %.9e\n",
+                   result.y3_before, result.y3_after,
+                   result.y3_lo, result.y3_hi, result.y3_omYN,
+                   result.y3_omYN_pre,
+                   cons_pt_old[CDN],
+                   CellCenterX(i-is, indcs.nx1, x1min, x1max),
+                   CellCenterX(j-js, indcs.nx2, x2min, x2max),
+                   CellCenterX(k-ks, indcs.nx3, x3min, x3max),
+                   m, rank, finer_, edge_, vol_w, sdetg);
+            if (static_cast<int>(ny3clamp_) + sumy3 == y3cap_) {
+              Kokkos::printf("### %d scal-3 bound adjustments reported on rank %d; "
+                     "further ones suppressed (see <mhd>/c2p_y3cap).\n", y3cap_, rank);
+            }
+          }
+        }
+
         // If the conservative variables were floored or adjusted for consistency,
         // we need to copy the conserved variables, too.
         if (result.cons_floor || result.cons_adjusted) {
+          // ---- diagnostic: signed, volume-weighted injection from this write-back ----
+          // Weighted to match outputs/history.cpp, which integrates vol*u0(nmhd+n) over
+          // active cells, so these sums are directly comparable to the scal-N columns.
+          if (scaldiag_ && !floors_only && active_ && nscal > 3) {
+            const Real vol_ = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+            const Real d3_ = vol_*sdetg*(cons_pt[CYD + 3] - cons_pt_old[CYD + 3]);
+            sdY0 += vol_*sdetg*(cons_pt[CYD + 0] - cons_pt_old[CYD + 0]);
+            sdY3 += d3_;
+            sumwb += 1;
+            // Attribute to the stage that moved Y[3]. The limiter cannot appear here:
+            // it only alters fluxes, which are conservative by construction.
+            const int ch_ = result.y3_chan;
+            if (ch_ & 1)      { scf += d3_; }
+            else if (ch_ & 4) { spf += d3_; }
+            else if (ch_ & 2) { ssp += d3_; }
+            else              { sot += d3_; }
+          }
           /*if (fabs((cons_pt[CDN] - cons_pt_old[CDN])/cons_pt_old[CDN]) > 1e-12) {
             Real &x1min = size.d_view(m).x1min;
             Real &x1max = size.d_view(m).x1max;
@@ -607,13 +736,52 @@ class PrimitiveSolverHydro {
           }
         }
       }
-    }, Kokkos::Sum<int>(count_errs));
+    }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<int>(count_wb),
+       Kokkos::Sum<int>(count_y3), Kokkos::Sum<Real>(sum_dY0),
+       Kokkos::Sum<Real>(sum_dY3), Kokkos::Sum<Real>(sum_cf),
+       Kokkos::Sum<Real>(sum_sp), Kokkos::Sum<Real>(sum_pf),
+       Kokkos::Sum<Real>(sum_ot));
 
     if (floors_only) {
       ps.GetEOSMutable().SetPrimitiveFloorFailure(prim_failure);
       ps.GetEOSMutable().SetConservedFloorFailure(cons_failure);
     } else {
       nerrs += count_errs;
+
+      // ---- write-back diagnostic: accumulate and report every scaldiag cycles -------
+      // Deliberately NOT MPI-reduced here. ConsToPrim is also reached via ConToPrimBC,
+      // which is called per boundary strip, so the call count is not guaranteed equal
+      // across ranks and a collective in this path could deadlock. Each rank prints its
+      // own running totals instead; sum the C2PWB lines per cycle in post-processing.
+      if (scaldiag > 0) {
+        ny3clamp += static_cast<unsigned int>(count_y3);
+        wb_dY0   += sum_dY0;
+        wb_dY3   += sum_dY3;
+        wb_cf += sum_cf; wb_sp += sum_sp; wb_pf += sum_pf; wb_ot += sum_ot;
+        wb_cells += static_cast<unsigned long long>(count_wb);
+        const int nc = pmy_pack->pmesh->ncycle;
+        if (nc % scaldiag == 0) {
+          std::cout << "C2PWB rank " << global_variable::my_rank
+                    << " ncycle " << nc
+                    << " t " << pmy_pack->pmesh->time
+                    << " dY0 " << std::scientific << wb_dY0
+                    << " dY3 " << wb_dY3
+                    << " cells " << wb_cells
+                    << " y3clamp " << ny3clamp
+                    << " cf " << wb_cf << " sp " << wb_sp
+                    << " pf " << wb_pf << " ot " << wb_ot
+                    << std::endl;
+        }
+      }
+      if (errabort > 0 && nerrs >= static_cast<unsigned int>(errabort)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl
+                  << nerrs << " conserved-to-primitive errors have accumulated on rank "
+                  << global_variable::my_rank << ", exceeding <mhd>/c2pabort = "
+                  << errabort << ". The solution is almost certainly no longer valid; "
+                  << "aborting rather than continuing to evolve it." << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
     }
   }
 

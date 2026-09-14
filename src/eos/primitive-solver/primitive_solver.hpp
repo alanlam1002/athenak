@@ -350,12 +350,46 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
       Y[s] = cons[CYD + s]/cons[CDN];
     }
   }
-  // Apply limits to Y to ensure a physical state
+  // Apply limits to Y to ensure a physical state.
+  // Snapshot Y[3] first: ApplySpeciesLimits can pin it to a band whose width is
+  // proportional to (1 - Y[1]), and that clamp is propagated into the conserved
+  // variables a few lines below, so it is a one-way sink for this species.
+  solver_result.y3_clamped = false;
+  solver_result.y3_before  = 0.0;
+  solver_result.y3_after   = 0.0;
+  solver_result.y3_lo      = 0.0;
+  solver_result.y3_hi      = 0.0;
+  solver_result.y3_omYN    = 0.0;
+  solver_result.y3_omYN_pre = 0.0;
+  const Real y3_in = (n_species > 3) ? Y[3] : 0.0;
+  // The reference the flux limiter used: 1 - Y[1] as reconstructed, before the
+  // cascade below can move Y[1] (it clamps to [0, Y[0]] and force-sets Y[1] = Y[0]
+  // when Y[0] hits its ceiling). dyn_grmhd_fofc.cpp builds scalar 3's band from this
+  // value; the band applied a few lines down is built from the post-cascade one.
+  const Real y1_in = (n_species > 1) ? Y[1] : 0.0;
+  solver_result.y3_chan  = 0;
+  solver_result.y3_entry = y3_in;
   bool Y_adjusted = eos.ApplySpeciesLimits(Y);
+  solver_result.species_adjusted = Y_adjusted;
+  if (n_species > 3 && Y[3] != y3_in) { solver_result.y3_chan |= 2; }
+  if (n_species > 3 && Y[3] != y3_in) {
+    // Must match ResetFloorZlaBag::SpeciesLimits exactly, floor included. Reporting
+    // the UNFLOORED 1 - Y[1] here made a correct clamp to -q_snap look out-of-band.
+    const Real omYN = fmax(1.0 - Y[1], eos.GetQuarkSnapTol());
+    solver_result.y3_clamped = true;
+    solver_result.y3_before  = y3_in;
+    solver_result.y3_after   = Y[3];
+    solver_result.y3_lo      = eos.GetMinimumSpeciesFraction(3)*omYN;
+    solver_result.y3_hi      = eos.GetMaximumSpeciesFraction(3)*omYN;
+    solver_result.y3_omYN    = omYN;
+    solver_result.y3_omYN_pre = 1.0 - y1_in;
+  }
 
   // Check the conserved variables for consistency and do whatever
   // the EOSPolicy wants us to.
+  const Real y3_precf = (n_species > 3) ? Y[3] : 0.0;
   bool floored = eos.ApplyConservedFloor(D, S_d, tau, Y, SquareVector(B_u, g3d));
+  if (n_species > 3 && Y[3] != y3_precf) { solver_result.y3_chan |= 1; }
   solver_result.cons_floor = floored;
   if (floored && eos.IsConservedFlooringFailure()) {
     HandleFailure(prim, cons, b, g3d);
@@ -363,6 +397,15 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
     return solver_result;
   }
   // If a floor is applied or Y is adjusted, we need to propagate the changes back to DYe.
+  //
+  // Suppressing the species half of this was tried (run v7) and is NOT the right fix. It
+  // does remove a non-conservative sink, but it also leaves the CONSERVED Y[3] unbounded
+  // while only the primitive copy is clamped, so prim and cons diverge without limit.
+  // The sink is instead closed at its source, by flooring the reference that defines
+  // Y[3]'s admissible band (ResetFloorZlaBag::SpeciesLimits): the band is then set by a
+  // resolved quantity rather than by round-off, so the clamp stops firing on noise --
+  // which is what was draining int(D*Y_3) -- and every clamp that does fire is a genuine
+  // violation whose write-back is both correct and rare.
   if (floored || Y_adjusted) {
     for (int s = 0; s < n_species; s++) {
       cons[CYD + s] = D*Y[s];
@@ -492,11 +535,13 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
 
   // Do the root solve.
   Real n, P, T, mu;
-  bool result = root.FalsePosition(RootFunction, mul, muh, mu, tol,
+  unsigned int nit = 0;
+  bool result = root.FalsePosition(RootFunction, mul, muh, mu, tol, &nit,
                                    D, q, bsqr, rsqr, rbsqr, Y, &eos, &n, &T, &P);
-  // WARNING: the reported number of iterations is not thread-safe and should only be
-  // trusted on single-thread benchmarks.
-  solver_result.iterations = root.iterations;
+  // The work actually done, not root.iterations, which is only the configured cap and
+  // so reported the maximum for every cell. nit lives on this thread's stack, so unlike
+  // the old member-based counter it is thread-safe.
+  solver_result.iterations = nit;
   if (!result) {
     HandleFailure(prim, cons, b, g3d);
     solver_result.error = Error::NO_SOLUTION;
@@ -518,7 +563,10 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
   Wv_u[2] = Wmux*(r_u[2] + rbmu*b_u[2]);
 
   // Apply the flooring policy to the primitive variables.
+  const Real y3_prepf = (n_species > 3) ? Y[3] : 0.0;
   floored = eos.ApplyPrimitiveFloor(n, Wv_u, P, T, Y);
+  if (n_species > 3 && Y[3] != y3_prepf) { solver_result.y3_chan |= 4; }
+  if (n_species > 3) { solver_result.y3_final = Y[3]; }
   solver_result.prim_floor = floored;
   if (floored && eos.IsPrimitiveFlooringFailure()) {
     HandleFailure(prim, cons, b, g3d);

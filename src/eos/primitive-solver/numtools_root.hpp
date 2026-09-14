@@ -38,14 +38,25 @@ class Root {
   // \param[out]  x  The location of the root.
   // \param[in]  args  Additional arguments required by f.
 
+  // \param[out] iters  If non-null, receives the number of iterations actually
+  //                    performed. Root::iterations is only the configured *maximum*, so
+  //                    reporting that instead tells every cell it used the cap and hides
+  //                    exactly the information needed to diagnose slow convergence (for
+  //                    example across a first-order phase transition, where the root
+  //                    function is nearly flat). This is an out-parameter rather than the
+  //                    `last_count` member the commented-out lines below hint at, because
+  //                    the solver is captured *by value* into the device kernel closure:
+  //                    a mutable member would be one object shared by every thread in the
+  //                    launch, so the threads would race on it. A pointer to the caller's
+  //                    stack is per-thread and safe.
   template<class Functor, class ... Types>
   KOKKOS_INLINE_FUNCTION
   bool FalsePosition(Functor&& f, Real &lb, Real &ub, Real& x, Real tol,
-                     Types ... args) const {
+                     unsigned int *iters, Types ... args) const {
     int side = 0;
     Real ftest;
     unsigned int count = 0;
-    //last_count = 0;
+    if (iters != nullptr) { *iters = 0; }
     // Get our initial bracket.
     Real flb = f(lb, args...);
     Real fub = f(ub, args...);
@@ -70,6 +81,7 @@ class Root {
       // Calculate f at the prospective root.
       ftest = f(x,args...);
       if (fabs((x-xold)/x) <= tol) {
+        if (iters != nullptr) { *iters = count; }
         return true;
       }
       // Check the sign of f. If f is on the same side as the lower bound, then we adjust
@@ -97,7 +109,7 @@ class Root {
         side = -1;
       }
     } while (count < iterations);
-    //last_count = count;
+    if (iters != nullptr) { *iters = count; }
 
     // Return success if we're below the tolerance, otherwise report failure.
     return fabs((x-xold)/x) <= tol;

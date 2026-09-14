@@ -10,6 +10,7 @@
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <iostream>
 #include <cstddef>
@@ -36,10 +37,68 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
   // Set Reduce Planck constant
   //h_bar = 1.0545718e-27 * eos_units.EnergyConversion(CGS)
   //                      * eos_units.TimeConversion(CGS);
-  h_bar = pin->GetOrAddReal(block, "h_bar", 197.327);
+  // CODATA hbar*c in MeV fm. The previous default, 197.327, is a truncation of this
+  // value; because the Fermi pressure scales as hbar^2, the 1.0e-7 relative
+  // truncation showed up as a systematic 1.99e-7 relative offset between the analytic
+  // cold pressure and the tabulated pressure across the whole table.
+  h_bar = pin->GetOrAddReal(block, "h_bar", 197.3269804);
   pi2hbar3 = Kokkos::numbers::pi*Kokkos::numbers::pi * h_bar*h_bar*h_bar;
 
   ZL_eta = pin->GetOrAddReal(block, "ZL_eta", 1.0);
+
+  // Phase fractions closer than f_snap to 0 or 1 are snapped onto the single-phase
+  // limit; see EOSZlaBag::SnapPhaseFraction() for why. The default sits ~3 decades
+  // above the round-off band that corrupts the bag term at atmosphere densities and
+  // ~6 decades below the smallest genuine mixed-phase fraction in a ZLA table.
+  f_snap = pin->GetOrAddReal(block, "f_snap", 1.0e-8);
+
+  // Resolvability tolerance on the nucleon fraction. y_lQ = Y[3]/(1-yn) is a ratio of
+  // two independently advected small quantities; below this tolerance the denominator
+  // is round-off and the quark phase is treated as absent rather than divided by. Same
+  // default as f_snap, which guards the identical hazard for the volume fraction.
+  yn_snap = pin->GetOrAddReal(block, "yn_snap", 1.0e-8);
+
+  // Pressure floor on the phase fraction. Quark matter is unbound below the transition
+  // density -- ColdPressureQuarks tends to -Bag_B -- so a frozen composition holding a
+  // quark phase there gives a negative total pressure. Measured on 400 real failing
+  // states from a 600 M TOV run: P < 0 in 400/400. See SnapPhaseFraction() for the
+  // mechanism and for why snapping on density instead would be wrong.
+  // Default false, so an input that does not mention it is bit-identical to before.
+  pfloor_on = pin->GetOrAddBoolean(block, "zla_pfloor", false);
+  // Floor expressed as a fraction of the single-phase nucleonic pressure at the same
+  // density. 0 requires only P >= 0, which is the physical statement.
+  pfloor_frac = pin->GetOrAddReal(block, "zla_pfloor_frac", 0.0);
+  // Keep the composition-independent fast path? Default true = historical behaviour.
+  // False makes the pressure-floor fixed point the single criterion at every density,
+  // removing the jump at n_pfloor_force. See SnapPhaseFraction().
+  pfloor_fastpath = pin->GetOrAddBoolean(block, "zla_pfloor_fastpath", true);
+
+  // Bisection switch for the m_min_h = fmin(m_min_h, mb) floor applied after the
+  // table scan (see ReadTableFromFile). True reproduces the current behaviour;
+  // false restores the pure beta-equilibrium scan that HEAD uses.
+  min_h_floor_mb = pin->GetOrAddBoolean(block, "eos_min_h_floor_mb", true);
+
+  // Print every node of the table self-test, not just the summary. Off by default:
+  // the full dump is ~53k lines per run for the production table and is only useful
+  // when a specific node is under investigation.
+  selftest_verbose = pin->GetOrAddBoolean(block, "zla_selftest_verbose", false);
+
+  // Fermi-integral series/closed-form crossover. HEAD used 1.0e-2; 3.0e-2 is the
+  // current default. Bisectable because the band between them is the
+  // non-relativistic tail, where the failures are.
+  x_series_max = pin->GetOrAddReal(block, "x_series_max", 3.0e-2);
+
+  // Temperature ceiling. The constructor leaves max_T at DBL_MAX and the table (which
+  // is a 1D cold slice plus a gamma-law thermal part) supplies no upper bound, so
+  // ApplyTemperatureLimits has nothing to clamp against: a conserved state implying an
+  // arbitrarily large tau/D is accepted rather than limited. Opt in by setting
+  // <mhd>/tceiling. The default preserves the previous unbounded behaviour.
+  //
+  // Note this bounds the temperature, not the energy: RootFunctor's nu_b is built from
+  // the conserved q, so fmax(nu_a, nu_b) still tracks the full q. A ceiling makes the
+  // recovered state finite and floorable; it does not reject an unphysical q.
+  max_T = pin->GetOrAddReal(block, "tceiling",
+                            std::numeric_limits<Real>::max());
 
   m_electron = pin->GetOrAddReal(block, "m_electron", 0.5109989499961642);
   m_muon     = pin->GetOrAddReal(block, "m_muon"    , 105.65837549724458);
@@ -191,6 +250,11 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
       }
     }
 
+    // Worst-case accumulators for the table self-test. The scan is cheap and its
+    // result is a real correctness check on the analytic EOS, so it always runs and
+    // always reports; only the per-node dump is optional (zla_selftest_verbose).
+    Real st_on_p = 0.0, st_on_e = 0.0, st_on_h = 0.0;
+    Real st_off_p = 0.0, st_off_e = 0.0, st_off_h = 0.0;
     if (global_variable::my_rank == 0) {
     {
       for (size_t in=0; in<m_nn; ++in) {
@@ -229,6 +293,12 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
         Real h_analytic = (h_n * nY[4] + h_q * (1.0-nY[4]) + (1.0-ZL_eta) * h_g) / n;
         Real h_tab = (p_tab + e_tab) / n;
         Real h_reldiff = h_analytic/h_tab - 1.0;
+        st_on_p = fmax(st_on_p, fabs(p_cold/p_tab - 1.0));
+        st_on_e = fmax(st_on_e, fabs(e_cold/e_tab - 1.0));
+        st_on_h = fmax(st_on_h, fabs(h_reldiff));
+        // Everything below is dump-only. test_dPdn/test_dEdn are numerical
+        // derivatives, so skipping them is the bulk of the saving when quiet.
+        if (!selftest_verbose) { continue; }
         Real e_mu = GetHeavyLeptonFraction(nY[0] * fabs(nY[2]), m_idiff_mu_e);
         Real chp_e = ChemPoFermion(nY[0] * fabs(nY[2]) * (1.0-e_mu), m_electron);
         Real chp_mu = ChemPoFermion(nY[0] * fabs(nY[2]) * (e_mu), m_muon);
@@ -360,6 +430,11 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
           Real h_tab = (p_tab + e_tab) / n_test;
           Real h_reldiff = h_analytic/h_tab - 1.0;
 
+          st_off_p = fmax(st_off_p, fabs(p_reldiff));
+          st_off_e = fmax(st_off_e, fabs(e_reldiff));
+          st_off_h = fmax(st_off_h, fabs(h_reldiff));
+          if (!selftest_verbose) { continue; }
+
           std::cout << "Test offgrid " << in << " t=" << t
                     << " n = " << n_test
                     << " Y = [ " << f << ", " << yn << ", " << yln << ", " << ylq << " ]"
@@ -373,6 +448,19 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
         }
       }
     }
+    }
+
+    if (global_variable::my_rank == 0) {
+      std::cout << "### EOSZlaBag table self-test over " << m_nn
+                << " nodes: max |analytic/table - 1|" << std::endl
+                << "###   on-grid  P = " << st_on_p
+                << ", E = " << st_on_e << ", H = " << st_on_h << std::endl
+                << "###   off-grid P = " << st_off_p
+                << ", E = " << st_off_e << ", H = " << st_off_h << std::endl;
+      if (!selftest_verbose) {
+        std::cout << "###   (set <mhd>/zla_selftest_verbose = true for the per-node dump)"
+                  << std::endl;
+      }
     }
 
     m_initialized = true;
@@ -396,6 +484,67 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
       Real p = exp2_(host_table(ECLOGP,in));
       Real h = (e + p) / nb;
       m_min_h = fmin(m_min_h, h);
+    }
+
+    // m_min_h is scanned along the table's beta-equilibrium composition, but the C2P
+    // solver admits *frozen* compositions, whose enthalpy can sit below the
+    // equilibrium minimum. PrimitiveSolver::ConToPrim uses 1/min_h as the upper
+    // bracket for mu = 1/(h W) (primitive_solver.hpp:456-459), so an m_min_h that is
+    // not a genuine lower bound over the admissible compositions puts the root
+    // outside the bracket and FalsePosition reports NO_SOLUTION without iterating.
+    // The rest mass per baryon is a valid floor for any cold, non-negative-pressure
+    // state, and is exactly what the analytic EOS policies return
+    // (cf. idealgas.hpp:92, piecewise_polytrope.hpp:121).
+    if (min_h_floor_mb) {
+      m_min_h = fmin(m_min_h, mb);
+    }
+
+    // Guard against a table that produced a nonsensical bound, as eos_compose.cpp
+    // does. Without this the bracket silently becomes [0, inf) or [0, negative).
+    if (!(m_min_h > 0.0)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "EOSZlaBag: minimum enthalpy is not positive ("
+                << m_min_h << "); the table in " << fname << " is unusable."
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+
+    // Locate the density below which no resolvable quark phase can be supported, i.e.
+    // the largest n whose maximum admissible (1-f) is still under f_snap. Below it
+    // SnapPhaseFraction can collapse straight to f = 1 with no EOS evaluation, which
+    // is the path every atmosphere cell takes -- and the atmosphere is where the
+    // failures live, so this keeps the floor essentially free where it matters most.
+    //
+    // The bound is 1-f <= P_N/(Bag_B + P_N) from P_N*f - Bag_B*(1-f) >= 0. P_N rises
+    // monotonically with n, so bisect. Use yq = 0.5 (symmetric matter), which
+    // maximises the nucleonic pressure and therefore *over*estimates what is
+    // admissible -- making n_pfloor_force a deliberate underestimate, so the fast path
+    // can never fire where a quark phase would actually have been supportable.
+    if (pfloor_on) {
+      Real nlo = min_n;
+      Real nhi = max_n;
+      const Real yq_max_P = 0.5;
+      auto omf_max = [&](Real nn) {
+        const Real PN = ColdPressureNucleons(nn, yq_max_P);
+        return (PN > 0.0) ? PN/(Bag_B + PN) : 0.0;
+      };
+      if (omf_max(nlo) >= f_snap) {
+        n_pfloor_force = 0.0;            // even the floor density supports a phase
+      } else if (omf_max(nhi) < f_snap) {
+        n_pfloor_force = nhi;            // nothing in the table supports one
+      } else {
+        for (int it = 0; it < 200; ++it) {
+          const Real nmid = sqrt(nlo*nhi);
+          if (omf_max(nmid) < f_snap) { nlo = nmid; } else { nhi = nmid; }
+          if (nhi <= nlo*(1.0 + 1.0e-12)) { break; }
+        }
+        n_pfloor_force = nlo;
+      }
+      std::cout << "### EOSZlaBag: pressure floor on the phase fraction is ENABLED"
+                << std::endl
+                << "###   zla_pfloor_frac = " << pfloor_frac
+                << ",  n_pfloor_force = " << n_pfloor_force << " fm^-3"
+                << "  (n_sat = " << n_sat << " fm^-3)" << std::endl;
     }
   } // if (m_initialized==false)
 }

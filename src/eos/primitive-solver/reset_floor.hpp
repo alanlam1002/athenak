@@ -29,6 +29,7 @@ class ResetFloor : public ErrorPolicyInterface {
     fail_conserved_floor = false;
     fail_primitive_floor = false;
     adjust_conserved = true;
+    q_snap = 0.0;   // unused by this policy
   }
 
   /// Floor for primitive variables
@@ -155,6 +156,23 @@ class ResetFloor : public ErrorPolicyInterface {
   /// Set whether or not it's okay to adjust the conserved variables.
   KOKKOS_INLINE_FUNCTION void SetAdjustConserved(bool adjust) {
     adjust_conserved = adjust;
+  }
+
+  /// Accepted for interface parity with ResetFloorZlaBag, which is the policy that
+  /// actually consumes q_snap. This box policy clamps each species independently
+  /// against absolute bounds, so it has no (1 - Y_N) denominator to protect. The setter
+  /// exists because EOS<EOSZlaBag, ResetFloor> is still instantiated even though
+  /// BuildDynGRMHD() remaps dyn_error=reset_floor to reset_floor_zla_bag whenever the
+  /// EOS is zla_bag (dyn_grmhd.cpp:112).
+  KOKKOS_INLINE_FUNCTION void SetQuarkSnapTol(Real tol) {
+    q_snap = tol;
+  }
+
+  /// The same tolerance, for the flux limiter. dyn_grmhd_fofc.cpp must floor its own
+  /// Y[3] reference identically or the band it certifies differs from the band
+  /// SpeciesLimits() then applies.
+  KOKKOS_INLINE_FUNCTION Real GetQuarkSnapTol() const {
+    return q_snap;
   }
 };
 

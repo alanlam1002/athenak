@@ -29,6 +29,7 @@ class ResetFloorZlaBag : public ErrorPolicyInterface {
     fail_conserved_floor = false;
     fail_primitive_floor = false;
     adjust_conserved = true;
+    q_snap = 0.0;   // overwritten from <mhd>/yn_snap in SetPolicyParams()
   }
 
   /// Floor for primitive variables
@@ -133,8 +134,27 @@ class ResetFloorZlaBag : public ErrorPolicyInterface {
       Y[2] = Y_max_;
     }
     /// Quarks Leptons Fraction ((1-f) nB,Q y_lQ / nB)
-    Y_min_ = Y_min[3] * (1.0 - Y[1]);
-    Y_max_ = Y_max[3] * (1.0 - Y[1]);
+    // The band is [Y_min[3], Y_max[3]] * (1 - Y[1]). As (1 - Y[1]) reaches the
+    // round-off floor the band collapses onto the noise in Y[3], and pinning Y[3] to an
+    // edge of it is meaningless: y_lQ = Y[3]/(1 - Y[1]) is then a ratio of two
+    // noise-level numbers. Measured saturating at exactly -1 on 1.09e9 cell-visits with
+    // (1 - Y_N) down to 1e-9, which drained 72% of int(D*Y_3). Leaving Y[3] alone keeps
+    // the primitive exactly equal to the conserved value it came from; ConvertPrimitive
+    // independently guards the division that consumes it (see EOSZlaBag::yn_snap).
+    // FLOOR the reference rather than skipping the test. Skipping it removed the only
+    // bound on Y[3]: run v7 then let |y_lQ| reach 1.06e+03, which inflates the
+    // atmosphere pressure by eleven decades (P goes 1.8e-23 -> 1.1e-12 as Y[3] goes
+    // 1e-9 -> 1e6; unit test I) and the run died with 411,155 NANS_IN_CONS 29 M after
+    // restart. Flooring keeps both properties at once:
+    //   * the band is ~6 decades wider than the noise band at the default q_snap, so
+    //     the clamp almost never fires there and no longer drains int(D*Y_3);
+    //   * Y[3] is still bounded by a fixed, RESOLVED quantity, so it cannot run away.
+    // The degenerate Y[1] >= 1 case is covered too: the reference floors at q_snap
+    // instead of collapsing to 0 (or inverting), so the band never becomes empty.
+    // With q_snap = 0 this is identical to the original for every Y[1] <= 1.
+    const Real omYN = fmax(1.0 - Y[1], q_snap);
+    Y_min_ = Y_min[3] * omYN;
+    Y_max_ = Y_max[3] * omYN;
     if (Y[3] < Y_min_) {
       adjusted = true;
       Y[3] = Y_min_;
@@ -187,6 +207,19 @@ class ResetFloorZlaBag : public ErrorPolicyInterface {
   /// Set whether or not it's okay to adjust the conserved variables.
   KOKKOS_INLINE_FUNCTION void SetAdjustConserved(bool adjust) {
     adjust_conserved = adjust;
+  }
+
+  /// Set the quark-phase resolvability tolerance (<mhd>/yn_snap). Below it the species
+  /// band on Y[3] is skipped rather than applied to round-off; see SpeciesLimits().
+  KOKKOS_INLINE_FUNCTION void SetQuarkSnapTol(Real tol) {
+    q_snap = tol;
+  }
+
+  /// The same tolerance, for the flux limiter. dyn_grmhd_fofc.cpp must floor its own
+  /// Y[3] reference identically or the band it certifies differs from the band
+  /// SpeciesLimits() then applies.
+  KOKKOS_INLINE_FUNCTION Real GetQuarkSnapTol() const {
+    return q_snap;
   }
 };
 

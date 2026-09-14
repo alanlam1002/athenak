@@ -56,6 +56,28 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     ECNVARS = 11
   };
 
+  //! \brief Expose the phase decomposition (after snapping and the pressure floor).
+  //
+  //  ConvertPrimitive itself is protected because it is an internal detail of the
+  //  EOS evaluation, but the decomposition it produces is exactly what the phase-
+  //  fraction floor modifies, so it has to be observable to be testable. Used by the
+  //  c2p_zla_bag unit test to check that the corrected composition still satisfies
+  //  n == f*nY[0] + (1-f)*nY[1]. Read-only; no state is mutated.
+  KOKKOS_INLINE_FUNCTION
+  void GetPhaseDecomposition(Real n, const Real *Y, Real nY[6]) const {
+    ConvertPrimitive(n, Y, nY);
+  }
+
+  //! \brief Resolvability tolerance on the nucleon fraction (<mhd>/yn_snap). Exposed so
+  //  the unit test can assert the guard's contract at the actual threshold rather than
+  //  hardcoding a duplicate of the default.
+  KOKKOS_INLINE_FUNCTION Real GetYnSnap() const { return yn_snap; }
+
+  //! \brief Density below which the pressure floor collapses f -> 1 with no EOS
+  //  evaluation (see SnapPhaseFraction). Exposed so the unit test can sweep ACROSS the
+  //  branch rather than hardcoding a value that ReadTableFromFile computes by bisection.
+  KOKKOS_INLINE_FUNCTION Real GetPfloorForce() const { return n_pfloor_force; }
+
  protected:
   /// Constructor
   EOSZlaBag() :
@@ -64,6 +86,16 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     n_species = 0;
     eos_units = MakeNuclear();
     m_initialized = false;
+
+    // Overwritten by ReadParametersFromInput; a sane value is needed beforehand so
+    // ConvertPrimitive() never sees an uninitialized tolerance.
+    f_snap = 1.0e-8;
+    yn_snap = 1.0e-8;
+    min_h_floor_mb = true;
+    x_series_max = 3.0e-2;
+    pfloor_on = false;
+    pfloor_frac = 0.0;
+    n_pfloor_force = 0.0;
 
     // These will be set properly when the table is read
     m_id_log_nb = std::numeric_limits<Real>::quiet_NaN();
@@ -436,24 +468,246 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return ( dEdn_N * nY[4] + dEdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dEdn_G );
   }
 
+  //! \brief Snap a vanishing phase fraction onto the single-phase limit.
+  //
+  //  The MIT bag constant is an *absolute* energy density: Bag_B^4/hbar^3 is
+  //  85.3 MeV/fm^3 for Bag_B = 160 MeV, whereas n*mb at atmosphere densities can be
+  //  ~1e-15 MeV/fm^3. Because the quark branch is taken for any f < 1 and weighted by
+  //  (1-f), a (1-f) of only a few ulp still injects +(1-f)*Bag_B into the energy and
+  //  -(1-f)*Bag_B into the pressure. Those cancel in h = (e+P)/(n*mb), but only to
+  //  round-off, and the surviving residue ~ (1-f)*Bag_B*DBL_EPSILON/(n*mb) swamps the
+  //  physical enthalpy excess (h/mb - 1 is only ~3e-13 at the atmosphere) once (1-f)
+  //  exceeds ~3e-14. That drives h below mb, which puts the C2P root outside the
+  //  Kastaun bracket [0, 1/min_h] and makes ConToPrim fail with NO_SOLUTION -- in
+  //  every atmosphere cell, on every substep.
+  //
+  //  A phase fraction that small is never physical. In the tabulated equilibrium f is
+  //  bit-exactly 0 or 1 outside the mixed-phase window, and inside it f spans only
+  //  [1.1e-2, 0.998]; there is a ~9 decade gap between genuine mixed-phase fractions
+  //  and the round-off band. f_snap therefore separates them with orders of margin at
+  //  both ends. Values in between come from reconstruction and the conservative update
+  //  of the advected scalars, not from physics.
+  //
+  //  Snapping here rather than in the six Cold* functions means every consumer of
+  //  ConvertPrimitive inherits the guard, and nY[4] lands exactly on 0.0 or 1.0 so the
+  //  existing `nY[4] > 0.0` / `nY[4] < 1.0` branch tests drop the absent phase.
+  //! \brief Single-phase (f = 1) cold pressure at density n, without re-entering
+  //!        ConvertPrimitive.
+  //
+  //  Mirrors what ColdPressure() computes when nY[4] == 1: the quark branch is skipped
+  //  entirely, nY[0] = n, nY[2] = Y[2] and nY[5] = Y[2] + Y[3]. Kept separate so it can
+  //  be called from inside SnapPhaseFraction without recursion -- ColdPressureNucleons
+  //  and ColdPressureLeptons take phase densities directly and never call back here.
+  KOKKOS_INLINE_FUNCTION Real SinglePhasePressure(Real nN, Real yqN, Real yqG) const {
+    Real P = ColdPressureNucleons(nN, yqN);
+    if (ZL_eta < 1.0) { P += (1.0 - ZL_eta) * ColdPressureLeptons(nN, yqG); }
+    return P;
+  }
+
+  //! \brief Snap a vanishing phase fraction onto the single-phase limit, then enforce
+  //!        that the mixture can actually support a non-negative pressure.
+  //
+  //  The second half is the pressure floor. ColdPressureQuarks carries the *absolute*
+  //  constant -Bag_B, so as the quark-phase density falls the quark pressure tends to
+  //  -Bag_B rather than to zero -- measured: P_Q = -2.46197e-04 in code units, flat to
+  //  six digits across every failing cell of the 600 M TOV run. ColdPressure then mixes
+  //  the phases linearly in the volume fraction, P = P_N*f + P_Q*(1-f), so at
+  //  atmosphere densities, where P_N is ~30 decades below Bag_B, *any* resolvable
+  //  (1-f) drives the total pressure negative. Measured on 400 real failing states:
+  //  P < 0 in 400/400, robust over four decades in n.
+  //
+  //  That is a physical statement, not a numerical one: quark matter is unbound below
+  //  the transition density, so a frozen composition holding a quark phase there is
+  //  thermodynamically unsupportable. Snapping on *density* alone would be wrong --
+  //  the table stores only beta-equilibrium composition, and a frozen f < 1 below the
+  //  transition density is legitimate wherever the pressure can support it. Snapping on
+  //  *pressure* asks exactly the right question, and it reproduces the transition
+  //  density on its own: the floor stops firing between n = 0.037 and n = 0.369, and
+  //  the tabulated transition is at n = 0.2538.
+  //
+  //  The correction moves f and yn together along the ray that holds the quark-phase
+  //  density nQ = (1-yn)*n/(1-f) fixed. That keeps the parametrisation consistent --
+  //  f*nY[0] + (1-f)*nQ stays exactly n, since both sides collapse to yn*n + (1-yn)*n
+  //  -- and it always yields yn <= 1 for f_new >= f. Holding nY[0] fixed instead would
+  //  also preserve n but can push yn above 1 for real failing states, so it is wrong.
+  //
+  //  nQ is invariant under the correction, so P_Q is too; but nY[0] = yn*n/f is *not*,
+  //  so P_N must be re-evaluated as f moves. The fixed point below does that. In the
+  //  atmosphere nY[0] shifts by ~1e-5 and it converges immediately; near the transition
+  //  the shift reaches ~12% and the iteration earns its keep.
+  KOKKOS_INLINE_FUNCTION
+  //! \param[out] Y2e,Y3e  the nucleon/quark lepton contents AFTER any phase
+  //!   transfer this routine performs. They differ from Y[2],Y[3] only when the
+  //!   pressure floor actually moves f; the sum Y2e + Y3e is preserved exactly.
+  void SnapPhaseFraction(Real n, const Real *Y, Real *f, Real *yn,
+                         Real *Y2e, Real *Y3e) const {
+    const Real yqG_tot = Y[2] + Y[3];   // total leptons per baryon: invariant
+    *Y2e = Y[2];
+    *Y3e = Y[3];
+    // yn = Y_N is a fraction of the baryons and must lie in [0,1]. SpeciesLimits
+    // enforces that before C2P, but the flux path evaluates the EOS on a RECONSTRUCTED
+    // w0 that has never been through it, and WENOZ overshoots at extrema. Out of range
+    // BOTH densities in ConvertPrimitive go negative -- nY[0] = yn*n/f for yn < 0 and
+    // nY[1] = (1-yn)*n/(1-f) for yn > 1. Measured (unit test L) yn = 1.01 returns
+    // P = +6.34e+22 instead of ~-1e-07: not NaN, so no tripwire fires, but instantly
+    // fatal. Clamp yn itself rather than the two densities separately, so the partition
+    // f*nY[0] + (1-f)*nY[1] == n stays exact. A clamped-away phase holds no baryons, so
+    // its leptons move to the surviving phase -- the same transfer the f-snap branches
+    // below perform, and it keeps Y2e + Y3e invariant.
+    if (*yn > 1.0) {
+      *yn = 1.0;
+      *Y2e = yqG_tot;
+      *Y3e = 0.0;
+    } else if (*yn < 0.0) {
+      *yn = 0.0;
+      *Y2e = 0.0;
+      *Y3e = yqG_tot;
+    }
+    if (1.0 - (*f) < f_snap) {
+      // No resolvable quark phase: its leptons belong to the nucleon phase now.
+      *f = 1.0;
+      *yn = 1.0;
+      *Y2e = yqG_tot;
+      *Y3e = 0.0;
+      return;
+    } else if (*f < f_snap) {
+      // No resolvable nucleonic phase. A pure quark state is only meaningful where the
+      // density can actually support quark matter; below n_pfloor_force its pressure is
+      // -Bag_B, so the cell is unsupportable and ConToPrim would fail on it. The error
+      // policy would then reset it to the atmosphere composition (1,1,0,0), i.e. pure
+      // nucleonic -- so do that here directly and spare the failure. This branch also
+      // catches f <= 0, which prolongation and the conservative scalar update can
+      // produce even though it is not a physical composition.
+      if (pfloor_on && n < n_pfloor_force) {
+        *f = 1.0;
+        *yn = 1.0;
+        *Y2e = yqG_tot;
+        *Y3e = 0.0;
+      } else {
+        *f = 0.0;
+        *yn = 0.0;
+        *Y2e = 0.0;
+        *Y3e = yqG_tot;
+      }
+      return;
+    }
+
+    if (!pfloor_on) { return; }
+
+    // Fast path. Below n_pfloor_force the largest admissible (1-f) is smaller than
+    // f_snap, so anything that survived the test above cannot be supported and the
+    // answer is f = 1 without evaluating the EOS at all.
+    //
+    // WARNING -- this is NOT the same criterion the fixed point below applies. Both
+    // reduce to 1-f <= P_N/(P_N + |P_Q|), but n_pfloor_force is built with |P_Q|
+    // replaced by Bag_B and yqN by yq = 0.5. Since P_Q = P_Fermi(nQ) - Bag_B with
+    // P_Fermi >= 0, Bag_B is an UPPER bound on |P_Q|, so this path underestimates the
+    // admissible quark fraction and snaps states the fixed point would keep. The two
+    // meet at n_pfloor_force with no blending, giving an 8.23x jump in P (unit test M).
+    // C2P varies n = D/(W*mb) through W as it solves, so for any cell within ~0.5% of
+    // the threshold that jump sits INSIDE the root-solve bracket: there is then no root,
+    // FalsePosition crawls toward the discontinuity, and 100% of the production
+    // NO_SOLUTION failures land in a 0.6% band just above n_pfloor_force.
+    //
+    // <mhd>/zla_pfloor_fastpath = false removes it and lets the fixed point own every
+    // density, which makes the criterion single-valued and the EOS continuous.
+    if (pfloor_fastpath && n < n_pfloor_force) {
+      *f = 1.0;
+      *yn = 1.0;
+      *Y2e = yqG_tot;
+      *Y3e = 0.0;
+      return;
+    }
+
+    const Real omf = 1.0 - (*f);
+    const Real omyn0 = 1.0 - (*yn);   // pre-rescale; y_lQ must be invariant w.r.t. it
+    // Clamp at zero. omyn0 < 0 means yn > 1, which SpeciesLimits cannot produce (it
+    // clamps Y[1] first) but a RECONSTRUCTED w0 state in the flux path can, since
+    // WENOZ overshoots at extrema. A negative nQ is not caught downstream: measured
+    // (unit test L) it returns P = +1.03e+23 instead of ~-1e-07 -- not NaN, so no
+    // tripwire fires, but instantly fatal. yqQ just below already has its own guard,
+    // and ResetFloorZlaBag guards the same quantity as fmax(1 - Y[1], q_snap); this
+    // makes the third site agree. nQ = 0 gives P_Q -> -Bag_B, the correct limit.
+    const Real nQ = Kokkos::fmax(omyn0, 0.0) * n / omf;
+    const Real yqQ = (omyn0 > yn_snap) ? (*Y3e)/omyn0 : 0.0;
+    const Real P_Q = ColdPressureQuarks(nQ, yqQ);
+    const Real yqG = yqG_tot;
+
+    Real f_new = *f;
+    for (int it = 0; it < 3; ++it) {
+      const Real yn_t = 1.0 - (1.0 - (*yn))*(1.0 - f_new)/omf;
+      const Real nN_t = yn_t * n / f_new;
+      // Leptons follow the baryons this trial f would transfer, so the nucleon
+      // phase gains exactly what the quark phase loses.
+      const Real omyn_t = 1.0 - yn_t;
+      const Real Y3_t = (omyn0 > yn_snap) ? (*Y3e)*(omyn_t/omyn0) : 0.0;
+      const Real yqN = (yn_t > 0.0) ? (yqG_tot - Y3_t)/yn_t : 0.0;
+      const Real P_N = SinglePhasePressure(nN_t, yqN, yqG);
+      const Real P_floor = pfloor_frac * P_N;
+      // Mixture pressure at the current trial f, with P_Q fixed by construction.
+      if (P_N*f_new + P_Q*(1.0 - f_new) >= P_floor) { break; }
+      const Real den = P_N - P_Q;
+      if (!(den > 0.0)) { f_new = 1.0; break; }
+      const Real f_next = Kokkos::fmin((P_floor - P_Q)/den, 1.0);
+      if (f_next <= f_new*(1.0 + 1.0e-12)) { break; }
+      f_new = f_next;
+    }
+
+    // The fixed point approaches f = 1 asymptotically, so without the fast path it
+    // returns 1 - eps rather than exactly 1. Re-apply the f_snap collapse that Stage 1
+    // already applied on entry: an unresolvable (1-f) still injects (1-f)*Bag_B into
+    // the energy and -(1-f)*Bag_B into the pressure, which cancel only to round-off.
+    if (1.0 - f_new < f_snap) {
+      *f = 1.0;
+      *yn = 1.0;
+      *Y2e = yqG_tot;
+      *Y3e = 0.0;
+      return;
+    }
+
+    if (f_new > *f) {
+      *yn = 1.0 - omyn0*(1.0 - f_new)/omf;
+      // Move the leptons with the baryons: this keeps y_lQ = Y3e/(1-yn) exactly equal
+      // to its pre-rescale value, and Y2e + Y3e exactly equal to yqG_tot. Without it
+      // y_lQ is multiplied by (1-f_old)/(1-f_new) -- up to ~8x at 1-f = 0.5.
+      const Real omyn_new = 1.0 - (*yn);
+      if (omyn0 > yn_snap) {
+        *Y3e = (*Y3e)*(omyn_new/omyn0);
+        *Y2e = yqG_tot - (*Y3e);
+      }
+      *f = f_new;
+    }
+  }
+
   /// Convert Primitive Variables to the mass fraction
   /// Y: (f n, f n_N, f Y_qN n_N, (1-f) Y_qQ n_Q)
   /// (n_N, n_Q, Y_qN, Y_qQ, f, Y_qG)
   KOKKOS_INLINE_FUNCTION void ConvertPrimitive(Real n, const Real *Y, Real nY[6]) const{
-    nY[4] = Y[0];                                 // Volume fraction
-    if ( Y[0] > 0.0 ) {
-      nY[0] = Y[1] * n / Y[0];                    // Nucleon number density
-      if ( Y[1] > 0.0 ) {
-        nY[2] = Y[2] / Y[1];                      // Charge Fraction for Nucleons
+    // Work on snapped copies so that an unresolvably small phase fraction cannot
+    // switch on the bag term. See SnapPhaseFraction() for why this matters.
+    Real f = Y[0];
+    Real yn = Y[1];
+    Real Y2e = Y[2];
+    Real Y3e = Y[3];
+    SnapPhaseFraction(n, Y, &f, &yn, &Y2e, &Y3e);
+
+    nY[4] = f;                                    // Volume fraction
+    if ( f > 0.0 ) {
+      nY[0] = yn * n / f;                         // Nucleon number density
+      // Only divide by a denominator that is actually resolved -- see yn_snap. The
+      // exact-inequality tests these replaced admitted denominators at the round-off
+      // floor, turning both charge fractions into amplified noise.
+      if ( yn > yn_snap ) {
+        nY[2] = Y2e / yn;                         // Charge Fraction for Nucleons
       }
     }
-    if ( Y[0] < 1.0 ) {
-      nY[1] = (1.0-Y[1]) * n / (1.0-Y[0]);        // Quark number density
-      if ( Y[1] < 1.0 ) {
-        nY[3] = Y[3] / (1.0-Y[1]);                // Charge Fraction for Quarks
+    if ( f < 1.0 ) {
+      nY[1] = (1.0-yn) * n / (1.0-f);             // Quark number density
+      if ( 1.0 - yn > yn_snap ) {
+        nY[3] = Y3e / (1.0-yn);                   // Charge Fraction for Quarks
       }
     }
-    nY[5] = Y[2] + Y[3];                          // Total Charge Fraction
+    nY[5] = Y2e + Y3e;                            // Total Charge Fraction (invariant)
     //nY[0] = Y[0] * n;                             // Nucleon number density
     //nY[1] = Y[1] * n;                             // Quark number density
     //nY[2] = Y[2] / Y[0];                          // Charge Fraction for Nucleons
@@ -826,6 +1080,64 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return ONE_3RD * m * y * SQR(x) / ChemPoFermion_FromX(x);
   }
 
+  //! Crossover between the small-x series and the closed forms of the Fermi-gas
+  //  integrals below.
+  //
+  //  Both sides lose accuracy, in opposite directions: the series truncates at O(x^6)
+  //  relative, while the closed forms subtract terms of size O(x) to leave a result of
+  //  size O(x^5) and so lose ~eps/x^4. Balancing c*x^6 against eps/x^4 (with the
+  //  measured c ~ 0.036 for the internal energy and ~0.14 for the pressure) puts the
+  //  optimum at x ~ 0.03. The previous value of 1e-2 sat far onto the closed forms'
+  //  bad side: it left a ~2e-8 relative error, visible as a ~3.7e-8 discontinuity in
+  //  the internal energy and ~1.6e-8 in the pressure across the crossover. At 3e-2 the
+  //  worst case on either side is ~3e-10.
+  //! Threshold in x = k_F/m above which the Fermi integrals use the closed form
+  //! rather than the small-x series. HEAD used 1.0e-2. This is a runtime member
+  //! rather than a constant so it can be bisected: the affected band,
+  //! x in (1e-2, 3e-2), is the non-relativistic tail, i.e. exactly the low
+  //! densities where the observed C2P failures live. See <mhd>/x_series_max.
+  Real x_series_max;
+
+  //! \brief Small-x series for the Fermi internal-energy integral, divided by x^5.
+  //
+  //  The closed forms below subtract terms of size O(x) to leave a result of size
+  //  O(x^5), so they lose ~eps/x^4: the amplification is 1.5e6 for the internal energy
+  //  and 7.0e6 for the pressure at x = 3e-2, which in plain IEEE double leaves 3.4e-10
+  //  and 1.5e-9 of relative error. The second of those is *larger* than the ~1.1e-9
+  //  headroom the C2P bracket has at atmosphere densities
+  //  (f(muh) = muh - 1/nu, measured), i.e. the closed forms alone can flip the sign of
+  //  the bracket and turn a solvable cell into Error::NO_SOLUTION. Carrying the series
+  //  to 12 terms instead of 3 lets the crossover move out to x ~ 0.3, where the
+  //  closed-form amplification is only ~1.6e2, and drops the worst case to ~1.6e-13.
+  //
+  //  Coefficients are the exact rationals of
+  //    x*sqrt(1+x^2)*(2x^2+1) - (8/3)x^3 - asinh(x) = x^5*(4/5 - x^2/7 + x^4/18 - ...)
+  //  i.e. 4/5, -1/7, 1/18, -5/176, 7/416, -7/640, 33/4352, -429/77824, 715/172032,
+  //  -2431/753664, 4199/1638400, -29393/14155776. Evaluated by Horner in u = x^2.
+  KOKKOS_INLINE_FUNCTION Real InternalEnergySeries(Real u) const {
+    return 0.80000000000000004 + u*(-0.14285714285714285 + u*(0.055555555555555552
+         + u*(-0.028409090909090908 + u*(0.016826923076923076
+         + u*(-0.010937499999999999 + u*(0.0075827205882352941
+         + u*(-0.0055124383223684207 + u*(0.0041562034970238099
+         + u*(-0.0032255753226902175 + u*(0.0025628662109375001
+         + u*(-0.0020763962357132522)))))))))));
+  }
+
+  //! \brief Small-x series for the Fermi pressure integral, divided by x^5, in the
+  //! same 3*(...) convention the closed form below uses.
+  //
+  //  Exact rationals of x*sqrt(1+x^2)*(2x^2-3) + 3*asinh(x)
+  //    = x^5*(8/5 - 4x^2/7 + x^4/3 - ...): 8/5, -4/7, 1/3, -5/22, 35/208, -21/160,
+  //  231/2176, -429/4864, 2145/28672, -12155/188416, 46189/819200, -29393/589824.
+  KOKKOS_INLINE_FUNCTION Real PressureSeries(Real u) const {
+    return 1.6000000000000001 + u*(-0.5714285714285714 + u*(0.33333333333333331
+         + u*(-0.22727272727272727 + u*(0.16826923076923078
+         + u*(-0.13125000000000001 + u*(0.10615808823529412
+         + u*(-0.088199013157894732 + u*(0.074811662946428575
+         + u*(-0.064511506453804351 + u*(0.056383056640624998
+         + u*(-0.049833509657118052)))))))))));
+  }
+
   /// Fermion Chemical Potential / m
   KOKKOS_INLINE_FUNCTION Real ChemPoFermion_FromX(Real x) const{
     return Kokkos::sqrt(x*x+1.0);
@@ -833,44 +1145,43 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Fermion Energy / m^4
   KOKKOS_INLINE_FUNCTION Real EnergyFermion_FromX(Real x) const{
-    if ( x > 1.e-2 ) {
+    if ( x > x_series_max ) {
       return 0.125 / pi2hbar3 
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) + 1.0)
           - Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
     } else {
+      // E = (8/3)x^3 + InternalEnergy exactly, so reuse the one series.
       Real x3 = x*x*x;
-      Real x2 = x*x;
+      Real u = x*x;
       return 0.125 / pi2hbar3 * x3
-          * ( ONE_3RD * 8.0 + 0.8 * x2 - SQR(x2) / 7.0 );
+          * ( ONE_3RD * 8.0 + u * InternalEnergySeries(u) );
     }
   }
 
   /// Fermion Internal Energy / m^4
   KOKKOS_INLINE_FUNCTION Real InternalEnergyFermion_FromX(Real x) const{
-    if ( x > 1.e-2 ) {
+    if ( x > x_series_max ) {
       return 0.125 / pi2hbar3 
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) + 1.0)
           - ONE_3RD * 8.0 * x*x*x
           - Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
     } else {
-      Real x5 = x*x*x*x*x;
-      Real x2 = x*x;
-      return 0.125 / pi2hbar3 * x5
-          * ( 0.8 - x2 / 7.0 + SQR(x2) / 18.0 );
+      Real u = x*x;
+      Real x5 = x*u*u;
+      return 0.125 / pi2hbar3 * x5 * InternalEnergySeries(u);
     }
   }
 
   /// Fermion Pressure / m^4
   KOKKOS_INLINE_FUNCTION Real PressureFermion_FromX(Real x) const{
-    if ( x > 1.e-2 ) {
+    if ( x > x_series_max ) {
       return 0.125 * ONE_3RD / pi2hbar3 
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) - 3.0)
           + 3.0 * Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
     } else {
-      Real x5 = x*x*x*x*x;
-      Real x2 = x*x;
-      return 0.125 * ONE_3RD / pi2hbar3 * x5
-          * (1.6 - 4.0 * x2 / 7.0 + ONE_3RD * SQR(x2) );
+      Real u = x*x;
+      Real x5 = x*u*u;
+      return 0.125 * ONE_3RD / pi2hbar3 * x5 * PressureSeries(u);
     }
   }
 
@@ -1055,8 +1366,10 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Get the maximum pressure at a given density and composition.
   KOKKOS_INLINE_FUNCTION Real MaximumPressure(Real n, Real *Y) const {
-    // Note that max_T is already set to numeric_limits<Real>::max!
-    return max_T;
+    // Evaluate at the temperature ceiling. This used to return max_T itself, i.e. a
+    // temperature where a pressure is expected -- harmless only because nothing calls
+    // it (ApplyPressureLimits has no call sites), but wrong.
+    return Pressure(n, max_T, Y);
   }
 
   /// Get the minimum energy at a given density and composition.
@@ -1066,8 +1379,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Get the maximum energy at a given density and composition.
   KOKKOS_INLINE_FUNCTION Real MaximumEnergy(Real n, Real *Y) const {
-    // Note that max_T is already set to numeric_limits<Real>::max!
-    return max_T;
+    return Energy(n, max_T, Y);
   }
 
   /// Get the minimum energy at a given density and composition.
@@ -1075,10 +1387,9 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return InternalEnergy(n, min_T, Y);
   }
 
-  /// Get the maximum energy at a given density and composition.
+  /// Get the maximum internal energy at a given density and composition.
   KOKKOS_INLINE_FUNCTION Real MaximumInternalEnergy(Real n, Real *Y) const {
-    // Note that max_T is already set to numeric_limits<Real>::max!
-    return max_T;
+    return InternalEnergy(n, max_T, Y);
   }
 
  public:
@@ -1201,6 +1512,44 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   Real Bag_B;
   // Parameters for Phase Transition
   Real ZL_eta;
+  // Phase-fraction snapping tolerance; see SnapPhaseFraction().
+  Real f_snap;
+  //! Resolvability tolerance on the NUCLEON fraction, the exact analogue of f_snap one
+  //! variable over (<mhd>/yn_snap). y_lQ is never advected: it is derived as
+  //! Y[3]/(1-yn), a ratio of two independently advected conserved quantities. In the
+  //! envelope both are ~1e-7..1e-9 with independent truncation error, so the ratio is
+  //! noise amplified by up to 1e9 -- measured saturating at exactly the -1 species
+  //! bound on 1.09e9 cell-visits. Below this tolerance the quark phase is treated as
+  //! absent (y_lQ = 0) instead of dividing by the noise floor. The mirror guard on yn
+  //! itself covers the pure-quark (yn -> 0) side, which has not been observed to fail.
+  Real yn_snap;
+  //! Enable the pressure floor on the phase fraction (<mhd>/zla_pfloor). Default
+  //! false, i.e. bit-identical to the behaviour without it.
+  bool pfloor_on;
+  //! Pressure floor as a fraction of the single-phase nucleonic pressure at the same
+  //! density (<mhd>/zla_pfloor_frac). 0 means "require P >= 0".
+  Real pfloor_frac;
+  //! Density below which no resolvable quark phase can be supported at all, i.e. the
+  //! largest n for which the maximum admissible (1-f) is still under f_snap. Below
+  //! this the floor collapses to f = 1 with no EOS evaluation at all, which is the
+  //! path essentially every atmosphere cell takes. Set in ReadTableFromFile().
+  Real n_pfloor_force;
+  //! Take the composition-independent fast path that collapses f -> 1 below
+  //! n_pfloor_force. TRUE reproduces the historical behaviour. The fast path applies a
+  //! DIFFERENT admissibility criterion than the fixed point below it does -- it
+  //! substitutes Bag_B for |P_Q| and yq = 0.5 for the real yqN -- so the two disagree
+  //! at the threshold and the EOS jumps there (measured: 8.23x in P). See
+  //! SnapPhaseFraction().
+  bool pfloor_fastpath;
+  //! Floor the table-scanned minimum enthalpy at the rest mass per baryon. See
+  //! <mhd>/eos_min_h_floor_mb; true reproduces the current behaviour.
+  bool min_h_floor_mb;
+
+  // Per-node dump of the table self-test in ReadTableFromFile. The check itself always
+  // runs and always reports its worst deviations; this only controls whether every
+  // table node is also printed individually, which is ~7 lines x m_nn (53k lines /
+  // 10 MB for the production table) written once at startup on rank 0.
+  bool selftest_verbose;
 
   // bool to protect against access of uninitialized table and prevent repeated reading
   // of table

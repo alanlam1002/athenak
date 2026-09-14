@@ -31,6 +31,10 @@ class ErrorPolicyInterface {
   bool fail_conserved_floor;
   bool fail_primitive_floor;
   bool adjust_conserved;
+  //! Resolvability tolerance on the quark-phase fraction (1 - Y_N), set from
+  //! <mhd>/yn_snap. Used only by ResetFloorZlaBag; 0 for every other policy, which
+  //! leaves them bit-identical.
+  Real q_snap;
 };
 
 } // namespace Primitive

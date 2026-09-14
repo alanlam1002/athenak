@@ -23,6 +23,60 @@
 #include "coordinates/adm.hpp"
 
 namespace dyngr {
+
+//----------------------------------------------------------------------------------------
+//! \fn bool ZlaCascadeAdmissible
+//! \brief Direct test of the four ZLA-cascade bounds on one side of one face.
+//
+//  The cascade in FOFC SOLVES each theta while holding the others at whatever values it
+//  happened to compute on the way down, so the bound it certifies is not the bound that
+//  the finally applied thetas produce. This evaluates the partial update at the thetas
+//  that will actually be used and checks the four bounds outright. A false return only
+//  means "use a more diffusive candidate"; it is never an error.
+//
+//  sgn = -1 for the left cell (utest - bet*flx), +1 for the right cell (utest + bet*flx).
+//  ut[] holds utest for {D, Y0, Y1, Y2, Y3}; fhi[] the high-order scalar fluxes; llf[]
+//  the first-order ones.
+//
+//  Bounds are the same padded values the cascade targets, relaxed by tol relative to each
+//  bound's own reference. The cascade solves theta to EXACTLY attain its padded bound, so
+//  testing with no slack would fail by one ulp about half the time and chatter between
+//  candidates.
+template<class TView>
+KOKKOS_INLINE_FUNCTION
+bool ZlaCascadeAdmissible(const Real ut[5], const Real fD, const Real fhi[4],
+                          const Real llf[4], const Real bet, const Real sgn,
+                          const Real th[4], const Real q_snap,
+                          const TView &minY, const TView &maxY) {
+  const Real uD = ut[0] + sgn * bet * fD;
+  if (!(uD > 0.0)) { return false; }
+
+  const Real tol = 8.0 * DBL_EPSILON;
+
+  // Volume fraction: band is [min_Y0, max_Y0] * uD. Subsumes the cascade's uD0 guard.
+  const Real u0 = ut[1] + sgn * bet * (llf[0] + th[0] * (fhi[0] - llf[0]));
+  if (u0 < (minY(0) + DBL_EPSILON) * uD - tol * Kokkos::fabs(uD) ||
+      u0 > (maxY(0) - DBL_EPSILON) * uD + tol * Kokkos::fabs(uD)) { return false; }
+
+  // Nucleon fraction: band references u0, which is the cascade's uD0.
+  const Real u1 = ut[2] + sgn * bet * (llf[1] + th[1] * (fhi[1] - llf[1]));
+  if (u1 < (minY(1) + DBL_EPSILON) * u0 - tol * Kokkos::fabs(u0) ||
+      u1 > (maxY(1) - DBL_EPSILON) * u0 + tol * Kokkos::fabs(u0)) { return false; }
+
+  // Nucleon leptons: band references u1, which is the cascade's uDN.
+  const Real u2 = ut[3] + sgn * bet * (llf[2] + th[2] * (fhi[2] - llf[2]));
+  if (u2 < (minY(2) + DBL_EPSILON) * u1 - tol * Kokkos::fabs(u1) ||
+      u2 > (maxY(2) - DBL_EPSILON) * u1 + tol * Kokkos::fabs(u1)) { return false; }
+
+  // Quark leptons: the coupled one. Same q_snap floor on the reference the cascade uses.
+  const Real r3 = fmax(uD - u1, q_snap * uD);
+  const Real u3 = ut[4] + sgn * bet * (llf[3] + th[3] * (fhi[3] - llf[3]));
+  if (u3 < (minY(3) + DBL_EPSILON) * r3 - tol * Kokkos::fabs(r3) ||
+      u3 > (maxY(3) - DBL_EPSILON) * r3 + tol * Kokkos::fabs(r3)) { return false; }
+
+  return true;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn void DynGRMHDPS::FOFC
 //! \brief Implements first-order flux-correction (FOFC) algorithm for MHD.  First an
@@ -73,6 +127,29 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     Kokkos::deep_copy(eos_min_Y, h_min_Y);
     Kokkos::deep_copy(eos_max_Y, h_max_Y);
   }
+
+  // PHASE 1 / defect 2. Scalar 3's band is [min_Y(3), max_Y(3)] * (quark baryon
+  // fraction), whose conserved-space reference is (uD - uDN). Neither uD nor uDN is
+  // range-checked against the other for scalar 3 (scalars 1 and 2 are), so a negative
+  // reference inverts the band into an empty interval and theta is then computed from
+  // an inconsistent target. ResetFloorZlaBag::SpeciesLimits already floors the same
+  // quantity as fmax(1 - Y[1], q_snap); mirroring it here makes the band the limiter
+  // CERTIFIES identical by construction to the band C2P then APPLIES. With q_snap = 0
+  // this reduces to the original expression for every uDN <= uD.
+  const Real q_snap_ = eos.ps.GetEOS().GetQuarkSnapTol();
+  // Only the ZLA cascade makes one scalar's bound depend on another scalar's theta
+  // (scalar 1 -> uD0, scalars 2 and 3 -> uDN). Every other EOS references all four
+  // bands to uD, whose flux is already final before this kernel, so each bound is
+  // affine in its OWN theta alone and the per-scalar value is both correct and
+  // optimal there. Sharing theta across independent scalars would only add
+  // diffusion, so make the flag inert outside the cascade.
+  constexpr bool zla_cascade_ =
+      std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
+      std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>;
+  const bool shared_theta_ = scalar_shared_theta && zla_cascade_;
+  // Verified theta supersedes shared theta: the first rung of its fallback ladder IS the
+  // shared value, so turning it on can only ever relax the limiter, never tighten it.
+  const bool verify_theta_ = scalar_theta_verify && zla_cascade_;
 
   if (pmy_pack->pmhd->use_fofc) {
     Real &gam0 = pdriver->gam0[stage-1];
@@ -657,8 +734,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                 wthe_m[2] = 1.0;
               }
               uY_m = utest_(m,nmhd_+3,k,j,i-1) - bet_pp * flx1(m,nmhd_+3,k,j,i);
-              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+              const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
               if ( uY_m < min_DY_ ) {
                 wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j,i-1) - min_DY_ ) * bet_ppi
                   - flx_llf[3] ) / ( flx1(m,nmhd_+3,k,j,i) - flx_llf[3] );
@@ -748,8 +826,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                 wthe_p[2] = 1.0;
               }
               uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx1(m,nmhd_+3,k,j,i);
-              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+              const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
               if ( uY_p < min_DY_ ) {
                 wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
                   + flx_llf[3] ) / ( flx_llf[3] - flx1(m,nmhd_+3,k,j,i) );
@@ -788,8 +867,80 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
         }
       }
+      // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
+      // assumed to hold it, at the solved theta it is exactly attained, so every smaller
+      // theta holds it too. That argument needs the bound to be affine in ONE theta. For
+      // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
+      // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
+      // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
+      // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
+      // the two differ. Collapsing to a single theta restores a one-parameter family and
+      // makes every linear bound among the scalars hold by construction. Costs diffusion:
+      // each scalar is limited by the most restrictive of the four.
+      //   verify_theta_ removes that price. Convexity only ever needed the ENDPOINT to be
+      // admissible: origin (all-LLF) admissible plus endpoint admissible gives the whole
+      // segment. So try the per-scalar thetas and CHECK the four bounds there instead of
+      // asserting them. Wherever they hold -- most of the star, since scalar 0's own band
+      // [0,1]*uD is never tight there -- nothing is limited that need not be. Where they
+      // fail, walk the uniform ray down from wthe_all (today's answer) toward the origin.
+      Real wraw[MAX_SPECIES] = {0.0};
       for (int n=0; n < nscal_; ++n) {
-        wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+        wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+      }
+      Real wthe_all = 1.0;
+      for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
+
+      bool decided_ = false;
+      if constexpr (zla_cascade_) {
+        if (verify_theta_ && nscal_ == 4) {
+          // Read the high-order fluxes BEFORE the application loop overwrites them.
+          const Real utm[5] = {utest_(m,IDN,k,j,i-1), utest_(m,nmhd_+0,k,j,i-1),
+                               utest_(m,nmhd_+1,k,j,i-1), utest_(m,nmhd_+2,k,j,i-1),
+                               utest_(m,nmhd_+3,k,j,i-1)};
+          const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
+                               utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
+                               utest_(m,nmhd_+3,k,j,i)};
+          const Real fhi[4] = {flx1(m,nmhd_+0,k,j,i), flx1(m,nmhd_+1,k,j,i),
+                               flx1(m,nmhd_+2,k,j,i), flx1(m,nmhd_+3,k,j,i)};
+          const Real fD = flx1(m,IDN,k,j,i);
+          // Candidate 1: the per-scalar thetas. Optimal whenever it holds.
+          bool ok =
+            ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
+                                 q_snap_, eos_min_Y, eos_max_Y) &&
+            ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
+                                 q_snap_, eos_min_Y, eos_max_Y);
+          if (ok) {
+            for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
+          } else {
+            // Candidates 2..5: the uniform ray from the origin, first stop exactly
+            // today's shared-theta value, halving after. theta = 0 is the LLF flux, which
+            // FOFC assumes admissible, so the ladder always terminates.
+            Real a = wthe_all;
+            for (int it=0; it < 4 && !ok; ++it) {
+              Real cand[MAX_SPECIES] = {0.0};
+              for (int n=0; n < nscal_; ++n) { cand[n] = a; }
+              ok =
+                ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
+                                     q_snap_, eos_min_Y, eos_max_Y) &&
+                ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
+                                     q_snap_, eos_min_Y, eos_max_Y);
+              if (ok) {
+                for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
+              } else {
+                a *= 0.5;
+              }
+            }
+            if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
+          }
+          decided_ = true;
+        }
+      }
+      if (!decided_) {
+        for (int n=0; n < nscal_; ++n) {
+          wthe[n] = shared_theta_ ? wthe_all : wraw[n];
+        }
+      }
+      for (int n=0; n < nscal_; ++n) {
         flx1(m,nmhd_+n,k,j,i) = flx_llf[n]
           + wthe[n] * (flx1(m,nmhd_+n,k,j,i) - flx_llf[n]);
       }
@@ -859,8 +1010,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                   wthe_m[2] = 1.0;
                 }
                 uY_m = utest_(m,nmhd_+3,k,j-1,i) - bet_pp * flx2(m,nmhd_+3,k,j,i);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
                 if ( uY_m < min_DY_ ) {
                   wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j-1,i) - min_DY_ ) * bet_ppi
                     - flx_llf[3] ) / ( flx2(m,nmhd_+3,k,j,i) - flx_llf[3] );
@@ -949,8 +1101,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                   wthe_p[2] = 1.0;
                 }
                 uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx2(m,nmhd_+3,k,j,i);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
                 if ( uY_p < min_DY_ ) {
                   wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
                     + flx_llf[3] ) / ( flx_llf[3] - flx2(m,nmhd_+3,k,j,i) );
@@ -989,8 +1142,70 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         }
+        // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
+        // assumed to hold it, at the solved theta it is exactly attained, so every smaller
+        // theta holds it too. That argument needs the bound to be affine in ONE theta. For
+        // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
+        // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
+        // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
+        // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
+        // the two differ. Collapsing to a single theta restores a one-parameter family and
+        // makes every linear bound among the scalars hold by construction. Costs diffusion:
+        // each scalar is limited by the most restrictive of the four.
+        //   verify_theta_ removes that price -- see the x1 block above for the argument.
+        Real wraw[MAX_SPECIES] = {0.0};
         for (int n=0; n < nscal_; ++n) {
-          wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+          wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+        }
+        Real wthe_all = 1.0;
+        for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
+
+        bool decided_ = false;
+        if constexpr (zla_cascade_) {
+          if (verify_theta_ && nscal_ == 4) {
+            const Real utm[5] = {utest_(m,IDN,k,j-1,i), utest_(m,nmhd_+0,k,j-1,i),
+                                 utest_(m,nmhd_+1,k,j-1,i), utest_(m,nmhd_+2,k,j-1,i),
+                                 utest_(m,nmhd_+3,k,j-1,i)};
+            const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
+                                 utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
+                                 utest_(m,nmhd_+3,k,j,i)};
+            const Real fhi[4] = {flx2(m,nmhd_+0,k,j,i), flx2(m,nmhd_+1,k,j,i),
+                                 flx2(m,nmhd_+2,k,j,i), flx2(m,nmhd_+3,k,j,i)};
+            const Real fD = flx2(m,IDN,k,j,i);
+            bool ok =
+              ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
+                                   q_snap_, eos_min_Y, eos_max_Y) &&
+              ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
+                                   q_snap_, eos_min_Y, eos_max_Y);
+            if (ok) {
+              for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
+            } else {
+              Real a = wthe_all;
+              for (int it=0; it < 4 && !ok; ++it) {
+                Real cand[MAX_SPECIES] = {0.0};
+                for (int n=0; n < nscal_; ++n) { cand[n] = a; }
+                ok =
+                  ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
+                                       q_snap_, eos_min_Y, eos_max_Y) &&
+                  ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
+                                       q_snap_, eos_min_Y, eos_max_Y);
+                if (ok) {
+                  for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
+                } else {
+                  a *= 0.5;
+                }
+              }
+              if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
+            }
+            decided_ = true;
+          }
+        }
+        if (!decided_) {
+          for (int n=0; n < nscal_; ++n) {
+            wthe[n] = shared_theta_ ? wthe_all : wraw[n];
+          }
+        }
+        for (int n=0; n < nscal_; ++n) {
           flx2(m,nmhd_+n,k,j,i) = flx_llf[n]
             + wthe[n] * (flx2(m,nmhd_+n,k,j,i) - flx_llf[n]);
         }
@@ -1061,8 +1276,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                   wthe_m[2] = 1.0;
                 }
                 uY_m = utest_(m,nmhd_+3,k-1,j,i) - bet_pp * flx3(m,nmhd_+3,k,j,i);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
                 if ( uY_m < min_DY_ ) {
                   wthe_m[3] = ( ( utest_(m,nmhd_+3,k-1,j,i) - min_DY_ ) * bet_ppi
                     - flx_llf[3] ) / ( flx3(m,nmhd_+3,k,j,i) - flx_llf[3] );
@@ -1151,8 +1367,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
                   wthe_p[2] = 1.0;
                 }
                 uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx3(m,nmhd_+3,k,j,i);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * (uD - uDN);
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * (uD - uDN);
+                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
+                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
+                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
                 if ( uY_p < min_DY_ ) {
                   wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
                     + flx_llf[3] ) / ( flx_llf[3] - flx3(m,nmhd_+3,k,j,i) );
@@ -1191,8 +1408,70 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         }
+        // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
+        // assumed to hold it, at the solved theta it is exactly attained, so every smaller
+        // theta holds it too. That argument needs the bound to be affine in ONE theta. For
+        // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
+        // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
+        // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
+        // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
+        // the two differ. Collapsing to a single theta restores a one-parameter family and
+        // makes every linear bound among the scalars hold by construction. Costs diffusion:
+        // each scalar is limited by the most restrictive of the four.
+        //   verify_theta_ removes that price -- see the x1 block above for the argument.
+        Real wraw[MAX_SPECIES] = {0.0};
         for (int n=0; n < nscal_; ++n) {
-          wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+          wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
+        }
+        Real wthe_all = 1.0;
+        for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
+
+        bool decided_ = false;
+        if constexpr (zla_cascade_) {
+          if (verify_theta_ && nscal_ == 4) {
+            const Real utm[5] = {utest_(m,IDN,k-1,j,i), utest_(m,nmhd_+0,k-1,j,i),
+                                 utest_(m,nmhd_+1,k-1,j,i), utest_(m,nmhd_+2,k-1,j,i),
+                                 utest_(m,nmhd_+3,k-1,j,i)};
+            const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
+                                 utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
+                                 utest_(m,nmhd_+3,k,j,i)};
+            const Real fhi[4] = {flx3(m,nmhd_+0,k,j,i), flx3(m,nmhd_+1,k,j,i),
+                                 flx3(m,nmhd_+2,k,j,i), flx3(m,nmhd_+3,k,j,i)};
+            const Real fD = flx3(m,IDN,k,j,i);
+            bool ok =
+              ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
+                                   q_snap_, eos_min_Y, eos_max_Y) &&
+              ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
+                                   q_snap_, eos_min_Y, eos_max_Y);
+            if (ok) {
+              for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
+            } else {
+              Real a = wthe_all;
+              for (int it=0; it < 4 && !ok; ++it) {
+                Real cand[MAX_SPECIES] = {0.0};
+                for (int n=0; n < nscal_; ++n) { cand[n] = a; }
+                ok =
+                  ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
+                                       q_snap_, eos_min_Y, eos_max_Y) &&
+                  ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
+                                       q_snap_, eos_min_Y, eos_max_Y);
+                if (ok) {
+                  for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
+                } else {
+                  a *= 0.5;
+                }
+              }
+              if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
+            }
+            decided_ = true;
+          }
+        }
+        if (!decided_) {
+          for (int n=0; n < nscal_; ++n) {
+            wthe[n] = shared_theta_ ? wthe_all : wraw[n];
+          }
+        }
+        for (int n=0; n < nscal_; ++n) {
           flx3(m,nmhd_+n,k,j,i) = flx_llf[n]
             + wthe[n] * (flx3(m,nmhd_+n,k,j,i) - flx_llf[n]);
         }

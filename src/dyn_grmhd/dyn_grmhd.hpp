@@ -121,6 +121,18 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
+  // Share one theta across all scalars in the positivity limiter instead of giving
+  // each its own. The ZLA cascade makes scalar 3's admissible band a function of
+  // scalars 0 and 1, and a bound coupling several variables is only preserved by a
+  // convex combination if they are ALL interpolated with the SAME theta. See
+  // dyn_grmhd_fofc.cpp where wthe[] is applied.
+  bool scalar_shared_theta;
+  // Replace the cascade's a-priori certificate with a direct check (<mhd>/
+  // scalar_theta_verify). The per-scalar thetas are tried first and kept whenever the
+  // four cascade bounds actually hold at them; otherwise the uniform ray is walked down,
+  // starting at exactly the scalar_shared_theta value. Default false. When true it
+  // supersedes scalar_shared_theta, whose value is the first fallback anyway.
+  bool scalar_theta_verify;
   // <time>/gr_dt (default false): opt-in to the real GR fast-magnetosonic-speed
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.

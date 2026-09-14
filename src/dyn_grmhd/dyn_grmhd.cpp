@@ -177,6 +177,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   enforce_maximum = pin->GetOrAddBoolean("mhd", "enforce_maximum", true);
   dmp_M = pin->GetOrAddReal("mhd", "dmp_M", 1.2);
   scalar_pplimiter = pin->GetOrAddBoolean("mhd", "scalar_pplimiter", true);
+  scalar_shared_theta = pin->GetOrAddBoolean("mhd", "scalar_shared_theta", false);
+  scalar_theta_verify = pin->GetOrAddBoolean("mhd", "scalar_theta_verify", false);
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
@@ -720,6 +722,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
     }
   });
 }
+
 
 // Instantiated templates
 template class DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor>;

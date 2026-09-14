@@ -142,6 +142,7 @@ add_executable(
         pgen/tests/binary_gravity.cpp
         pgen/tests/be_collapse.cpp
 
+        pgen/unit_tests/c2p_zla_bag.cpp
         pgen/unit_tests/eos_compose.cpp
         pgen/unit_tests/gauss_legendre.cpp
 

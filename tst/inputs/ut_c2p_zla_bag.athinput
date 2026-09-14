@@ -1,0 +1,92 @@
+# AthenaK input file for the ZLA-bag C2P atmosphere diagnostic unit test.
+#
+# This performs no evolution (nlim = 0, tlim = 0); the pgen instruments
+# PrimitiveSolver::ConToPrim directly at atmosphere densities.
+#
+# <mhd>/table and <mhd>/dfloor must point at the same table and use the same floor as
+# the production run being diagnosed, e.g.
+#   table  = /lus/flare/projects/CompactBinaryMerger/tlam/eos/ZLA_a20_B160_g0.athtab
+#   dfloor = 5.e-21
+# The defaults below use the repo-relative path so the test is runnable in-tree once a
+# ZLA table is available.
+
+<comment>
+problem = ZLA-bag C2P atmosphere diagnostics
+
+<job>
+basename  = c2p_zla_bag
+
+<mesh>
+nghost    = 3         # Number of ghost cells
+nx1       = 8         # Number of zones in X1-direction
+x1min     = 0         # minimum value of X1
+x1max     = 1.0       # maximum value of X1
+ix1_bc    = outflow   # Inner-X1 boundary condition flag
+ox1_bc    = outflow   # Outer-X1 boundary condition flag
+
+nx2       = 1         # Number of zones in X2-direction
+x2min     = 0.0       # minimum value of X2
+x2max     = 1.0       # maximum value of X2
+ix2_bc    = periodic  # Inner-X2 boundary condition flag
+ox2_bc    = periodic  # Outer-X2 boundary condition flag
+
+nx3       = 1         # Number of zones in X3-direction
+x3min     = 0.0       # minimum value of X3
+x3max     = 1.0       # maximum value of X3
+ix3_bc    = periodic  # Inner-X3 boundary condition flag
+ox3_bc    = periodic  # Outer-X3 boundary condition flag
+
+<meshblock>
+nx1       = 8         # Number of cells in each MeshBlock, X1-dir
+nx2       = 1         # Number of cells in each MeshBlock, X2-dir
+nx3       = 1         # Number of cells in each MeshBlock, X3-dir
+
+<time>
+evolution  = dynamic  # dynamic/kinematic/static
+integrator = rk2      # time integration algorithm
+cfl_number = 0.8      # The Courant, Friedrichs, & Lewy (CFL) Number
+nlim       = 0        # cycle limit
+tlim       = 0        # time limit
+ndiag      = 1        # cycles between diagnostic output
+
+<coord>
+general_rel = true
+minkowski   = true
+excise      = false
+m           = 0.0
+a           = 0.0
+
+<mhd>
+eos         = ideal              # placeholder (unused, required by parser)
+gamma       = 2.0                # placeholder (unused, required by parser)
+
+dyn_eos     = zla_bag
+dyn_error   = reset_floor        # silently upgraded to reset_floor_zla_bag
+reconstruct = ppm4
+rsolver     = hlle
+nscalars    = 4
+use_NQT     = false
+
+# Match the production run being diagnosed.
+dfloor      = 5.e-21
+c2p_tol     = 2.49e-13
+gamma_max   = 20.025
+ZL_eta      = 0.0                # 0 = Gibbs / global charge neutrality ("g0" tables)
+h_bar       = 197.3269804        # CODATA hbar*c [MeV fm]; P scales as hbar^2
+f_snap      = 1.0e-8             # snap phase fractions this close to 0 or 1
+
+# Atmosphere composition: (f, Y_N, Y_N y_lN, (1-Y_N) y_lQ).
+# NOTE: these default to 0.0, which would make the atmosphere pure *quark* matter.
+s0_atmosphere = 1.0
+s1_atmosphere = 1.0
+s2_atmosphere = 0.0
+s3_atmosphere = 0.0
+
+table       = inputs/tables/ZLA_a20_B160_g0.athtab
+
+<adm>
+
+<problem>
+pgen_name = c2p_zla_bag
+nf = 21       # number of f = Y[0] values swept in Test A
+nn = 7        # number of densities swept in Tests B and C (x100 each)

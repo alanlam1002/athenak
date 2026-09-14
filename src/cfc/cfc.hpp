@@ -31,6 +31,7 @@
 #include "mg_cfc_vector_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
+#include <vector>
 
 class MeshBlockPack;
 class ParameterInput;
@@ -101,6 +102,51 @@ class CFC {
   // <cfc> alpha_floor (default 0.0): lower clamp on adm.alpha (AssembleLapseShiftK)
   // so the fluid update never sees a negative lapse. See DEVELOPMENT.md item 59.
   Real alpha_floor_;
+
+  // Running totals of what excision has removed from the grid over the whole run.
+  // accreted_mass_ is ADM-weighted (int psi^5 E dV) and is what Step 3 hands to
+  // puncture_mass_; accreted_mom_ is a DIAGNOSTIC only -- the puncture is fixed at
+  // the origin and non-spinning by design, so the swallowed momentum is discarded,
+  // and this records how much recoil that neglects.
+  Real accreted_mass_ = 0.0;
+  Real accreted_mom_[3] = {0.0, 0.0, 0.0};
+  // Per-RK-stage excision removals, [stage][{dM_adm, dPx, dPy, dPz, dM_raw}].  Drained
+  // once per stage and combined on the last stage with the RK propagation weights
+  // w_s = prod_{j>s} gam0_j -- summing them raw over-counts by ~2x, because the SSP-RK
+  // u1 register re-injects matter a previous stage already excised.  See
+  // AccreteExcisedMass and item 60.  Sized for Driver::gam0[4], the max stage count.
+  Real stage_tally_[4][5] = {};
+  // <cfc> accrete_to_puncture (default true when puncture_enabled): actually grow
+  // M_BH by the swallowed energy.  Set false to keep the tally as a pure diagnostic,
+  // which is how the psi^5-vs-psi^6 weighting A/B is run.
+  bool accrete_to_puncture_;
+  Real puncture_mass_init_ = 0.0;  // for reporting M_BH growth
+
+  // ADM-mass surface integral (<cfc> adm_mass_r0, adm_mass_r1, ... ; adm_mass_dr,
+  // adm_mass_nlev).  The INDEPENDENT check that mass handed to the puncture actually
+  // shows up in the spacetime: everything else (the excision tally, M_BH itself) is
+  // internal bookkeeping that could be self-consistently wrong.
+  std::vector<Real> adm_mass_radii_;
+  Real adm_mass_dr_ = 1.0;
+  int  adm_mass_nlev_ = 3;
+  // <cfc> adm_mass_center = origin (default) | com.  With "com" the extraction spheres
+  // are centered on r_com_mass_, the SAME centroid SolveConformalFactor() already hands
+  // to MultigridDriver::SetRobinCenter() -- so the diagnostic and the solver agree on
+  // where the residual's 1/r falloff is anchored.  Requires puncture_enabled_, since
+  // r_com_mass_ is only ever filled on that path.  See ComputeADMMass() for what this
+  // does and does not change.
+  bool adm_mass_center_com_ = false;
+  void ComputeADMMass();
+  // Volume-integral counterparts of the ADM surface integral, split into the two
+  // sources the Hamiltonian constraint actually has.  Exact identity being tested:
+  //     M_res = int(psi^5 E) dV + (1/16pi) int[psi^-7 Ahat^2 - psi0^-7 Ahat0^2] dV
+  // The first term is what AccreteExcisedMass hands to the puncture; the second is
+  // the extrinsic-curvature energy, which changes when excision removes the matter
+  // momentum that sources Ahat and which is currently NOT transferred.  Comparing
+  // the sum against M_res both quantifies that omission and validates the surface
+  // integral against an independent volume integral.
+  void ComputeResidualMassVolume(Real *i_e, Real *i_a);
+  void AccreteExcisedMass(Driver *pdriver, int stage);
 
   // Mass-weighted centroid of pmy_pack->pmhd->u0(IDN), recomputed every
   // SolveConformalFactor() call and reused by SolveLapse() the same stage (Sec 3.10

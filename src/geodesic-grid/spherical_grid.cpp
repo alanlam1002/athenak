@@ -23,7 +23,8 @@
 //----------------------------------------------------------------------------------------
 // constructor, initializes data structures and parameters
 
-SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp):
+SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp,
+                             const Real *ctr):
     GeodesicGrid(nlev,true,false),
     radius(rad),
     interp_coord("interp_coord",1,1),
@@ -31,6 +32,10 @@ SphericalGrid::SphericalGrid(MeshBlockPack *ppack, int nlev, Real rad, int nintp
     pmy_pack(ppack),
     interp_indcs("interp_indcs",1,1),
     interp_wghts("interp_wghts",1,1,1) {
+  center[0] = (ctr == nullptr) ? 0.0 : ctr[0];
+  center[1] = (ctr == nullptr) ? 0.0 : ctr[1];
+  center[2] = (ctr == nullptr) ? 0.0 : ctr[2];
+
   // reallocate and set interpolation coordinates, indices, and weights
   ninterp = (nintp <= 0) ? pmy_pack->pmesh->mb_indcs.ng*2 : nintp;
   if (ninterp > pmy_pack->pmesh->mb_indcs.ng*2+1) {
@@ -66,29 +71,51 @@ void SphericalGrid::SetInterpolationCoordinates() {
   // Schild data, the SphericalGrid radius is assumed to correspond to a spherical Kerr-
   // Schild radius, meaning that when setting the x1, x2, and x3 interpolation coordinates
   // we must translate between the two coordinate systems.
+  //
+  // NOTE: the Kerr-Schild branch below places the sphere in the spheroidal coordinates of
+  // a hole sitting at the ORIGIN, so a nonzero center only makes unambiguous sense when
+  // spin == 0 (the branch then reduces to the flat one).  Offsetting a spinning-KS sphere
+  // is a rigid translation of a spheroid, which is not what a coordinate sphere about the
+  // new center would be -- do not use `center` together with bh_spin != 0.
   if (pmy_pack->pcoord->is_general_relativistic ||
       pmy_pack->pcoord->is_dynamical_relativistic) {
     for (int n=0; n<nangles; ++n) {
       Real &spin = pmy_pack->pcoord->coord_data.bh_spin;
       Real &theta = polar_pos.h_view(n,0);
       Real &phi = polar_pos.h_view(n,1);
-      interp_coord.h_view(n,0) = (radius*cos(phi)-spin*sin(phi))*sin(theta);
-      interp_coord.h_view(n,1) = (radius*sin(phi)+spin*cos(phi))*sin(theta);
-      interp_coord.h_view(n,2) = radius*cos(theta);
+      interp_coord.h_view(n,0) = (radius*cos(phi)-spin*sin(phi))*sin(theta) + center[0];
+      interp_coord.h_view(n,1) = (radius*sin(phi)+spin*cos(phi))*sin(theta) + center[1];
+      interp_coord.h_view(n,2) = radius*cos(theta) + center[2];
     }
   } else {
     for (int n=0; n<nangles; ++n) {
       Real &theta = polar_pos.h_view(n,0);
       Real &phi = polar_pos.h_view(n,1);
-      interp_coord.h_view(n,0) = radius*cos(phi)*sin(theta);
-      interp_coord.h_view(n,1) = radius*sin(phi)*sin(theta);
-      interp_coord.h_view(n,2) = radius*cos(theta);
+      interp_coord.h_view(n,0) = radius*cos(phi)*sin(theta) + center[0];
+      interp_coord.h_view(n,1) = radius*sin(phi)*sin(theta) + center[1];
+      interp_coord.h_view(n,2) = radius*cos(theta) + center[2];
     }
   }
 
   // sync dual arrays
   interp_coord.template modify<HostMemSpace>();
   interp_coord.template sync<DevExeSpace>();
+
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void SphericalGrid::SetCenter
+//! \brief move the sphere to a new Cartesian center and rebuild the interpolation stencil
+
+void SphericalGrid::SetCenter(const Real *ctr) {
+  center[0] = (ctr == nullptr) ? 0.0 : ctr[0];
+  center[1] = (ctr == nullptr) ? 0.0 : ctr[1];
+  center[2] = (ctr == nullptr) ? 0.0 : ctr[2];
+
+  SetInterpolationCoordinates();
+  SetInterpolationIndices();
+  SetInterpolationWeights();
 
   return;
 }

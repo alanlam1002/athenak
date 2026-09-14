@@ -25,7 +25,6 @@
 #include "eos/eos.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
-#include "cfc/cfc.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
@@ -45,6 +44,25 @@ static Real A2(const tov::TOVStar& tov_, const TOVEOS& eos, bool isotropic, Real
 
 // Prototypes for user-defined BCs and history
 void TOVHistory(HistoryData *pdata, Mesh *pm);
+
+// Prototype for the optional tracked-refinement criterion (<problem>
+// amr_condition = tde_track). See TDERefineTracker's own comment below.
+void TDERefineTracker(MeshBlockPack *pmbp);
+
+namespace {
+// Parameters for TDERefineTracker (<problem> amr_condition = tde_track).
+struct TDERefineParams {
+  Real r0;          // star's initial x-position (<problem> star_center_x1),
+                    // used only to seed x1_star before the first reduction
+  Real rad_bh;      // refinement radius around the (fixed) puncture at the origin
+  Real rad_star;    // refinement radius around the star
+  Real rad_bh_fine; // inner, higher-level radius around the puncture (0 disables)
+  int  lev_bh;      // target level within rad_bh
+  int  lev_star;    // target level within rad_star
+  int  lev_bh_fine; // target level within rad_bh_fine (must exceed lev_bh)
+};
+TDERefineParams tde_ref;
+} // namespace
 
 namespace {
 struct TOVParams {
@@ -66,19 +84,10 @@ struct TOVParams {
 };
 
 TOVParams *ptov_params;
-Real track_radius_ = 4.0;  // set once in UserProblem() when tracking is enrolled
-// Fallback tracking center, used only before CFC's r_com_mass_ centroid has been
-// computed by a first solve (it starts at exactly {0,0,0} -- a real centroid
-// essentially never lands there, so that's a safe sentinel).
-Real track_fallback_x0_ = 0.0, track_fallback_y0_ = 0.0, track_fallback_z0_ = 0.0;
 } // namespace
 
 void SetADMVariablesToTOV(MeshBlockPack *pmbp);
 void FinalizeTOV(ParameterInput *pin, Mesh *pm);
-// AMR refinement condition that follows the star's mass centroid, analogous to
-// z4c's CompactObjectTracker-driven RefineTracker() in dynbbh.cpp. Only enrolled
-// when <problem> track_star_refinement=true.
-void RefineTOVTracker(MeshBlockPack *pmbp);
 
 template<class TOVEOS>
 void SolveTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
@@ -485,15 +494,18 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   pgen_final_func = &FinalizeTOV;
   pmbp->padm->SetADMVariables = &SetADMVariablesToTOV;
 
-  // Optional: track the star's mass centroid instead of a static box (see
-  // RefineTOVTracker below). Off by default; requires <mesh_refinement>
-  // refinement=adaptive and an <amr_criterionN> method=user block.
-  if (pin->GetOrAddBoolean("problem", "track_star_refinement", false)) {
-    user_ref_func = &RefineTOVTracker;
-    track_radius_ = pin->GetOrAddReal("problem", "track_radius", 4.0);
-    track_fallback_x0_ = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
-    track_fallback_y0_ = pin->GetOrAddReal("problem", "star_center_x2", 0.0);
-    track_fallback_z0_ = pin->GetOrAddReal("problem", "star_center_x3", 0.0);
+  // Optional tracked refinement for the TDE setup (<problem> amr_condition).
+  // Default "none" leaves user_ref_func null, so every existing fixture -- all of
+  // which use static refinement -- is completely unaffected.
+  if (pin->GetOrAddString("problem", "amr_condition", "none") == "tde_track") {
+    tde_ref.r0       = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
+    tde_ref.rad_bh      = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
+    tde_ref.rad_star    = pin->GetOrAddReal("problem", "amr_radius_star", 2.0);
+    tde_ref.rad_bh_fine = pin->GetOrAddReal("problem", "amr_radius_bh_fine", 0.0);
+    tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
+    tde_ref.lev_star    = pin->GetOrAddInteger("problem", "amr_level_star", 5);
+    tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
+    user_ref_func = &TDERefineTracker;
   }
 
   // initialize primitive variables for restart
@@ -673,6 +685,138 @@ void SetADMVariablesToTOV(MeshBlockPack *pmbp) {
   });
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void TDERefineTracker(MeshBlockPack *pmbp)
+//! \brief Refinement criterion for the TDE setup: keep a fine box around the BH
+//! puncture (fixed at the origin) and a second one around the infalling star,
+//! instead of the single long static "tube" spanning the whole trajectory that
+//! wastes ~90% of its finest-level cost on space that is empty at any instant.
+//!
+//! Follows dynbbh.cpp's RefineTracker (an analytic-trajectory user_ref_func that
+//! needs no z4c object) rather than z4c's CompactObjectTracker, which is
+//! unreachable here: <cfc> and <z4c> are mutually exclusive (meshblock_pack.cpp),
+//! so pz4c is always nullptr in a CFC run and ptracker never exists.
+//!
+//! The star position comes from the analytic Schwarzschild radial free-fall from
+//! rest, r(t) = (r0/2)(1+cos eta) with t = sqrt(r0^3/2M)(eta+sin eta)/2, inverted
+//! by bisection. Checked against the production run: accurate to <0.19 code units
+//! through t~60, but it drifts badly later (-7 at t=180) because the collapsing
+//! lapse slows coordinate infall relative to the Schwarzschild areal result. So
+//! this is adequate for a short regrid-behaviour test, NOT for production -- a
+//! real run needs a genuine tracker (e.g. a density maximum).
+//!
+//! Note this writes refine_flag through h_view, not d_view. dynbbh.cpp's version
+//! writes d_view from a host loop, which happens to work only because the two
+//! views alias on a CPU-only build; z4c_amr.cpp's RefineTracker uses h_view, and
+//! that is the form that is also correct for a GPU build.
+
+void TDERefineTracker(MeshBlockPack *pmbp) {
+  Mesh *pmesh       = pmbp->pmesh;
+  auto &refine_flag = pmesh->pmr->refine_flag;
+  auto &size        = pmbp->pmb->mb_size;
+  int nmb           = pmbp->nmb_thispack;
+  int mbs           = pmesh->gids_eachrank[global_variable::my_rank];
+
+  // Locate the star as the global maximum of rest-mass density. (The earlier
+  // analytic Schwarzschild free-fall estimate was accurate to <0.19 through
+  // t~60 but drifts to ~-2.4 by t~145 -- larger than a sensible box half-width,
+  // so the box would slide off the star. Widening the box instead is not an
+  // option: radius 4 would cost ~4096 finest MeshBlocks, as much as the tube
+  // this design exists to replace.)
+  Real x1_star = tde_ref.r0, x2_star = 0.0, x3_star = 0.0;
+  {
+    auto &w0_    = pmbp->pmhd->w0;
+    auto &indcs  = pmesh->mb_indcs;
+    int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    const int nmkji = nmb*nkji;
+
+    using MaxLocR = Kokkos::MaxLoc<Real, int>;
+    typename MaxLocR::value_type mxl;
+    Kokkos::parallel_reduce("TDEStarLoc",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+      KOKKOS_LAMBDA(const int &idx, typename MaxLocR::value_type &lmx) {
+        int m = idx/nkji;
+        int k = (idx - m*nkji)/nji;
+        int j = (idx - m*nkji - k*nji)/nx1;
+        int i = (idx - m*nkji - k*nji - j*nx1) + is;
+        k += ks; j += js;
+        Real d = w0_(m,IDN,k,j,i);
+        if (d > lmx.val) { lmx.val = d; lmx.loc = idx; }
+      }, MaxLocR(mxl));
+
+    // Convert this rank's winning flat index back to coordinates.
+    int m = mxl.loc/nkji;
+    int k = (mxl.loc - m*nkji)/nji;
+    int j = (mxl.loc - m*nkji - k*nji)/nx1;
+    int i = (mxl.loc - m*nkji - k*nji - j*nx1);
+    Real xl = CellCenterX(i, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+    Real yl = CellCenterX(j, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+    Real zl = CellCenterX(k, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+
+#if MPI_PARALLEL_ENABLED
+    // Pick the globally-densest cell, then broadcast its position from the
+    // owning rank. MPI_MAXLOC on {value, rank} identifies the owner.
+    struct { double val; int rank; } lin, gout;
+    lin.val = static_cast<double>(mxl.val);
+    lin.rank = global_variable::my_rank;
+    MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    Real pos[3] = {xl, yl, zl};
+    MPI_Bcast(pos, 3, MPI_ATHENA_REAL, gout.rank, MPI_COMM_WORLD);
+    xl = pos[0]; yl = pos[1]; zl = pos[2];
+#endif
+    x1_star = xl; x2_star = yl; x3_star = zl;
+  }
+
+  const Real r2_bh      = SQR(tde_ref.rad_bh);
+  const Real r2_star    = SQR(tde_ref.rad_star);
+  const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
+
+  for (int m = 0; m < nmb; ++m) {
+    Real &x1min = size.h_view(m).x1min;
+    Real &x1max = size.h_view(m).x1max;
+    Real &x2min = size.h_view(m).x2min;
+    Real &x2max = size.h_view(m).x2max;
+    Real &x3min = size.h_view(m).x3min;
+    Real &x3max = size.h_view(m).x3max;
+
+    // Distance from each target to the closest point of this MeshBlock's AABB
+    // (0 when the target is inside it), matching z4c_amr.cpp's RefineTracker.
+    auto dist2_to_block = [&](Real px, Real py, Real pz) -> Real {
+      Real cx = std::fmax(x1min, std::fmin(px, x1max));
+      Real cy = std::fmax(x2min, std::fmin(py, x2max));
+      Real cz = std::fmax(x3min, std::fmin(pz, x3max));
+      return SQR(px - cx) + SQR(py - cy) + SQR(pz - cz);
+    };
+
+    // Per-target requested levels, compared against this block's CURRENT level
+    // (the z4c_amr.cpp:84 pattern). A single "refine or derefine" flag is not
+    // enough once different targets want different depths: the puncture needs a
+    // deeper level than the star, to widen the gap between the excision surface
+    // and the horizon, while refining the STAR that deep would halve dt (the
+    // star sits where alpha~1, so it is what sets the global timestep).
+    int level = pmesh->lloc_eachmb[m + mbs].level - pmesh->root_level;
+    Real d2_bh = dist2_to_block(0.0, 0.0, 0.0);
+    Real d2_st = dist2_to_block(x1_star, x2_star, x3_star);
+
+    int want = -1;
+    if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }
+    if (r2_bh_fine > 0.0 && d2_bh < r2_bh_fine) { want = std::max(want, tde_ref.lev_bh_fine); }
+    if (d2_st < r2_star)                        { want = std::max(want, tde_ref.lev_star); }
+
+    int flag;
+    if (want < 0)             { flag = -1; }        // outside every target
+    else if (level < want)    { flag =  1; }
+    else if (level == want)   { flag =  0; }
+    else                      { flag = -1; }
+    refine_flag.h_view(m + mbs) = flag;
+  }
+
+  refine_flag.template modify<HostMemSpace>();
+  refine_flag.template sync<DevExeSpace>();
+}
+
 // Cleanup at the end of the run
 void FinalizeTOV(ParameterInput *pin, Mesh *pm) {
   // This function is only needed to delete the TOV solver data, which is stored inside
@@ -743,68 +887,3 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[1] = alpha_min;
 }
 
-//----------------------------------------------------------------------------------------
-//! \fn void RefineTOVTracker(MeshBlockPack *pmbp)
-//! \brief AMR refinement condition that keeps the refined region centered on the star's
-//! current mass centroid, instead of a pre-drawn static box. Pattern copied from
-//! RefineTracker() in dynbbh.cpp. The tracked center, pmbp->pcfc->r_com_mass_, is
-//! already computed every CFC solve (CFC::ComputeMassCentroid()), so no new reduction
-//! is needed.
-//!
-//! Each local MeshBlock is flagged +1 (refine) if any corner is within track_radius of
-//! the centroid, else -1 (derefine). AMR only moves one level per check, so blocks
-//! near the star ramp up over consecutive checks as long as they keep being flagged,
-//! and the region recedes behind the star as it moves on.
-void RefineTOVTracker(MeshBlockPack *pmbp) {
-  Mesh *pmesh = pmbp->pmesh;
-  auto &refine_flag = pmesh->pmr->refine_flag;
-  auto &size = pmbp->pmb->mb_size;
-  int nmb = pmbp->nmb_thispack;
-  int mbs = pmesh->gids_eachrank[global_variable::my_rank];
-
-  Real x0 = pmbp->pcfc->r_com_mass_[0];
-  Real y0 = pmbp->pcfc->r_com_mass_[1];
-  Real z0 = pmbp->pcfc->r_com_mass_[2];
-  if (x0 == 0.0 && y0 == 0.0 && z0 == 0.0) {
-    // No CFC solve has populated r_com_mass_ yet -- use the star's known initial
-    // center instead of tracking towards the coordinate origin.
-    x0 = track_fallback_x0_;
-    y0 = track_fallback_y0_;
-    z0 = track_fallback_z0_;
-  }
-  Real rad2 = SQR(track_radius_);
-
-  for (int m = 0; m < nmb; ++m) {
-    Real &x1min = size.h_view(m).x1min;
-    Real &x1max = size.h_view(m).x1max;
-    Real &x2min = size.h_view(m).x2min;
-    Real &x2max = size.h_view(m).x2max;
-    Real &x3min = size.h_view(m).x3min;
-    Real &x3max = size.h_view(m).x3max;
-
-    Real d2[8] = {
-      SQR(x1min-x0) + SQR(x2min-y0) + SQR(x3min-z0),
-      SQR(x1max-x0) + SQR(x2min-y0) + SQR(x3min-z0),
-      SQR(x1min-x0) + SQR(x2max-y0) + SQR(x3min-z0),
-      SQR(x1max-x0) + SQR(x2max-y0) + SQR(x3min-z0),
-      SQR(x1min-x0) + SQR(x2min-y0) + SQR(x3max-z0),
-      SQR(x1max-x0) + SQR(x2min-y0) + SQR(x3max-z0),
-      SQR(x1min-x0) + SQR(x2max-y0) + SQR(x3max-z0),
-      SQR(x1max-x0) + SQR(x2max-y0) + SQR(x3max-z0),
-    };
-    Real dmin2 = *std::min_element(&d2[0], &d2[8]);
-    bool contains_centroid = (x0 >= x1min && x0 <= x1max) &&
-                             (y0 >= x2min && y0 <= x2max) &&
-                             (z0 >= x3min && z0 <= x3max);
-
-    if (dmin2 < rad2 || contains_centroid) {
-      refine_flag.h_view(m + mbs) = 1;
-    } else {
-      refine_flag.h_view(m + mbs) = -1;
-    }
-  }
-
-  // sync host and device
-  refine_flag.template modify<HostMemSpace>();
-  refine_flag.template sync<DevExeSpace>();
-}

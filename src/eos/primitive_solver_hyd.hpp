@@ -333,6 +333,13 @@ class PrimitiveSolverHydro {
     int &ks = indcs.ks;
     auto &size = pmy_pack->pmb->mb_size;
 
+    // Captured by value for the excised-mass tally below (interior-cell guard and
+    // the accumulator itself).  ie/je/ke are copies because indcs members cannot be
+    // captured by reference into a device lambda.
+    const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
+    const bool floors_only_ = floors_only;
+    auto tally_ = pmy_pack->pcoord->excised_tally;
+
     const int ni = (iu - il + 1);
     const int nji = (ju - jl + 1)*ni;
     const int nkji = (ku - kl + 1)*nji;
@@ -442,6 +449,36 @@ class PrimitiveSolverHydro {
             result.prim_floor = false;
             result.cons_adjusted = true;
             ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
+
+            // Bank what this reset just removed, so CFC can hand it to the puncture.
+            // Without this the hole loses the mass it swallowed: CFC's metric comes
+            // from elliptic constraints on the instantaneous matter distribution, so
+            // deleting matter deletes its gravity in the same step.
+            //
+            // Interior cells only.  This kernel is also run over ghost zones (the
+            // caller sweeps 0..n1m1) and re-entered by ConToPrimBC on boundary
+            // strips, so an unguarded sum would multiply-count every excised cell.
+            // Also skipped for floors_only, where FOFC probes the state and writes
+            // nothing back.
+            if (!floors_only_ && i >= is && i <= ie_ && j >= js && j <= je_ &&
+                k >= ks && k <= ke_) {
+              // psi from sqrt(det g) == psi^6 (conformal flatness).  The energy is
+              // weighted by 1/psi to convert the densitized conserved energy
+              // psi^6*E into the ADM-mass contribution psi^5*E; the momenta are
+              // NOT, since psi^6*S_i is already the momentum-constraint source.
+              Real psi_c = Kokkos::pow(sdetg, 1.0/6.0);
+              Real dvol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+              Real dE = ((cons_pt_old[CTA] + cons_pt_old[CDN])
+                        - (cons_pt[CTA] + cons_pt[CDN]))*sdetg*dvol;
+              Kokkos::atomic_add(&tally_(m,0), dE/psi_c);
+              Kokkos::atomic_add(&tally_(m,1),
+                                 (cons_pt_old[CSX] - cons_pt[CSX])*sdetg*dvol);
+              Kokkos::atomic_add(&tally_(m,2),
+                                 (cons_pt_old[CSY] - cons_pt[CSY])*sdetg*dvol);
+              Kokkos::atomic_add(&tally_(m,3),
+                                 (cons_pt_old[CSZ] - cons_pt[CSZ])*sdetg*dvol);
+              Kokkos::atomic_add(&tally_(m,4), dE);   // raw psi^6 E, validation only
+            }
           } else {
             result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);
           }

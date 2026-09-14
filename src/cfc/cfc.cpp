@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -25,6 +27,7 @@
 #include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "cfc.hpp"
+#include "geodesic-grid/spherical_grid.hpp"
 #include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
 
@@ -300,6 +303,38 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
+  accrete_to_puncture_ = pin->GetOrAddBoolean("cfc", "accrete_to_puncture", true);
+  puncture_mass_init_ = puncture_mass_;
+
+  // ADM-mass extraction radii, discovered by existence (<cfc> adm_mass_r0, _r1, ...).
+  for (int n = 0; n < 8; ++n) {
+    std::string key = "adm_mass_r" + std::to_string(n);
+    if (pin->DoesParameterExist("cfc", key)) {
+      adm_mass_radii_.push_back(pin->GetReal("cfc", key));
+    }
+  }
+  adm_mass_dr_   = pin->GetOrAddReal("cfc", "adm_mass_dr", 1.0);
+  adm_mass_nlev_ = pin->GetOrAddInteger("cfc", "adm_mass_nlev", 3);
+  {
+    std::string ctr = pin->GetOrAddString("cfc", "adm_mass_center", "origin");
+    if (ctr == "origin") {
+      adm_mass_center_com_ = false;
+    } else if (ctr == "com") {
+      adm_mass_center_com_ = true;
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> adm_mass_center = '" << ctr
+                << "' not recognized; must be 'origin' or 'com'" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (adm_mass_center_com_ && !puncture_enabled_) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> adm_mass_center = com requires the puncture "
+                << "background: r_com_mass_ is only computed when puncture is enabled"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
   r_com_mass_[0] = r_com_mass_[1] = r_com_mass_[2] = 0.0;
   r_com_X_[0] = r_com_X_[1] = r_com_X_[2] = 0.0;
   r_com_beta_[0] = r_com_beta_[1] = r_com_beta_[2] = 0.0;
@@ -1198,7 +1233,356 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   AssembleADM();
+  AccreteExcisedMass(pdriver, stage);
+  if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeADMMass()
+//! \brief Surface-integral ADM mass on coordinate spheres, reported at each requested
+//! radius.  This is the only INDEPENDENT check that mass transferred to the puncture
+//! by AccreteExcisedMass actually appears in the spacetime -- the excision tally and
+//! M_BH itself are internal bookkeeping that could be self-consistently wrong.
+//!
+//! For a conformally-flat slice, psi -> 1 + M/(2r), and
+//!     M_ADM = -(1/2pi) * closed_integral( grad(psi) . dS ) = -2 r^2 d<psi>/dr.
+//!
+//! CRUCIALLY this is applied to the RESIDUAL, not the full psi, and the background's
+//! contribution is taken analytically:
+//!     M_total = M_BH  +  ( -2 r^2 d<delta_psi>/dr ).
+//! Integrating the full psi would throw away the entire point of the puncture split.
+//! The background carries almost all the mass, so its truncation error swamps the
+//! quantity of interest: at r=16 the full-psi integral is only ~1% accurate, i.e. ~1e-2
+//! absolute.  In the TDE case this is fatal -- a 0.7 Msun star against a 1e4 Msun hole
+//! is 7e-5 in units of M_BH, so the error on the hole alone would be two orders of
+//! magnitude larger than the entire object being measured.  Splitting makes the
+//! numerical error scale with the RESIDUAL's size instead, which is the same reason
+//! the puncture background is split out of the evolution in the first place.
+//!
+//! Reported per radius: M_res (the residual surface integral -- the matter's own ADM
+//! contribution), M_BH (analytic), M_total = sum, and bg_num.  The last is the same
+//! surface integral applied to psi0 alone: it should reproduce M_BH, and is carried
+//! only to verify that the background's ADM mass really is the analytic value -- it
+//! is NOT used in M_total.  Radius-independence of M_res is the real test; a single
+//! number at a single radius proves nothing.
+//!
+//! The spheres are rebuilt on every call rather than cached: SphericalGrid stores
+//! interpolation indices/weights tied to the CURRENT MeshBlock layout, which any AMR
+//! regrid invalidates.  Rebuilding is ~nangles*nmb index lookups (92 points at the
+//! default nlev=3), i.e. negligible against a V-cycle.
+//!
+//! psi is reassembled as delta_psi + psi0, since CFC stores the residual.
+//!
+//! EXTRACTION CENTER (<cfc> adm_mass_center = origin | com).  With "com" the spheres are
+//! centered on r_com_mass_, the same centroid SolveConformalFactor() hands to
+//! SetRobinCenter(), so the diagnostic and the solver's outer BC share an origin.  Be
+//! precise about what that does and does not buy, because the naive expectation is wrong:
+//!
+//!   - It is NOT a first-order correction to the monopole.  By the mean-value property,
+//!     the spherical average of a harmonic field over a shell equals 1/r times the
+//!     enclosed mass no matter WHERE inside the shell that mass sits, and no matter where
+//!     the shell is centered.  For the exact solution, -2 r^2 d<psi>/dr returns the same
+//!     enclosed mass either way.  Recentering does not fix a bias in an otherwise correct
+//!     extraction.
+//!   - What it changes is (a) WHAT IS ENCLOSED and (b) how much high-l power the finite
+//!     quadrature has to cancel.  The nlev geodesic quadrature is exact only up to some
+//!     multipole degree; a sphere centered where the residual is most nearly monopolar
+//!     leaks least.  Centered on the origin with the star far off-center, the residual's
+//!     dominant structure across the sphere is l>=1, and the extraction is measuring
+//!     quadrature leakage rather than mass.
+//!   - Corollary: with "com", bg_num stops being a check on M_BH.  psi0's puncture sits
+//!     at the ORIGIN, so once the sphere is centered elsewhere and no longer encloses it,
+//!     the same mean-value property drives bg_num toward zero.  That is correct
+//!     behaviour, not a regression -- bg_num only validates M_BH for origin-centered
+//!     spheres.
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ComputeResidualMassVolume(Real *i_e, Real *i_a)
+//! \brief The two volume integrals that the residual surface integral must equal.
+//!
+//! With K=0 the Hamiltonian constraint is  Delta psi = -2pi psi^5 E - (1/8) psi^-7 Ahat^2
+//! (see ConformalFactorRHS, mg_cfc_conformal_factor.cpp:160, whose 2pi/0.125 coefficients
+//! fix this normalisation), so integrating against the puncture-split field gives
+//!
+//!     M_res = int(psi^5 E) dV  +  (1/16pi) int[psi^-7 Ahat^2 - psi0^-7 Ahat0^2] dV
+//!             \______i_e______/    \______________i_a______________________________/
+//!
+//! i_e is exactly the quantity AccreteExcisedMass transfers to the puncture on excision.
+//! i_a is NOT transferred: Ahat is *solved* from the momentum constraint sourced by S_i,
+//! so deleting matter drops S_i and the next elliptic solve returns a smaller Ahat, with
+//! nothing absorbing the difference.  That omission is the energy face of the momentum
+//! the pinned, non-spinning puncture already discards by design -- one approximation with
+//! two faces, not two independent ones.  Reporting i_e and i_a separately turns it from
+//! an acknowledged approximation into a measured one, and (i_e + i_a) vs M_res is an
+//! independent volume-vs-surface check on the extraction itself.
+//!
+//! NUMERICS: near the puncture psi0 -> inf and Ahat0^2 diverges, so forming
+//! psi^-7 Ahat^2 - psi0^-7 Ahat0^2 by direct subtraction is catastrophic cancellation of
+//! two large nearly-equal numbers.  It is regrouped as
+//!     psi^-7 (Ahat^2 - Ahat0^2)  +  Ahat0^2 (psi^-7 - psi0^-7)
+//! with the second difference evaluated as psi0^-7 * [(1+r)^-7 - 1], r = delta_psi/psi0,
+//! via expm1/log1p so it stays accurate when r << 1 -- which is exactly the regime near
+//! the puncture, where the physical answer is that the two cancel.
+
+void CFC::ComputeResidualMassVolume(Real *i_e, Real *i_a) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+
+  auto &utilde_ = u_tilde;      // psi^6 E  (cons(IEN)+cons(IDN))
+  auto &dpsi_   = delta_psi;    // psi - psi0
+  auto &psi0_   = u_psi0;       // psi0
+  auto &asq_    = a_sq;         // Ahat^2   (total)
+  auto &a0sq_   = a0_sq;        // Ahat0^2  (background)
+
+  DvceArray2D<Real> partial("cfc_resmass_partial", nmb, 2);
+  par_for("cfc_residual_mass_volume", DevExeSpace(), 0, nmb-1,
+  KOKKOS_LAMBDA(const int m) {
+    Real dx1 = (size.d_view(m).x1max - size.d_view(m).x1min)/static_cast<Real>(indcs.nx1);
+    Real dx2 = (size.d_view(m).x2max - size.d_view(m).x2min)/static_cast<Real>(indcs.nx2);
+    Real dx3 = (size.d_view(m).x3max - size.d_view(m).x3min)/static_cast<Real>(indcs.nx3);
+    Real vol = dx1*dx2*dx3;
+    Real se = 0.0, sa = 0.0;
+    for (int k = ks; k <= ke; ++k) {
+      for (int j = js; j <= je; ++j) {
+        for (int i = is; i <= ie; ++i) {
+          Real p0 = psi0_(m,0,k,j,i);
+          Real dp = dpsi_(m,0,k,j,i);
+          Real psi = p0 + dp;
+          // psi^5 E = (psi^6 E)/psi.  Same weighting AccreteExcisedMass uses.
+          if (psi > 0.0) { se += (utilde_(m,0,k,j,i)/psi)*vol; }
+          // Extrinsic-curvature term, regrouped to avoid cancelling large numbers.
+          if (psi > 0.0 && p0 > 0.0) {
+            Real ipsi7  = 1.0/(psi*psi*psi*psi*psi*psi*psi);
+            Real ipsi07 = 1.0/(p0*p0*p0*p0*p0*p0*p0);
+            Real r = dp/p0;
+            Real dinv7 = (r > -1.0) ? ipsi07*Kokkos::expm1(-7.0*Kokkos::log1p(r))
+                                    : (ipsi7 - ipsi07);
+            sa += (ipsi7*(asq_(m,0,k,j,i) - a0sq_(m,0,k,j,i))
+                   + a0sq_(m,0,k,j,i)*dinv7)*vol;
+          }
+        }
+      }
+    }
+    partial(m,0) = se;
+    partial(m,1) = sa;
+  });
+
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  Real totals[2] = {};
+  for (int m = 0; m < nmb; ++m) {
+    totals[0] += partial_h(m,0);
+    totals[1] += partial_h(m,1);
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, totals, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  *i_e = totals[0];
+  *i_a = totals[1]/(16.0*M_PI);
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+
+void CFC::ComputeADMMass() {
+  if (adm_mass_radii_.empty()) { return; }
+
+  // Volume counterparts, for comparison against the surface integral below.
+  Real i_e = 0.0, i_a = 0.0;
+  ComputeResidualMassVolume(&i_e, &i_a);
+  if (global_variable::my_rank == 0) {
+    std::streamsize prec0 = std::cout.precision();
+    std::cout << std::scientific << std::setprecision(8)
+              << "### CFC residual volume: I_E=" << i_e
+              << " I_A=" << i_a
+              << " I_sum=" << (i_e + i_a) << std::endl;
+    std::cout.unsetf(std::ios_base::floatfield);
+    std::cout.precision(prec0);
+  }
+
+  // Extraction center.  nullptr => origin-centered, the historical behaviour.
+  const Real *ctr = adm_mass_center_com_ ? r_com_mass_ : nullptr;
+
+  // InterpolateToSphere leaves interp_vals ZERO for every angle whose interpolation
+  // stencil does not live on this rank, so the host sums below are PARTIAL sums and
+  // must be reduced -- same pattern as Z4c's wave extraction (z4c_wave_extr.cpp:115).
+  // All radii are accumulated into one buffer so this costs a single collective per
+  // call rather than four per radius.  solid_angles is deliberately NOT reduced: it is
+  // the full geodesic-grid weight array, identical and complete on every rank, so wtot
+  // is already 4*pi locally.
+  const size_t nrad = adm_mass_radii_.size();
+  std::vector<Real> part(4*nrad, 0.0);   // [4n+0,+1] = <delta_psi> at r-dr, r+dr
+  Real wtot = 0.0;                       // [4n+2,+3] = <psi0>      at r-dr, r+dr
+
+  for (size_t n = 0; n < nrad; ++n) {
+    const Real rad = adm_mass_radii_[n];
+    for (int side = 0; side < 2; ++side) {
+      Real r = rad + (side == 0 ? -adm_mass_dr_ : +adm_mass_dr_);
+      SphericalGrid sph(pmy_pack, adm_mass_nlev_, r, -1, ctr);
+
+      sph.InterpolateToSphere(1, delta_psi);
+      Real s_d = 0.0;
+      Real w_here = 0.0;
+      for (int ip = 0; ip < sph.nangles; ++ip) {
+        Real w = sph.solid_angles.h_view(ip);
+        s_d += w*sph.interp_vals.h_view(ip,0);
+        w_here += w;
+      }
+      // Every sphere shares the same nlev, hence the same complete 4*pi weight set;
+      // assign rather than accumulate so the value is independent of loop trip count.
+      wtot = w_here;
+      sph.InterpolateToSphere(1, u_psi0);
+      Real s_0 = 0.0;
+      for (int ip = 0; ip < sph.nangles; ++ip) {
+        s_0 += sph.solid_angles.h_view(ip)*sph.interp_vals.h_view(ip,0);
+      }
+      part[4*n + side]     = s_d;
+      part[4*n + 2 + side] = s_0;
+    }
+  }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, part.data(), static_cast<int>(part.size()),
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+
+  for (size_t n = 0; n < nrad; ++n) {
+    const Real rad = adm_mass_radii_[n];
+    // Solid-angle averages of the RESIDUAL and of the BACKGROUND, kept separate.
+    Real dpsi_at[2] = {part[4*n + 0]/wtot, part[4*n + 1]/wtot};
+    Real psi0_at[2] = {part[4*n + 2]/wtot, part[4*n + 3]/wtot};
+
+    // M = -(r^2/2pi) * closed_integral(grad psi . dS) = -2 r^2 d<psi>/dr.
+    Real m_res    = -2.0*rad*rad*(dpsi_at[1] - dpsi_at[0])/(2.0*adm_mass_dr_);
+    Real m_bg_num = -2.0*rad*rad*(psi0_at[1] - psi0_at[0])/(2.0*adm_mass_dr_);
+    Real m_total  = puncture_mass_ + m_res;
+
+    if (global_variable::my_rank == 0) {
+      std::streamsize prec0 = std::cout.precision();
+      std::cout << std::scientific << std::setprecision(8)
+                << "### CFC ADM mass: r=" << rad
+                << " M_res=" << m_res
+                << " M_BH=" << puncture_mass_
+                << " M_total=" << m_total
+                << " M_accreted=" << accreted_mass_
+                << " [bg_num=" << m_bg_num;
+      if (adm_mass_center_com_) {
+        std::cout << " ctr=(" << r_com_mass_[0] << "," << r_com_mass_[1] << ","
+                  << r_com_mass_[2] << ")";
+      }
+      std::cout << "]" << std::endl;
+      std::cout.unsetf(std::ios_base::floatfield);
+      std::cout.precision(prec0);
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::AccreteExcisedMass(Driver *pdriver, int stage)
+//! \brief Drain the excision tally once per cycle and add it to the running totals.
+//!
+//! CFC's metric comes from elliptic constraints sourced by the INSTANTANEOUS matter
+//! distribution, so it has no memory: excising matter also removes its gravity in the
+//! same step, and the black hole would lose the mass it just swallowed.  (Z4c is not
+//! affected -- its hyperbolic evolution keeps that information in the metric.)  The
+//! energy banked here is therefore destined for puncture_mass_.
+//!
+//! RK-STAGE WEIGHTING (item 60).  The excision reset fires on EVERY RK stage, and
+//! naively summing those removals over-counts by ~2x.  The reason is the SSP-RK3
+//! register: each stage forms u0 = gam0*u0 + gam1*u1 + beta*dt*L, and u1 still holds
+//! the START-of-cycle state, so every stage RE-INJECTS a fraction of the matter that
+//! the previous stage already excised, and the next reset removes it again.
+//!
+//! What is physically removed over the cycle is the influx F, once.  A removal applied
+//! at the end of stage s reaches the final state with weight
+//!     w_s = prod_{j>s} gam0_j,     w_last = 1,
+//! i.e. (1/6, 2/3, 1) for rk3 (gam0 = 0, 1/4, 2/3; driver.cpp:120-129).  Draining each
+//! stage separately and combining with those weights returns exactly F: with per-stage
+//! removals (F, F/4, 2F/3) the weighted sum is F/6 + F/6 + 2F/3 = F, where the naive
+//! sum gives 1.92F.  That predicted 1.92x is what the t=145->230 TDE run measured as
+//! 1.95x (M_accreted 1.9176e-4 against a peak residual mass of 9.83e-5).
+//!
+//! Draining every stage costs one extra MPI_Allreduce per stage on a 5-element buffer,
+//! against the elliptic solves in the same stage -- negligible.
+
+void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
+  if (!pmy_pack->pcoord->coord_data.bh_excise) { return; }
+  const int ns = pdriver->nexp_stages;
+  if (stage < 1 || stage > ns) { return; }
+
+  // Drain THIS stage's removals into its own slot.  DrainExcisedTally zeroes the
+  // device tally, so the slots are disjoint by construction.
+  Real tot[5];
+  pmy_pack->pcoord->DrainExcisedTally(tot);
+  for (int c = 0; c < 5; ++c) { stage_tally_[stage-1][c] = tot[c]; }
+
+  if (stage != ns) { return; }
+
+  // Combine the stages with their propagation weights to the final state.
+  Real w[4];
+  w[ns-1] = 1.0;
+  for (int s = ns-2; s >= 0; --s) { w[s] = pdriver->gam0[s+1]*w[s+1]; }
+  for (int c = 0; c < 5; ++c) {
+    tot[c] = 0.0;
+    for (int s = 0; s < ns; ++s) { tot[c] += w[s]*stage_tally_[s][c]; }
+  }
+
+  accreted_mass_  += tot[0];
+  accreted_mom_[0] += tot[1];
+  accreted_mom_[1] += tot[2];
+  accreted_mom_[2] += tot[3];
+
+  // Hand the swallowed energy to the puncture.  Gated on puncture_enabled_ (there is
+  // no hole to grow otherwise) and on accrete_to_puncture_, so the tally can be run as
+  // a pure diagnostic for comparison.
+  if (puncture_enabled_ && accrete_to_puncture_ && tot[0] != 0.0) {
+    puncture_mass_ += tot[0];
+
+    // All three copies of M_BH must move together.  The two multigrid drivers read
+    // their own copies from <cfc> at construction and feed them to
+    // FillPunctureCoefficients on every Solve(); if only one were updated, psi's
+    // coarse levels would use the new mass while alpha's used the old.  Updated here,
+    // at the END of the last stage, so the change is in place before any of the next
+    // cycle's solves rather than part-way through this one.
+    if (pmgd_psi != nullptr) { pmgd_psi->SetPunctureMass(puncture_mass_); }
+    if (pmgd_alpha != nullptr) { pmgd_alpha->SetPunctureMass(puncture_mass_); }
+
+    // Re-derive the analytic background at the new mass.  Cheap: one ghost-inclusive
+    // par_for with a root-find per cell, against the ~4.5 finest-grid-equivalent
+    // sweeps the per-level coefficient fills already do every stage.
+    FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
+                           a0_dd, a0_sq, grad_ap6_0);
+
+    // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
+    // this would make the PHYSICAL psi jump by delta(psi0) everywhere at once.
+    // Clearing the seed flags makes the next solve re-derive the residual from the
+    // unchanged ADM fields minus the NEW background (cfc.cpp's seed blocks), which
+    // keeps the physical metric continuous and lets the mass change enter through the
+    // elliptic solve instead of as a step.  It also avoids the multigrid warm start
+    // being a guess for the old background, which would otherwise spike V-cycles.
+    psi_seeded_ = false;
+    alpha_psi_seeded_ = false;
+  }
+
+  if (cfc_init_verbose_ && global_variable::my_rank == 0 && tot[0] != 0.0) {
+    // NB high precision: M_BH changes are many orders below its O(1) value, so at
+    // default stream precision the growth is invisible.
+    std::streamsize prec0 = std::cout.precision();
+    std::cout << std::scientific << std::setprecision(10)
+              << "### CFC accretion: dM_adm=" << tot[0]
+              << " dM_raw=" << tot[4]
+              << " <1/psi>=" << (tot[4] != 0.0 ? tot[0]/tot[4] : 0.0)
+              << " M_accreted=" << accreted_mass_
+              << " M_BH-M0=" << (puncture_mass_ - puncture_mass_init_)
+              << " dPx=" << tot[1] << std::endl;
+    std::cout.unsetf(std::ios_base::floatfield);
+    std::cout.precision(prec0);
+  }
 }
 
 //----------------------------------------------------------------------------------------

@@ -1,22 +1,26 @@
 # TRACKING VARIANT of cfc_tde_wd_imbh_elliptic.athinput -- see
 # go-to-athenak-tde-read-memoized-dusk.md plan (2026-09-14) and DEVELOPMENT.md
 # items 38/39/42. Instead of a pre-drawn static disk covering the whole orbit,
-# this fixture uses refinement=adaptive with a user-enrolled AMR criterion
-# (RefineTOVTracker in dyngr_tov.cpp) that recenters the refined region on the
-# star's CFC-computed mass centroid every cycle, analogous to z4c's
-# CompactObjectTracker. GENUINE, CURRENTLY-UNFIXED RISK: refinement=adaptive
-# means real per-cycle regridding, and items 38/39/42 document a still-open
-# MeshBlock::SetNeighbors registration bug under irregular AMR topology --
-# exactly why the production fixture deliberately avoids AMR. Validate at
-# small scale before trusting this for any long production run.
+# this fixture uses refinement=adaptive with TDERefineTracker (dyngr_tov.cpp,
+# <problem> amr_condition=tde_track -- the same tracked two-box mechanism
+# validated for the radial fixture in cfc_tde_wd_imbh_amr.athinput/item 55)
+# recentering two fine boxes -- one on the fixed puncture, one on the star's
+# global density maximum -- every cycle. GENUINE, CURRENTLY-UNFIXED RISK:
+# refinement=adaptive means real per-cycle regridding, and items 38/39/42
+# document a still-open MeshBlock::SetNeighbors registration bug under
+# irregular AMR topology. Item 55 confirmed this bug does NOT bite the radial
+# fixture's tracked AMR through infall to periapsis, but explicitly left the
+# post-periapsis debris-spreading phase untested -- and this elliptic fixture's
+# own first production attempt DID hit it, past periapsis (see the plan file).
+# Validate at small scale before trusting this for any long production run.
 #
 # Otherwise identical to cfc_tde_wd_imbh_elliptic.athinput (see its own header
-# for the orbit/velocity/mesh derivation) except: refinement=adaptive with a
-# small seed region instead of the full static disk (see <refined_region1>
-# below), and <problem>/<cfc> tracking-related keys.
+# for the orbit/velocity/mesh derivation) except: refinement=adaptive with two
+# small seed regions (puncture + star) instead of the full static disk, and
+# the <problem> tde_track keys.
 
 <comment>
-problem  = Elliptic-orbit TDE, TRACKING refinement variant (RefineTOVTracker) -- comparison run
+problem  = Elliptic-orbit TDE, TRACKING refinement variant (TDERefineTracker) -- comparison run
 
 <job>
 basename = cfc_tde_wd_imbh_elliptic_tracker
@@ -58,18 +62,28 @@ ncycle_check        = 1         # check every cycle -- the star moves far less t
                                  # dt~0.03), comfortably fast enough to keep up.
 
 <amr_criterion0>
-method = user           # dispatches to RefineTOVTracker (dyngr_tov.cpp), enrolled
-                        # via <problem>/track_star_refinement=true below.
+method = user           # dispatches to TDERefineTracker (dyngr_tov.cpp), enrolled
+                        # via <problem> amr_condition=tde_track below.
 
+# Two static SEED boxes (puncture + star's t=0 position), not the full disk the
+# static fixture uses -- required, not redundant with adaptive: there is no
+# initial-AMR pass, and CheckForRefinement's cooldown means adaptive alone would
+# take several cycles to reach level 4 from the root grid, during which the star
+# (R_*=0.677) would sit under-resolved (same reasoning as cfc_tde_wd_imbh_amr.
+# athinput). TDERefineTracker maintains/moves both boxes thereafter.
 <refined_region1>
-# Small SEED box at the star's t=0 position/radius (R_*=0.677), not the full disk
-# the static fixture uses -- gives correct resolution at t=0, before
-# RefineTOVTracker has a centroid to work from (<refined_regionN> is read once
-# at startup; a cold AMR start would under-resolve the star for several cycles
-# while levels ramp up one at a time). Tracker maintains/moves this box after.
-level = 4        # dx = 1.0/2^4 = 0.0625 -> ~11 cells across the star
-x1min = 27.0     # star_center +/- ~3 in x1/x2 (> R_*=0.677 + track_radius=4.0),
-x1max = 33.0     # +/- 2 in x3 (matches the disk's own x3 half-thickness).
+level = 4        # puncture, fixed at the origin
+x1min = -2.0
+x1max = 2.0
+x2min = -2.0
+x2max = 2.0
+x3min = -2.0
+x3max = 2.0
+
+<refined_region2>
+level = 4        # star, at its t=0 position
+x1min = 27.0
+x1max = 33.0
 x2min = -3.0
 x2max = 3.0
 x3min = -2.0
@@ -127,9 +141,9 @@ puncture_mass    = 1.0            # M_BH = 1e4 Msun, fixed at the coordinate ori
 # causing a 1/alpha singularity/NANS_IN_CONS cascade near the puncture (item 59).
 alpha_floor = 1.0e-6
 # solve_interval: same production-validated cadence as the static-region fixture
-# (DEVELOPMENT.md item 61/62) -- 3.65x speedup, negligible accuracy cost. Note
-# pcfc->r_com_mass_ (what RefineTOVTracker reads) only refreshes every 10th
-# cycle, lagging the true centroid by at most a fraction of a block-width.
+# (DEVELOPMENT.md item 61/62) -- 3.65x speedup, negligible accuracy cost.
+# Independent of TDERefineTracker, which locates the star directly from
+# pmhd->w0's density every check, not from any CFC-solved quantity.
 solve_interval = 10
 <problem>
 isotropic   = true      # required: CFC solves for the isotropic-gauge metric AND
@@ -149,12 +163,12 @@ star_vel_x2    = 0.135657  # header). Solved for periapsis(areal)=10.0 r_g via
 star_vel_x3    = 0.0     # scripts/tde_elliptical_orbit_ic.py; both closed-form and
                          # full ODE cross-check agree to <0.0001 r_g.
 user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
-track_star_refinement = true   # enrolls RefineTOVTracker as user_ref_func -- THE
-                                # feature this fixture exists to test.
-track_radius = 4.0             # flag any MeshBlock within this distance of
-                                # pcfc->r_com_mass_ for refinement; larger than
-                                # R_*=0.677 plus a buffer for the centroid's lag
-                                # between solve_interval-gated updates.
+amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
+                                # fixture exists to test.
+amr_radius_bh   = 2.0          # fine box around the fixed puncture
+amr_radius_star = 2.0          # fine box around the star (density maximum)
+amr_level_bh    = 4            # matches this fixture's own level-4 resolution
+amr_level_star  = 4
 
 <output1>
 file_type   = hst      # History data dump -- mass/momentum/energy conservation check

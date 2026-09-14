@@ -245,6 +245,24 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   } else {
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
                    "MHD_C2P", Task_Run, {MHD_BCS}, {Z4c_Excise, CFC_SolvePsi});
+
+    // The dynamic excision schemes (lapse/horizon) rebuild excision_floor/_flux from
+    // the CURRENT lapse every cycle; only "fixed" is filled once at construction
+    // (coordinates.cpp:111).  The branch above queues that refresh, but it is gated
+    // on <adm> dynamic=true -- which no CFC fixture sets (all leave <adm> empty, so
+    // adm.cpp:34 defaults it false).  The result was that excision_scheme=lapse
+    // allocated its masks, never wrote them, and silently excised nothing at all in
+    // every CFC run: verified in a TDE run where density inside the nominal excision
+    // radius sat at 1.9e-9 instead of dexcise=1e-24, velocities there were nonzero,
+    // and no mass ever left the grid.  So queue the refresh here too.
+    // Dependencies mirror MHD_Newdt just below: MHD_C2P required, CFC_AssembleFinal
+    // optional so that with <cfc> active the mask is built from the fully assembled
+    // lapse of this step (and the optional dep is simply dropped when CFC is absent).
+    if (pmy_pack->pcoord->coord_data.bh_excise &&
+        pmy_pack->pcoord->coord_data.excision_scheme != ExcisionScheme::fixed) {
+      pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
+                     Task_Run, {MHD_C2P}, {CFC_AssembleFinal});
+    }
   }
   // CFC_AssembleFinal is optional for the same reason: MHD_Newdt should see the final
   // lapse/shift when cfc is active, but is unaffected when it isn't.

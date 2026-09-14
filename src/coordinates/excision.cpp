@@ -8,6 +8,8 @@
 
 #include <float.h>
 
+#include <Kokkos_Core.hpp>
+
 #include "athena.hpp"
 #include "mesh/mesh.hpp"
 #include "coordinates.hpp"
@@ -254,4 +256,46 @@ void Coordinates::UpdateExcisionMasks() {
       flux(m,k,j,i) = excise;
     });
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Coordinates::DrainExcisedTally(Real tot[4])
+//! \brief Sum the per-MeshBlock excision tally over blocks and ranks, zero it, and
+//! return {dM, dPx, dPy, dPz}.
+//!
+//! WHY THE ENERGY COLUMN CARRIES A 1/psi:  the conserved energy the code stores is
+//! densitized, cons(IEN)+cons(IDN) = sqrt(gamma)*E = psi^6*E (sqrt(detg) == psi^6
+//! exactly for the conformally-flat ansatz -- cfc.cpp:1322-1325).  But the CFC
+//! Hamiltonian constraint reads Delta(psi) = -2*pi*psi^5*E - ..., so the matter's
+//! contribution to the ADM mass, M_ADM = -(1/2pi) * closed_integral(grad psi . dS),
+//! is int(psi^5 E)dV, i.e. int((D+tau)/psi)dV.  Handing the puncture the RAW
+//! conserved energy would therefore overcount the swallowed mass by a factor psi,
+//! which is ~1.9 at a lapse-0.20 excision surface -- nearly a factor of two.  The
+//! 1/psi is applied per cell at the reset site (primitive_solver_hyd.hpp), where the
+//! local psi is available as sdetg^(1/6), rather than here.
+//!
+//! The momentum columns carry NO such factor: S~_i = psi^6 * S_i is itself the
+//! momentum-constraint source, so the densitized value is already the right one.
+//! They are accumulated as a DIAGNOSTIC only -- the puncture is fixed at the origin
+//! and non-spinning by design, so the corresponding recoil is discarded, and this
+//! tally is how we report the size of that neglected effect rather than leaving it
+//! implicit.
+//!
+//! Collective: uses MPI_Allreduce so every rank gets the same totals and can apply
+//! the same updated puncture mass.
+
+void Coordinates::DrainExcisedTally(Real tot[5]) {
+  for (int c = 0; c < 5; ++c) { tot[c] = 0.0; }
+  if (!coord_data.bh_excise) { return; }
+
+  const int nmb = pmy_pack->nmb_thispack;
+  auto tally_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), excised_tally);
+  for (int m = 0; m < nmb; ++m) {
+    for (int c = 0; c < 5; ++c) { tot[c] += tally_h(m,c); }
+  }
+  Kokkos::deep_copy(excised_tally, 0.0);
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, tot, 5, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
 }

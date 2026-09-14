@@ -142,6 +142,17 @@ class MGCFCLapseDriver : public MultigridDriver {
     bool puncture_enabled_;
     Real puncture_mass_;
 
+ public:
+  //! \brief Update the puncture mass mid-run (CFC accretes swallowed matter into the
+  //! hole -- see CFC::AccreteExcisedMass).  Only the stored value needs changing:
+  //! Solve() already re-runs FillPunctureCoefficients(puncture_mass_) over every
+  //! multigrid level on every call, so the per-level analytic coefficients pick the
+  //! new mass up automatically.  Mirrors the existing SetRobinCenter/
+  //! SetMultipoleOrigin setters that cfc::CFC already calls each stage.
+  void SetPunctureMass(Real m) { puncture_mass_ = m; }
+
+ protected:
+
     // mgroot_ never receives coeff_ data via the generic TransferFromBlocksToRoot
     // (src_/u_ only) -- duplicates the relevant slice of that logic locally rather
     // than touching src/multigrid/. See MGCFCConformalFactorDriver::

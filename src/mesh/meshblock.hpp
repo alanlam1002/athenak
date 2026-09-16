@@ -44,6 +44,12 @@ class MeshBlock {
 
   // function to set data describing neighbors
   void SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklist);
+  // build the neighbor row of ANY gid (shared by SetNeighbors and the audit below)
+  void BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ranklist,
+                        int gid, NeighborBlock *row) const;
+  // opt-in audit of the send/recv symmetry invariant (ATHENAK_CHECK_NGHBR_SYMMETRY)
+  void CheckNeighborSymmetry(std::unique_ptr<MeshBlockTree> &ptree,
+                             int *ranklist) const;
 
  private:
   // data

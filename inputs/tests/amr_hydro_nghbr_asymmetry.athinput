@@ -1,0 +1,131 @@
+# AthenaXXX input file -- minimal, CFC-independent reproducer for the
+# MeshBlock::SetNeighbors neighbor-table ASYMMETRY documented in
+# src/cfc/SETNEIGHBORS_HANDOFF.md.  Plain Newtonian hydro (linear_wave pgen),
+# no CFC/GR/elliptic solve: the defect is in core mesh code, not CFC.
+#
+# WHAT IT REPRODUCES
+# ------------------
+# Every consumer of the nghbr table (MeshBoundaryValues::BuildRankPackedVarMetadata
+# in src/bvals/bvals.cpp, and the separate reimplementation in
+# src/multigrid/multigrid_bvals.cpp) builds its MPI messages purely from each
+# rank's OWN rows, with no cross-rank negotiation.  That is only correct if
+#
+#     nghbr(b,n) = {gid=T, dest=d}   =>   nghbr(T,d) = {gid=b, dest=n}
+#
+# holds for every populated slot.  Run this input with
+#
+#     ATHENAK_CHECK_NGHBR_SYMMETRY=1 ./athena -i amr_hydro_nghbr_asymmetry.athinput
+#
+# and MeshBlock::CheckNeighborSymmetry reports the violations directly, instead
+# of leaving them to surface much later as an opaque `MPI internal_Waitall` /
+# `Message truncated` abort in whichever subsystem exchanges first.
+#
+# WHY THIS TOPOLOGY AND NOT lwave_hydro_diag_collision.athinput
+# ------------------------------------------------------------
+# lwave_hydro_diag_collision.athinput refines ONE root block one level, giving a
+# two-level, octant-symmetric tree in which every coarser diagonal candidate is
+# parity-matched -- it reports zero asymmetries and is therefore a clean-
+# registration regression check, not a reproducer.  Two refined regions at the
+# SAME level do not do it either (also zero).  What is required is THREE levels
+# with the finer region placed ASYMMETRICALLY inside the coarser one, so that a
+# block's coarser diagonal neighbour is reached through a different lineage than
+# its own octant parity implies:
+#
+#   <refined_region1>  root block (1,1,1), i.e. the unit cube [1,2]^3, -> level 1
+#   <refined_region2>  the (+x1,-x2,+x3) OCTANT of that block        -> level 2
+#
+# Non-periodic (outflow) boundaries, matching the production TDE run's `diode`
+# BCs; that exposes both failure kinds (target slot empty, and target slot
+# claimed by a third block) rather than only the latter.
+#
+# EXPECTED (127 MeshBlocks, 3 levels), with the tree-walk rule as of this file:
+#   ### nghbr symmetry audit: 127 MeshBlocks, 2288 registrations, 124 asymmetric
+#   (orphan=44 stolen=80 destmismatch=0)
+# A correct registration rule must report 0 asymmetric on this input while
+# leaving no ghost region unfilled.
+#
+# Runs serial (non-MPI) in a few seconds; nlim=0 stops right after mesh build,
+# which is all the audit needs.  The <output1> restart dump lets the tree be
+# re-read and checked independently offline.
+
+<comment>
+problem   = MeshBlock::SetNeighbors neighbor-table asymmetry reproducer
+reference = src/cfc/SETNEIGHBORS_HANDOFF.md
+
+<job>
+basename  = AmrNghbrAsymmetry
+
+<mesh>
+nghost    = 2
+nx1       = 16         # 4 MeshBlocks/axis at root level (nx1/meshblock.nx1 = 4)
+x1min     = 0.0
+x1max     = 4.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+
+nx2       = 16
+x2min     = 0.0
+x2max     = 4.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+
+nx3       = 16
+x3min     = 0.0
+x3max     = 4.0
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<meshblock>
+nx1       = 4
+nx2       = 4
+nx3       = 4
+
+<mesh_refinement>
+refinement = static     # deterministic tree -- no AMR-criterion guessing
+
+<refined_region1>
+level = 1               # root block (1,1,1) -> one level finer
+x1min = 1.0
+x1max = 2.0
+x2min = 1.0
+x2max = 2.0
+x3min = 1.0
+x3max = 2.0
+
+<refined_region2>
+level = 2               # ONE octant of that block -> two levels finer.
+x1min = 1.5             # Deliberately NOT centred and NOT mirror-symmetric:
+x1max = 2.0             # this asymmetry is what makes a block's coarser
+x2min = 1.0             # diagonal neighbour reachable through a lineage its
+x2max = 1.5             # own octant parity does not match, which is the
+x3min = 1.5             # situation the registration rule has to get right.
+x3max = 2.0
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = 0          # mesh build is all this reproducer needs
+tlim       = 1.0e10
+ndiag      = 1
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.66666666667
+
+<problem>
+pgen_name = linear_wave
+wave_flag = 0
+amp       = 1.0e-3
+dens      = 1.0
+pgas      = 0.6
+vx0       = 0.0
+along_x1  = false
+along_x2  = false
+along_x3  = false
+
+<output1>
+file_type = rst         # lets the tree be re-read and audited offline
+dt        = 1.0e9

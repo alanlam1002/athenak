@@ -1,0 +1,159 @@
+# HYPOTHESIS TEST for item 39c's root cause (DEVELOPMENT.md items 38/39a-39g/42;
+# plan file go-to-athenak-tde-read-memoized-dusk.md). Identical physics to
+# cfc_puncture_offcenter_tov_amr_setneighbors_smoke.athinput, EXCEPT the domain
+# is widened to a symmetric 8x8x8-root-MeshBlock cube (was 5x2x2, with only 2
+# blocks total spanning the ENTIRE x2/x3 domain).
+#
+# WHY: read MeshBlockTree::FindNeighbor's actual source directly (src/mesh/
+# meshblock_tree.cpp) rather than assuming. Its ONLY `return nullptr;` paths
+# are the 6 domain-boundary-exit checks (non-periodic x1/x2/x3 faces) -- there
+# is no other code path in the function that returns nullptr; every in-domain
+# query resolves to a real tree node (or hard-exits on a broken tree). This
+# means item 39f's `recip == nullptr` rule is not actually testing "is there
+# a genuine reciprocal registration somewhere in the interior" -- it can ONLY
+# ever be true when the reciprocal query, evaluated at the TARGET's own
+# (coarser) level, steps past a non-periodic domain edge. In the original
+# smoke test's narrow domain (only 2 root MeshBlocks total across the ENTIRE
+# x2/x3 extent), essentially any coarser-level reciprocal query with a
+# nonzero x2/x3 component runs off that domain immediately -- so the 72
+# recip=NULL registrations found there, and the resulting item-39c internal_
+# Waitall abort at 8 ranks, may be dominated by this artifact, not by genuine
+# AMR-topology need. If so: widening the domain so the refined puncture patch
+# sits deep in the interior (many root MeshBlocks of margin in every
+# direction before any real boundary) should show far fewer/zero spurious
+# recip=NULL hits and should NOT reproduce item 39c's abort at 8 ranks.
+#
+# CHANGED from the parent smoke test: nx1/nx2/nx3 widened from 80/32/32 to a
+# symmetric 128/128/128 (8 root MeshBlocks/axis, dx=1.6 unchanged, meshblock
+# size unchanged) -- a clean power-of-2 root grid (root_level is then a true,
+# minimal root, not the padded/incomplete grid the old 5-block x1 extent
+# needed). Domain now +-102.4 in all three axes. star_center_x1=60 (unchanged)
+# sits comfortably interior (block index ~6 of 8), not near any edge.
+# EVERYTHING ELSE (puncture <refined_region1>, <amr_criterion0>, CFC/TOV
+# parameters, nlim=20) is unchanged from the parent smoke test.
+
+<comment>
+problem  = item-39c hypothesis test: does widening the domain (fewer boundary-adjacent recip=NULL hits) avoid the internal_Waitall abort?
+
+<job>
+basename = cfc_setneighbors_smoke_wide
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 128      # 8 MeshBlocks in x1-direction (root level), dx=1.6 -- was 80 (5 blocks)
+x1min  = -102.4   # widened -- was -25.6
+x1max  = 102.4    # star surface (~71.8) still has ample buffer before here
+ix1_bc = diode    # inner boundary -- NOT reflect (star is off-center, no mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 128      # 8 MeshBlocks in x2-direction (root level), dx=1.6 -- was 32 (2 blocks)
+x2min  = -102.4   # widened -- was -25.6
+x2max  = 102.4    # widened -- was 25.6
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 128      # 8 MeshBlocks in x3-direction (root level), dx=1.6 -- was 32 (2 blocks)
+x3min  = -102.4   # widened -- was -25.6
+x3max  = 102.4    # widened -- was 25.6
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive
+max_nmb_per_rank    = 200
+num_levels          = 3
+refinement_interval = 1
+ncycle_check        = 1
+
+<refined_region1>
+level = 2        # matches the parent smoke test / cfc_puncture_offcenter_tov_refined_noexcise
+x1min = -3.2
+x1max = 3.2
+x2min = -3.2
+x2max = 3.2
+x3min = -3.2
+x3max = 3.2
+
+<amr_criterion0>
+method    = min_max
+variable  = mhd_w_d
+value_max = 1.0e-4
+
+<time>
+evolution  = dynamic
+gr_dt      = true
+integrator = rk3
+cfl_number = 0.4
+nlim       = 20
+tlim       = 1.0e10
+ndiag      = 1
+
+<coord>
+general_rel = true
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal
+dyn_eos     = ideal
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 1.0e-10
+tfloor      = 1.0e-8
+dthreshold  = 1.02
+gamma       = 2.0
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0
+
+<problem>
+isotropic   = true
+rhoc        = 1.28e-4
+kappa       = 100.0
+npoints     = 10000.0
+dr          = 1e-2
+b_norm      = 0.0
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0
+star_center_x2 = 0.0
+star_center_x3 = 0.0
+user_hist   = true
+
+<output1>
+file_type   = hst
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin
+variable    = adm
+dcycle      = 5
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin
+variable    = mhd_w_bcc
+dcycle      = 5
+slice_x3    = 0.0
+id = prim_xy

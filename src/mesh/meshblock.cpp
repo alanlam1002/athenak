@@ -173,13 +173,13 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
     LogicalLocation lloc = pmy_pack->pmesh->lloc_eachmb[mb_gid.h_view(b)];
 
     // find location of this MeshBlock relative to XXXX
-    int myox1, myox2 = 0, myox3 = 0, myfx1, myfx2, myfx3;
+    // Item 65: myox1/myox2/myox3 (this block's own octant parity) drove the
+    // old exterior-edge/corner guard, now replaced by the recip-based rule
+    // at each diagonal site -- no longer needed.
+    int myfx1, myfx2, myfx3;
     myfx1 = ((lloc.lx1 & 1) == 1);
     myfx2 = ((lloc.lx2 & 1) == 1);
     myfx3 = ((lloc.lx3 & 1) == 1);
-    myox1 = ((lloc.lx1 & 1) == 1)*2 - 1;
-    if (pmy_pack->pmesh->multi_d) myox2 = ((lloc.lx2 & 1) == 1)*2 - 1;
-    if (pmy_pack->pmesh->three_d) myox3 = ((lloc.lx3 & 1) == 1)*2 - 1;
 
     // neighbors on x1face
     for (int n=-1; n<=1; n+=2) {
@@ -266,15 +266,33 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
               }
             } else {   // neighbor at same or coarser level
               int idest,inghbr;
+              bool do_register;
               if (nt->lloc_.level == lloc.level) { // same level -- no subblocks
                 inghbr = NeighborIndex(n,m,0,0,0);
                 idest = NeighborIndex(-n,-m,0,0,0);
+                do_register = true;
               } else { // neighbor at coarser level, set indx/dest to appropriate subblock
                 inghbr = NeighborIndex(n,m,0,myfx3,0);
                 idest = NeighborIndex(-n,-m,0,myfx3,0);
+                // Item 65 (DEVELOPMENT.md; supersedes the old octant-parity
+                // guard and this session's earlier recip==nullptr-only rule):
+                // register this diagonal neighbor in OUR OWN row unless T's
+                // own direct reciprocal query finds a genuine same-level LEAF
+                // neighbor instead (meaning we are not really T's diagonal
+                // neighbor at all -- T has a real neighbor there already).
+                // When T's reciprocal query instead finds something FINER,
+                // T's own unconditional finer-branch (above) always covers
+                // BOTH children of the free axis, so T WILL also register
+                // this same relationship from its side -- but that does not
+                // give OUR row an entry, which we still need regardless (this
+                // is the orphan mechanism behind item 39c's cross-rank MPI
+                // abort: the previous rule skipped registering here, trusting
+                // T to "cover" it, leaving this block's own send/recv
+                // bookkeeping for the relationship completely empty).
+                MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, -m, 0);
+                do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
               }
-              // only set neighbor for exterior edges of coarser face
-              if (nt->lloc_.level >= lloc.level || (myox1 == n && myox2 == m)) {
+              if (do_register) {
                 nghbr.h_view(b,inghbr).gid = nt->gid_;
                 nghbr.h_view(b,inghbr).lev = nt->lloc_.level;
                 nghbr.h_view(b,inghbr).rank = ranklist[nt->gid_];
@@ -338,15 +356,20 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
               }
             } else {   // neighbor at same or coarser level -- no subblocks
               int idest,inghbr;
+              bool do_register;
               if (nt->lloc_.level == lloc.level) { // neighbor at same level
                 inghbr = NeighborIndex(n,0,l,0,0);
                 idest = NeighborIndex(-n,0,-l,0,0);
+                do_register = true;
               } else { // neighbor at coarser level, set indx/dest to appropriate subblock
                 inghbr = NeighborIndex(n,0,l,myfx2,0);
                 idest = NeighborIndex(-n,0,-l,myfx2,0);
+                // Item 65: see the x1x2-edge comment above for the full
+                // rationale.
+                MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, 0, -l);
+                do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
               }
-              // only set neighbor for exterior edges of coarser face
-              if (nt->lloc_.level >= lloc.level || (myox1 == n && myox3 == l)) {
+              if (do_register) {
                 nghbr.h_view(b,inghbr).gid = nt->gid_;
                 nghbr.h_view(b,inghbr).lev = nt->lloc_.level;
                 nghbr.h_view(b,inghbr).rank = ranklist[nt->gid_];
@@ -375,15 +398,20 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
               }
             } else {   // neighbor at same or coarser level -- no subblocks
               int idest,inghbr;
+              bool do_register;
               if (nt->lloc_.level == lloc.level) { // neighbor at same level
                 inghbr = NeighborIndex(0,m,l,0,0);
                 idest = NeighborIndex(0,-m,-l,0,0);
+                do_register = true;
               } else { // neighbor at coarser level, set indx/dest to appropriate subblock
                 inghbr = NeighborIndex(0,m,l,myfx1,0);
                 idest = NeighborIndex(0,-m,-l,myfx1,0);
+                // Item 65: see the x1x2-edge comment above for the full
+                // rationale.
+                MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, 0, -m, -l);
+                do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
               }
-              // only set neighbor for exterior edges of coarser face
-              if (nt->lloc_.level >= lloc.level || (myox2 == m && myox3 == l)) {
+              if (do_register) {
                 nghbr.h_view(b,inghbr).gid = nt->gid_;
                 nghbr.h_view(b,inghbr).lev = nt->lloc_.level;
                 nghbr.h_view(b,inghbr).rank = ranklist[nt->gid_];
@@ -407,8 +435,25 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
                 nt = nt->GetLeaf(ffx, ffy, ffz);
               }
               int nlevel = nt->lloc_.level;
-              // only set neighbor for exterior corners of coarser face
-              if (nlevel >= lloc.level || (myox1 == n && myox2 == m && myox3 == l)) {
+              bool do_register;
+              if (nlevel >= lloc.level) {  // same-level or already-resolved finer leaf
+                do_register = true;
+              } else {
+                // Item 65: see the x1x2-edge comment above for the general
+                // rationale. Corners have no free axis (no subblock loop), so
+                // unlike edges, T's own finer-branch resolves to exactly ONE
+                // specific child via its own single GetLeaf call -- it is not
+                // guaranteed to be us. That distinction does not matter for
+                // THIS fix though: whether or not T's resolution happens to
+                // match us, we still need our own row entry regardless (the
+                // orphan mechanism is the same either way). Only recip==LEAF
+                // (a genuine same-level neighbor of T's, meaning we are not
+                // really T's diagonal neighbor at all) should suppress
+                // registration.
+                MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, -m, -l);
+                do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
+              }
+              if (do_register) {
                 int inghbr = NeighborIndex(n,m,l,0,0);
                 nghbr.h_view(b,inghbr).gid = nt->gid_;
                 nghbr.h_view(b,inghbr).lev = nt->lloc_.level;

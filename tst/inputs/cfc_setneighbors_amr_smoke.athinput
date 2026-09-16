@@ -1,0 +1,133 @@
+# Automated-test-suite copy of the item-39c reproducer (DEVELOPMENT.md items
+# 38/39a-39g/42/63; run by
+# tst/test_suite/dyngrmhd/test_dyngrmhd_setneighbors_cfc_amr_mpicpu.py).
+# Real CFC + BH-puncture + TOV star + multigrid on a wide (8x8x8 root
+# MeshBlock), symmetric domain -- the puncture's refined patch sits deep in
+# the interior, away from any real boundary, ruling out the domain-edge
+# artifact item 63 investigated and disconfirmed. Requires a build configured
+# with -DPROBLEM=dyn_grmhd/dyngr_tov (NOT the built_in_pgens default the rest
+# of this test suite uses) -- the test itself skips cleanly if that pgen
+# isn't compiled in. The canonical, fully-annotated copy (with the complete
+# derivation of why the domain is this size) lives at
+# inputs/dyn_grmhd/cfc_puncture_offcenter_tov_amr_setneighbors_smoke_wide.
+# athinput -- keep both in sync if either changes.
+#
+# Expected current behavior (item 63, unresolved): aborts before cycle 0 with
+# "Abort(14) ... Fatal error in internal_Wait: Message truncated" on every
+# rank, at 8 MPI ranks -- a cross-rank nvars-cache desync in
+# BuildRankPackedVarMetadata (src/bvals/bvals.cpp), not a NaN/convergence
+# failure. Dropped the .bin outputs the canonical copy has (adm_xy/prim_xy)
+# since the run never reaches an output cycle anyway; kept only the .hst
+# output for a lighter-weight CI artifact.
+
+<comment>
+problem  = item 39c reproducer: cross-rank nvars-cache desync in BuildRankPackedVarMetadata
+
+<job>
+basename = cfc_setneighbors_smoke_wide
+
+<mesh>
+nghost = 4
+nx1    = 128
+x1min  = -102.4
+x1max  = 102.4
+ix1_bc = diode
+ox1_bc = diode
+
+nx2    = 128
+x2min  = -102.4
+x2max  = 102.4
+ix2_bc = diode
+ox2_bc = diode
+
+nx3    = 128
+x3min  = -102.4
+x3max  = 102.4
+ix3_bc = diode
+ox3_bc = diode
+
+<meshblock>
+nx1  = 16
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive
+max_nmb_per_rank    = 200
+num_levels          = 3
+refinement_interval = 1
+ncycle_check        = 1
+
+<refined_region1>
+level = 2
+x1min = -3.2
+x1max = 3.2
+x2min = -3.2
+x2max = 3.2
+x3min = -3.2
+x3max = 3.2
+
+<amr_criterion0>
+method    = min_max
+variable  = mhd_w_d
+value_max = 1.0e-4
+
+<time>
+evolution  = dynamic
+gr_dt      = true
+integrator = rk3
+cfl_number = 0.4
+nlim       = 20
+tlim       = 1.0e10
+ndiag      = 1
+
+<coord>
+general_rel = true
+m           = 1.0
+a           = 0.0
+excise      = false
+
+<mhd>
+eos         = ideal
+dyn_eos     = ideal
+dyn_error   = reset_floor
+reconstruct = ppmx
+rsolver     = hlle
+dfloor      = 1.0e-10
+tfloor      = 1.0e-8
+dthreshold  = 1.02
+gamma       = 2.0
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0
+
+<problem>
+isotropic   = true
+rhoc        = 1.28e-4
+kappa       = 100.0
+npoints     = 10000.0
+dr          = 1e-2
+b_norm      = 0.0
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0
+star_center_x2 = 0.0
+star_center_x3 = 0.0
+user_hist   = true
+
+<output1>
+file_type   = hst
+dt          = 1.0
+data_format = %20.15e

@@ -8966,3 +8966,427 @@ one continuous sequence.
       the same floor that motivated `mg_threshold=1e-9` over `1e-10`.
     - **Still open**: `I_A` is measured but not transferred (the physics choice
       of item 59); item 61's spherical test is unrun.
+
+63. **(2026-09-15) `SetNeighbors` fix resumed on `proj/tde`: item 39f's
+    `recip==nullptr` rule reimplemented from scratch and confirmed working on
+    real CFC physics for the first time; a second, distinct corner-only
+    asymmetry bug found and fixed; item 39c finally traced to a concrete
+    byte-level mechanism (a cross-rank `nvars`-cache desync in
+    `BuildRankPackedVarMetadata`) but NOT yet fixed.** Numbering note: this
+    continues directly from items 38/39(a-g)/42 (now at lines ~5541-6373,
+    shifted from their original line numbers by the 2026-09-14 merge noted
+    above -- content unchanged) rather than from item 62 immediately above;
+    appended here, not inserted near item 42, to avoid renumbering anything
+    (same convention as the merge note itself). See
+    `.claude/plans/go-to-athenak-tde-read-memoized-dusk.md` for the full plan
+    this work executes.
+
+    - **Starting-state correction**: both artifacts item 42's "current state"
+      pointed future sessions at no longer exist. The `item39-debug-
+      instrumentation` branch is unreachable (not in this repo, not in
+      `~/athenak_cfc`, not on origin, checked via `git fetch --all` + `git
+      branch -a`/reflog/tags). `inputs/tests/lwave_hydro_diag_collision.
+      athinput` and its `build_generic` build directory also do not exist on
+      disk (both were apparently never committed, matching 39g's own text
+      that its instrumentation "has been removed" and `git diff` was clean).
+      Both were reconstructed fresh this session from DEVELOPMENT.md's own
+      prose description, not recovered -- see below for what differs from
+      the original (mesh dimensions/BCs chosen independently, not copied).
+
+    - **Reimplemented item 39f's confirmed rule at all 4 diagonal sites**
+      (`src/mesh/meshblock.cpp`, currently uncommitted on `proj/tde`): at each
+      of x1x2-edge, x3x1-edge, x2x3-edge, and corner, the coarser-neighbor
+      branch's registration is now `do_register = (recip == nullptr)`, where
+      `recip = ptree->FindNeighbor(nt->lloc_, <reciprocal direction>)` --
+      the target block's own direct query, at its own level, in the opposite
+      direction. Same-level and finer-neighbor branches are unchanged
+      (already unconditional, not part of this bug). Added a
+      `CFC_DEBUG_NGHBR`-gated dump (env-var, no permanent behavior change) at
+      each site printing `b_gid`, the direction, the target's `gid`/`lev`,
+      the `recip` classification (`NULL`/`LEAF`/`FINER`), the *old* guard's
+      own verdict for comparison, and the resulting `do_register`, plus a
+      full post-construction `nghbr` topology dump per block (grep for a
+      `(nt_gid,dest)` pair claimed by more than one distinct `b_gid` to find
+      a slot collision). All temporary, gated, intended for removal once this
+      item's work is fully landed and documented.
+
+    - **New CFC-independent reproducer, recreated from item 39g's
+      description**: `inputs/tests/lwave_hydro_diag_collision.athinput` --
+      plain Newtonian hydro (`linear_wave` pgen), no CFC/GR, 4x4x4 root
+      MeshBlocks (`nx1=nx2=nx3=16`, `meshblock nx1=nx2=nx3=4`), one root
+      block (matching the physical center of the domain) statically refined
+      one level via `<refined_region1>`, periodic BCs on all 6 faces (matches
+      39g/40's own setup, confirmed independent of PR #748's boundary-BC
+      fix). Requires `build_generic` (`-DPROBLEM=built_in_pgens`, recreated
+      via the same cmake flags as `build_cpu` minus `-DPROBLEM=...`, see
+      `build_aurora.sh`). Run via PBS (`debug` queue, `CompactBinaryMerger`
+      allocation, 1 node, `mpiexec -np 1`, `nlim=10`) -- confirmed (job
+      8827681) this reproduces 39g/39d's own documented mechanism exactly: of
+      128 coarser-branch candidates in this topology, **0 have `recip=NULL`**
+      -- every one is either `LEAF` (96, a genuine pre-existing same-level
+      neighbor already claims that slot) or `FINER` (32, cases the *old*
+      guard's octant-parity check would have wrongly allowed --
+      `old_guard=1, do_register=0` -- now correctly rejected since this
+      topology's single-refined-block-in-an-otherwise-uniform-grid geometry
+      makes every candidate redundant with something). Zero `(nt_gid,dest)`
+      collisions found; zero `NANS_IN_CONS`; exit 0. This confirms the new
+      implementation correctly avoids 39d's original collision on the same
+      reproducer geometry that first exposed it, though this particular
+      topology is too symmetric to exercise the `recip==nullptr` ("genuinely
+      needed") path at all -- see below for where that was actually tested.
+
+    - **First real-physics confirmation of item 38's original fix, via a new
+      small CFC+puncture+TOV AMR smoke test**: `inputs/dyn_grmhd/
+      cfc_puncture_offcenter_tov_amr_setneighbors_smoke.athinput` (and a
+      domain-widened variant, `..._smoke_wide.athinput`), adapted from the
+      known-good `cfc_puncture_offcenter_tov_refined_noexcise.athinput`
+      (same TOV/puncture/CFC parameters) with `refinement=adaptive` + a
+      `min_max` density criterion added to discover and refine the star's
+      core from scratch after a few stable cycles -- the parent fixture's
+      static puncture `<refined_region1>` is KEPT (a first version dropped
+      it, reasoning by false analogy to item 38's own lost test; that
+      produced immediate, widespread B-field NaNs from cycle 0, with `0
+      MeshBlocks created` for the whole run -- i.e. the blowup happened
+      before any regrid could occur at all, unrelated to SetNeighbors
+      entirely; corrected by restoring the static region, matching the
+      parent exactly). Run via `build_cpu` (`PROBLEM=dyn_grmhd/dyngr_tov`),
+      1 node, `debug` queue. At 1 rank (job 8827750, then again at 8-rank
+      domain-widened scale, job 8828484): **72 diagonal candidates showed
+      `recip=NULL, old_guard=0, do_register=1`** -- i.e. genuinely new
+      registrations the *old* code would have missed entirely, matching item
+      38's original under-registration bug, fixed, confirmed on live CFC
+      physics for the first time (previously only ever confirmed via the
+      8-rank CFC TOV scenario in items 38/39b, whose own parfile is lost).
+      Among these 72, found a live, concrete instance of 39f's own
+      second-regression mechanism: **two different blocks (`gid=31` and
+      `gid=59`), reached via different face-neighbors of the same target,
+      independently compute `recip=NULL` and land on the identical `dest`
+      slot (`nt_gid=70`'s corner slot 50)** -- confirmed by direct line
+      inspection, not aggregate counting (the aggregate `(nt_gid,dest)`
+      grouping over-counts because the `topology` dump and the per-site
+      decision dump both print the same registration; filtering to `corner`-
+      tagged lines only removes this confound). **This specific tie-break
+      collision is not yet resolved** -- see "Not in scope for this pass" in
+      the plan file; a validated tie-break formula for corner/x1x2-edge/
+      x3x1-edge (only x2x3-edge's was ever validated, per 39f) is still
+      needed before this rule can be considered complete, independent of the
+      39c work below.
+
+    - **A second, distinct, corner-site-only bug found and fixed while
+      investigating item 39c** (not the tie-break collision above -- a
+      different failure mode entirely): unlike all 3 edge sites, the corner
+      site's target block T has *no free axis* in its own unconditional
+      finer-neighbor branch -- it resolves via `GetLeaf(ffx,ffy,ffz)` to
+      exactly ONE specific child, not a loop over every child like the 3
+      edge sites (whose `fz` loop over both values of the free axis
+      guarantees T's own branch covers whichever child the candidate turns
+      out to be). This means `recip->pleaf_ != nullptr` ("FINER") only
+      proves *something* refined exists in that direction from T's own
+      perspective -- not that T's own branch actually discovers *this*
+      candidate. A candidate that is not T's one chosen sibling was wrongly
+      skipping its own needed registration under the naive port of 39f's
+      rule, leaving an asymmetric (one-sided) relationship. **Fix**: when
+      `recip=FINER` at the corner site only, additionally resolve T's own
+      `GetLeaf` using T's own reciprocal search direction (mirroring T's
+      exact algorithm) and only skip if that resolution's `gid_` equals the
+      current candidate's own `gid` -- otherwise register (added
+      `recip_leaf_gid` to the debug dump for direct verification).
+      **Verified** (jobs 8828453 -> 8828484, same wide-domain 8-rank input,
+      before/after): 100% internally consistent (`recip_leaf_gid==b_gid` <=>
+      skip, zero exceptions across 296 `recip=FINER` corner lines);
+      diffed against the pre-fix run by `(b_gid,n,m,l)` key: **184 keys
+      flipped `do_register` 0->1, zero flipped 1->0** -- strictly additive,
+      no regressions. This fix is real, validated, and worth keeping
+      regardless of the 39c outcome below.
+
+    - **Item 39c (the cross-rank MPI abort every 39-family fix attempt has
+      hit, per item 39's own text) reproduced fresh this session, and is now
+      mechanically understood in concrete terms -- but NOT fixed.**
+      Reproduced first at job 8827734 (8 ranks, the narrow-domain smoke test:
+      `Abort(17) ... Fatal error in internal_Waitall`, all 8 ranks, crashes
+      before a single cycle -- an exact match to item 39c's own documented
+      signature). Two rounds of investigation:
+        - *Hypothesis 1, tested and disconfirmed*: `MeshBlockTree::
+          FindNeighbor`'s only `return nullptr;` paths (confirmed by direct
+          reading of `src/mesh/meshblock_tree.cpp`, all 6 are non-periodic-
+          domain-boundary-exit checks; there is no other path) suggested
+          `recip==nullptr` might only ever fire near a real domain edge,
+          meaning the narrow smoke test's domain (only 2 root MeshBlocks
+          across the entire x2/x3 extent) could be manufacturing spurious
+          `recip=NULL` hits rather than exercising genuine AMR-topology
+          need. Tested directly: widened the domain to a symmetric 8x8x8-
+          root-MeshBlock cube (`..._smoke_wide.athinput`, job 8828453) --
+          `recip=NULL` dropped to exactly **0** (confirming that part of the
+          reasoning), but **the abort still reproduced**, changing signature
+          to `Abort(14) ... Fatal error in internal_Wait: Message truncated`.
+          Since it persists with zero `recip=NULL` registrations present,
+          domain-boundary artifacts are not the (sole) cause.
+        - *Hypothesis 2, tested, confirmed additive-but-insufficient*: the
+          corner-site asymmetry bug above, found while investigating this.
+          Re-ran the identical wide-domain 8-rank test with the corner fix
+          applied (job 8828484): **the abort reproduces identically**
+          (same `Abort(14)`, same "before cycle 0" timing) despite the fix's
+          184 new, verified-correct registrations. So the corner asymmetry,
+          while real and worth keeping, is not what's causing 39c either.
+        - *Direct byte-level trace (the actual mechanism, found via new
+          instrumentation)*: added a `CFC_DEBUG_BVALS`-gated dump to
+          `src/bvals/bvals.cpp`'s `BuildRankPackedVarMetadata` (per-rank
+          send/recv message metadata: peer rank, entry count, total
+          `data_size`) plus a `CFC_DEBUG_BVALS_ENTRY` per-entry dump (block/
+          slot, peer rank, target `gid`, level classification, `data_size`,
+          and the raw `icoar_ndat`/`isame_ndat`/`isame_z4c_ndat`/`ifine_ndat`
+          terms). Job 8828511: message *counts* (`nentries`) matched on
+          every one of 112 checked rank-pair messages -- **the mismatch is
+          entirely in `data_size`**, confined to one message class
+          (`nentries=132`), with the *identical* fixed offset (2560 bytes,
+          then 1920 bytes on the next `BuildRankPackedVarMetadata` call) on
+          every one of the 24 affected rank pairs -- a uniform, systematic
+          discrepancy, not a per-relationship registration asymmetry (which
+          would vary pair to pair). Job 8828576 (after adding `peer=`/
+          `nt_gid=` to the entry dump so send/recv entries can be matched
+          exactly rather than by ambiguous slot number alone): of 226
+          uniquely-matched send/recv entry pairs, 114 mismatch; **for all
+          114, both sides agree the neighbor is same-level
+          (`lev_cmp=0`)** -- ruling out a coarser/finer misclassification --
+          and the actual pattern is `send.data_size == 5*send.isame_ndat`
+          while `recv.data_size == 3*recv.isame_ndat` (110/114; the
+          remaining 4/114 show the reverse multiplier assignment). This is
+          the signature of the two sides calling `BuildRankPackedVarMetadata`
+          with **different `nvars`** for what should be the same logical
+          exchange (5 matches Hydro/MHD's conserved-variable count; 3 is
+          `bvals_fc.cpp:57`'s hardcoded face-centered/B-field count; CFC's
+          own ADM field would be a third, larger group again).
+        - **Implicated mechanism (not yet fixed)**: `MeshBoundaryValues::
+          rank_packed_bvals_nvars_` (`src/bvals/bvals.hpp:162`) is a
+          **single scalar cache per rank**, rebuilt only when the just-
+          requested `nvars` differs from the *previous* call's cached value
+          on *that same rank* (`bvals_cc.cpp:60`, `bvals_fc.cpp:56`,
+          `bvals_tasks.cpp:34` -- three independent call sites, each with its
+          own local `!=` check; only `bvals_tasks.cpp`'s `InitRecv` also
+          checks `pmy_pack->pmesh->IsMeshUpdated()`, the other two do not).
+          This design implicitly assumes every rank marches through the same
+          sequence of variable-group boundary exchanges (Hydro/MHD=5,
+          B-field=3, ADM=17, ...) in lockstep, so that whenever two ranks
+          actually communicate, both have the same group's metadata cached.
+          If any rank's call sequence skips or reorders a group relative to
+          its peers -- plausible whenever a rank happens to have zero cross-
+          rank neighbors for that specific group at that moment, an
+          asymmetry independent of any registration bug -- its cache falls
+          out of step, and the next real cross-rank message computes sizes
+          from mismatched `nvars` on the two ends. Both this session's fixes
+          (the core `recip==nullptr` rule and the corner-asymmetry fix)
+          *create new cross-rank registrations* that plausibly flip some
+          ranks from "no cross-rank neighbors this group" to "has some,"
+          which would newly expose this pre-existing assumption for the
+          first time -- consistent with 39c only ever appearing once a
+          39-family fix is applied, on every attempt across multiple
+          sessions, per item 39's own text.
+        - **Not yet done**: confirming the exact call-sequence divergence
+          (which rank skips which group's call and why), and actually fixing
+          the cache (restructure to be keyed per-`nvars` rather than a single
+          scalar, or add a collective/handshake consistency check) -- a
+          distinct piece of work from the `SetNeighbors` registration logic
+          itself, not part of this pass's original scope.
+
+    - **New unit test added**: `tst/test_suite/unit_tests/
+      test_ut_setneighbors_diag_collision_cpu.py` runs the CFC-independent
+      `lwave_hydro_diag_collision.athinput` reproducer above (1 rank, no MPI,
+      matches this directory's existing `run()`-only convention) and asserts
+      a clean exit -- a regression check that the `recip==nullptr` fix keeps
+      avoiding 39d's collision on this exact geometry. Does not (and cannot,
+      being CFC-independent and 1-rank) exercise item 39c; a second test,
+      `tst/test_suite/dyngrmhd/test_dyngrmhd_setneighbors_cfc_amr_mpicpu.py`,
+      runs the wide-domain CFC AMR smoke test at 8 ranks and is marked
+      `xfail` with a reason string naming this item, documenting 39c as a
+      live, tracked, reproducible failure until it's actually fixed (skipped
+      automatically if the CFC-locked binary it needs isn't present, since
+      the default CI build used by the rest of this test suite is
+      `built_in_pgens`, not `dyn_grmhd/dyngr_tov`).
+
+    - **Current state**: `src/mesh/meshblock.cpp` (all 4 sites'
+      `recip==nullptr` rule + corner fix + debug dump) and
+      `src/bvals/bvals.cpp` (the `CFC_DEBUG_BVALS`/`_ENTRY` dump) are both
+      modified and uncommitted on `proj/tde`. Debug dumps in both files are
+      env-var-gated (`CFC_DEBUG_NGHBR`, `CFC_DEBUG_BVALS`) and safe to leave
+      in place (zero-cost, zero-output when unset) or strip before a final
+      commit, reviewer's choice. **Next session's highest-value next step**:
+      root-cause the actual call-sequence divergence behind the `nvars`
+      cache desync (item 39c) -- this now blocks *any* multi-rank validation
+      of this fix family, independent of the tie-break collision
+      (`gid=31`/`gid=59`) still open from 39f. Do not re-attempt the
+      "widen the domain" or "check `FindNeighbor`'s boundary behavior"
+      hypotheses -- both tested directly this session and disconfirmed as
+      the (sole) cause.
+
+64. **(2026-09-15, later) Correction to item 63's "cross-rank `nvars` cache
+    desync" diagnosis for item 39c -- it was a diagnostic artifact, not a
+    real bug -- and a new, concrete, hand-verified mechanism found in its
+    place: a genuinely inconsistent `nghbr[].lev` value between two blocks
+    that otherwise agree on everything else about their relationship.**
+
+    - **The correction, confirmed by direct code reading before any new
+      job**: `BuildRankPackedVarMetadata`'s debug dump (and the underlying
+      `rank_packed_bvals_nvars_` cache) is defined once on the shared base
+      class `MeshBoundaryValues`, but is inherited independently by **every
+      physics module's own, separate instance** -- confirmed at least 9
+      coexist in a CFC+MHD run: Hydro's `pbval_u`, MHD's `pbval_u` (`nvar=
+      nmhd+nscalars=5`) *and* `pbval_b` (a different class,
+      `MeshBoundaryValuesFC`, hardcoded `nvar=3`), Z4c's `pbval_u`/
+      `pbval_weyl`, and CFC's five (`pbval_pietax`/`psi`/`alpha_psi`/
+      `pietabeta`/`adm`, fixed `nvar` 4/1/1/4/`nadm` respectively, every
+      instance always called with that same fixed value -- no instance is
+      ever invoked with more than one `nvar`). The dump carried **no
+      instance identifier**, so item 63's "`nvar=5` on one side, `nvar=3`
+      on the other, same `(peer,lid,dn)` key" match was, with near
+      certainty, `pbval_u`'s own entry (nvar=5) accidentally compared
+      against `pbval_b`'s own, completely unrelated entry (nvar=3) --
+      confirmed independently via the `isame_z4c_ndat` field in that same
+      example: populated on one side (consistent with `pbval_u`, whose
+      `InitSendIndices`/`buffs_cc.cpp` always computes this field even when
+      unused) and exactly `0` on the other (consistent with `pbval_b`'s
+      class, whose own `buffs_fc.cpp` never touches this field at all --
+      confirmed via `grep`, zero occurrences). **Item 63's specific "5 vs
+      3" numbers should not be reused as evidence for anything.**
+    - **Fix applied to make the diagnostic trustworthy**: added a
+      construction-order sequence number (`instance_seq_`, `src/bvals/
+      bvals.hpp`/`.cpp`) to `MeshBoundaryValues` -- a static counter
+      incremented once per instance construction, valid across ranks
+      (unlike a raw `this` pointer) because every rank constructs these
+      ~9+ instances in the same order, driven by uniform `ParameterInput`
+      config, not local mesh content. Threaded into every existing
+      `CFC_DEBUG_BVALS`/`_ENTRY` print.
+    - **Re-ran the identical wide-domain 8-rank smoke test** (job 8828663;
+      same crash signature as every prior attempt: `Abort(14) ...
+      internal_Wait: Message truncated`, all 8 ranks, before cycle 0) and
+      redid the send/recv match, this time properly constrained to same
+      `instance_seq` **and** the correct rank-pair identity (a send entry's
+      `(my_rank, peer)` must equal a recv entry's `(peer, my_rank)`, not
+      just matching `lid`/`dn` against `m`/`n` in isolation -- the first
+      re-match attempt, done by a delegated agent, missed this and produced
+      an invalid cross-rank-pair "match" that a direct hand-check falsified
+      immediately: it claimed rank 6's message to peer 2 matched rank 3's
+      recv entry, but rank 2 has no such recv entry at all). Redone
+      correctly (script, not by eye): 6888 unique send keys, 5905 cleanly
+      matched 1:1 against a recv counterpart, only 43 (~0.7%) with a
+      `data_size` mismatch -- small, not a wholesale breakdown, but real.
+    - **One mismatch traced all the way through by hand, mechanism fully
+      identified**: block `gid=576` (rank 7's local block 30, slot 52) and
+      block `gid=497` (rank 6's local block 29, slot 51) are each other's
+      neighbor. Their registrations are **mutually correct on gid/dest**:
+      576's own slot 52 reads `nt_gid=497 dest=51`; 497's own slot 51 reads
+      `nt_gid=576 dest=52` -- perfectly reciprocal, no under-registration,
+      no collision. But their **recorded neighbor level disagrees**: 576's
+      own entry classifies 497 as **finer** (`lev_cmp=1`, i.e. `nghbr(30,
+      52).lev=3 > mblev(30)`, so block 576 itself is level <3) -- correct,
+      since 497 genuinely is level 3. But 497's own entry for its neighbor
+      576 reads `nt_lev=3` too (`lev_cmp=0`, "same level") -- **wrong**:
+      since 497 is level 3 and 576 is coarser, 497 should record 576's
+      level as <3 (`lev_cmp=-1`, coarser), not 3. One side's `nghbr[].lev`
+      for this specific, otherwise-correctly-registered relationship is
+      stale/wrong. This directly explains the `data_size` mismatch (level
+      classification selects `icoar_ndat`/`isame_ndat`/`ifine_ndat`), and is
+      exactly the kind of inconsistency `BuildRankPackedVarMetadata`'s
+      cache has no way to detect or protect against.
+    - **Not yet determined**: whether this `.lev` inconsistency originates
+      in `MeshBlock::SetNeighbors` itself (one of the sites this session
+      modified, or a pre-existing site), or downstream (e.g. a level
+      value not refreshed after a subsequent regrid changes the true
+      neighbor's level after this block's own registration already ran).
+      Also not yet checked: whether this specific mismatch class is new
+      (introduced by this session's `recip==nullptr`/corner fixes) or was
+      always latent, only now exposed because those fixes create far more
+      cross-rank diagonal registrations than the old code ever did. Whether
+      this is the same underlying issue as the still-open tie-break
+      collision (`gid=31`/`gid=59` from item 63) or a genuinely separate
+      one is also unconfirmed -- both live in the same newly-active
+      diagonal-registration code paths, so a connection is plausible but
+      not demonstrated.
+    - **Current state**: `src/bvals/bvals.hpp`/`.cpp` (the `instance_seq_`
+      addition, on top of item 63's `CFC_DEBUG_BVALS` dump) uncommitted on
+      `proj/tde`, alongside item 63's own uncommitted `meshblock.cpp`
+      changes. **Next step**: determine whether the wrong `.lev` value is
+      written incorrectly at registration time (check `SetNeighbors`'s
+      write for this specific relationship directly, e.g. via a targeted
+      probe on `b_gid=497`'s own registration of `dest=52`/`gid=576`) or
+      corrupted afterward: instrument the `.lev` field's write, not just
+      the finished dump, on the next run.
+
+    - **Follow-up (same day, later): the specific `.lev`-disagreement
+      finding above does not replicate under fully rigorous matching, and
+      should be treated as unconfirmed, like the "5 vs 3" claim before it.**
+      Added an unconditional per-candidate trace (`CFC_DEBUG_NGHBR
+      corner_trace`, printed for every corner direction regardless of
+      branch, not just the coarser one) to check the `gid=497`/`gid=576`
+      pair directly -- but AMR block numbering is not stable run-to-run (a
+      fresh Z-order renumbering happens on every construction), so a
+      second run's `corner_trace` for that same gid pair (which happened to
+      recur) showed a fully **consistent**, symmetric relationship (both
+      sides `nlevel=3`, `branch=same_or_finer`, no disagreement at all).
+      Redid the `CFC_DEBUG_BVALS_ENTRY` match a third time with BOTH
+      diagnostics active in the same job and the **fully rigorous** key
+      (send's `(my_rank,peer,lid,dn)` must equal recv's `(peer,my_rank,m,
+      n)`, not just `lid/dn` against `m/n` in isolation, plus matching
+      `instance_seq`): this eliminated all matching ambiguity (0 of 6751
+      recv keys ambiguous, vs. 244 under the previous, looser key), and
+      the number of surviving mismatches **dropped from 25/5903 (~0.4%) to
+      1/5804 (~0.017%)** -- consistent with most of the previous count,
+      including the clean finer-vs-same-level pattern, having themselves
+      been an artifact of a still-too-loose match key, not a real
+      systematic disagreement. The single survivor that remains shows no
+      level disagreement either (`lev_cmp=0` both sides) -- just a
+      differing `isame_ndat`/multiplier pair, at a slot outside the corner
+      range, i.e. in a branch not yet instrumented at all. **Net effect:
+      every specific `bvals.cpp`-side mechanism proposed so far (the
+      original "5 vs 3" cache desync, the corner `.lev` disagreement) has
+      failed to survive stricter verification. Item 39c's precise
+      mechanism inside the boundary-value machinery remains unidentified.**
+    - **What IS now confirmed, decisively, via a control test**: item 39c
+      is a genuine consequence of this session's `SetNeighbors` changes,
+      not a pre-existing, unrelated bug. Reverted `src/mesh/meshblock.cpp`
+      to its original, unmodified committed `HEAD` (temporarily; restored
+      immediately after), rebuilt `build_cpu`, reran the identical
+      wide-domain 8-rank smoke test unchanged otherwise. Result: **no
+      `internal_Wait`/`internal_Waitall`/"Message truncated" abort at
+      all** -- the first wide-domain 8-rank run in this entire investigation
+      to get past cycle 0 (every one of 9 prior attempts with this
+      session's fix applied crashed with `Abort(14)`/`Abort(17)` before or
+      immediately after cycle 0, zero exceptions). Instead: reaches
+      `cycle=20` cleanly (full cycle stats printed), then a late SIGBUS
+      after the run otherwise "finishes" -- a different, unrelated failure
+      mode (matching the earlier 1-rank run's own crash-after-completion
+      symptom, job 8827750), with substantial real `NANS_IN_CONS` (7964,
+      vs. zero on every fixed-code run of this same input) -- i.e.
+      unmodified code trades this item's abort for real physics
+      corruption instead, not for a clean run. This directly reconfirms,
+      in this exact scenario (not just by citing the older documented
+      instance), item 39's own original characterization: 39c is a
+      byproduct of applying the registration fix, not an independent bug
+      that happens to coexist with it.
+    - **Current state / next step**: the mechanism is confirmed
+      fix-induced but not yet identified at the code level. Candidates not
+      yet tried: (1) redo the message-*count* (`nentries`) comparison
+      properly keyed by `instance_seq` (the original count-matches-
+      everywhere finding from earlier this item, job 8828511, predates the
+      `instance_seq` fix and may have the same cross-instance ambiguity
+      problem the size checks did); (2) instrument the actual MPI call
+      sites directly (byte counts, tags, request completion order) rather
+      than the pre-computed metadata tables, since those tables now look
+      consistent almost everywhere; (3) check whether the abort is
+      order-of-registration-dependent by testing with only ONE of the two
+      independent fixes applied at a time (`recip==nullptr` alone without
+      the corner-`GetLeaf` fix, or vice versa) to see if either alone is
+      sufficient to trigger it, narrowing which specific new registrations
+      are responsible.
+
+**Follow-on, separate session (2026-09-16)**: item 39c's root mechanism was
+found (an orphaned/asymmetric registration when one side defers, not the
+`nvars`-cache theory above -- that theory was refuted). A slot-capacity
+redesign was attempted to fix it properly, found to regress (it dropped a
+load-bearing validity check along with the defer logic), and was reverted in
+full. A smaller, targeted patch was applied instead. **See
+`src/cfc/SETNEIGHBORS_HANDOFF.md` for the complete, current-state writeup**
+(root cause, both confirmed failure modes with job evidence, what was tried
+and why the redesign regressed, the actual patch landed, and what a future
+redesign session should pick up) -- written specifically to be portable to a
+fresh session, since this investigation's history (including the refuted
+theory above) is context a new session doesn't need to carry.

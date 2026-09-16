@@ -1,0 +1,169 @@
+# SMOKE TEST for the MeshBlock::SetNeighbors edge/corner registration fix
+# (DEVELOPMENT.md items 38/39a-39g/42; plan file
+# go-to-athenak-tde-read-memoized-dusk.md). Real CFC + BH-puncture + TOV star +
+# multigrid, adapted from cfc_puncture_offcenter_tov_refined_noexcise.athinput
+# (same TOV/puncture/CFC parameters, known-good), keeping that fixture's static
+# puncture <refined_region1> (needed for basic stability, independent of AMR --
+# see CORRECTION below) and adding a genuine refinement=adaptive criterion
+# (min_max on density) that discovers and refines the star's core from
+# scratch after a few stable cycles -- this is what actually produces a real,
+# from-scratch regrid event to exercise SetNeighbors against, mirroring item
+# 38's own (no longer recoverable, see go-to-athenak-tde-read-memoized-dusk.md)
+# `cfc_amr_dynamic_check` smoke test in spirit, not by exact reconstruction.
+#
+# CORRECTION (post-first-run, job 8827714): the first version of this fixture
+# dropped the parent's static puncture refinement entirely (mistakenly
+# reasoning that item 38's own test used no static seed at all), leaving the
+# puncture at unresolved root dx=1.6 from t=0. That produced immediate,
+# widespread NaNs (first in the B-field, cycle 0->1) that had nothing to do
+# with SetNeighbors or AMR -- confirmed by the fact that `0 MeshBlocks created,
+# 0 deleted by AMR` for the whole run, i.e. the blowup happened before any
+# regrid could occur at all. Restored the puncture's static region below.
+#
+# Purpose: exercise a REAL post-regrid CFC AMR event (ReinitializeMetricForAMR,
+# multigrid ReallocateForAMR, ADM ghost exchange) with the recip==nullptr fix
+# applied at all 4 SetNeighbors diagonal sites, watching for NANS_IN_CONS and
+# metric sanity (detg>0, alpha>0) -- not just "no crash". Small/short by
+# design for a quick multi-rank correctness check, not a resolution/accuracy
+# study.
+
+<comment>
+problem  = SetNeighbors-fix smoke test: CFC+puncture+TOV with adaptive (min_max) AMR
+
+<job>
+basename = cfc_setneighbors_smoke
+
+<mesh>
+nghost = 4        # Number of ghost cells
+nx1    = 80       # 5 MeshBlocks in x1-direction (root level), dx=1.6
+x1min  = -25.6    # minimum x1 -- BH puncture at x=0 sits one MeshBlock in from here
+x1max  = 102.4    # maximum x1 -- star surface (~71.8) has ~19 cells of buffer before here
+ix1_bc = diode    # inner boundary -- NOT reflect (star is off-center, no mirror parity)
+ox1_bc = diode    # outer boundary
+
+nx2    = 32       # 2 MeshBlocks in x2-direction (root level), dx=1.6
+x2min  = -25.6    # minimum x2
+x2max  = 25.6     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 32       # 2 MeshBlocks in x3-direction (root level), dx=1.6
+x3min  = -25.6    # minimum x3
+x3max  = 25.6     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive  # was static in the *_refined_noexcise parent
+max_nmb_per_rank    = 200
+num_levels          = 3
+refinement_interval = 1
+ncycle_check        = 1
+
+# CORRECTION (post-first-run): the first version of this fixture dropped the
+# parent's static puncture refinement entirely, relying only on the adaptive
+# criterion below (targeting the STAR, far from the puncture) to provide any
+# resolution at all near x=0. That is NOT safe on its own -- the puncture
+# needs its own resolved region for basic C2P stability independent of AMR
+# (root dx=1.6 there is too coarse); dropping it produced immediate,
+# widespread NaNs (in the B-field, from cycle 0) unrelated to SetNeighbors
+# entirely, before any regrid could even occur. Restored below, matching the
+# parent fixture exactly. The star intentionally gets NO static seed -- the
+# parent fixture itself runs fine with the star at root-level resolution, so
+# leaving it unrefined at t=0 and letting <amr_criterion0> discover and
+# refine it after a few stable cycles is what actually produces a genuine,
+# from-scratch regrid event (the thing this test exists to exercise).
+<refined_region1>
+level = 2        # matches cfc_puncture_offcenter_tov_refined_noexcise.athinput exactly
+x1min = -3.2
+x1max = 3.2
+x2min = -3.2
+x2max = 3.2
+x3min = -3.2
+x3max = 3.2
+
+<amr_criterion0>
+method    = min_max     # dispatches to AthenaK's built-in min/max-threshold criterion
+variable  = mhd_w_d     # refine wherever density exceeds value_max (the star's core)
+value_max = 1.0e-4      # rhoc=1.28e-4 below; this sits just inside the core, comfortably
+                         # below the surface density, matching item 38's own tuning intent
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = 20         # short: a handful of regrid checks/events is the whole point
+tlim       = 1.0e10     # cycle-limited, not time-limited
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false     # matches every off-center TOV fixture to date (item 46/48)
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method (matches cfc_puncture_vacuum*)
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-10    # floor on density rho (matches cfc_puncture_vacuum*)
+tfloor      = 1.0e-8
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 2.0        # ratio of specific heats Gamma
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+mg_threshold   = 1.0e-10  # matches cfc_bu8_stability's genuine-dynamical-run setting
+mg_poisson_threshold = 1.0e-10
+mg_npresmooth  = 3
+mg_npostsmooth = 3
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH, fixed at the coordinate origin x=0
+
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric
+rhoc        = 1.28e-4   # matches cfc_puncture_vacuum_small.athinput -- gives
+                         # isotropic radius R_iso~11.82 for this kappa/gamma
+kappa       = 100.0     # P = kappa*rho^gamma
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 1e-2      # radial step for TOV calculation
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 60.0    # ~5x R_iso -- the star's actual center, away from the BH
+star_center_x2 = 0.0     # puncture (always fixed at x=0)
+star_center_x3 = 0.0
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 1.0
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- inspect psi/alpha near the puncture and star
+variable    = adm
+dcycle      = 5
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- inspect density near the star for stability
+variable    = mhd_w_bcc
+dcycle      = 5
+slice_x3    = 0.0
+id = prim_xy

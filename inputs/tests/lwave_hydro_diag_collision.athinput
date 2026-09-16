@@ -1,0 +1,104 @@
+# AthenaXXX input file -- MINIMAL, CFC-INDEPENDENT reproducer for the
+# MeshBlock::SetNeighbors edge/corner diagonal-registration bug documented in
+# src/cfc/DEVELOPMENT.md items 38/39(a-g)/42. Plain Newtonian hydro
+# (linear_wave pgen), no CFC/GR/elliptic solve at all -- confirms the bug is
+# generic AthenaK mesh code, not anything CFC-specific.
+#
+# Topology: a 4x4x4 root grid (4 MeshBlocks/axis at the root level), with
+# exactly ONE root block -- (1,1,1) in 0-indexed block coordinates, i.e. the
+# unit cube x1,x2,x3 in [1,2] -- refined one level finer via <refined_region1>
+# (static refinement, no adaptive-criterion guessing -- fully deterministic
+# tree). This gives the same irregular diagonal-adjacency topology as items
+# 39b/39d/39f/39g's original investigation: the refined block's 8 children
+# each have some diagonal neighbors that are root-level (coarser) blocks in an
+# "interior octant" position relative to that diagonal, which is exactly the
+# case MeshBlock::SetNeighbors's edge/corner registration guard mishandles.
+#
+# Periodic BCs on all 6 faces (matches item 39g/40's setup -- no physical
+# boundary anywhere, so no interaction with unrelated fixes like PR #748/
+# item 40/41's coarse-then-prolongate BC reordering).
+#
+# Build with: build_generic (cmake -DPROBLEM=built_in_pgens, see build_aurora.sh
+# for the exact flags used for build_cpu/build_generic on this branch).
+# Run 1-rank (mpiexec -n 1) to reproduce the original 39d/39f/39g investigation
+# exactly; a small multi-rank run also exercises 39c's still-unexplained MPI
+# abort once 39b's guard-removal fix is applied.
+
+<comment>
+problem   = MeshBlock::SetNeighbors diagonal-registration reproducer (items 38/39/42)
+reference = src/cfc/DEVELOPMENT.md items 38, 39a-39g, 42
+
+<job>
+basename  = LWaveDiagCollision
+
+<mesh>
+nghost    = 2          # Number of ghost cells
+nx1       = 16         # 4 MeshBlocks/axis at root level (nx1/meshblock.nx1=4)
+x1min     = 0.0
+x1max     = 4.0
+ix1_bc    = periodic
+ox1_bc    = periodic
+
+nx2       = 16
+x2min     = 0.0
+x2max     = 4.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 16
+x3min     = 0.0
+x3max     = 4.0
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 4          # 4 cells/block -> 4 root blocks/axis (16/4=4)
+nx2       = 4
+nx3       = 4
+
+<mesh_refinement>
+refinement = static     # deterministic tree -- no AMR-criterion guessing
+
+<refined_region1>
+level = 1               # refine exactly root block (1,1,1) one level finer
+x1min = 1.0
+x1max = 2.0
+x2min = 1.0
+x2max = 2.0
+x3min = 1.0
+x3max = 2.0
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = 10         # a handful of cycles is enough to see NANS_IN_CONS
+tlim       = 1.0e10     # cycle-limited, not time-limited
+ndiag      = 1
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.66666666667
+
+<problem>
+pgen_name = linear_wave
+wave_flag = 0
+amp       = 1.0e-3
+dens      = 1.0
+pgas      = 0.6
+vx0       = 0.0
+along_x1  = false
+along_x2  = false
+along_x3  = false
+
+<output1>
+file_type   = hst
+data_format = %12.5e
+dt          = 1.0
+
+<output2>
+file_type   = bin
+variable    = hydro_w
+dt          = 1.0

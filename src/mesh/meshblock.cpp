@@ -439,19 +439,41 @@ void MeshBlock::SetNeighbors(std::unique_ptr<MeshBlockTree> &ptree, int *ranklis
               if (nlevel >= lloc.level) {  // same-level or already-resolved finer leaf
                 do_register = true;
               } else {
-                // Item 65: see the x1x2-edge comment above for the general
-                // rationale. Corners have no free axis (no subblock loop), so
+                // Item 65 CORRECTION (found via a production-scale restart
+                // validation, 96 ranks/1268 MeshBlocks, that the small-scale
+                // smoke tests never exercised): corners have no free axis, so
                 // unlike edges, T's own finer-branch resolves to exactly ONE
-                // specific child via its own single GetLeaf call -- it is not
-                // guaranteed to be us. That distinction does not matter for
-                // THIS fix though: whether or not T's resolution happens to
-                // match us, we still need our own row entry regardless (the
-                // orphan mechanism is the same either way). Only recip==LEAF
-                // (a genuine same-level neighbor of T's, meaning we are not
-                // really T's diagonal neighbor at all) should suppress
-                // registration.
+                // specific child via a single GetLeaf call -- NOT necessarily
+                // us. Registering unconditionally here (as edges correctly
+                // do, since edges' free-axis loop always covers every real
+                // child) is UNSAFE for corners: if T's own resolution picks a
+                // DIFFERENT sibling C (not us, "B"), T's own row will only
+                // ever expect to exchange with C at this slot -- if B ALSO
+                // registers itself pointing at the same slot, B's send has no
+                // matching recv on T's side (T never posted one for B), which
+                // is exactly the kind of orphaned message that aborts with
+                // `internal_Waitall`. This is the still-open item 39f/63
+                // tie-break collision (SETNEIGHBORS_HANDOFF.md section 2c/6),
+                // not the orphan mechanism (2b) this item's fix otherwise
+                // targets -- only rare/deep enough AMR topology exercises it,
+                // which is why small smoke tests missed it. So: register
+                // unconditionally ONLY when T's own resolution is confirmed
+                // to match us (fixes 2b's orphan case, safe); when it does
+                // NOT match, do not register (preserves this already-known,
+                // deliberately-unaddressed 2c gap instead of turning it into
+                // an even more certain abort).
                 MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, -m, -l);
-                do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
+                if (recip == nullptr) {
+                  do_register = true;
+                } else if (recip->pleaf_ == nullptr) {
+                  do_register = false;  // recip=LEAF: genuinely invalid candidacy
+                } else {
+                  int rffx = 1 - (-n + 1)/2;
+                  int rffy = 1 - (-m + 1)/2;
+                  int rffz = 1 - (-l + 1)/2;
+                  MeshBlockTree* recip_leaf = recip->GetLeaf(rffx, rffy, rffz);
+                  do_register = (recip_leaf->gid_ == mb_gid.h_view(b));
+                }
               }
               if (do_register) {
                 int inghbr = NeighborIndex(n,m,l,0,0);

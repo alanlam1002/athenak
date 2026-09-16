@@ -621,6 +621,15 @@ Checked, all three matching the offline predictions exactly:
 plus 0 ghost-coverage holes on all three, and the `xfail` dropped from
 `test_ut_nghbr_symmetry_cpu.py`.
 
+One more corroboration worth stating plainly, and worth having checked earlier:
+`origin/main` carries this same guard, unchanged
+(`origin/main:src/mesh/meshblock.cpp`, the four `// only set neighbor for
+exterior edges of coarser face` sites). So this is not a novel rule being
+argued for from first principles -- it is upstream AthenaK's own, exercised by
+every other user of the code, and `proj/tde` is simply back on it. The burden of
+proof was always on the change, not on the guard; that it read as an unexplained
+heuristic is what inverted it.
+
 ### 8.8 Still open, and NOT explained by any of this
 
 Section 2a attributed the original production `NANS_IN_CONS` cascade (cycle

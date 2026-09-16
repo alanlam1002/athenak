@@ -559,10 +559,56 @@ is the "stolen" case, and it is the whole of the 1172.
   asserts a clean audit. Currently `xfail(strict=True)`: it flips to a failure
   the moment the rule is fixed, which is the signal to drop the marker.
 
-### 8.6 Open
+### 8.6 In-situ confirmation at production scale (job 8832179)
 
-The rule itself is untouched, pending the in-situ 96-rank confirmation run
-(`tde_elliptic_tracker_nexteval_v2_nghbraudit`, audit in mode 1) that the abort
-really is these registrations and not something else that merely coincides with
-them. If it is, the fix is to restore the parity condition at the four diagonal
-sites -- a forward commit, not a history rewrite -- and delete the `xfail`.
+Predictions in 8.2 were made offline, from two independent implementations, and
+written into the case's `BATCH/CONFIG` **before** submission. Case
+`tde_elliptic_tracker_nexteval_v2_nghbraudit`, 8 nodes / 96 ranks -- identical
+to the blocked restart in every respect except `ATHENAK_CHECK_NGHBR_SYMMETRY=1`,
+with the registration rule deliberately left unchanged so the run had to fail
+the same way jobs 8830813 and 8831986 did. It did:
+
+```
+Restarting from parent: parent/rst/cfc_tde_wd_imbh_elliptic_tracker.00010.rst
+### nghbr symmetry audit: 1268 MeshBlocks, 28006 registrations, 1172 asymmetric
+    (orphan=0 stolen=1172 destmismatch=0), 847 of them cross-rank
+  STOLEN  gid=63 (lev 4 @ 5,6,6, rank 4) slot=16 -> gid=60 (lev 3 @ 2,2,3, rank 4)
+          dest=22 ; that slot holds gid=70 dest=16
+  ...
+Multigrid root grid levels: 4
+Number of MeshBlocks in the pack: 13
+MeshBlock size: 16 x 16 x 16          [x4]
+Abort(17) ... Fatal error in internal_Waitall                [64 of 96 ranks]
+```
+
+Every offline number reproduced exactly at 96 ranks (1268 / 28006 / 1172, all
+"stolen", same offending pairs). The one genuinely new number is **847 of the
+1172 are cross-rank** -- 847 sends with no matching recv, spread over most of
+the job. The abort then lands 6 s in, immediately after multigrid's root-grid
+setup prints and before a single `cycle=` line: byte-for-byte the signature of
+8830813 and 8831986, and precisely where 2c predicted it (multigrid's own
+exchange is the first cross-rank communication after the mesh is built).
+
+What this does and does not establish. It establishes that the asymmetries are
+real, present at production scale, overwhelmingly cross-rank, and that the abort
+follows them at the predicted place -- an observation-only run cannot do better
+than that. It does **not** by itself prove causation; that needs the A/B against
+the parity rule, which was deliberately not attempted here.
+
+### 8.7 Open
+
+The rule itself is still untouched. 8.6 has now supplied the in-situ evidence;
+what remains is the change it points to: restore the octant-parity condition at
+the four diagonal sites (a forward commit, not a history rewrite -- `fee50981`
+and `8641e00f` stay in the log), delete the `xfail` from
+`test_ut_nghbr_symmetry_cpu.py`, and rerun this same case to confirm the audit
+reports 0 and the restart reaches real cycles. The offline tool predicts 26834
+registrations / 0 asymmetries / 0 ghost holes on this exact checkpoint, so that
+rerun is a direct check of a specific prediction, not an open-ended trial.
+
+Still separate and still open, and NOT explained by any of this: the cycle-0
+elliptic-solver convergence failure and the `NANS_IN_CONS` that follow it in
+section 5's wide-domain smoke test. Section 2a attributed the original
+production NaN cascade to `SetNeighbors`; 8.3 and 8.4 make that attribution
+doubtful, which means the cause of the cascade that started this whole
+investigation may never have been found.

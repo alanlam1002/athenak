@@ -33,15 +33,32 @@ def test_diag_collision():
     # primitive-recovery failures -- exit code alone would miss that). The
     # log file is shared/appended-to across the whole pytest session, so only
     # inspect the portion this specific run appends, not the whole file.
+    # Enable the neighbor-table audit for this run. Without it this test checks
+    # only "exited 0 and logged no NaNs", which on this deliberately symmetric
+    # topology is true under every registration rule tried so far -- i.e. it
+    # asserted almost nothing. The audit at least makes the table itself a
+    # checked property. (For a topology that DISCRIMINATES between rules, see
+    # test_ut_nghbr_symmetry_cpu.py.)
+    prev = os.environ.get(testutils.NGHBR_AUDIT_ENV)
+    os.environ[testutils.NGHBR_AUDIT_ENV] = "1"
+
     log_offset = 0
     if os.path.exists(testutils.LOG_FILE_PATH):
         log_offset = os.path.getsize(testutils.LOG_FILE_PATH)
 
-    testutils.run(input_file)
+    try:
+        testutils.run(input_file)
+    finally:
+        if prev is None:
+            del os.environ[testutils.NGHBR_AUDIT_ENV]
+        else:
+            os.environ[testutils.NGHBR_AUDIT_ENV] = prev
 
     with open(testutils.LOG_FILE_PATH, "r") as log_file:
         log_file.seek(log_offset)
         log_text = log_file.read()
+    testutils.assert_nghbr_symmetry_clean(log_text, context=f" in {input_file}")
+
     assert "NANS_IN_CONS" not in log_text, (
         "NANS_IN_CONS appeared in the run log -- the SetNeighbors "
         "diagonal-registration rule may have regressed item 39d's "

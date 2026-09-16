@@ -7,6 +7,7 @@ Various utility functions used for automatic testing, including
 
 # Modules
 import os
+import re
 from subprocess import Popen, PIPE
 from typing import List
 import time
@@ -175,6 +176,48 @@ def mpi_run(
             f"and {threads}-threads"
         )
     return True
+
+
+NGHBR_AUDIT_ENV = "ATHENAK_CHECK_NGHBR_SYMMETRY"
+
+
+def assert_nghbr_symmetry_clean(log_text: str, context: str = "") -> tuple:
+    """
+    Asserts that MeshBlock::CheckNeighborSymmetry found no asymmetric neighbor
+    registrations in the given run-log text.
+
+    The nghbr table must satisfy, for every populated slot,
+        nghbr(b,n) = {gid=T, dest=d}  =>  nghbr(T,d) = {gid=b, dest=n}
+    because bvals.cpp and multigrid_bvals.cpp build their MPI messages from each
+    rank's own rows with no cross-rank negotiation. A violation is a send with no
+    matching recv, which surfaces only later as an opaque MPI_Waitall abort.
+
+    Requires the run to have been made with NGHBR_AUDIT_ENV set; a missing audit
+    line is treated as a failure rather than a pass, since it means nothing was
+    actually checked. SetNeighbors also runs on every AMR remesh, so a run may
+    emit many audit lines -- all of them are checked.
+
+    Returns (n_audits, total_meshblocks_of_last_audit).
+    """
+    audits = re.findall(
+        r"nghbr symmetry audit: (\d+) MeshBlocks, (\d+) registrations, "
+        r"(\d+) asymmetric",
+        log_text,
+    )
+    assert audits, (
+        f"no 'nghbr symmetry audit' line in the run log{context} -- either the run "
+        f"never reached mesh build, or {NGHBR_AUDIT_ENV} was not set, or the binary "
+        "predates MeshBlock::CheckNeighborSymmetry. Nothing was actually checked."
+    )
+    bad = [(nmb, nreg, nbad) for nmb, nreg, nbad in audits if int(nbad) != 0]
+    assert not bad, (
+        f"asymmetric neighbor registrations{context}: "
+        + "; ".join(f"{n} of {r} on {m} MeshBlocks" for m, r, n in bad)
+        + ". Each is a send with no matching recv; at multi-rank scale they abort "
+        "the run in MPI_Waitall during the first boundary exchange. See "
+        "src/cfc/SETNEIGHBORS_HANDOFF.md section 8."
+    )
+    return len(audits), int(audits[-1][0])
 
 
 def cleanup(text=False) -> None:

@@ -685,7 +685,67 @@ What is known about the cascade, from this run:
 That is the next thing to investigate, and it is a *different* problem from
 this one. It should not be folded back in.
 
-### 8.9 Still open
+### 8.9 The tests that were said to reproduce this
+
+Worth stating plainly, because it is the reason the wrong diagnosis survived so
+long: **no test in this repository ever demonstrated the upstream rule failing.**
+
+`git log --diff-filter=A` shows both SetNeighbors tests were added *by
+`fee50981` itself* -- they were written to validate that commit, not to
+establish a pre-existing defect.
+
+* `test_ut_setneighbors_diag_collision_cpu.py` runs
+  `lwave_hydro_diag_collision.athinput`: 71 MeshBlocks, 1780 registrations,
+  **0 asymmetric under both rules**. Two-level and octant-symmetric, so every
+  coarser diagonal candidate in it is parity-matched. It passes identically on
+  upstream and on the modified code and cannot distinguish them. Section 6 of
+  this note says as much ("confirmed too symmetric"), yet it was cited as the
+  reproducer.
+* `test_dyngrmhd_setneighbors_cfc_amr_mpicpu.py` asserted nothing beyond the
+  process exit code, was marked `xfail`, and `skip`s unless the build has
+  `-DPROBLEM=dyn_grmhd/dyngr_tov` -- which the default suite does not build. In
+  a normal `run_test_suite.py --mpicpu` run it never executed at all.
+
+The strongest remaining claim was section 3's "decisive control test" (job
+8828760), reporting that *unmodified* code produced 7964 NaNs on the CFC smoke
+input. Measured directly on that input's own topology:
+
+| rule | registrations | asymmetric |
+|---|---|---|
+| upstream / restored parity | 12472 | **0** |
+| `fee50981` + `8641e00f`    | 12664 | **192** (all stolen) |
+
+624 MeshBlocks either way. So that input's neighbour table is clean on upstream
+code -- whatever produced those NaNs was not the table -- and the replacement
+rule adds 192 asymmetries to it. One of the stolen slots' true owners is
+`gid=132`, the very block section 3 traced by hand as the "orphan" motivating
+`fee50981`. That strongly suggests the section 2b orphan mechanism was itself
+produced by the *earlier* rule change (step 1's `recip==nullptr` rule, which had
+already replaced the parity guard), i.e. the 39b -> 39c -> 39f chain was
+self-inflicted.
+
+Both tests have since been given assertions that can actually fail
+(`testutils.assert_nghbr_symmetry_clean`, which also fails when no audit line is
+present, so a run that never reached mesh build cannot pass vacuously). The
+dyngrmhd test's `xfail` is gone: it now asserts the audit is clean and that no
+`internal_Wait`/`Message truncated` appears, and deliberately does **not** assert
+the exit code, which is still nonzero for the unrelated reason in 8.8.
+
+### 8.10 Scope of the correctness claim
+
+What has been established is that the upstream octant-parity rule yields a
+**symmetric, ghost-complete** neighbour table on every topology obtainable here:
+the production checkpoint, 51 dynamic AMR remeshes, 40 random 2:1-balanced
+trees, both CFC smoke inputs, and both small reproducers. That is exactly the
+property the `internal_Waitall` abort depends on.
+
+It is **not** a proof that `SetNeighbors` is correct in general. Not audited:
+buffer-size agreement between paired slots, the 1D/2D paths, flux correction,
+and `bvals_part.cpp`'s reliance on per-category slot contiguity. And the
+cycle-10600 cascade (8.8) remains unexplained -- the neighbour table is ruled
+out as its cause, mesh and boundary code in general is not.
+
+### 8.11 Still open
 
 The `SetNeighbors` neighbor table is fixed and verified (8.7, 8.8). The TDE
 production run is **not** unblocked end to end: it now restarts and evolves

@@ -1,30 +1,34 @@
 """
-Regression/tracking test for item 39c (src/cfc/SETNEIGHBORS_HANDOFF.md,
-section 2b): an orphaned/asymmetric neighbor registration in
-`MeshBlock::SetNeighbors` (src/mesh/meshblock.cpp) -- when one block defers
-registering a coarser diagonal neighbor (trusting the other side's own
-unconditional branch to "cover" it), that block's own row is left with
-nothing, but its own row is what its own rank's send/recv bookkeeping
-(`MeshBoundaryValues::BuildRankPackedVarMetadata`, src/bvals/bvals.cpp) is
-built from -- producing an orphaned registration that aborts real
-multi-rank runs with "Fatal error in internal_Wait: Message truncated"
-before cycle 0, at 8 MPI ranks, on real CFC + BH-puncture + TOV physics.
-(An earlier theory blaming a cross-rank `nvars`-cache desync in the same
-function was investigated and refuted -- see SETNEIGHBORS_HANDOFF.md
-section 3, step 3, for why.)
+Regression/tracking test for cross-rank MPI aborts out of
+`MeshBlock::SetNeighbors` (src/mesh/meshblock.cpp): at 8 MPI ranks on real
+CFC + BH-puncture + TOV physics, an asymmetric neighbor registration -- one
+where block b names (T, dest=d) but T's own row at slot d does not name b
+back -- becomes a send with no matching recv, and kills the run with
+"Fatal error in internal_Wait: Message truncated" before cycle 0.
 
-A minimal, targeted patch for this (SETNEIGHBORS_HANDOFF.md section 5) is
-now applied and CONFIRMED to fix this specific abort (job 8830513, 2026-09-16
--- zero occurrences of internal_Wait/internal_Waitall/Message truncated/
-Abort(, first time this test's own scenario has gotten past cycle 0 at all).
-The `xfail` marker stays for now anyway: the same job surfaced a SEPARATE,
-apparently pre-existing problem with this input (a CFC elliptic-solver
-convergence failure at cycle-0 metric init, producing widespread
-NANS_IN_CONS, plus a later SIGBUS after AthenaK's own clean nlim-termination
-print) that also matches the unmodified-code control test's own symptom --
-see SETNEIGHBORS_HANDOFF.md section 5 for the full trace. Remove `xfail`
-only once THAT is separately fixed or shown unrelated to this test's actual
-purpose; until then this test still won't exit 0.
+History, since the docstring has been rewritten more than once as the
+diagnosis changed (SETNEIGHBORS_HANDOFF.md has the full account):
+  - a cross-rank `nvars`-cache desync was blamed, then refuted (section 3);
+  - an "orphaned registration when one side defers" mechanism was blamed
+    next, and a rule change landed for it (sections 2b / 5);
+  - that rule change turned out to be the actual source of the asymmetries,
+    and the original octant-parity guard it replaced was correct all along
+    (section 8). The guard is restored as of commit b0d987ee.
+
+The direct check for what this test is really about is now
+`ATHENAK_CHECK_NGHBR_SYMMETRY=1`, which makes MeshBlock::CheckNeighborSymmetry
+report asymmetric registrations by (block, slot) at mesh-build time rather than
+leaving them to surface as an opaque MPI abort later. Setting it here would
+make a failure of this test far easier to attribute.
+
+The `xfail` marker stays for a reason unrelated to any of the above: this
+input separately hits a CFC elliptic-solver convergence failure at cycle-0
+metric initialization, producing widespread NANS_IN_CONS, plus a later SIGBUS
+after AthenaK's own clean nlim-termination print. That symptom is also present
+in the unmodified-code control, i.e. it is not caused by any SetNeighbors
+change -- see SETNEIGHBORS_HANDOFF.md sections 5 and 8.8. Remove `xfail` only
+once THAT is separately fixed or shown unrelated; until then this test will not
+exit 0 regardless of the neighbor table being correct.
 
 Requires a build configured with -DPROBLEM=dyn_grmhd/dyngr_tov (the CFC +
 BH-puncture + TOV problem generator) -- NOT the built_in_pgens default the

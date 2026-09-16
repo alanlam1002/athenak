@@ -9390,3 +9390,29 @@ and why the redesign regressed, the actual patch landed, and what a future
 redesign session should pick up) -- written specifically to be portable to a
 fresh session, since this investigation's history (including the refuted
 theory above) is context a new session doesn't need to carry.
+
+**Resolution, following session (2026-09-16)**: the premise of everything above
+about slot capacity was wrong, and the resolution went the other way. There is
+no capacity problem: the original octant-parity guard (`myox1 == n && myox2 == m
+[&& myox3 == l]`) is *exactly* symmetric on this project's real production
+topology and on every random 2:1-balanced AMR tree tried, and it leaves no ghost
+region unfilled -- a parity-mismatched coarser diagonal is not a second genuine
+neighbour but the block's own face/edge neighbour in the reduced direction,
+already covered by that lower-order slot's `icoar` receive range. Items 63/64/65
+replaced that guard, and the replacement is what blocked the `proj/tde`
+production restart: measured on the blocked restart's own checkpoint, it added
+1172 registrations over the parity rule, all of them asymmetric, 847 cross-rank
+-- 847 sends with no matching recv, aborting in `internal_Waitall` on 64 of 96
+ranks before cycle 0 (job 8832179, with a new in-tree audit naming them in
+situ). The guard was restored in commit `b0d987ee` as a forward fix; `fee50981`
+and `8641e00f` remain in the log.
+
+Note also that item 2a's attribution of the original `NANS_IN_CONS` cascade to
+`SetNeighbors` now looks doubtful, which means that cause may still be unfound.
+
+**`src/cfc/SETNEIGHBORS_HANDOFF.md` section 8 is the current account** -- the
+derivation, the measurements, the in-situ confirmation, and the tooling that
+makes any future claim about this table checkable in seconds
+(`ATHENAK_CHECK_NGHBR_SYMMETRY=1`, and `scripts/nghbr_symmetry_offline.py` which
+needs no build at all). Sections 1-7 of that file, and items 63/64/65 here, are
+retained as the record of how the investigation went wrong, not as guidance.

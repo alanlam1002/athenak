@@ -6,11 +6,14 @@ Runs a minimal, CFC-independent, plain-hydro AMR reproducer (one root
 MeshBlock of a 4x4x4 root grid statically refined one level, periodic BCs)
 that item 39g's original investigation used to demonstrate item 39d's
 diagonal-neighbor slot-collision mechanism, and item 63 reused to confirm the
-recip==nullptr fix (all 4 sites of src/mesh/meshblock.cpp) avoids it. This
-topology is fully symmetric (every coarser diagonal candidate is genuinely
-redundant with an existing same-level or finer-branch registration), so it
-does not exercise the recip==nullptr ("genuinely needed") path itself -- see
-item 63 for the CFC+puncture+TOV smoke test that does. A clean exit and no
+registration rule avoids it. This topology is two-level and fully
+octant-symmetric (every coarser diagonal candidate is parity-matched, hence
+genuinely redundant with an existing same-level or finer-branch registration),
+which means it reports zero asymmetries under every rule tried so far and
+CANNOT distinguish between them. Keep it as a cheap clean-registration check,
+but for a topology that actually discriminates see
+test_ut_nghbr_symmetry_cpu.py (three levels, finest region placed
+asymmetrically) and SETNEIGHBORS_HANDOFF.md section 8. A clean exit and no
 NANS_IN_CONS in the run log is exactly what this fix should keep producing on
 this geometry; a nonzero exit or any NANS_IN_CONS occurrence here would mean
 this specific collision-avoidance mechanism has regressed.
@@ -41,6 +44,6 @@ def test_diag_collision():
         log_text = log_file.read()
     assert "NANS_IN_CONS" not in log_text, (
         "NANS_IN_CONS appeared in the run log -- the SetNeighbors "
-        "recip==nullptr fix (DEVELOPMENT.md item 63) may have regressed "
-        "item 39d's diagonal-neighbor slot-collision avoidance."
+        "diagonal-registration rule may have regressed item 39d's "
+        "slot-collision avoidance. See SETNEIGHBORS_HANDOFF.md section 8."
     )

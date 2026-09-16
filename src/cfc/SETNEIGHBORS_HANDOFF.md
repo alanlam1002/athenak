@@ -630,17 +630,67 @@ every other user of the code, and `proj/tde` is simply back on it. The burden of
 proof was always on the change, not on the guard; that it read as an unexplained
 heuristic is what inverted it.
 
-### 8.8 Still open, and NOT explained by any of this
+### 8.8 Validation run (job 8832259): fix confirmed, and 2a refuted outright
 
-Section 2a attributed the original production `NANS_IN_CONS` cascade (cycle
-10660, t~446) to `SetNeighbors` under-registration. 8.3 and 8.4 make that
-attribution doubtful: the parity rule drops nothing that is needed. Section 5's
-own validation points the same way -- the patched wide-domain run produced 7987
-NaNs downstream of a *cycle-0 elliptic-solver convergence failure*, against 7964
-in the unmodified control, i.e. the NaNs track the elliptic solver, not the
-registration rule. So the cause of the cascade that started this whole
-investigation may never have been found, and the restart validated here could
-still run into it again around the same cycle. That is a separate investigation;
-it should not be folded back into this one.
+The restart that had never survived to cycle 0 ran **600 clean cycles**,
+10000 -> 10599, at normal `dt` (~0.031-0.039), with no MPI abort and no NaN.
+Both pre-registered criteria met, both numbers exactly as predicted:
+
+```
+### nghbr symmetry audit: 1268 MeshBlocks, 26834 registrations,
+    0 asymmetric (orphan=0 stolen=0 destmismatch=0), 0 of them cross-rank
+cycle=10000 time=4.222390e+02 dt=3.505099e-02
+...
+cycle=10599 time=4.442490e+02 dt=3.078349e-02
+```
+
+A stronger result than intended came for free. AMR remeshed **51 times** during
+those cycles, and `SetNeighbors` (and the audit with it) runs on every remesh.
+All 51 reported **0 asymmetric**, over MeshBlock counts from 757 to 1345 across
+20 distinct tree sizes. So the rule is now validated on 51 independently
+generated, dynamically evolving AMR topologies -- not just the one frozen tree
+in the checkpoint, which is far better coverage than this fix was designed to
+get.
+
+**Then the run hit the NaN cascade, and that settles section 2a.** At cycle
+10600 `dt` begins doubling every cycle -- 0.0308, 0.0616, 0.1231, 0.2463,
+0.4925, ... 48.5 -- with 974,640 `NANS_IN_CONS`, and the run "terminates on
+time limit" at exactly t=500, which is the runaway `dt` overshooting `tlim`,
+not physics reaching it. The original v2 crash, running this same
+(octant-parity) rule, was cycle 10660 and **974,603** occurrences. Same
+cascade, same magnitude, ~60 cycles apart (a restart from a checkpoint is not
+bitwise identical to continuous running).
+
+So: with a neighbor table proven symmetric, proven free of ghost-coverage
+holes, identical to upstream AthenaK's, and re-verified 51 times as the mesh
+evolved, **the cascade happens anyway, at the same place, to the same extent.**
+Section 2a attributed this cascade to `SetNeighbors` under-registration. It is
+not that. That attribution is now refuted, not merely doubtful -- which means
+the cause of the failure that started this entire investigation is still
+unfound, and the whole `SetNeighbors` line of inquiry was chasing the wrong
+thing from item 38 onward.
+
+What is known about the cascade, from this run:
+- The elliptic solver converged throughout (`Failed to converge`: **0**
+  occurrences), so the section 5 convergence-failure theory -- which concerned a
+  different input, the wide-domain smoke test -- does not apply here.
+- The NaN sites are **not** localized. Of the first 3000: 285 at r<5, 730 at
+  5<=r<15, 948 at 15<=r<40, 1037 at r>=40. A global blowup, not a puncture or
+  excision artifact (`excise = false` in this run; `puncture_mass = 1.0` fixed
+  at the origin).
+- Onset is abrupt: cycle 10599 is entirely clean, 10600 is already doubling.
+  `dt` doubling exactly 2x per cycle looks like the CFL timestep being computed
+  from an already-corrupt state rather than a gradual physical steepening.
+
+That is the next thing to investigate, and it is a *different* problem from
+this one. It should not be folded back in.
+
+### 8.9 Still open
+
+The `SetNeighbors` neighbor table is fixed and verified (8.7, 8.8). The TDE
+production run is **not** unblocked end to end: it now restarts and evolves
+cleanly, but still dies in the cycle-10600 NaN cascade characterised in 8.8,
+whose cause is unknown. Restarting production from this checkpoint will get
+~600 cycles and then hit it again.
 
 

@@ -6,7 +6,7 @@
 > why, with measurements on the exact production topology that is currently
 > failing: the pre-`fee50981` octant-parity rule is exactly symmetric with no
 > unfilled ghost region, and the two commits on `proj/tde` are what introduce the
-> 1172 asymmetric registrations that abort the restart. The rest of this file is
+> 1172 asymmetric registrations that abort the restart (now fixed, 8.7). The rest of this file is
 > kept unedited as the record of how the investigation got here -- read it for
 > history, not for direction.
 
@@ -595,20 +595,43 @@ follows them at the predicted place -- an observation-only run cannot do better
 than that. It does **not** by itself prove causation; that needs the A/B against
 the parity rule, which was deliberately not attempted here.
 
-### 8.7 Open
+### 8.7 The fix, and what it was checked against
 
-The rule itself is still untouched. 8.6 has now supplied the in-situ evidence;
-what remains is the change it points to: restore the octant-parity condition at
-the four diagonal sites (a forward commit, not a history rewrite -- `fee50981`
-and `8641e00f` stay in the log), delete the `xfail` from
-`test_ut_nghbr_symmetry_cpu.py`, and rerun this same case to confirm the audit
-reports 0 and the restart reaches real cycles. The offline tool predicts 26834
-registrations / 0 asymmetries / 0 ghost holes on this exact checkpoint, so that
-rerun is a direct check of a specific prediction, not an open-ended trial.
+The octant-parity condition is restored at all four diagonal sites, as a forward
+commit -- `fee50981` and `8641e00f` stay in the log. The resulting rule is
+identical to the pre-`fee50981` one: the only differences from that code are the
+`do_register` refactor (`level >= lloc.level || parity` split into a branch) and
+`myox_i = myfx_i*2 - 1` in place of the open-coded `((lloc.lx_i & 1) == 1)*2 - 1`,
+which is the same expression. Verified by normalised diff against
+`fee50981^:src/mesh/meshblock.cpp`.
 
-Still separate and still open, and NOT explained by any of this: the cycle-0
-elliptic-solver convergence failure and the `NANS_IN_CONS` that follow it in
-section 5's wide-domain smoke test. Section 2a attributed the original
-production NaN cascade to `SetNeighbors`; 8.3 and 8.4 make that attribution
-doubtful, which means the cause of the cascade that started this whole
-investigation may never have been found.
+Each site now carries the derivation (8.3) in a comment, so the next reader does
+not have to rediscover why the condition is what it is -- the absence of that
+explanation is a large part of how this went wrong: the guard looked like an
+unexplained heuristic, so it was replaced by one.
+
+Checked, all three matching the offline predictions exactly:
+
+| topology | before | after |
+|---|---|---|
+| `amr_hydro_nghbr_asymmetry.athinput` (127 blocks) | 2288 reg, 124 asym | **2164 reg, 0 asym** |
+| `lwave_hydro_diag_collision.athinput` (71 blocks) | 1780 reg, 0 asym | 1780 reg, 0 asym |
+| TDE production checkpoint (1268 blocks) | 28006 reg, 1172 asym | **26834 reg, 0 asym** |
+
+plus 0 ghost-coverage holes on all three, and the `xfail` dropped from
+`test_ut_nghbr_symmetry_cpu.py`.
+
+### 8.8 Still open, and NOT explained by any of this
+
+Section 2a attributed the original production `NANS_IN_CONS` cascade (cycle
+10660, t~446) to `SetNeighbors` under-registration. 8.3 and 8.4 make that
+attribution doubtful: the parity rule drops nothing that is needed. Section 5's
+own validation points the same way -- the patched wide-domain run produced 7987
+NaNs downstream of a *cycle-0 elliptic-solver convergence failure*, against 7964
+in the unmodified control, i.e. the NaNs track the elliptic solver, not the
+registration rule. So the cause of the cascade that started this whole
+investigation may never have been found, and the restart validated here could
+still run into it again around the same cycle. That is a separate investigation;
+it should not be folded back into this one.
+
+

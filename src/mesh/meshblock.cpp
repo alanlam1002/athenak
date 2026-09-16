@@ -163,14 +163,18 @@ void MeshBlock::BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ran
   LogicalLocation lloc = pmy_pack->pmesh->lloc_eachmb[gid];
 
 
-  // find location of this MeshBlock relative to XXXX
-  // Item 65: myox1/myox2/myox3 (this block's own octant parity) drove the
-  // old exterior-edge/corner guard, now replaced by the recip-based rule
-  // at each diagonal site -- no longer needed.
-  int myfx1, myfx2, myfx3;
+  // find location of this MeshBlock relative to its parent.
+  // myfx* is this block's child index within its parent along each axis; myox* is
+  // the same thing as a direction (-1 for the lower child, +1 for the upper one).
+  // myox* is what the diagonal sites below test against the direction they look
+  // in -- see the x1x2-edge comment for why that is the right condition.
+  int myox1, myox2 = 0, myox3 = 0, myfx1, myfx2, myfx3;
   myfx1 = ((lloc.lx1 & 1) == 1);
   myfx2 = ((lloc.lx2 & 1) == 1);
   myfx3 = ((lloc.lx3 & 1) == 1);
+  myox1 = myfx1*2 - 1;
+  if (pmy_pack->pmesh->multi_d) myox2 = myfx2*2 - 1;
+  if (pmy_pack->pmesh->three_d) myox3 = myfx3*2 - 1;
 
   // neighbors on x1face
   for (int n=-1; n<=1; n+=2) {
@@ -265,23 +269,44 @@ void MeshBlock::BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ran
             } else { // neighbor at coarser level, set indx/dest to appropriate subblock
               inghbr = NeighborIndex(n,m,0,myfx3,0);
               idest = NeighborIndex(-n,-m,0,myfx3,0);
-              // Item 65 (DEVELOPMENT.md; supersedes the old octant-parity
-              // guard and this session's earlier recip==nullptr-only rule):
-              // register this diagonal neighbor in OUR OWN row unless T's
-              // own direct reciprocal query finds a genuine same-level LEAF
-              // neighbor instead (meaning we are not really T's diagonal
-              // neighbor at all -- T has a real neighbor there already).
-              // When T's reciprocal query instead finds something FINER,
-              // T's own unconditional finer-branch (above) always covers
-              // BOTH children of the free axis, so T WILL also register
-              // this same relationship from its side -- but that does not
-              // give OUR row an entry, which we still need regardless (this
-              // is the orphan mechanism behind item 39c's cross-rank MPI
-              // abort: the previous rule skipped registering here, trusting
-              // T to "cover" it, leaving this block's own send/recv
-              // bookkeeping for the relationship completely empty).
-              MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, -m, 0);
-              do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
+              // Register a COARSER diagonal neighbour only when this block's octant
+              // parity matches the direction on every axis the diagonal turns in.
+              // Writing A = lloc + d for the shifted address, the node FindNeighbor
+              // lands on has T.lloc = A>>1; comparing that with this block's parent,
+              // (A-d)>>1, axis by axis:
+              //   d_i =  0  they always agree
+              //   d_i = +1  they agree iff lx_i is odd   (myox_i == +1)
+              //   d_i = -1  they agree iff lx_i is even  (myox_i == -1)
+              // i.e. exactly myox_i == d_i. When that holds, T's own reciprocal query
+              // descends into this block's parent and its GetLeaf(ff...) resolves to
+              // precisely this block, so both sides register the same relationship with
+              // matching slot and dest -- symmetric by construction. That symmetry is
+              // load-bearing: the boundary-exchange bookkeeping is built per-rank from
+              // these rows alone, with no cross-rank negotiation, so an asymmetric entry
+              // is a send with no matching recv (see MeshBlock::CheckNeighborSymmetry).
+              //
+              // When the parity does NOT match on some axis set S, T is not a separate
+              // diagonal block at all: it is this block's own face or edge neighbour in
+              // the reduced direction (d with S zeroed). |S| = 3 cannot arise -- it would
+              // make T this block's parent, which is internal, so FindNeighbor descends
+              // past it. That lower-order relationship is always registered, and its
+              // coarse receive already covers the region this diagonal slot would have:
+              // InitRecvIndices' icoar range extends ng cells along each free axis i,
+              // toward +i when f[i]==0 and toward -i when f[i]==1 (buffs_cc.cpp), and a
+              // mismatch on axis i means exactly d_i = +1 with lx_i even, or d_i = -1
+              // with lx_i odd -- so the extension direction always equals d_i. No ghost
+              // region is left unfilled by declining to register here.
+              //
+              // Registering anyway would be redundant AND wrong: the dest it computes,
+              // NeighborIndex(-d,...), names a slot on T that T's own query fills from a
+              // different block entirely. Measured on the blocked TDE restart's own
+              // checkpoint (1268 MeshBlocks, 5 levels), the recip-based rule this
+              // replaces added 1172 such registrations, ALL asymmetric, 847 of them
+              // cross-rank -- which aborted that run in internal_Waitall before cycle 0
+              // (job 8832179). This rule gives 26834 registrations, zero asymmetries and
+              // zero ghost holes on the same tree. See src/cfc/SETNEIGHBORS_HANDOFF.md
+              // section 8.
+              do_register = (myox1 == n && myox2 == m);
             }
             if (do_register) {
               row[inghbr].gid = nt->gid_;
@@ -355,10 +380,9 @@ void MeshBlock::BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ran
             } else { // neighbor at coarser level, set indx/dest to appropriate subblock
               inghbr = NeighborIndex(n,0,l,myfx2,0);
               idest = NeighborIndex(-n,0,-l,myfx2,0);
-              // Item 65: see the x1x2-edge comment above for the full
-              // rationale.
-              MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, 0, -l);
-              do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
+              // Octant parity on the two axes this edge turns in; see the x1x2-edge
+              // comment above for the full rationale.
+              do_register = (myox1 == n && myox3 == l);
             }
             if (do_register) {
               row[inghbr].gid = nt->gid_;
@@ -397,10 +421,9 @@ void MeshBlock::BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ran
             } else { // neighbor at coarser level, set indx/dest to appropriate subblock
               inghbr = NeighborIndex(0,m,l,myfx1,0);
               idest = NeighborIndex(0,-m,-l,myfx1,0);
-              // Item 65: see the x1x2-edge comment above for the full
-              // rationale.
-              MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, 0, -m, -l);
-              do_register = (recip == nullptr) || (recip->pleaf_ != nullptr);
+              // Octant parity on the two axes this edge turns in; see the x1x2-edge
+              // comment above for the full rationale.
+              do_register = (myox2 == m && myox3 == l);
             }
             if (do_register) {
               row[inghbr].gid = nt->gid_;
@@ -430,41 +453,12 @@ void MeshBlock::BuildNeighborRow(std::unique_ptr<MeshBlockTree> &ptree, int *ran
             if (nlevel >= lloc.level) {  // same-level or already-resolved finer leaf
               do_register = true;
             } else {
-              // Item 65 CORRECTION (found via a production-scale restart
-              // validation, 96 ranks/1268 MeshBlocks, that the small-scale
-              // smoke tests never exercised): corners have no free axis, so
-              // unlike edges, T's own finer-branch resolves to exactly ONE
-              // specific child via a single GetLeaf call -- NOT necessarily
-              // us. Registering unconditionally here (as edges correctly
-              // do, since edges' free-axis loop always covers every real
-              // child) is UNSAFE for corners: if T's own resolution picks a
-              // DIFFERENT sibling C (not us, "B"), T's own row will only
-              // ever expect to exchange with C at this slot -- if B ALSO
-              // registers itself pointing at the same slot, B's send has no
-              // matching recv on T's side (T never posted one for B), which
-              // is exactly the kind of orphaned message that aborts with
-              // `internal_Waitall`. This is the still-open item 39f/63
-              // tie-break collision (SETNEIGHBORS_HANDOFF.md section 2c/6),
-              // not the orphan mechanism (2b) this item's fix otherwise
-              // targets -- only rare/deep enough AMR topology exercises it,
-              // which is why small smoke tests missed it. So: register
-              // unconditionally ONLY when T's own resolution is confirmed
-              // to match us (fixes 2b's orphan case, safe); when it does
-              // NOT match, do not register (preserves this already-known,
-              // deliberately-unaddressed 2c gap instead of turning it into
-              // an even more certain abort).
-              MeshBlockTree* recip = ptree->FindNeighbor(nt->lloc_, -n, -m, -l);
-              if (recip == nullptr) {
-                do_register = true;
-              } else if (recip->pleaf_ == nullptr) {
-                do_register = false;  // recip=LEAF: genuinely invalid candidacy
-              } else {
-                int rffx = 1 - (-n + 1)/2;
-                int rffy = 1 - (-m + 1)/2;
-                int rffz = 1 - (-l + 1)/2;
-                MeshBlockTree* recip_leaf = recip->GetLeaf(rffx, rffy, rffz);
-                do_register = (recip_leaf->gid_ == gid);
-              }
+              // Octant parity on all three axes: a corner turns in every axis, so
+              // there is no free axis and no subdivision. The x1x2-edge rationale above
+              // applies here unchanged, with |S| ranging over 1 or 2, so a parity-
+              // mismatched corner is always already covered by this block's coarse face
+              // or edge receive from the same block T.
+              do_register = (myox1 == n && myox2 == m && myox3 == l);
             }
             if (do_register) {
               int inghbr = NeighborIndex(n,m,l,0,0);

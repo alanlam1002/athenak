@@ -30,22 +30,9 @@ Serial, ~127 MeshBlocks, nlim=0 -- a few seconds.
 # Modules
 import os
 import re
-import pytest
-
 import test_suite.testutils as testutils
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN DEFECT: the current registration rule produces 124 asymmetric "
-        "entries on this tree (44 orphan + 80 stolen), and 1172 on the real TDE "
-        "production topology, which is what aborts that run in internal_Waitall "
-        "before cycle 0. strict=True so this flips to a FAILURE once the rule is "
-        "fixed -- that is the signal to delete this marker. See "
-        "src/cfc/SETNEIGHBORS_HANDOFF.md."
-    ),
-)
 def test_nghbr_symmetry():
     input_file = "inputs/amr_hydro_nghbr_asymmetry.athinput"
 

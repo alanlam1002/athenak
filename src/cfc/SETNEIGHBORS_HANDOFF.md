@@ -546,6 +546,15 @@ is the "stolen" case, and it is the whole of the 1172.
   finest region placed asymmetrically inside the coarser one.** 127 MeshBlocks,
   serial, seconds. Reports `124 asymmetric (orphan=44 stolen=80)` under HEAD;
   the offline model puts the parity rule at 0 on the identical tree.
+* `scripts/nghbr_symmetry_offline.py` -- the same audit done straight from a
+  restart file, with no build, no MPI and no allocation: a `.rst` carries the
+  complete tree plus the parameter deck, which is all `SetNeighbors` depends on,
+  so a large failing run's table can be rebuilt and checked in seconds. It
+  implements *both* rules (`parity` and `head`) so they can be compared on
+  identical input, and additionally checks the parity rule for ghost-coverage
+  holes -- symmetry alone is not sufficient, a rule could be symmetric and still
+  wrong by dropping needed data. This is what produced 8.2's table; it and the
+  in-tree audit were written independently and agree exactly.
 * `tst/test_suite/unit_tests/test_ut_nghbr_symmetry_cpu.py` -- runs it and
   asserts a clean audit. Currently `xfail(strict=True)`: it flips to a failure
   the moment the rule is fixed, which is the signal to drop the marker.

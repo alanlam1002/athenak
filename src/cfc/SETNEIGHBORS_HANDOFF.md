@@ -731,6 +731,39 @@ dyngrmhd test's `xfail` is gone: it now asserts the audit is clean and that no
 `internal_Wait`/`Message truncated` appears, and deliberately does **not** assert
 the exit code, which is still nonzero for the unrelated reason in 8.8.
 
+### 8.9b Where the original diagnosis went wrong (item 39b)
+
+Worth naming precisely, since every later item descends from it.
+
+Item 38 is not about `SetNeighbors` at all -- it is the
+`ReinitializeMetricForAMR` fold-in, and that work is sound. What started the
+hunt was its *residual*: 896 `NANS_IN_CONS`/rank, `detg=0`, one ghost slab.
+
+**That residual was re-diagnosed in July.** Item 42: "it was never item 38's
+own bug -- `padm->u_adm` simply had no physical-BC pass at all before item 41";
+the corrupted cell sat at `i=0`, the block's own physical reflect boundary, and
+item 38's "ruled out a BC gap" check had only tested the y-coordinate.
+
+But item 42 kept the `SetNeighbors` theory alive anyway, on item 39b's code
+reading alone, after the observation motivating it had been explained away.
+That is the hinge of this whole investigation.
+
+39b's reading rests on one false claim: "a face neighbor's own ghost fill only
+extends `ng` cells toward the shared *interior* seam, never reaching the
+block's *opposite* exterior ghost region." In `buffs_cc.cpp`, both `icoar`
+(the coarse receive) and `iprol` (the prolongation range) extend a face/edge
+slot by `cn = ng/2` coarse cells along each free axis, in the direction chosen
+by `f1`/`f2` -- and that direction is *outward*, exactly the one the parity
+guard declines to register. On 39b's own example (`gid=2`, `ng=4`, `nx=8`,
+cell `j=14,k=14`, direction `(0,+1,+1)`, `myox3=-1`), the reduced direction is
+the `+x2` face, `f2 = myfx3 = 0` gives `iprol.bke += cn`, and the resulting
+fine ranges are `j = 12..15`, `k = 4..15` -- so `ProlongateCC` writes
+`(j=14,k=14)` from the face slot. 8.3's coverage argument therefore holds at
+the prolongation level, not just for the received coarse data.
+
+What 39b correctly observed -- the slot is unregistered, `nghbr(m,46)` never
+written -- is true. The inference that the region is therefore unfilled is not.
+
 ### 8.10 Scope of the correctness claim
 
 What has been established is that the upstream octant-parity rule yields a

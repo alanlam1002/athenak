@@ -5735,6 +5735,45 @@ src/cfc/
       unconditional across all 56 neighbor slots regardless of whether a
       slot is populated; only the registration gate itself is the bug.
 
+      **CORRECTION (2026-09-16): 39b's conclusion is wrong, and it is the
+      root of everything from 39c through item 65 and commit `fee50981`.**
+      What 39b observed is true -- the slot is unregistered, `nghbr(m,46)`
+      is never written. What does not follow is that the ghost region goes
+      unfilled. The load-bearing claim above -- "a face neighbor's own ghost
+      fill only extends `ng` cells toward the shared *interior* seam, never
+      reaching the block's *opposite* exterior ghost region" -- is not what
+      the code does. In `buffs_cc.cpp`, BOTH the coarse-receive range
+      (`icoar`, line 220+) and the prolongation range (`iprol`, line 362+)
+      extend a face/edge slot by `cn = ng/2` coarse cells along each free
+      axis, in the direction chosen by `f1`/`f2` -- and that direction is
+      *outward*, precisely the one the octant-parity guard declines to
+      register as a diagonal.
+
+      Worked through on 39b's own example (`gid=2`, `ng=4`, `nx=8`, failing
+      cell `j=14,k=14`, direction `(0,+1,+1)`, `myox3=-1`): parity mismatches
+      only on x3, so the reduced direction is the `+x2` FACE, whose neighbour
+      is the same coarser block `gid=9`, and faces always register. That
+      face slot has `f2 = myfx3 = 0`, giving `iprol.bke += cn`:
+          x2: bjs=cje+1=8, bje=cje+cn=9  ->  fine j = 12..15
+          x3: bks=cks=4,   bke=cke+cn=9  ->  fine k =  4..15
+      so `ProlongateCC` writes fine cell `(j=14,k=14)` from the x2-face slot.
+      The region 39b traced as permanently zero is filled by the face slot.
+
+      Empirically: the parity rule declines exactly 1172 diagonal
+      registrations on the real TDE production topology. Under 39b's theory
+      each is a permanently-zero ghost region feeding CFC's elliptic solve.
+      That run evolved 600 clean cycles through 51 AMR remeshes with a
+      converging solver and zero NaNs (job 8832259). See
+      `src/cfc/SETNEIGHBORS_HANDOFF.md` section 8.
+
+      Note also that the symptom 39b was explaining had ALREADY been
+      attributed elsewhere by the time the theory hardened: item 42 found
+      item 38's residual was `u_adm` having no physical-BC pass (fixed by
+      item 41), i.e. "it was never item 38's own bug". Item 42 nonetheless
+      kept this `SetNeighbors` theory alive on the strength of 39b's code
+      reading alone, after the observation motivating it had been explained
+      away. That is the step to learn from.
+
     - **39c. Applying 39b's fix causes an MPI `internal_Waitall` abort on
       the 8-rank cross-rank scenario** (job aborts in ~6s, never completes a
       single cycle -- `Abort(17) ... Fatal error in internal_Waitall`,

@@ -7,6 +7,7 @@
 //! \brief implementation of the CFC class
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -303,6 +304,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
+  // Lower clamp on psi at the psi solve's output; see ApplyPsiFloor. Default 0.0
+  // (disabled) so every existing fixture is bitwise unchanged.
+  psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.0);
   accrete_to_puncture_ = pin->GetOrAddBoolean("cfc", "accrete_to_puncture", true);
   puncture_mass_init_ = puncture_mass_;
 
@@ -395,11 +399,199 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Delta-n-cycle solve cadence; see cfc.hpp. <=0 (default) is a no-op.
   cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
+
+  // Elliptic source/output NaN scan; see cfc.hpp. Default 0 = off.
+  src_nan_check_ = pin->GetOrAddInteger("cfc", "src_nan_check", 0);
+  indcs_ng_ = pmy_pack->pmesh->mb_indcs.ng;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const
 //! \brief see cfc_solve_interval_'s comment in cfc.hpp.
+
+//----------------------------------------------------------------------------------------
+//! \fn int CFC::CheckFinite(const char*, const DvceArray5D<Real>&, int, int)
+//! \brief see cfc.hpp. Scans for NaN/Inf and reports the first offender globally.
+
+int CFC::CheckFinite(const char *label, const DvceArray5D<Real> &a, int nchan,
+                     int stage, int ngh) const {
+  if (src_nan_check_ <= 0) { return 0; }
+
+  const int nmb = a.extent_int(0);
+  const int n3  = a.extent_int(2);
+  const int n2  = a.extent_int(3);
+  const int n1  = a.extent_int(4);
+  const int nkji = n3*n2*n1, nji = n2*n1;
+  const int total = nmb*nchan*nkji;
+  auto arr = a;
+
+  int nbad = 0;
+  // Flat index of the lowest-indexed offender on this rank (INT_MAX if none), so the
+  // MPI_MINLOC below picks a deterministic single cell to report.
+  int firstbad = INT_MAX;
+  Kokkos::parallel_reduce("cfc_check_finite",
+    Kokkos::RangePolicy<>(DevExeSpace(), 0, total),
+    KOKKOS_LAMBDA(const int idx, int &lcnt, int &lmin) {
+      const int m = idx/(nchan*nkji);
+      const int r = idx - m*(nchan*nkji);
+      const int n = r/nkji;
+      const int t = r - n*nkji;
+      const int k = t/nji;
+      const int j = (t - k*nji)/n1;
+      const int i = t - k*nji - j*n1;
+      const Real v = arr(m,n,k,j,i);
+      // NaN: v!=v. Inf: exceeds any representable finite magnitude of interest.
+      // Interior only: ghost zones of some of these arrays are never written.
+      const bool interior = (i >= ngh) && (i < n1-ngh) && (j >= ngh) && (j < n2-ngh) &&
+                            (k >= ngh) && (k < n3-ngh);
+      const Real vv = interior ? v : static_cast<Real>(0.0);
+      const bool bad = !(vv == vv) || (vv > 1.0e300) || (vv < -1.0e300);
+      if (bad) { lcnt += 1; if (idx < lmin) { lmin = idx; } }
+    }, Kokkos::Sum<int>(nbad), Kokkos::Min<int>(firstbad));
+  Kokkos::fence();
+
+  int gbad = nbad;
+  struct { int idx; int rank; } lin, gout;
+  lin.idx = firstbad; lin.rank = global_variable::my_rank;
+  gout = lin;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(&nbad, &gbad, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(&lin, &gout, 1, MPI_2INT, MPI_MINLOC, MPI_COMM_WORLD);
+#endif
+  if (gbad == 0) { return 0; }
+
+  // Decode and print the winning cell's coordinates/value from its owning rank, then
+  // let rank 0 emit the summary line (two short messages beat 192 duplicates).
+  if (global_variable::my_rank == gout.rank && gout.idx != INT_MAX) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    auto &size = pmy_pack->pmb->mb_size;
+    const int idx = gout.idx;
+    const int m = idx/(nchan*nkji);
+    const int r = idx - m*(nchan*nkji);
+    const int n = r/nkji;
+    const int t = r - n*nkji;
+    const int k = t/nji;
+    const int j = (t - k*nji)/n1;
+    const int i = t - k*nji - j*n1;
+    auto hv = Kokkos::create_mirror_view(Kokkos::subview(a, m, n,
+                Kokkos::ALL(), Kokkos::ALL(), Kokkos::ALL()));
+    Kokkos::deep_copy(hv, Kokkos::subview(a, m, n,
+                Kokkos::ALL(), Kokkos::ALL(), Kokkos::ALL()));
+    size.template sync<HostMemSpace>();
+    // These arrays are allocated at differing ghost depths, so (k,j,i) are array
+    // indices; convert with the mesh's own ng only when the extents match a
+    // mesh-depth array, otherwise report raw indices.
+    const bool mesh_depth = (n1 == indcs.nx1 + 2*indcs.ng);
+    Real x1v = 0.0, x2v = 0.0, x3v = 0.0;
+    if (mesh_depth) {
+      x1v = CellCenterX(i-indcs.is, indcs.nx1, size.h_view(m).x1min, size.h_view(m).x1max);
+      x2v = CellCenterX(j-indcs.js, indcs.nx2, size.h_view(m).x2min, size.h_view(m).x2max);
+      x3v = CellCenterX(k-indcs.ks, indcs.nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+    }
+    std::cout << "### CFC NONFINITE [" << label << "] stage=" << stage
+              << " ncycle=" << pmy_pack->pmesh->ncycle
+              << " count=" << gbad
+              << " first: rank=" << gout.rank << " mb=" << m << " chan=" << n
+              << " (k,j,i)=(" << k << "," << j << "," << i << ")";
+    if (mesh_depth) {
+      std::cout << " x=(" << x1v << "," << x2v << "," << x3v << ")";
+    } else {
+      std::cout << " [solver-depth array, raw indices]";
+    }
+    std::cout << " val=" << hv(k,j,i) << std::endl;
+  }
+  return gbad;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ApplyPsiFloor()
+//! \brief Clamp psi >= psi_floor_ on the psi solve's OUTPUT.
+//!
+//! WHY AT THE SOLVE AND NOT AT THE ADM WRITE. The pre-existing alpha_floor lived in
+//! AssembleLapseShiftK (cfc_reconstruct.cpp), which runs in AssembleFinalTask -- the
+//! LAST task of the step. That clamps only `adm.alpha`, the copy handed to
+//! con2prim/hydro. It does NOT protect:
+//!   - the shift source, which consumes the RAW alpha*psi and psi via
+//!     ap6 = (delta_alpha_psi + u_alpha0_psi0)/psi^7 (AssembleVectorSource, step 6);
+//!   - the next cycle's psi/lapse solves, which re-consume the raw residuals.
+//! So a non-positive psi or alpha could enter an elliptic source while every ADM-side
+//! diagnostic still read a healthy floored value. Clamping at the solve output closes
+//! that gap and makes the floored value the one everything downstream sees.
+//!
+//! GHOST CELLS. This runs BEFORE the field's ghost exchange
+//! (CFC_RestPsi/.../CFC_BCSPsi all depend on CFC_SolveLapse, which is downstream of
+//! this), so the exchange propagates already-clamped data into ghosts. The loop
+//! nevertheless covers the FULL array extent, not just the interior: that costs
+//! nothing and also clears any stale sub-floor value sitting in a ghost from a
+//! previous step. (Caveat for a future reader: ProlongPsi interpolates fine-level
+//! ghosts from coarse data, and a non-monotone prolongation stencil could in
+//! principle undershoot the floor again. If that is ever observed, the fix is a
+//! second clamp after CFC_BCSPsi -- not a change here.)
+//!
+//! RESIDUAL ARITHMETIC. delta_psi is a residual: psi = delta_psi + psi0. Clamping psi
+//! therefore rearranges onto the residual as delta_psi >= psi_floor - psi0.
+
+void CFC::ApplyPsiFloor() {
+  if (psi_floor_ <= 0.0) { return; }
+  auto &dpsi = delta_psi;
+  auto &psi0 = u_psi0;
+  Real floor_val = psi_floor_;
+  const int nmb = dpsi.extent_int(0);
+  const int n3 = dpsi.extent_int(2);
+  const int n2 = dpsi.extent_int(3);
+  const int n1 = dpsi.extent_int(4);
+  par_for("cfc_apply_psi_floor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    // NOT fmax: IEEE fmax(NaN, x) returns x, which would SILENTLY ABSORB a NaN solve
+    // output into the floor value -- masking the very failure this file exists to
+    // diagnose and yielding a quietly wrong spacetime instead of a loud one. The
+    // explicit comparison is false for NaN, so NaN passes through untouched and is
+    // still caught by src_nan_check / NANS_IN_CONS. This clamp is for non-positive
+    // FINITE values, which is what it was asked to prevent.
+    const Real v = dpsi(m,0,k,j,i);
+    const Real lo = floor_val - psi0(m,0,k,j,i);
+    dpsi(m,0,k,j,i) = (v < lo) ? lo : v;
+  });
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ApplyAlphaFloor()
+//! \brief Clamp alpha >= alpha_floor_ on the lapse solve's OUTPUT.
+//!
+//! Same rationale and the same ghost-cell ordering as ApplyPsiFloor (this runs before
+//! CFC_RestAlphaPsi/.../CFC_BCSAlphaPsi, and before CFC_BuildSrcBeta which depends on
+//! CFC_BCSAlphaPsi). The clamp is on alpha, NOT on alpha*psi, to match the existing
+//! AssembleLapseShiftK semantics exactly:
+//!   alpha = alpha_psi/psi >= alpha_floor   <=>   alpha_psi >= alpha_floor*psi
+//! and with alpha_psi = delta_alpha_psi + alpha0*psi0 this rearranges onto the residual
+//! as delta_alpha_psi >= alpha_floor*psi - alpha0*psi0. psi here is the ALREADY-FLOORED
+//! psi, since ApplyPsiFloor ran in the psi solve one step earlier in the task graph.
+//!
+//! The late clamp in AssembleLapseShiftK is deliberately LEFT IN PLACE: it is
+//! idempotent once this one has run, and it still covers the alpha_floor_ == 0 case
+//! (where this routine is a no-op) exactly as before.
+
+void CFC::ApplyAlphaFloor() {
+  if (alpha_floor_ <= 0.0) { return; }
+  auto &dap = delta_alpha_psi;
+  auto &a0p0 = u_alpha0_psi0;
+  auto &dpsi = delta_psi;
+  auto &psi0 = u_psi0;
+  Real floor_val = alpha_floor_;
+  const int nmb = dap.extent_int(0);
+  const int n3 = dap.extent_int(2);
+  const int n2 = dap.extent_int(3);
+  const int n1 = dap.extent_int(4);
+  par_for("cfc_apply_alpha_floor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    // See ApplyPsiFloor on why this is an explicit comparison and not fmax: NaN must
+    // pass through rather than be absorbed into the floor.
+    const Real psi_val = dpsi(m,0,k,j,i) + psi0(m,0,k,j,i);
+    const Real v = dap(m,0,k,j,i);
+    const Real lo = floor_val*psi_val - a0p0(m,0,k,j,i);
+    dap(m,0,k,j,i) = (v < lo) ? lo : v;
+  });
+}
 
 bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   // stage<1: a direct call from InitializeMetric()/ReinitializeMetricForAMR, not
@@ -1171,7 +1363,20 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  // Matter FIRST, before any elliptic work this cycle. This is the ordering test the
+  // first instrumented run (job 8835173) could not make: if the conserved state is
+  // already non-finite when the cycle's solves begin, every elliptic NaN downstream is
+  // a consequence; if it is clean here and beta comes back NaN, the solver originated
+  // it. u0 is at mesh-NGHOST depth.
+  CheckFinite("matter.in[pmhd->u0]", pmy_pack->pmhd->u0, 5, stage, indcs_ng_);
   SolveVectorPotential(pdriver, stage);
+  // src_nan_check: u_p_src is this solve's SOURCE (rebuilt inside SolveVectorPotential
+  // by AssembleVectorSource(false)) and u_p_x its OUTPUT. Checking both separates "the
+  // source was already bad" from "the solver made NaN from a finite source" -- the X
+  // solve is the control here, since it uses the SAME MGCFCVectorPoisson machinery as
+  // the shift solve but a far simpler source (8*pi*S_i, no psi^-7, no derivatives).
+  CheckFinite("X.src[u_p_src]", u_p_src, 4, stage, mg_nghost_);
+  CheckFinite("X.out[u_p_x]",   u_p_x,   4, stage, mg_nghost_);
   return TaskStatus::complete;
 }
 
@@ -1181,6 +1386,10 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   ComputeADual();
+  // Adual^ij feeds BOTH scalar solves (psi's Ahat^2 term and the lapse's) AND the
+  // shift source. If this is finite here but K_dd ends up NaN, the corruption is
+  // downstream of Adual, not in it.
+  CheckFinite("adual[u_adual]", u_adual, 6, stage, indcs_ng_);
   return TaskStatus::complete;
 }
 
@@ -1189,6 +1398,7 @@ TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
 TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveConformalFactor(pdriver, stage);
+  CheckFinite("psi.out[delta_psi]", delta_psi, 1, stage, indcs_ng_);
   return TaskStatus::complete;
 }
 
@@ -1206,6 +1416,7 @@ TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
 TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveLapse(pdriver, stage);
+  CheckFinite("lapse.out[delta_alpha_psi]", delta_alpha_psi, 1, stage, indcs_ng_);
   return TaskStatus::complete;
 }
 
@@ -1216,6 +1427,32 @@ TaskStatus CFC::SolveLapseTask(Driver *pdriver, int stage) {
 TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   SolveShift(pdriver, stage);
+  // THE measurement this instrumentation exists for. Ordered as the data flows, so
+  // the first label to report names the earliest corrupted object:
+  //   dap6   = Delta(alpha*psi^-6), the regularized quantity BuildShiftSource
+  //            differences -- the one place psi^-7 and a psi0*(1/psi) product appear
+  //   u_p_src= the assembled shift source (16*pi*alpha*psi^-6*S~_i + 2*Ahat*grad(dap6))
+  //   u_p_beta = the solve OUTPUT
+  // If dap6/u_p_src are finite and u_p_beta is NaN, the multigrid produced NaN from a
+  // finite source -- which is what §13.5 infers but has never measured.
+  // ROUND 3 (NANCASCADE §14.8): at the first failing cycle only shift.src reported,
+  // with matter/adual/delta_psi/delta_alpha_psi/dap6-interior ALL clean. That leaves
+  // exactly these inputs of BuildShiftSource unchecked. ngh=0 scans ghosts too --
+  // `Dx` differences dap6 across its GHOST cells, so an interior-only scan can miss
+  // the very thing that poisons the interior source.
+  //   grad_ap6_0 is used ONLY here, in the shift source, and nowhere else in CFC --
+  //   which would explain why the shift source is the sole object to go bad.
+  //   psi0/alpha0psi0/a0dual are the analytic BACKGROUNDS, which AccreteExcisedMass
+  //   REFILLS whenever the puncture mass changes (item 57). The big accretion drain
+  //   landed at cycle 10001, nine cycles before the failure.
+  CheckFinite("shift.dap6.FULL[u_alpha_psi6]", u_alpha_psi6, 1, stage, 0);
+  CheckFinite("shift.grad_ap6_0[u_grad_ap6_0]", u_grad_ap6_0, 3, stage, 0);
+  CheckFinite("bg.a0dual[u_a0dual]", u_a0dual, 6, stage, 0);
+  CheckFinite("bg.psi0[u_psi0]", u_psi0, 1, stage, 0);
+  CheckFinite("bg.alpha0psi0[u_alpha0_psi0]", u_alpha0_psi0, 1, stage, 0);
+  CheckFinite("shift.dap6[u_alpha_psi6]", u_alpha_psi6, 1, stage, indcs_ng_);
+  CheckFinite("shift.src[u_p_src]",       u_p_src,      4, stage, mg_nghost_);
+  CheckFinite("shift.out[u_p_beta]",      u_p_beta,     4, stage, indcs_ng_);
   return TaskStatus::complete;
 }
 
@@ -2050,6 +2287,11 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   pmgd_psi->Solve(pdriver, stage);
   pmgd_psi->RetrieveSolution(delta_psi);
 
+  // Clamp psi BEFORE AssembleConformalMetric, so psi4/g_dd -- which the shared
+  // con2prim at step 4 consumes -- are built from the floored psi too, and before the
+  // psi ghost exchange (CFC_RestPsi onward). See ApplyPsiFloor.
+  ApplyPsiFloor();
+
   cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0);
   return;
 }
@@ -2174,6 +2416,10 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
   }
   pmgd_alpha->Solve(pdriver, stage);
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
+
+  // Clamp alpha before the alpha*psi ghost exchange (CFC_RestAlphaPsi onward) and
+  // before CFC_BuildSrcBeta, so no non-positive alpha reaches the shift source.
+  ApplyAlphaFloor();
   return;
 }
 

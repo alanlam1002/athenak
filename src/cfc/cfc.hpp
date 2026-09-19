@@ -417,6 +417,42 @@ class CFC {
   TaskStatus ClearRecvTask(Driver *pdriver, int stage);
 
  private:
+  // <cfc> src_nan_check: when >0, scan the elliptic solves' SOURCES and OUTPUTS for
+  // non-finite values after every solve and report the first offender's location.
+  // Purpose (NANCASCADE_HANDOFF.md §13.5/§14): the cascade begins with the VECTOR
+  // Poisson solve returning an all-NaN beta^i while psi/alpha/K and every primitive
+  // are still clean, and while the multigrid reports convergence. This distinguishes
+  // "the source handed to the solver was already bad" from "the solver produced NaN
+  // from a finite source" -- which no existing diagnostic separates. 0 = off (default,
+  // zero cost: the checks are behind this branch).
+  int src_nan_check_;
+
+  // Mesh ghost depth, cached for CheckFinite's interior restriction.
+  int indcs_ng_;
+
+  // <cfc> psi_floor: lower clamp on the conformal factor psi, applied to the psi
+  // solve's OUTPUT (see ApplyPsiFloor). <=0 (default) disables it, leaving every
+  // existing fixture bitwise unchanged. See cfc.cpp for why the clamp belongs at the
+  // solve rather than at the ADM write.
+  Real psi_floor_;
+
+  // Clamp psi >= psi_floor_ / alpha >= alpha_floor_ on the SOLVE OUTPUT, before that
+  // field's ghost exchange, so no non-positive value reaches a downstream solver.
+  // Both operate on the RESIDUAL arrays (psi = delta_psi + psi0), so the clamp is
+  // applied to the sum and rearranged onto the residual.
+  void ApplyPsiFloor();
+  void ApplyAlphaFloor();
+
+  // Scan `a`'s first `nchan` channels over interior+ghost cells for NaN/Inf. Returns
+  // the global count; rank 0 prints a one-line report naming the first offending
+  // cell (globally lowest flat index, MPI_MINLOC) with its coordinates and value.
+  // Collective: every rank must call it.
+  // `ngh` is the array's own ghost depth: cells shallower than that are skipped, so
+  // never-written ghost zones (u_p_src's, for one -- it is pure solver input, never
+  // ghost-exchanged) cannot register as false positives.
+  int CheckFinite(const char *label, const DvceArray5D<Real> &a, int nchan,
+                  int stage, int ngh) const;
+
   // cfc_solve_interval_ gate: every CFC task calls this first and early-returns
   // TaskStatus::complete when false (a skipped task satisfies the task graph the
   // same as a completed one). stage<1 (direct calls from InitializeMetric()/

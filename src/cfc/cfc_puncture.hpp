@@ -115,7 +115,14 @@ void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
   Real rrs = r_sch/m_bh;
   Real rrs3 = rrs*rrs*rrs;
   Real psi = std::sqrt(r_sch/r);
-  Real alpha = std::sqrt(1.0 - 2.0/rrs + 1.6875/(rrs3*rrs));
+  // Clamp at 0 before the sqrt. alpha^2 has a DOUBLE ROOT at the trumpet throat
+  // rrs = 3/2, so near it this expression loses all significance to cancellation and
+  // evaluates NEGATIVE for a measurable fraction of positions (2.4% of samples within
+  // 1e-7 of the throat), making sqrt() return NaN. alpha^2 >= 0 analytically
+  // everywhere, so clamping restores the mathematical value rather than masking a
+  // real negative. Companion to the grad_ap6_0 fix in cfc_puncture.cpp.
+  Real alpha_sq = 1.0 - 2.0/rrs + 1.6875/(rrs3*rrs);
+  Real alpha = std::sqrt(alpha_sq > 0.0 ? alpha_sq : 0.0);
   *psi0 = psi;
   *alpha0 = alpha;
   if (dpsi0 != nullptr) {

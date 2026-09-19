@@ -64,11 +64,25 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
     // it against the matter-only Ahats^ij = Ahat^ij-Ahat0^ij at the point of use, since
     // the Ahat0-contracted combination cancels out of the final residual (Sec 3.9).
     Real psi0_inv6 = 1.0/(psi0*psi0*psi0*psi0*psi0*psi0);
-    Real ap6 = alpha0*psi0_inv6;
-    Real dfac = dalpha0/alpha0 - 6.0*dpsi0/psi0;
-    grad_ap6_0(m,0,k,j,i) = ap6*dfac*x1v/r;
-    grad_ap6_0(m,1,k,j,i) = ap6*dfac*x2v/r;
-    grad_ap6_0(m,2,k,j,i) = ap6*dfac*x3v/r;
+    // alpha0 CANCELS ANALYTICALLY, and forming the quotient is fatal:
+    //   ap6*dfac = (alpha0*psi0^-6) * (dalpha0/alpha0 - 6*dpsi0/psi0)
+    //            =  psi0^-6 * (dalpha0 - 6*alpha0*dpsi0/psi0)
+    // The original wrote the first form, which evaluates dalpha0/alpha0. At the
+    // maximal-slicing trumpet THROAT (rrs = r_sch/m_bh = 3/2) BOTH vanish --
+    // alpha0^2 = 1 - 2/rrs + 1.6875/rrs^4 has a DOUBLE ROOT there, and
+    // dalpha0 ~ (1 - 3.375/rrs^3) vanishes at the same point -- so the quotient is
+    // 0/0 = NaN. Because it is a double root, alpha0^2 also loses all significance to
+    // catastrophic cancellation nearby: sampling rrs within 1e-7 of 3/2, 2.8% of
+    // positions give exactly 0 and a further 2.4% give a NEGATIVE alpha0^2.
+    // This was the origin of the NANS_IN_CONS cascade -- grad_ap6_0 is consumed ONLY
+    // by BuildShiftSource, so the corruption appeared as beta^i coming back 100% NaN
+    // with psi/alpha/K_dd and every primitive still clean. See
+    // src/cfc/NANCASCADE_HANDOFF.md section 15.
+    // The second form never divides by alpha0; psi0 = sqrt(r_sch/r) > 0 always.
+    Real amp = psi0_inv6*(dalpha0 - 6.0*alpha0*dpsi0/psi0);
+    grad_ap6_0(m,0,k,j,i) = amp*x1v/r;
+    grad_ap6_0(m,1,k,j,i) = amp*x2v/r;
+    grad_ap6_0(m,2,k,j,i) = amp*x3v/r;
   });
 }
 

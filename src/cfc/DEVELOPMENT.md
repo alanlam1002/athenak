@@ -5738,6 +5738,57 @@ src/cfc/
       unconditional across all 56 neighbor slots regardless of whether a
       slot is populated; only the registration gate itself is the bug.
 
+      **CORRECTION (2026-09-16, from `~/athenak_tde`'s `proj/tde` branch,
+      commit `69918bda`): 39b's conclusion is wrong, and it is the root of
+      everything from 39c through item 65 and commit `fee50981` on that
+      sibling branch.** What 39b observed is true -- the slot is
+      unregistered, `nghbr(m,46)` is never written. What does not follow is
+      that the ghost region goes unfilled. The load-bearing claim above --
+      "a face neighbor's own ghost fill only extends `ng` cells toward the
+      shared *interior* seam, never reaching the block's *opposite* exterior
+      ghost region" -- is not what the code does. In `buffs_cc.cpp`, BOTH
+      the coarse-receive range (`icoar`) and the prolongation range
+      (`iprol`) extend a face/edge slot by `cn = ng/2` coarse cells along
+      each free axis, in the direction chosen by `f1`/`f2` -- and that
+      direction is *outward*, precisely the one the octant-parity guard
+      declines to register as a diagonal.
+
+      Worked through on 39b's own example (`gid=2`, `ng=4`, `nx=8`, failing
+      cell `j=14,k=14`, direction `(0,+1,+1)`, `myox3=-1`): parity mismatches
+      only on x3, so the reduced direction is the `+x2` FACE, whose
+      neighbour is the same coarser block `gid=9`, and faces always
+      register. That face slot has `f2 = myfx3 = 0`, giving `iprol.bke +=
+      cn`:
+          x2: bjs=cje+1=8, bje=cje+cn=9  ->  fine j = 12..15
+          x3: bks=cks=4,   bke=cke+cn=9  ->  fine k =  4..15
+      so `ProlongateCC` writes fine cell `(j=14,k=14)` from the x2-face
+      slot. The region 39b traced as permanently zero is filled by the face
+      slot.
+
+      Empirically: the parity rule declines exactly 1172 diagonal
+      registrations on the real TDE production topology. Under 39b's theory
+      each is a permanently-zero ghost region feeding CFC's elliptic solve.
+      That run evolved 600 clean cycles through 51 AMR remeshes with a
+      converging solver and zero NaNs (job 8832259, `proj/tde`). Full
+      derivation, in-situ evidence, and scope of the claim: this repo's own
+      `src/cfc/SETNEIGHBORS_CORRECTION.md` (ported 2026-09-19 from
+      `~/athenak_tde`'s `src/cfc/SETNEIGHBORS_HANDOFF.md` section 8).
+
+      Note also that the symptom 39b was explaining had ALREADY been
+      attributed elsewhere by the time the theory hardened: item 42 (below)
+      found item 38's residual was `u_adm` having no physical-BC pass
+      (fixed by item 41), i.e. "it was never item 38's own bug". The
+      "Current state"/roadmap note at the end of this item (39f's
+      `recip==nullptr` rule, the tie-break-formula TODO, the extra-slot-
+      capacity fallback) nonetheless kept this `SetNeighbors` theory alive
+      on 39b's code reading alone, after the observation motivating it had
+      been explained away -- **do not pursue that roadmap; the octant-
+      parity guard as it stands in this file (`meshblock.cpp`, unchanged
+      since item 38) is correct and complete.** That is the step to learn
+      from: item 42's own explanation should have been the point this
+      theory was dropped, not merely noted in passing while the "current
+      state" plan kept it as the recommended next step.
+
     - **39c. Applying 39b's fix causes an MPI `internal_Waitall` abort on
       the 8-rank cross-rank scenario** (job aborts in ~6s, never completes a
       single cycle -- `Abort(17) ... Fatal error in internal_Waitall`,
@@ -6009,14 +6060,21 @@ src/cfc/
     - **Current state**: only 39a (`FillCoarseInBndryCC`) is applied and
       committed-ready. 39b's fix (the `SetNeighbors` guard removal, in any
       of the now 4 variants tried across two sessions) is *not* applied --
-      `git diff` of `src/mesh/meshblock.cpp` is clean (matches `HEAD`). All
+      `git diff` of `src/mesh/meshblock.cpp` is clean (matches `HEAD`). **Do
+      not act on the "highest-value next step" below** -- see the
+      2026-09-16 CORRECTION under item 39b above: the guard is correct as
+      it stands, and pursuing this roadmap is exactly what produced
+      commit `fee50981` on `~/athenak_tde`'s `proj/tde` branch, which
+      declined 1172 diagonal registrations (847 cross-rank) and aborted
+      64 of 96 ranks before cycle 0 on the real production topology.
+      Superseded text kept below for the historical record only. All
       SLURM job outputs proving each attempt's result are preserved under
       `/sakura/ptmp/tlam/athenak_run/cfc_recipfix*`, `cfc_item38_topology_
-      8rank`, `cfc_recipnull_*`, `cfc_tiebreak_*` for reference. **Next
+      8rank`, `cfc_recipnull_*`, `cfc_tiebreak_*` for reference. ~~**Next
       session's highest-value next step**: the `recip==nullptr` rule (39f)
       is confirmed correct and should be kept as the foundation -- do NOT
       revisit 39e's reciprocity/collision-only variants, that space is
-      closed. What remains is (1) find and fix the bug in the x1x2/x3x1/
+      closed.~~ What remains is (1) find and fix the bug in the x1x2/x3x1/
       corner tie-break formulas (compare each site's derivation line-by-line
       against the x2x3-edge one that's confirmed correct, or instrument each
       site's own `sib_gid` computation the same way block 11 was dumped, on
@@ -7810,3 +7868,159 @@ hardware. No detectable accuracy cost up to N=8 at this integration point
 (t~1.14, 40 cycles) -- doesn't rule out slower cumulative drift over a much
 longer run. `solve_interval=1` looks safe to recommend as a new default for
 this fixture.
+
+**TDE-tree addendum (2026-09-12)**: ported onto `~/athenak_tde` (branch
+`proj/tde`, diverged from this tree's `cfc.cpp`/`cfc.hpp` by 690/146 lines --
+mostly that tree's own MGTimers instrumentation interleaved through the same
+constructor/task functions this feature touches, so this was a manual
+re-application, not a cherry-pick). Same design, same `stage<1` fix applied
+from the start. Full writeup: that tree's own `DEVELOPMENT.md` item 61.
+
+Two things worth knowing here even though they're TDE-tree-specific:
+- **The performance win does not transfer as-is.** On that tree's own TDE
+  production fixture (2 nodes x 12 ranks, `nlim=40`): only **1.12x** at N=1
+  (3.807 -> 3.390 s/cycle), rising to 1.23x by N=8 -- nowhere near this
+  fixture's 2.93x. The elliptic solve is evidently a much smaller fraction of
+  per-cycle cost on that fixture/mesh than on GRASS; don't assume this
+  feature's payoff transfers to a new fixture without measuring it there.
+- **A cautionary pattern for any future defensive clamp near a puncture**:
+  that tree separately added an `alpha_floor` lapse clamp (this codebase
+  doesn't have one) whose default silently converts a benign, already-known-
+  safe small negative undershoot into a hard `alpha=0` value -- which is
+  categorically worse (an immediate `1/alpha` singularity) than the small
+  negative value it replaces. It went unnoticed until this port's
+  verification run actually evolved that tree's production fixture for the
+  first time since the clamp landed. If this codebase ever adds a similar
+  "clamp a physically-marginal quantity defensively" guard, make sure its
+  default value is a genuinely safe replacement for the bad value, not just
+  "the nearest round number" -- a `<cutoff` isn't the only value that needs
+  checking, the replacement value matters just as much.
+
+## 62. next-eval vs capacity: CFC's elliptic solve is the dominant, but not
+sole, driver of a 3-4x next-eval slowdown (2026-09-16). The node-count
+scaling test (item 61's config, 1-32 nodes) found next-eval running
+**2.9-4.0x slower per-cycle than capacity/debug-scaling at every matched
+node count**, same binary commit (`d4a47192`), same GRASS CFC+R3+`gr_dt`+
+`solve_interval=1` fixture:
+
+| nodes | next-eval s/cycle | capacity s/cycle | ratio |
+|---|---|---|---|
+| 2 | 19.13 | 6.67 | 2.87x |
+| 4 | 18.36 | 5.36 | 3.43x |
+| 8 | 15.60 | 4.86 | 3.21x |
+| 16 | 13.28 | 3.73 | 3.56x |
+| 32 | 12.84 | 3.18 | 4.03x |
+
+(1-node next-eval never reached steady state in its segment budget --
+unusable there, not included.)
+
+**Root cause, established at the code level before running anything**: CFC's
+multigrid V-cycle issues on the order of **200-250 blocking, full-
+communicator MPI collectives per simulation cycle** --
+`TransferFromBlocksToRoot()` (`multigrid_driver.cpp:493-562`) fires `2*nvar_`
+separate `MPI_Allgatherv` calls (never batched across variable channels)
+every V-cycle (`multigrid_driver.cpp:510-519`); `TotalDefectNorm()`
+(`multigrid_driver.cpp:763-770`) fires `nvar_` more `MPI_Allreduce` calls per
+V-cycle for the convergence check. CFC's 4 `MultigridDriver`s (psi,
+alpha*psi, pietax `nvar_=4`, pietabeta `nvar_=4` -- `cfc.cpp:190-195`), each
+~7-8 V-cycles/solve (item 60), multiply this out to the 200-250 figure. A
+plain matter evolution (no `<z4c>`/`<cfc>`) does **exactly one** global
+collective per cycle (`mesh.cpp:636`'s dt-min `MPI_Allreduce`) plus
+nearest-neighbor-only ghost exchange -- zero `Allgatherv`/global `Allreduce`
+anywhere in `bvals_cc.cpp`/`bvals_fc.cpp`/`dyn_grmhd_newdt.cpp`. A next-eval
+per-call MPI-collective-latency regression would be amplified ~200x/cycle by
+CFC's pattern while staying nearly invisible on plain matter evolution --
+directly testable.
+
+**The known next-eval MPICH fix does not close this gap.** Aurora's
+next-eval image has a documented 6.4x MPICH regression, fixed via
+`export MPIR_CVAR_CH4_IPC_GPU_MAX_CACHE_ENTRIES=128` (`~/athenak_tde`'s
+`DEVELOPMENT.md` item 57, `~/scratch/athenak_run/NEXT_EVAL_RUNBOOK.md` "Trap
+7") -- that entry itself stresses **"MECHANISM UNKNOWN"** and was calibrated
+only at 2-node/24-rank inter-node scale. Confirmed the cvar **is** active in
+this test's next-eval `ENVIRONMENT` capture, yet the gap above persists at
+1-32 nodes. Either a second, distinct next-eval regression, or the known one
+doesn't generalize to this collective-heavy/small-node-count regime.
+
+**Methodology note**: all s/cycle figures in this item use steady-state
+per-cycle cost, `(elapsed(cycle=N-1) - elapsed(cycle=1)) / (N-2)`, excluding
+both the one-time setup cost baked into `cycle=0` and the inflated final
+cycle (which includes checkpoint-write/finalize overhead) -- the same
+convention used for the node-count scaling table above. An earlier draft of
+this item used total-wall-time/`nlim` for the TOV numbers by mistake, which
+dilutes each run's fixed setup cost across only 30 short-test cycles and
+gives misleading results (it made capacity's 8-node TOV run look 1.7x worse
+than its 1-node run, an accounting artifact -- steady-state shows 8-node is
+actually faster, as expected). Corrected below.
+
+**Isolating experiment (frozen spacetime, zero elliptic-solve activity)**:
+omitting both `<z4c>` and `<cfc>` parfile blocks while keeping `<adm>` queues
+no spacetime-evolution tasks at all (`meshblock_pack.cpp:252-255`,
+`numerical_relativity.cpp:166-170`) -- a genuine, zero-code-change
+Cowling-equivalent route, already exercised by the checked-in
+`whisky_tov.athinput`/`mag_tov.athinput` fixtures (`-DPROBLEM=dyn_grmhd/
+dyngr_tov`, not `whisky_tov` -- that pgen path doesn't exist despite the
+input file's name). Built `whisky_tov_scaling.athinput` (`<meshblock>`
+reduced to 8^3 -> 512 MeshBlocks so the fixed 64^3 mesh is distributable
+across ranks; original single-block file is 1-rank-only), `nlim=30`, run at
+1 and 8 nodes on both queues, `MAX_CACHE_ENTRIES=128` (matching the GRASS
+scaling test above):
+
+| nodes | next-eval s/cycle | capacity s/cycle | ratio |
+|---|---|---|---|
+| 1 | 0.102 | 0.0519 | 1.97x |
+| 8 | 0.0315 | 0.0369 | **0.85x -- next-eval already faster** |
+
+**Conclusion (corrected)**: with zero elliptic-solve activity, next-eval was
+only slower at **1 node** (~2x) -- at 8 nodes it was already *faster* than
+capacity even at the old `MAX_CACHE_ENTRIES=128`. So the CFC-vs-plain-matter
+contrast isn't "removing the elliptic solve roughly halves the gap" (an
+earlier, methodologically-flawed reading) -- it's closer to **the CFC
+elliptic solve's collective-heavy pattern accounts for essentially the
+entire next-eval slowdown at any node count beyond 1**, consistent with the
+200-250-collectives/cycle vs. ~1-collective/cycle contrast established
+above. The 1-node-only residual gap is a separate, smaller effect (plausibly
+setup/small-scale-specific) not chased further here.
+
+**Follow-up, same day: raising `MAX_CACHE_ENTRIES` to 1024 (per
+`argonne-lcf/AuroraBugTracking` issue #165) closes the CFC gap entirely.**
+That issue explains the mechanism precisely: the cache must be sized above
+however many distinct GPU device allocations a rank actually communicates
+from, or every miss costs ~2500x its hit cost on next-eval; `128` was
+evidently still too small for CFC's `nvar_=4` solvers' per-V-cycle
+`Allgatherv`/`Allreduce` traffic. Re-ran the CFC/GRASS 8-node case and both
+TOV cases at `1024` instead (same binaries/parfiles/node counts, nothing
+else changed), all steady-state cycle1-to-(N-1):
+
+| workload | nodes | @128 s/cycle | @1024 s/cycle | capacity (ref) | ratio @128 | ratio @1024 |
+|---|---|---|---|---|---|---|
+| CFC/GRASS | 8 | 15.60 | **4.81** | 4.86 | 3.21x | **0.99x -- parity** |
+| TOV frozen | 1 | 0.102 | **0.0491** | 0.0519 | 1.97x | **0.95x -- parity** |
+| TOV frozen | 8 | 0.0315 | 0.0304 | 0.0369 | 0.85x | 0.82x |
+
+CFC/GRASS at 8 nodes goes from 3.21x slower to essential parity -- the
+dominant finding, and consistent with the "CFC's collective pattern is
+essentially the whole story" conclusion above: fixing the cache-thrashing
+mechanism directly closes the gap that mechanism was causing. TOV's 1-node
+gap (the one place plain matter *was* slower) also closes to parity; TOV's
+8-node case, already faster than capacity at `128`, sees only a small
+further improvement at `1024` (expected -- little cache pressure to relieve
+there in the first place).
+
+**Revised recommendation**: next-eval IS viable for CFC elliptic-solve-heavy
+production work (GRASS and similar), **provided `MAX_CACHE_ENTRIES=1024`
+(not `128`) is set** -- this is not a fundamental next-eval hardware/image
+limitation, it was a fixable cache-size misconfiguration. Any existing batch
+templates/runbooks still defaulting to `128` should be updated. Single clean
+run per config here (not repeated for noise-robustness), but the CFC effect
+(69% wall-time reduction) is far above this queue's ~15% job-to-job noise
+floor, so it's trustworthy as-is; the smaller TOV deltas are closer to that
+noise floor and would benefit from a repeat if ever load-bearing on their
+own.
+
+Case dirs: `~/scratch/athenak_run/cfc/grass_scaling_{1,2,4,8,16,32}node`
+(next-eval) / `grass_scaling_capacity_{1,2,4,8,16,32}node` (capacity/
+debug-scaling), `tov_frozen_nexteval_{1,8}node` / `tov_frozen_capacity_
+{1,8}node`, and the `_cache1024` suffix of each of the four next-eval dirs
+for the 1024 re-runs. Parfiles: `dyngr_grass_diff_v2_evolution_cfc_r3_grdt_
+si1_scaling.athinput`, `whisky_tov_scaling.athinput`.

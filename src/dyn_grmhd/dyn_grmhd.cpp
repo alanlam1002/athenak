@@ -119,7 +119,8 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
     if (eos_string.compare("zla_bag") != 0) {
       std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
                 << std::endl << "<mhd> dyn_error = '" << error_string
-                << "' ERROR_POLICY reset_floor_zla_bag must be used with zla_bag EOS" << std::endl;
+                << "' ERROR_POLICY reset_floor_zla_bag must be used with "
+                   "zla_bag EOS" << std::endl;
       std::exit(EXIT_FAILURE);
     } else {
       error_policy = DynGRMHD_Error::reset_floor_zla_bag;
@@ -765,19 +766,21 @@ INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NormalLogs>,
 INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloor);
 INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                         Primitive::ResetFloor);
-INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                         Primitive::ResetFloor);
 INSTANTIATE_COORD_TERMS(Primitive::IdealGas, Primitive::ResetFloorZlaBag);
 INSTANTIATE_COORD_TERMS(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag);
 INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NormalLogs>,
                         Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NQTLogs>,
+                        Primitive::ResetFloorZlaBag);
 INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NormalLogs>,
                         Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag);
+INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>,
+                        Primitive::ResetFloorZlaBag);
 INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                         Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                         Primitive::ResetFloorZlaBag);
 
 #undef INSTANTIATE_COORD_TERMS

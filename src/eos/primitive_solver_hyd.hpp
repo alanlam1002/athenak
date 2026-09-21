@@ -592,8 +592,8 @@ class PrimitiveSolverHydro {
                  m, k, j, i,
                  x1v, x2v, x3v,
                  cons_pt_old[CDN], cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ],
-                 cons_pt_old[CTA], 
-                 cons_pt_old[CYD], 
+                 cons_pt_old[CTA],
+                 cons_pt_old[CYD],
                  cons_pt_old[CYD+1],
                  cons_pt_old[CYD+2],
                  cons_pt_old[CYD+3],
@@ -649,7 +649,8 @@ class PrimitiveSolverHydro {
                   nghbr_.d_view(m,nb).lev > mblev_.d_view(m)) { finer_ = 1; break; }
             }
             int edge_ = i - is;
-            edge_ = (indcs.nx1 - 1 - (i - is) < edge_) ? (indcs.nx1 - 1 - (i - is)) : edge_;
+            edge_ = (indcs.nx1 - 1 - (i - is) < edge_) ?
+                    (indcs.nx1 - 1 - (i - is)) : edge_;
             if (indcs.nx2 > 1) {
               int e2 = j - js;
               if (indcs.nx2 - 1 - (j - js) < e2) { e2 = indcs.nx2 - 1 - (j - js); }

@@ -436,7 +436,8 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
       ++end;
     }
     for (std::size_t visit = begin; visit < end; ++visit)
-      canonical_for_visit[static_cast<std::size_t>(sorted_visits[visit].visit)] = canonical;
+      canonical_for_visit[static_cast<std::size_t>(sorted_visits[visit].visit)] =
+          canonical;
     begin = end;
   }
 
@@ -785,7 +786,8 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
     interpolation_plan_mean_seconds =
         interpolation_plan_sum_seconds / static_cast<double>(global_variable::nranks);
     interpolation_evaluation_mean_seconds =
-        interpolation_evaluation_sum_seconds / static_cast<double>(global_variable::nranks);
+        interpolation_evaluation_sum_seconds /
+        static_cast<double>(global_variable::nranks);
     interpolation_scatter_mean_seconds =
         interpolation_scatter_sum_seconds / static_cast<double>(global_variable::nranks);
   }

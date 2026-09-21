@@ -739,8 +739,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
         " Y = %.17g %.17g %.17g %.17g"
         " E = %.17g %.17g"
         "\n",
-        n, yq, yf, y_e, y_mu, 
-        EnergyFermion(n * y_e , m_electron), 
+        n, yq, yf, y_e, y_mu,
+        EnergyFermion(n * y_e , m_electron),
         EnergyFermion(n * y_mu, m_muon));
     return EnergyFermion(n * y_e , m_electron)
          + EnergyFermion(n * y_mu, m_muon);
@@ -764,7 +764,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Real y_e  = abs_yq * (1.0 - yf);
     Real y_mu = abs_yq * yf;
-    return PressureFermion(n * y_e , m_electron) 
+    return PressureFermion(n * y_e , m_electron)
          + PressureFermion(n * y_mu, m_muon);
   }
 
@@ -775,7 +775,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real yf = GetHeavyLeptonFraction(n * abs_yq, m_idiff_mu_e);
     Real y_e  = abs_yq * (1.0 - yf);
     Real y_mu = abs_yq * yf;
-    return EnthalpyFermion(n * y_e , m_electron) 
+    return EnthalpyFermion(n * y_e , m_electron)
          + EnthalpyFermion(n * y_mu, m_muon);
   }
 
@@ -894,8 +894,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
         ( InternalEnergyFermion(nQ * y_u * ONE_3RD, m_u_quark)
         + InternalEnergyFermion(nQ * y_d * ONE_3RD, m_d_quark)
         + InternalEnergyFermion(nQ * y_s * ONE_3RD, m_s_quark) )
-        + n * m_u_quark * y_u 
-        + n * m_d_quark * y_d 
+        + n * m_u_quark * y_u
+        + n * m_d_quark * y_d
         + n * m_s_quark * y_s
         + Bag_B + 0.5 * Bag_av * SQR(3.0 * nQ)
         + ZL_eta * ColdEnergyLeptons(n, yq);
@@ -911,7 +911,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real yf = GetHeavyLeptonFraction(n_ds * ONE_3RD, m_idiff_s_d);
     Real y_d = y_ds * (1.0 - yf);
     Real y_s = y_ds * yf;
-    return Bag_a4 * 3.0 * 
+    return Bag_a4 * 3.0 *
          ( PressureFermion(nQ * y_u * ONE_3RD, m_u_quark)
          + PressureFermion(nQ * y_d * ONE_3RD, m_d_quark)
          + PressureFermion(nQ * y_s * ONE_3RD, m_s_quark) )
@@ -988,9 +988,9 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   KOKKOS_INLINE_FUNCTION Real ZLattimer_Energy(Real n, Real y) const{
     Real u = n / n_sat;
     return n *
-      ( 4.0 * y * (1.0-y) 
-        * ( ZL_a0 * u + ZL_b0 * Kokkos::pow(u, ZL_gam0) ) 
-      + SQR(1.0 - 2.0 * y) 
+      ( 4.0 * y * (1.0-y)
+        * ( ZL_a0 * u + ZL_b0 * Kokkos::pow(u, ZL_gam0) )
+      + SQR(1.0 - 2.0 * y)
         * ( ZL_a1 * u + ZL_b1 * Kokkos::pow(u, ZL_gam1) ) );
   }
 
@@ -1000,7 +1000,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     return - 2.0 * u * (ZL_a1 * (1.0-2.0*y) - 2.0 * ZL_a0 * (1.0-y))
       + 4.0 * ZL_b0 * Kokkos::pow(u, ZL_gam0)
       * (1.0-y) * (1.0 + (ZL_gam0 - 1.0) * y)
-      - ZL_b1 * Kokkos::pow(u, ZL_gam1) 
+      - ZL_b1 * Kokkos::pow(u, ZL_gam1)
       * (1.0 - 2.0 * y) * (3.0 - 2.0 * y - ZL_gam1 * (1.0 - 2.0 * y));
   }
 
@@ -1018,14 +1018,14 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real u = n / n_sat;
     return n * ( SQR(1.0-2.0*y)
         * (ZL_a1 * u + ZL_b1 * ZL_gam1 * Kokkos::pow(u, ZL_gam1))
-        + 4.0 * y * (1.0-y) 
+        + 4.0 * y * (1.0-y)
         * (ZL_a0 * u + ZL_b0 * ZL_gam0 * Kokkos::pow(u, ZL_gam0)) );
   }
 
   /// Zhao-Lattimer dEdn
   KOKKOS_INLINE_FUNCTION Real ZLattimer_dEdn(Real n, Real y) const{
     Real u = n / n_sat;
-    return SQR(1.0-2.0*y) * (2.0 * ZL_a1 * u 
+    return SQR(1.0-2.0*y) * (2.0 * ZL_a1 * u
       + ZL_b1 * (1.0+ZL_gam1) * Kokkos::pow(u, ZL_gam1) )
       + 4.0 * y * (1.0-y) * (2.0 * ZL_a0 * u
       + ZL_b0 * (1.0+ZL_gam0) * Kokkos::pow(u, ZL_gam0) );
@@ -1036,7 +1036,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     Real u = n / n_sat;
     return SQR(1.0-2.0*y)
       * (2.0 * ZL_a1 * u + ZL_b1 * ZL_gam1 * (1.0+ZL_gam1) * Kokkos::pow(u, ZL_gam1))
-      + 4.0 * y * (1.0-y) 
+      + 4.0 * y * (1.0-y)
       * (2.0 * ZL_a0 * u + ZL_b0 * ZL_gam0 * (1.0+ZL_gam0) * Kokkos::pow(u, ZL_gam0));
   }
 
@@ -1146,7 +1146,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Fermion Energy / m^4
   KOKKOS_INLINE_FUNCTION Real EnergyFermion_FromX(Real x) const{
     if ( x > x_series_max ) {
-      return 0.125 / pi2hbar3 
+      return 0.125 / pi2hbar3
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) + 1.0)
           - Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
     } else {
@@ -1161,7 +1161,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Fermion Internal Energy / m^4
   KOKKOS_INLINE_FUNCTION Real InternalEnergyFermion_FromX(Real x) const{
     if ( x > x_series_max ) {
-      return 0.125 / pi2hbar3 
+      return 0.125 / pi2hbar3
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) + 1.0)
           - ONE_3RD * 8.0 * x*x*x
           - Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
@@ -1175,7 +1175,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   /// Fermion Pressure / m^4
   KOKKOS_INLINE_FUNCTION Real PressureFermion_FromX(Real x) const{
     if ( x > x_series_max ) {
-      return 0.125 * ONE_3RD / pi2hbar3 
+      return 0.125 * ONE_3RD / pi2hbar3
           * (x * Kokkos::sqrt(SQR(x) + 1.0) * (2.0*SQR(x) - 3.0)
           + 3.0 * Kokkos::log1p(x + SQR(x) / (1.0 + Kokkos::sqrt(SQR(x) + 1.0))));
     } else {
@@ -1217,7 +1217,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
                 - 0.00194910208120767933 * xm2
                 + 0.000337770531118376248 * xm3
                 - 0.0000606787224618394489 * xm4 )
-                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0,
                 -d + 2.0*f
                 + 6.53197264742180826
                 + 2.85773803324704111 * xm
@@ -1228,8 +1228,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
         return ZL_CUBE(kF) / x;
       } else {
         Real g = (2.0*x*Kokkos::fabs(9.0 - x2))/27.0; // b
-        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f) 
-                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f)
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0,
                 -d + 2.0*f + g / Kokkos::sqrt(d+f)
                 ) ) ) / 6.0; // b^(1/3)
         return ZL_CUBE(kF) / x;
@@ -1255,7 +1255,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //    Real d = (5.0*ZL_POW8(a) - 4.0*a2*b2 + SQR(c))/(3.0*a2*c); // b^(2/3)
   //    Real f = (-6.0*a6 + b2)/(9.0*SQR(a2)); //b^(2/3)
   //    Real g = (2.0*b*(9.0 - b2/a6))/27.0; // b
-  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f) 
+  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f)
   //            + 3.0*Kokkos::sqrt(-d + 2.0*f - SIGN(b-3.0*a3)*g
   //            / Kokkos::sqrt(d+f)) ) / 6.0; // b^(1/3)
   //    return ZL_CUBE(kF) / b;
@@ -1286,7 +1286,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
                 - 0.00194910208120767933 * xm2
                 + 0.000337770531118376248 * xm3
                 - 0.0000606787224618394489 * xm4 )
-                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0,
                 -d + 2.0*f
                 + 6.53197264742180826
                 + 2.85773803324704111 * xm
@@ -1297,7 +1297,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
         Kokkos::printf(" GetHeavyLeptonFractionA: "
           " var %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g"
           "\n",
-          x, c_cubic, c, d, f, d+f,-d + 2.0*f 
+          x, c_cubic, c, d, f, d+f,-d + 2.0*f
                 + 6.53197264742180826
                 + 2.85773803324704111 * xm3
                 + 0.246650008821917239 * SQR(xm3)
@@ -1307,8 +1307,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
         return ZL_CUBE(kF) / x;
       } else {
         Real g = (2.0*x*Kokkos::fabs(9.0 - x2))/27.0; // b
-        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f) 
-                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0, 
+        Real kF = ( -x - SIGN(x-3.0)*3.0*Kokkos::sqrt(d+f)
+                + 3.0*Kokkos::sqrt(Kokkos::fmax(0.0,
                 -d + 2.0*f + g / Kokkos::sqrt(d+f)
                 ) ) ) / 6.0; // b^(1/3)
         Kokkos::printf(" GetHeavyLeptonFractionB: "
@@ -1322,7 +1322,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
       return 0.0;
     }
   }
-  //KOKKOS_INLINE_FUNCTION Real TestGetHeavyLeptonFraction(Real n, Real m1, Real m2) const {
+  //KOKKOS_INLINE_FUNCTION
+  //Real TestGetHeavyLeptonFraction(Real n, Real m1, Real m2) const {
   //  Real a = Kokkos::sqrt(SQR(m2) - SQR(m1));
   //  Real a3 = ZL_CUBE(a);
   //  Real b = 3.0 * pi2hbar3 * n;
@@ -1339,7 +1340,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //    Real d = (5.0*ZL_POW8(a) - 4.0*a2*b2 + SQR(c))/(3.0*a2*c); // b^(2/3)
   //    Real f = (-6.0*a6 + b2)/(9.0*SQR(a2)); //b^(2/3)
   //    Real g = (2.0*b*(9.0 - b2/a6))/27.0; // b
-  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f) 
+  //    Real kF = ( -(b/a2) - SIGN(b-3.0*a3)*3.0*Kokkos::sqrt(d+f)
   //            + 3.0*Kokkos::sqrt(-d + 2.0*f - SIGN(b-3.0*a3)*g
   //            / Kokkos::sqrt(d+f)) ) / 6.0; // b^(1/3)
   //    Kokkos::printf(" GetHeavyLeptonFraction: "

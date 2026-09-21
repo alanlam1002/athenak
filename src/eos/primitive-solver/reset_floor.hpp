@@ -125,7 +125,8 @@ class ResetFloor : public ErrorPolicyInterface {
   }
 
   /// Policy for resetting internal energy density
-  KOKKOS_INLINE_FUNCTION void InternalEnergyLimits(Real& e, Real e_min, Real e_max) const {
+  KOKKOS_INLINE_FUNCTION
+  void InternalEnergyLimits(Real& e, Real e_min, Real e_max) const {
     e = fmax(e_min, fmin(e_max, e));
   }
 

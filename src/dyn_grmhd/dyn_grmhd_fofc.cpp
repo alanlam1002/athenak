@@ -995,7 +995,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
               }
               // Estimated Nucleons Fraction
               Real uDN = utest_(m,nmhd_+1,k,j-1,i) - bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+                + fmin(1.0, fmax(0.0, wthe_m[1]))
+                  * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
               if ( uDN >= 0.0 && uDN <= uD0 ) {
                 uY_m = utest_(m,nmhd_+2,k,j-1,i) - bet_pp * flx2(m,nmhd_+2,k,j,i);
                 min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
@@ -1086,7 +1087,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
               }
               // Estimated Nucleons Fraction
               Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+                + fmin(1.0, fmax(0.0, wthe_p[1]))
+                  * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
               if ( uDN >= 0.0 && uDN <= uD0 ) {
                 uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx2(m,nmhd_+2,k,j,i);
                 min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
@@ -1143,14 +1145,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           }
         }
         // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
-        // assumed to hold it, at the solved theta it is exactly attained, so every smaller
-        // theta holds it too. That argument needs the bound to be affine in ONE theta. For
+        // assumed to hold it, at the solved theta it is exactly attained, so
+        // every smaller
+        // theta holds it too. That argument needs the bound to be affine in ONE
+        // theta. For
         // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
         // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
         // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
         // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
-        // the two differ. Collapsing to a single theta restores a one-parameter family and
-        // makes every linear bound among the scalars hold by construction. Costs diffusion:
+        // the two differ. Collapsing to a single theta restores a one-parameter
+        // family and
+        // makes every linear bound among the scalars hold by construction. Costs
+        // diffusion:
         // each scalar is limited by the most restrictive of the four.
         //   verify_theta_ removes that price -- see the x1 block above for the argument.
         Real wraw[MAX_SPECIES] = {0.0};
@@ -1261,7 +1267,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
               }
               // Estimated Nucleons Fraction
               Real uDN = utest_(m,nmhd_+1,k-1,j,i) - bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+                + fmin(1.0, fmax(0.0, wthe_m[1]))
+                  * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
               if ( uDN >= 0.0 && uDN <= uD0 ) {
                 uY_m = utest_(m,nmhd_+2,k-1,j,i) - bet_pp * flx3(m,nmhd_+2,k,j,i);
                 min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
@@ -1352,7 +1359,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
               }
               // Estimated Nucleons Fraction
               Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
+                + fmin(1.0, fmax(0.0, wthe_p[1]))
+                  * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
               if ( uDN >= 0.0 && uDN <= uD0 ) {
                 uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx3(m,nmhd_+2,k,j,i);
                 min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
@@ -1409,14 +1417,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           }
         }
         // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
-        // assumed to hold it, at the solved theta it is exactly attained, so every smaller
-        // theta holds it too. That argument needs the bound to be affine in ONE theta. For
+        // assumed to hold it, at the solved theta it is exactly attained, so
+        // every smaller
+        // theta holds it too. That argument needs the bound to be affine in ONE
+        // theta. For
         // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
         // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
         // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
         // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
-        // the two differ. Collapsing to a single theta restores a one-parameter family and
-        // makes every linear bound among the scalars hold by construction. Costs diffusion:
+        // the two differ. Collapsing to a single theta restores a one-parameter
+        // family and
+        // makes every linear bound among the scalars hold by construction. Costs
+        // diffusion:
         // each scalar is limited by the most restrictive of the four.
         //   verify_theta_ removes that price -- see the x1 block above for the argument.
         Real wraw[MAX_SPECIES] = {0.0};
@@ -1503,18 +1515,19 @@ INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NormalLogs>, Primitive::ResetF
 INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NormalLogs>, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloor)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>, 
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                  Primitive::ResetFloor)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                  Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::IdealGas, Primitive::ResetFloorZlaBag)
 INSTANTIATE_FOFC(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NormalLogs>, Primitive::ResetFloorZlaBag)
+INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                 Primitive::ResetFloorZlaBag)
 INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NormalLogs>, Primitive::ResetFloorZlaBag)
 INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>, 
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                  Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>, 
+INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                  Primitive::ResetFloorZlaBag)
 } // namespace dyngr

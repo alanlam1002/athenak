@@ -128,29 +128,6 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     Kokkos::deep_copy(eos_max_Y, h_max_Y);
   }
 
-  // PHASE 1 / defect 2. Scalar 3's band is [min_Y(3), max_Y(3)] * (quark baryon
-  // fraction), whose conserved-space reference is (uD - uDN). Neither uD nor uDN is
-  // range-checked against the other for scalar 3 (scalars 1 and 2 are), so a negative
-  // reference inverts the band into an empty interval and theta is then computed from
-  // an inconsistent target. ResetFloorZlaBag::SpeciesLimits already floors the same
-  // quantity as fmax(1 - Y[1], q_snap); mirroring it here makes the band the limiter
-  // CERTIFIES identical by construction to the band C2P then APPLIES. With q_snap = 0
-  // this reduces to the original expression for every uDN <= uD.
-  const Real q_snap_ = eos.ps.GetEOS().GetQuarkSnapTol();
-  // Only the ZLA cascade makes one scalar's bound depend on another scalar's theta
-  // (scalar 1 -> uD0, scalars 2 and 3 -> uDN). Every other EOS references all four
-  // bands to uD, whose flux is already final before this kernel, so each bound is
-  // affine in its OWN theta alone and the per-scalar value is both correct and
-  // optimal there. Sharing theta across independent scalars would only add
-  // diffusion, so make the flag inert outside the cascade.
-  constexpr bool zla_cascade_ =
-      std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-      std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>;
-  const bool shared_theta_ = scalar_shared_theta && zla_cascade_;
-  // Verified theta supersedes shared theta: the first rung of its fallback ladder IS the
-  // shared value, so turning it on can only ever relax the limiter, never tighten it.
-  const bool verify_theta_ = scalar_theta_verify && zla_cascade_;
-
   if (pmy_pack->pmhd->use_fofc) {
     Real &gam0 = pdriver->gam0[stage-1];
     Real &gam1 = pdriver->gam1[stage-1];
@@ -237,55 +214,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       }
 
       if ( nscal_ > 0 ) {
-        if constexpr (
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-          // Hierarchy of FOFC for ZLA Bag EOS
-          Real min_Y_ = eos_min_Y(0);
-          Real max_Y_ = eos_max_Y(0);
-          if ( utest_(m,IDN,k,j,i) <= 0 ||
-               utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_,k,j,i) ||
-               utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_,k,j,i) ) {
-            for (int n=0; n<nscal_; ++n) {
+        for (int n=0; n<nscal_; ++n) {
+          if ( utest_(m,IDN,k,j,i) > 0 ) {
+            Real min_Y_ = eos_min_Y(n);
+            Real max_Y_ = eos_max_Y(n);
+            if ( utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_+n,k,j,i) ||
+                 utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_+n,k,j,i) ) {
               fofc_scal_(m,n,k,j,i) = true;
             }
           } else {
-            min_Y_ = eos_min_Y(1);
-            max_Y_ = eos_max_Y(1);
-            if ( utest_(m,nmhd_,k,j,i) * min_Y_ > utest_(m,nmhd_+1,k,j,i) ||
-                 utest_(m,nmhd_,k,j,i) * max_Y_ < utest_(m,nmhd_+1,k,j,i) ) {
-              for (int n=1; n<nscal_; ++n) {
-                fofc_scal_(m,n,k,j,i) = true;
-              }
-            } else {
-              Real nb = utest_(m,nmhd_+1,k,j,i);
-              min_Y_ = eos_min_Y(2);
-              max_Y_ = eos_max_Y(2);
-              if ( nb * min_Y_ > utest_(m,nmhd_+2,k,j,i) ||
-                   nb * max_Y_ < utest_(m,nmhd_+2,k,j,i) ) {
-                fofc_scal_(m,2,k,j,i) = true;
-              }
-              nb = utest_(m,IDN,k,j,i) - utest_(m,nmhd_+1,k,j,i);
-              min_Y_ = eos_min_Y(3);
-              max_Y_ = eos_max_Y(3);
-              if ( nb * min_Y_ > utest_(m,nmhd_+3,k,j,i) ||
-                   nb * max_Y_ < utest_(m,nmhd_+3,k,j,i) ) {
-                fofc_scal_(m,3,k,j,i) = true;
-              }
-            }
-          }
-        } else {
-          for (int n=0; n<nscal_; ++n) {
-            if ( utest_(m,IDN,k,j,i) > 0 ) {
-              Real min_Y_ = eos_min_Y(n);
-              Real max_Y_ = eos_max_Y(n);
-              if ( utest_(m,IDN,k,j,i) * min_Y_ > utest_(m,nmhd_+n,k,j,i) ||
-                   utest_(m,IDN,k,j,i) * max_Y_ < utest_(m,nmhd_+n,k,j,i) ) {
-                fofc_scal_(m,n,k,j,i) = true;
-              }
-            } else {
-              fofc_scal_(m,n,k,j,i) = true;
-            }
+            fofc_scal_(m,n,k,j,i) = true;
           }
         }
       }
@@ -685,260 +623,56 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       // Estimate density D^- at boundary from i-1
       Real uD = utest_(m,IDN,k,j,i-1) - bet_pp * flx1(m,IDN,k,j,i);
-      if constexpr (
-        std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-        std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-        if ( uD > 0.0 ) {
-          Real uY_m = utest_(m,nmhd_,k,j,i-1) - bet_pp * flx1(m,nmhd_,k,j,i);
-          Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-          Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+      if ( uD > 0.0 ) {
+        for (int n=0; n < nscal_; ++n) {
+          Real uY_m = utest_(m,nmhd_+n,k,j,i-1) - bet_pp * flx1(m,nmhd_+n,k,j,i);
+          Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+          Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
           if ( uY_m < min_DY_ ) {
-            wthe_m[0] = ( ( utest_(m,nmhd_,k,j,i-1) - min_DY_ ) * bet_ppi
-              - flx_llf[0] ) / ( flx1(m,nmhd_,k,j,i) - flx_llf[0] );
+            wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j,i-1) - min_DY_ ) * bet_ppi
+              - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
           } else if ( uY_m > max_DY_ ) {
-            wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i-1) ) * bet_ppi
-              + flx_llf[0] ) / ( flx_llf[0] - flx1(m,nmhd_,k,j,i) );
+            wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i-1) ) * bet_ppi
+              + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
           } else {
-            wthe_m[0] = 1.0;
+            wthe_m[n] = 1.0;
           }
-          // Estimated Volume Fraction
-          Real uD0 = utest_(m,nmhd_,k,j,i-1) - bet_pp * ( flx_llf[0]
-            + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx1(m,nmhd_,k,j,i) - flx_llf[0]) );
-          if ( uD0 >= 0.0 && uD0 <= uD ) {
-            uY_m = utest_(m,nmhd_+1,k,j,i-1) - bet_pp * flx1(m,nmhd_+1,k,j,i);
-            min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-            max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-            if ( uY_m < min_DY_ ) {
-              wthe_m[1] = ( ( utest_(m,nmhd_+1,k,j,i-1) - min_DY_ ) * bet_ppi
-                - flx_llf[1] ) / ( flx1(m,nmhd_+1,k,j,i) - flx_llf[1] );
-            } else if ( uY_m > max_DY_ ) {
-              wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i-1) ) * bet_ppi
-                + flx_llf[1] ) / ( flx_llf[1] - flx1(m,nmhd_+1,k,j,i) );
-            } else {
-              wthe_m[1] = 1.0;
-            }
-            // Estimated Nucleons Fraction
-            Real uDN = utest_(m,nmhd_+1,k,j,i-1) - bet_pp * ( flx_llf[1]
-              + fmin(1.0, fmax(0.0, wthe_m[1])) * (flx1(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-            if ( uDN >= 0.0 && uDN <= uD0 ) {
-              uY_m = utest_(m,nmhd_+2,k,j,i-1) - bet_pp * flx1(m,nmhd_+2,k,j,i);
-              min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-              max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[2] = ( ( utest_(m,nmhd_+2,k,j,i-1) - min_DY_ ) * bet_ppi
-                  - flx_llf[2] ) / ( flx1(m,nmhd_+2,k,j,i) - flx_llf[2] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i-1) ) * bet_ppi
-                  + flx_llf[2] ) / ( flx_llf[2] - flx1(m,nmhd_+2,k,j,i) );
-              } else {
-                wthe_m[2] = 1.0;
-              }
-              uY_m = utest_(m,nmhd_+3,k,j,i-1) - bet_pp * flx1(m,nmhd_+3,k,j,i);
-              const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j,i-1) - min_DY_ ) * bet_ppi
-                  - flx_llf[3] ) / ( flx1(m,nmhd_+3,k,j,i) - flx_llf[3] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i-1) ) * bet_ppi
-                  + flx_llf[3] ) / ( flx_llf[3] - flx1(m,nmhd_+3,k,j,i) );
-              } else {
-                wthe_m[3] = 1.0;
-              }
-            } else {
-              for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-          }
-        } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
         }
       } else {
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_m = utest_(m,nmhd_+n,k,j,i-1) - bet_pp * flx1(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-            if ( uY_m < min_DY_ ) {
-              wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j,i-1) - min_DY_ ) * bet_ppi
-                - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
-            } else if ( uY_m > max_DY_ ) {
-              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i-1) ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
-            } else {
-              wthe_m[n] = 1.0;
-            }
-          }
-        } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-        }
+        for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
       }
       // Estimate density D^+ at boundary from i
       uD = utest_(m,IDN,k,j,i) + bet_pp * flx1(m,IDN,k,j,i);
-      if constexpr (
-        std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-        std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-        if ( uD > 0.0 ) {
-          Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx1(m,nmhd_,k,j,i);
-          Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-          Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+      if ( uD > 0.0 ) {
+        for (int n=0; n < nscal_; ++n) {
+          Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx1(m,nmhd_+n,k,j,i);
+          Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+          Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
           if ( uY_p < min_DY_ ) {
-            wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
-              + flx_llf[0] ) / ( flx_llf[0] - flx1(m,nmhd_,k,j,i) );
+            wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+              + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
           } else if ( uY_p > max_DY_ ) {
-            wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
-              - flx_llf[0] ) / ( flx1(m,nmhd_,k,j,i) - flx_llf[0] );
+            wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+              - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
           } else {
-            wthe_p[0] = 1.0;
+            wthe_p[n] = 1.0;
           }
-          // Estimated Volume Fraction
-          Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
-            + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx1(m,nmhd_,k,j,i) - flx_llf[0]) );
-          if ( uD0 >= 0.0 && uD0 <= uD ) {
-            uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx1(m,nmhd_+1,k,j,i);
-            min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-            max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-            if ( uY_p < min_DY_ ) {
-              wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[1] ) / ( flx_llf[1] - flx1(m,nmhd_+1,k,j,i) );
-            } else if ( uY_p > max_DY_ ) {
-              wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
-                - flx_llf[1] ) / ( flx1(m,nmhd_+1,k,j,i) - flx_llf[1] );
-            } else {
-              wthe_p[1] = 1.0;
-            }
-            // Estimated Nucleons Fraction
-            Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
-              + fmin(1.0, fmax(0.0, wthe_p[1])) * (flx1(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-            if ( uDN >= 0.0 && uDN <= uD0 ) {
-              uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx1(m,nmhd_+2,k,j,i);
-              min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-              max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[2] ) / ( flx_llf[2] - flx1(m,nmhd_+2,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
-                  - flx_llf[2] ) / ( flx1(m,nmhd_+2,k,j,i) - flx_llf[2] );
-              } else {
-                wthe_p[2] = 1.0;
-              }
-              uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx1(m,nmhd_+3,k,j,i);
-              const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-              min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-              max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[3] ) / ( flx_llf[3] - flx1(m,nmhd_+3,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
-                  - flx_llf[3] ) / ( flx1(m,nmhd_+3,k,j,i) - flx_llf[3] );
-              } else {
-                wthe_p[3] = 1.0;
-              }
-            } else {
-              for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-          }
-        } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
         }
       } else {
-        if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
-            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx1(m,nmhd_+n,k,j,i);
-            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-            if ( uY_p < min_DY_ ) {
-              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[n] ) / ( flx_llf[n] - flx1(m,nmhd_+n,k,j,i) );
-            } else if ( uY_p > max_DY_ ) {
-              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-                - flx_llf[n] ) / ( flx1(m,nmhd_+n,k,j,i) - flx_llf[n] );
-            } else {
-              wthe_p[n] = 1.0;
-            }
-          }
-        } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-        }
+        for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
       }
       // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
       // assumed to hold it, at the solved theta it is exactly attained, so every smaller
-      // theta holds it too. That argument needs the bound to be affine in ONE theta. For
-      // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
-      // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
-      // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
-      // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
-      // the two differ. Collapsing to a single theta restores a one-parameter family and
-      // makes every linear bound among the scalars hold by construction. Costs diffusion:
-      // each scalar is limited by the most restrictive of the four.
-      //   verify_theta_ removes that price. Convexity only ever needed the ENDPOINT to be
-      // admissible: origin (all-LLF) admissible plus endpoint admissible gives the whole
-      // segment. So try the per-scalar thetas and CHECK the four bounds there instead of
-      // asserting them. Wherever they hold -- most of the star, since scalar 0's own band
-      // [0,1]*uD is never tight there -- nothing is limited that need not be. Where they
-      // fail, walk the uniform ray down from wthe_all (today's answer) toward the origin.
+      // theta holds it too. The argument needs the bound to be affine in ONE theta, which
+      // it is here: every species band is [min_Y(n), max_Y(n)] * uD, and uD's flux is
+      // already final before this kernel. So each scalar's own theta is both correct and
+      // optimal, and no collapse onto a shared value is needed.
       Real wraw[MAX_SPECIES] = {0.0};
       for (int n=0; n < nscal_; ++n) {
         wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
       }
-      Real wthe_all = 1.0;
-      for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
-
-      bool decided_ = false;
-      if constexpr (zla_cascade_) {
-        if (verify_theta_ && nscal_ == 4) {
-          // Read the high-order fluxes BEFORE the application loop overwrites them.
-          const Real utm[5] = {utest_(m,IDN,k,j,i-1), utest_(m,nmhd_+0,k,j,i-1),
-                               utest_(m,nmhd_+1,k,j,i-1), utest_(m,nmhd_+2,k,j,i-1),
-                               utest_(m,nmhd_+3,k,j,i-1)};
-          const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
-                               utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
-                               utest_(m,nmhd_+3,k,j,i)};
-          const Real fhi[4] = {flx1(m,nmhd_+0,k,j,i), flx1(m,nmhd_+1,k,j,i),
-                               flx1(m,nmhd_+2,k,j,i), flx1(m,nmhd_+3,k,j,i)};
-          const Real fD = flx1(m,IDN,k,j,i);
-          // Candidate 1: the per-scalar thetas. Optimal whenever it holds.
-          bool ok =
-            ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
-                                 q_snap_, eos_min_Y, eos_max_Y) &&
-            ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
-                                 q_snap_, eos_min_Y, eos_max_Y);
-          if (ok) {
-            for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
-          } else {
-            // Candidates 2..5: the uniform ray from the origin, first stop exactly
-            // today's shared-theta value, halving after. theta = 0 is the LLF flux, which
-            // FOFC assumes admissible, so the ladder always terminates.
-            Real a = wthe_all;
-            for (int it=0; it < 4 && !ok; ++it) {
-              Real cand[MAX_SPECIES] = {0.0};
-              for (int n=0; n < nscal_; ++n) { cand[n] = a; }
-              ok =
-                ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
-                                     q_snap_, eos_min_Y, eos_max_Y) &&
-                ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
-                                     q_snap_, eos_min_Y, eos_max_Y);
-              if (ok) {
-                for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
-              } else {
-                a *= 0.5;
-              }
-            }
-            if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
-          }
-          decided_ = true;
-        }
-      }
-      if (!decided_) {
-        for (int n=0; n < nscal_; ++n) {
-          wthe[n] = shared_theta_ ? wthe_all : wraw[n];
-        }
+      for (int n=0; n < nscal_; ++n) {
+        wthe[n] = wraw[n];
       }
       for (int n=0; n < nscal_; ++n) {
         flx1(m,nmhd_+n,k,j,i) = flx_llf[n]
@@ -961,255 +695,51 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
 
         uD = utest_(m,IDN,k,j-1,i) - bet_pp * flx2(m,IDN,k,j,i);
-        if constexpr (
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-          if ( uD > 0.0 ) {
-            Real uY_m = utest_(m,nmhd_,k,j-1,i) - bet_pp * flx2(m,nmhd_,k,j,i);
-            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_m = utest_(m,nmhd_+n,k,j-1,i) - bet_pp * flx2(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
             if ( uY_m < min_DY_ ) {
-              wthe_m[0] = ( ( utest_(m,nmhd_,k,j-1,i) - min_DY_ ) * bet_ppi
-                - flx_llf[0] ) / ( flx2(m,nmhd_,k,j,i) - flx_llf[0] );
+              wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j-1,i) - min_DY_ ) * bet_ppi
+                - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
             } else if ( uY_m > max_DY_ ) {
-              wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j-1,i) ) * bet_ppi
-                + flx_llf[0] ) / ( flx_llf[0] - flx2(m,nmhd_,k,j,i) );
+              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j-1,i) ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
             } else {
-              wthe_m[0] = 1.0;
+              wthe_m[n] = 1.0;
             }
-            // Estimated Volume Fraction
-            Real uD0 = utest_(m,nmhd_,k,j-1,i) - bet_pp * ( flx_llf[0]
-              + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx2(m,nmhd_,k,j,i) - flx_llf[0]) );
-            if ( uD0 >= 0.0 && uD0 <= uD ) {
-              uY_m = utest_(m,nmhd_+1,k,j-1,i) - bet_pp * flx2(m,nmhd_+1,k,j,i);
-              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[1] = ( ( utest_(m,nmhd_+1,k,j-1,i) - min_DY_ ) * bet_ppi
-                  - flx_llf[1] ) / ( flx2(m,nmhd_+1,k,j,i) - flx_llf[1] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j-1,i) ) * bet_ppi
-                  + flx_llf[1] ) / ( flx_llf[1] - flx2(m,nmhd_+1,k,j,i) );
-              } else {
-                wthe_m[1] = 1.0;
-              }
-              // Estimated Nucleons Fraction
-              Real uDN = utest_(m,nmhd_+1,k,j-1,i) - bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_m[1]))
-                  * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-              if ( uDN >= 0.0 && uDN <= uD0 ) {
-                uY_m = utest_(m,nmhd_+2,k,j-1,i) - bet_pp * flx2(m,nmhd_+2,k,j,i);
-                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-                if ( uY_m < min_DY_ ) {
-                  wthe_m[2] = ( ( utest_(m,nmhd_+2,k,j-1,i) - min_DY_ ) * bet_ppi
-                    - flx_llf[2] ) / ( flx2(m,nmhd_+2,k,j,i) - flx_llf[2] );
-                } else if ( uY_m > max_DY_ ) {
-                  wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j-1,i) ) * bet_ppi
-                    + flx_llf[2] ) / ( flx_llf[2] - flx2(m,nmhd_+2,k,j,i) );
-                } else {
-                  wthe_m[2] = 1.0;
-                }
-                uY_m = utest_(m,nmhd_+3,k,j-1,i) - bet_pp * flx2(m,nmhd_+3,k,j,i);
-                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-                if ( uY_m < min_DY_ ) {
-                  wthe_m[3] = ( ( utest_(m,nmhd_+3,k,j-1,i) - min_DY_ ) * bet_ppi
-                    - flx_llf[3] ) / ( flx2(m,nmhd_+3,k,j,i) - flx_llf[3] );
-                } else if ( uY_m > max_DY_ ) {
-                  wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j-1,i) ) * bet_ppi
-                    + flx_llf[3] ) / ( flx_llf[3] - flx2(m,nmhd_+3,k,j,i) );
-                } else {
-                  wthe_m[3] = 1.0;
-                }
-              } else {
-                for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-              }
-            } else {
-              for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
           }
         } else {
-          if ( uD > 0.0 ) {
-            for (int n=0; n < nscal_; ++n) {
-              Real uY_m = utest_(m,nmhd_+n,k,j-1,i) - bet_pp * flx2(m,nmhd_+n,k,j,i);
-              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[n] = ( ( utest_(m,nmhd_+n,k,j-1,i) - min_DY_ ) * bet_ppi
-                  - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j-1,i) ) * bet_ppi
-                  + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
-              } else {
-                wthe_m[n] = 1.0;
-              }
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-          }
+          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx2(m,IDN,k,j,i);
-        if constexpr (
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-          if ( uD > 0.0 ) {
-            Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx2(m,nmhd_,k,j,i);
-            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx2(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
             if ( uY_p < min_DY_ ) {
-              wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[0] ) / ( flx_llf[0] - flx2(m,nmhd_,k,j,i) );
+              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
             } else if ( uY_p > max_DY_ ) {
-              wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
-                - flx_llf[0] ) / ( flx2(m,nmhd_,k,j,i) - flx_llf[0] );
+              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+                - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
             } else {
-              wthe_p[0] = 1.0;
+              wthe_p[n] = 1.0;
             }
-            // Estimated Volume Fraction
-            Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
-              + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx2(m,nmhd_,k,j,i) - flx_llf[0]) );
-            if ( uD0 >= 0.0 && uD0 <= uD ) {
-              uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx2(m,nmhd_+1,k,j,i);
-              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[1] ) / ( flx_llf[1] - flx2(m,nmhd_+1,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
-                  - flx_llf[1] ) / ( flx2(m,nmhd_+1,k,j,i) - flx_llf[1] );
-              } else {
-                wthe_p[1] = 1.0;
-              }
-              // Estimated Nucleons Fraction
-              Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_p[1]))
-                  * (flx2(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-              if ( uDN >= 0.0 && uDN <= uD0 ) {
-                uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx2(m,nmhd_+2,k,j,i);
-                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-                if ( uY_p < min_DY_ ) {
-                  wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
-                    + flx_llf[2] ) / ( flx_llf[2] - flx2(m,nmhd_+2,k,j,i) );
-                } else if ( uY_p > max_DY_ ) {
-                  wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
-                    - flx_llf[2] ) / ( flx2(m,nmhd_+2,k,j,i) - flx_llf[2] );
-                } else {
-                  wthe_p[2] = 1.0;
-                }
-                uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx2(m,nmhd_+3,k,j,i);
-                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-                if ( uY_p < min_DY_ ) {
-                  wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
-                    + flx_llf[3] ) / ( flx_llf[3] - flx2(m,nmhd_+3,k,j,i) );
-                } else if ( uY_p > max_DY_ ) {
-                  wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
-                    - flx_llf[3] ) / ( flx2(m,nmhd_+3,k,j,i) - flx_llf[3] );
-                } else {
-                  wthe_p[3] = 1.0;
-                }
-              } else {
-                for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-              }
-            } else {
-              for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         } else {
-          if ( uD > 0.0 ) {
-            for (int n=0; n < nscal_; ++n) {
-              Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx2(m,nmhd_+n,k,j,i);
-              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[n] ) / ( flx_llf[n] - flx2(m,nmhd_+n,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-                  - flx_llf[n] ) / ( flx2(m,nmhd_+n,k,j,i) - flx_llf[n] );
-              } else {
-                wthe_p[n] = 1.0;
-              }
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-          }
+          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
         }
-        // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
-        // assumed to hold it, at the solved theta it is exactly attained, so
-        // every smaller
-        // theta holds it too. That argument needs the bound to be affine in ONE
-        // theta. For
-        // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
-        // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
-        // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
-        // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
-        // the two differ. Collapsing to a single theta restores a one-parameter
-        // family and
-        // makes every linear bound among the scalars hold by construction. Costs
-        // diffusion:
-        // each scalar is limited by the most restrictive of the four.
-        //   verify_theta_ removes that price -- see the x1 block above for the argument.
+        // Per-scalar theta, for the reason given in the x1 block above: every species
+        // band references uD alone, so each bound is affine in its own theta.
         Real wraw[MAX_SPECIES] = {0.0};
         for (int n=0; n < nscal_; ++n) {
           wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
         }
-        Real wthe_all = 1.0;
-        for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
-
-        bool decided_ = false;
-        if constexpr (zla_cascade_) {
-          if (verify_theta_ && nscal_ == 4) {
-            const Real utm[5] = {utest_(m,IDN,k,j-1,i), utest_(m,nmhd_+0,k,j-1,i),
-                                 utest_(m,nmhd_+1,k,j-1,i), utest_(m,nmhd_+2,k,j-1,i),
-                                 utest_(m,nmhd_+3,k,j-1,i)};
-            const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
-                                 utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
-                                 utest_(m,nmhd_+3,k,j,i)};
-            const Real fhi[4] = {flx2(m,nmhd_+0,k,j,i), flx2(m,nmhd_+1,k,j,i),
-                                 flx2(m,nmhd_+2,k,j,i), flx2(m,nmhd_+3,k,j,i)};
-            const Real fD = flx2(m,IDN,k,j,i);
-            bool ok =
-              ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
-                                   q_snap_, eos_min_Y, eos_max_Y) &&
-              ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
-                                   q_snap_, eos_min_Y, eos_max_Y);
-            if (ok) {
-              for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
-            } else {
-              Real a = wthe_all;
-              for (int it=0; it < 4 && !ok; ++it) {
-                Real cand[MAX_SPECIES] = {0.0};
-                for (int n=0; n < nscal_; ++n) { cand[n] = a; }
-                ok =
-                  ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
-                                       q_snap_, eos_min_Y, eos_max_Y) &&
-                  ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
-                                       q_snap_, eos_min_Y, eos_max_Y);
-                if (ok) {
-                  for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
-                } else {
-                  a *= 0.5;
-                }
-              }
-              if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
-            }
-            decided_ = true;
-          }
-        }
-        if (!decided_) {
-          for (int n=0; n < nscal_; ++n) {
-            wthe[n] = shared_theta_ ? wthe_all : wraw[n];
-          }
+        for (int n=0; n < nscal_; ++n) {
+          wthe[n] = wraw[n];
         }
         for (int n=0; n < nscal_; ++n) {
           flx2(m,nmhd_+n,k,j,i) = flx_llf[n]
@@ -1233,255 +763,51 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
 
         uD = utest_(m,IDN,k-1,j,i) - bet_pp * flx3(m,IDN,k,j,i);
-        if constexpr (
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-          if ( uD > 0.0 ) {
-            Real uY_m = utest_(m,nmhd_,k-1,j,i) - bet_pp * flx3(m,nmhd_,k,j,i);
-            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_m = utest_(m,nmhd_+n,k-1,j,i) - bet_pp * flx3(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
             if ( uY_m < min_DY_ ) {
-              wthe_m[0] = ( ( utest_(m,nmhd_,k-1,j,i) - min_DY_ ) * bet_ppi
-                - flx_llf[0] ) / ( flx3(m,nmhd_,k,j,i) - flx_llf[0] );
+              wthe_m[n] = ( ( utest_(m,nmhd_+n,k-1,j,i) - min_DY_ ) * bet_ppi
+                - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
             } else if ( uY_m > max_DY_ ) {
-              wthe_m[0] = ( ( max_DY_ - utest_(m,nmhd_,k-1,j,i) ) * bet_ppi
-                + flx_llf[0] ) / ( flx_llf[0] - flx3(m,nmhd_,k,j,i) );
+              wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k-1,j,i) ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
             } else {
-              wthe_m[0] = 1.0;
+              wthe_m[n] = 1.0;
             }
-            // Estimated Volume Fraction
-            Real uD0 = utest_(m,nmhd_,k-1,j,i) - bet_pp * ( flx_llf[0]
-              + fmin(1.0, fmax(0.0, wthe_m[0])) * (flx3(m,nmhd_,k,j,i) - flx_llf[0]) );
-            if ( uD0 >= 0.0 && uD0 <= uD ) {
-              uY_m = utest_(m,nmhd_+1,k-1,j,i) - bet_pp * flx3(m,nmhd_+1,k,j,i);
-              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[1] = ( ( utest_(m,nmhd_+1,k-1,j,i) - min_DY_ ) * bet_ppi
-                  - flx_llf[1] ) / ( flx3(m,nmhd_+1,k,j,i) - flx_llf[1] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k-1,j,i) ) * bet_ppi
-                  + flx_llf[1] ) / ( flx_llf[1] - flx3(m,nmhd_+1,k,j,i) );
-              } else {
-                wthe_m[1] = 1.0;
-              }
-              // Estimated Nucleons Fraction
-              Real uDN = utest_(m,nmhd_+1,k-1,j,i) - bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_m[1]))
-                  * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-              if ( uDN >= 0.0 && uDN <= uD0 ) {
-                uY_m = utest_(m,nmhd_+2,k-1,j,i) - bet_pp * flx3(m,nmhd_+2,k,j,i);
-                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-                if ( uY_m < min_DY_ ) {
-                  wthe_m[2] = ( ( utest_(m,nmhd_+2,k-1,j,i) - min_DY_ ) * bet_ppi
-                    - flx_llf[2] ) / ( flx3(m,nmhd_+2,k,j,i) - flx_llf[2] );
-                } else if ( uY_m > max_DY_ ) {
-                  wthe_m[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k-1,j,i) ) * bet_ppi
-                    + flx_llf[2] ) / ( flx_llf[2] - flx3(m,nmhd_+2,k,j,i) );
-                } else {
-                  wthe_m[2] = 1.0;
-                }
-                uY_m = utest_(m,nmhd_+3,k-1,j,i) - bet_pp * flx3(m,nmhd_+3,k,j,i);
-                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-                if ( uY_m < min_DY_ ) {
-                  wthe_m[3] = ( ( utest_(m,nmhd_+3,k-1,j,i) - min_DY_ ) * bet_ppi
-                    - flx_llf[3] ) / ( flx3(m,nmhd_+3,k,j,i) - flx_llf[3] );
-                } else if ( uY_m > max_DY_ ) {
-                  wthe_m[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k-1,j,i) ) * bet_ppi
-                    + flx_llf[3] ) / ( flx_llf[3] - flx3(m,nmhd_+3,k,j,i) );
-                } else {
-                  wthe_m[3] = 1.0;
-                }
-              } else {
-                for (int n=1; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-              }
-            } else {
-              for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
           }
         } else {
-          if ( uD > 0.0 ) {
-            for (int n=0; n < nscal_; ++n) {
-              Real uY_m = utest_(m,nmhd_+n,k-1,j,i) - bet_pp * flx3(m,nmhd_+n,k,j,i);
-              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-              if ( uY_m < min_DY_ ) {
-                wthe_m[n] = ( ( utest_(m,nmhd_+n,k-1,j,i) - min_DY_ ) * bet_ppi
-                  - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
-              } else if ( uY_m > max_DY_ ) {
-                wthe_m[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k-1,j,i) ) * bet_ppi
-                  + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
-              } else {
-                wthe_m[n] = 1.0;
-              }
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
-          }
+          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx3(m,IDN,k,j,i);
-        if constexpr (
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NormalLogs>, EOSPolicy> ||
-          std::is_same_v<Primitive::EOSZlaBag<Primitive::NQTLogs>, EOSPolicy>) {
-          if ( uD > 0.0 ) {
-            Real uY_p = utest_(m,nmhd_,k,j,i) + bet_pp * flx3(m,nmhd_,k,j,i);
-            Real min_DY_ = (eos_min_Y(0) + DBL_EPSILON) * uD;
-            Real max_DY_ = (eos_max_Y(0) - DBL_EPSILON) * uD;
+        if ( uD > 0.0 ) {
+          for (int n=0; n < nscal_; ++n) {
+            Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx3(m,nmhd_+n,k,j,i);
+            Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
+            Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
             if ( uY_p < min_DY_ ) {
-              wthe_p[0] = ( ( utest_(m,nmhd_,k,j,i) - min_DY_ ) * bet_ppi
-                + flx_llf[0] ) / ( flx_llf[0] - flx3(m,nmhd_,k,j,i) );
+              wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
+                + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
             } else if ( uY_p > max_DY_ ) {
-              wthe_p[0] = ( ( max_DY_ - utest_(m,nmhd_,k,j,i) ) * bet_ppi
-                - flx_llf[0] ) / ( flx3(m,nmhd_,k,j,i) - flx_llf[0] );
+              wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
+                - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
             } else {
-              wthe_p[0] = 1.0;
+              wthe_p[n] = 1.0;
             }
-            // Estimated Volume Fraction
-            Real uD0 = utest_(m,nmhd_,k,j,i) + bet_pp * ( flx_llf[0]
-              + fmin(1.0, fmax(0.0, wthe_p[0])) * (flx3(m,nmhd_,k,j,i) - flx_llf[0]) );
-            if ( uD0 >= 0.0 && uD0 <= uD ) {
-              uY_p = utest_(m,nmhd_+1,k,j,i) + bet_pp * flx3(m,nmhd_+1,k,j,i);
-              min_DY_ = (eos_min_Y(1) + DBL_EPSILON) * uD0;
-              max_DY_ = (eos_max_Y(1) - DBL_EPSILON) * uD0;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[1] = ( ( utest_(m,nmhd_+1,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[1] ) / ( flx_llf[1] - flx3(m,nmhd_+1,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[1] = ( ( max_DY_ - utest_(m,nmhd_+1,k,j,i) ) * bet_ppi
-                  - flx_llf[1] ) / ( flx3(m,nmhd_+1,k,j,i) - flx_llf[1] );
-              } else {
-                wthe_p[1] = 1.0;
-              }
-              // Estimated Nucleons Fraction
-              Real uDN = utest_(m,nmhd_+1,k,j,i) + bet_pp * ( flx_llf[1]
-                + fmin(1.0, fmax(0.0, wthe_p[1]))
-                  * (flx3(m,nmhd_+1,k,j,i) - flx_llf[1]) );
-              if ( uDN >= 0.0 && uDN <= uD0 ) {
-                uY_p = utest_(m,nmhd_+2,k,j,i) + bet_pp * flx3(m,nmhd_+2,k,j,i);
-                min_DY_ = (eos_min_Y(2) + DBL_EPSILON) * uDN;
-                max_DY_ = (eos_max_Y(2) - DBL_EPSILON) * uDN;
-                if ( uY_p < min_DY_ ) {
-                  wthe_p[2] = ( ( utest_(m,nmhd_+2,k,j,i) - min_DY_ ) * bet_ppi
-                    + flx_llf[2] ) / ( flx_llf[2] - flx3(m,nmhd_+2,k,j,i) );
-                } else if ( uY_p > max_DY_ ) {
-                  wthe_p[2] = ( ( max_DY_ - utest_(m,nmhd_+2,k,j,i) ) * bet_ppi
-                    - flx_llf[2] ) / ( flx3(m,nmhd_+2,k,j,i) - flx_llf[2] );
-                } else {
-                  wthe_p[2] = 1.0;
-                }
-                uY_p = utest_(m,nmhd_+3,k,j,i) + bet_pp * flx3(m,nmhd_+3,k,j,i);
-                const Real ref3 = fmax(uD - uDN, q_snap_ * uD);
-                min_DY_ = (eos_min_Y(3) + DBL_EPSILON) * ref3;
-                max_DY_ = (eos_max_Y(3) - DBL_EPSILON) * ref3;
-                if ( uY_p < min_DY_ ) {
-                  wthe_p[3] = ( ( utest_(m,nmhd_+3,k,j,i) - min_DY_ ) * bet_ppi
-                    + flx_llf[3] ) / ( flx_llf[3] - flx3(m,nmhd_+3,k,j,i) );
-                } else if ( uY_p > max_DY_ ) {
-                  wthe_p[3] = ( ( max_DY_ - utest_(m,nmhd_+3,k,j,i) ) * bet_ppi
-                    - flx_llf[3] ) / ( flx3(m,nmhd_+3,k,j,i) - flx_llf[3] );
-                } else {
-                  wthe_p[3] = 1.0;
-                }
-              } else {
-                for (int n=1; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-              }
-            } else {
-              for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
           }
         } else {
-          if ( uD > 0.0 ) {
-            for (int n=0; n < nscal_; ++n) {
-              Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx3(m,nmhd_+n,k,j,i);
-              Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
-              Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
-              if ( uY_p < min_DY_ ) {
-                wthe_p[n] = ( ( utest_(m,nmhd_+n,k,j,i) - min_DY_ ) * bet_ppi
-                  + flx_llf[n] ) / ( flx_llf[n] - flx3(m,nmhd_+n,k,j,i) );
-              } else if ( uY_p > max_DY_ ) {
-                wthe_p[n] = ( ( max_DY_ - utest_(m,nmhd_+n,k,j,i) ) * bet_ppi
-                  - flx_llf[n] ) / ( flx3(m,nmhd_+n,k,j,i) - flx_llf[n] );
-              } else {
-                wthe_p[n] = 1.0;
-              }
-            }
-          } else {
-            for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
-          }
+          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
         }
-        // Zhang-Shu preserves a bound by convex combination: at theta = 0 the LLF flux is
-        // assumed to hold it, at the solved theta it is exactly attained, so
-        // every smaller
-        // theta holds it too. That argument needs the bound to be affine in ONE
-        // theta. For
-        // the ZLA cascade scalar 3's bound is -1*(uD - uDN) <= uY3 <= 2*(uD - uDN), which
-        // couples scalar 3 to scalar 1; solving it for wthe[3] alone treats uDN as fixed,
-        // yet uDN is then rebuilt with wthe[1] = min(wthe_m[1], wthe_p[1]) -- a DIFFERENT
-        // theta from the wthe_m[1] the cascade assumed. The certificate is void whenever
-        // the two differ. Collapsing to a single theta restores a one-parameter
-        // family and
-        // makes every linear bound among the scalars hold by construction. Costs
-        // diffusion:
-        // each scalar is limited by the most restrictive of the four.
-        //   verify_theta_ removes that price -- see the x1 block above for the argument.
+        // Per-scalar theta, for the reason given in the x1 block above: every species
+        // band references uD alone, so each bound is affine in its own theta.
         Real wraw[MAX_SPECIES] = {0.0};
         for (int n=0; n < nscal_; ++n) {
           wraw[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
         }
-        Real wthe_all = 1.0;
-        for (int n=0; n < nscal_; ++n) { wthe_all = fmin(wthe_all, wraw[n]); }
-
-        bool decided_ = false;
-        if constexpr (zla_cascade_) {
-          if (verify_theta_ && nscal_ == 4) {
-            const Real utm[5] = {utest_(m,IDN,k-1,j,i), utest_(m,nmhd_+0,k-1,j,i),
-                                 utest_(m,nmhd_+1,k-1,j,i), utest_(m,nmhd_+2,k-1,j,i),
-                                 utest_(m,nmhd_+3,k-1,j,i)};
-            const Real utp[5] = {utest_(m,IDN,k,j,i), utest_(m,nmhd_+0,k,j,i),
-                                 utest_(m,nmhd_+1,k,j,i), utest_(m,nmhd_+2,k,j,i),
-                                 utest_(m,nmhd_+3,k,j,i)};
-            const Real fhi[4] = {flx3(m,nmhd_+0,k,j,i), flx3(m,nmhd_+1,k,j,i),
-                                 flx3(m,nmhd_+2,k,j,i), flx3(m,nmhd_+3,k,j,i)};
-            const Real fD = flx3(m,IDN,k,j,i);
-            bool ok =
-              ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, wraw,
-                                   q_snap_, eos_min_Y, eos_max_Y) &&
-              ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, wraw,
-                                   q_snap_, eos_min_Y, eos_max_Y);
-            if (ok) {
-              for (int n=0; n < nscal_; ++n) { wthe[n] = wraw[n]; }
-            } else {
-              Real a = wthe_all;
-              for (int it=0; it < 4 && !ok; ++it) {
-                Real cand[MAX_SPECIES] = {0.0};
-                for (int n=0; n < nscal_; ++n) { cand[n] = a; }
-                ok =
-                  ZlaCascadeAdmissible(utm, fD, fhi, flx_llf, bet_pp, -1.0, cand,
-                                       q_snap_, eos_min_Y, eos_max_Y) &&
-                  ZlaCascadeAdmissible(utp, fD, fhi, flx_llf, bet_pp, +1.0, cand,
-                                       q_snap_, eos_min_Y, eos_max_Y);
-                if (ok) {
-                  for (int n=0; n < nscal_; ++n) { wthe[n] = a; }
-                } else {
-                  a *= 0.5;
-                }
-              }
-              if (!ok) { for (int n=0; n < nscal_; ++n) { wthe[n] = 0.0; } }
-            }
-            decided_ = true;
-          }
-        }
-        if (!decided_) {
-          for (int n=0; n < nscal_; ++n) {
-            wthe[n] = shared_theta_ ? wthe_all : wraw[n];
-          }
+        for (int n=0; n < nscal_; ++n) {
+          wthe[n] = wraw[n];
         }
         for (int n=0; n < nscal_; ++n) {
           flx3(m,nmhd_+n,k,j,i) = flx_llf[n]
@@ -1519,15 +845,4 @@ INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                  Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                  Primitive::ResetFloor)
-INSTANTIATE_FOFC(Primitive::IdealGas, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NormalLogs>,
-                 Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSCompOSE<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NormalLogs>, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSHybrid<Primitive::NQTLogs>, Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                 Primitive::ResetFloorZlaBag)
-INSTANTIATE_FOFC(Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                 Primitive::ResetFloorZlaBag)
 } // namespace dyngr

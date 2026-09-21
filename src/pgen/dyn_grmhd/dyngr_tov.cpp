@@ -218,10 +218,14 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       w0_(m,nvars,k,j,i) = ye;
     }
     if (use_fvol && nscal == 4) {
+      // Flat packing advects (f, Y_N, y_lN, y_lQ) with Y_N = yn/f, so the table's
+      // y_lN / y_lQ go in directly; nested advects the products the cascade expects.
+      // y1 = yn was already clipped to y0 = f above, so Y_N <= 1 holds by
+      // construction. The atmosphere (1, 1, 0, 0) is the same vector either way.
       w0_(m,nvars  ,k,j,i) = y0;
-      w0_(m,nvars+1,k,j,i) = y1;
-      w0_(m,nvars+2,k,j,i) = y2 * y1;
-      w0_(m,nvars+3,k,j,i) = y3 * (1.0-y1);
+      w0_(m,nvars+1,k,j,i) = (y0 > 0.0) ? y1/y0 : 0.0;
+      w0_(m,nvars+2,k,j,i) = y2;
+      w0_(m,nvars+3,k,j,i) = y3;
     }
 
     // Set ADM variables

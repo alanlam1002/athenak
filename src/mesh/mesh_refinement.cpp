@@ -620,6 +620,20 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (pmhd != nullptr) {
       RefineCC(new_to_old, pmhd->u0, pmhd->coarse_u0);
       RefineFC(new_to_old, pmhd->b0, pmhd->coarse_b0);
+      // RefineCC prolongates every component of u0 independently, so the conserved
+      // passive scalars sqrt(gamma)*D*Y_i and sqrt(gamma)*D are limited separately and
+      // the implied Y_i can leave the physical range. Restore the bounds here, while
+      // coarse_u0 still holds the parent values -- the next RestrictU overwrites it.
+      // Implemented in DynGRMHDPS because the admissible set is ErrorPolicy-specific.
+      // The pass itself is gated on <mhd>/amr_scalar_repair (default false) -- the
+      // flag is protected, so the check lives at the top of the implementation
+      // rather than here.
+      auto *pdyngr = pm->pmb_pack->pdyngr;
+      if (pdyngr != nullptr && pmhd->nscalars > 0) {
+        pdyngr->EnforceScalarBoundsAfterRefinement(
+            new_to_old, refine_flag, new_nmb_eachrank[global_variable::my_rank],
+            new_gids_eachrank[global_variable::my_rank]);
+      }
     }
     if (prad != nullptr) {
       RefineCC(new_to_old, prad->i0, prad->coarse_i0);

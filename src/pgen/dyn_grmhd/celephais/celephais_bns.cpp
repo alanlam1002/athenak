@@ -599,9 +599,10 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
       }
 
       // ZLA bag: initialize all four passive scalars from the 1D table's
-      // beta-equilibrium slice, Y = (f, Y_N, Y_N y_l,N, (1-Y_N) y_l,Q), which is
-      // the layout Primitive::EOSZlaBag::ConvertPrimitive() expects.  Vacuum
-      // cells (rho == 0) need no special case: the Get*FromRho() getters fall
+      // beta-equilibrium slice, in the decoupled packing
+      // Primitive::EOSZlaBag::ConvertPrimitive() expects:
+      //   Y = (f, Y_N, y_l,N, y_l,Q),   Y_N = y_n/f
+      // Vacuum cells (rho == 0) need no special case: the Get*FromRho() getters fall
       // back to <mhd>/sN_atmosphere below the bottom of the table.
       if constexpr (use_fvol) {
         if (read_fvol) {
@@ -610,12 +611,15 @@ void SetupBNS(ParameterInput *pin, Mesh* pmy_mesh_) {
           Real y1 = eos.template GetYnFromRho<tov::LocationTag::Host>(rho);
           Real y2 = eos.template GetYlnFromRho<tov::LocationTag::Host>(rho);
           Real y3 = eos.template GetYlqFromRho<tov::LocationTag::Host>(rho);
-          // Y_N <= f is required by ResetFloorZlaBag::SpeciesLimits.
+          // y_n <= f makes slot 1 (Y_N = y_n/f) land in [0, 1] by construction, which
+          // is the band ResetFloor::SpeciesLimits enforces. The table has y_n slightly
+          // ABOVE f near n = 0.45 (0.721325 vs 0.719769), so without the clip slot 1
+          // would start out of band and the limiter would pull it back on step one.
           y1 = fmin(y0, y1);
           host_w0(m, nscal_base + 0, k, j, i) = y0;
-          host_w0(m, nscal_base + 1, k, j, i) = y1;
-          host_w0(m, nscal_base + 2, k, j, i) = y2 * y1;
-          host_w0(m, nscal_base + 3, k, j, i) = y3 * (1.0 - y1);
+          host_w0(m, nscal_base + 1, k, j, i) = (y0 > 0.0) ? y1/y0 : 0.0;
+          host_w0(m, nscal_base + 2, k, j, i) = y2;
+          host_w0(m, nscal_base + 3, k, j, i) = y3;
         }
       }
 
@@ -948,6 +952,11 @@ void KadathBNSHistory(HistoryData *pdata, Mesh *pm) {
 
   auto &w0_ = pm->pmb_pack->pmhd->w0;
   auto &adm = pm->pmb_pack->padm->adm;
+  // The Yl,N column is the raw max of scalar slot 2, which under the decoupled
+  // packing is y_l,N itself. Left raw rather than normalised so the column stays
+  // continuous across a run extended with a newer binary. Note it is NOT comparable
+  // with the same column from a run that predates the packing change, where slot 2
+  // held y_n*y_l,N; the f column (slot 0) is f in both and always comparable.
   // Yl,N (nvars_+2) and f (nvars_+0) are ZlaBag's 4-species layout -- guard against
   // out-of-bounds reads for EOS policies with fewer scalars (e.g. dyn_eos=hybrid with
   // nscalars=0).

@@ -29,7 +29,6 @@
 #include "eos/primitive-solver/eos_hybrid.hpp"
 #include "eos/primitive-solver/eos_zla_bag.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
-#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 #include "eos/primitive-solver/logs.hpp"
 
 // AthenaK headers
@@ -130,9 +129,8 @@ class PrimitiveSolverHydro {
       ps.GetEOSMutable().SetThermalGamma(pin->GetOrAddReal(block, "gamma_thermal",
                                          5.0/3.0));
       ps.GetEOSMutable().SetNSpecies(pin->GetOrAddInteger(block, "nscalars", 4));
-      // Same <mhd>/yn_snap the EOS policy reads. Duplicated onto the error policy
-      // because ResetFloorZlaBag cannot see EOSPolicy members; kept in one parfile key
-      // so the two halves of the guard can never disagree.
+      // Same <mhd>/yn_snap the EOS policy reads, mirrored onto the error policy so
+      // the two halves of the guard cannot disagree; kept in one parfile key.
       ps.GetEOSMutable().SetQuarkSnapTol(pin->GetOrAddReal(block, "yn_snap", 1.0e-8));
       std::string units = pin->GetOrAddString(block, "units", "geometric_solar");
       if (!units.compare("geometric_solar")) {

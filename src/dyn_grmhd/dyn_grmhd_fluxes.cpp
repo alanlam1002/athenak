@@ -30,7 +30,6 @@
 // include PrimitiveSolver stuff
 #include "eos/primitive-solver/idealgas.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
-#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 
 namespace dyngr {
 
@@ -284,19 +283,5 @@ INSTANTIATE_CALC_FLUXES(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                         Primitive::ResetFloor)
 INSTANTIATE_CALC_FLUXES(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                         Primitive::ResetFloor)
-INSTANTIATE_CALC_FLUXES(Primitive::IdealGas, Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSCompOSE<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSCompOSE<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSHybrid<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSHybrid<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag)
-INSTANTIATE_CALC_FLUXES(Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag)
 
 } // namespace dyngr

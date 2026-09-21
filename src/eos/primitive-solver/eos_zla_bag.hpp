@@ -536,14 +536,17 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //  atmosphere nY[0] shifts by ~1e-5 and it converges immediately; near the transition
   //  the shift reaches ~12% and the iteration earns its keep.
   KOKKOS_INLINE_FUNCTION
-  //! \param[out] Y2e,Y3e  the nucleon/quark lepton contents AFTER any phase
-  //!   transfer this routine performs. They differ from Y[2],Y[3] only when the
-  //!   pressure floor actually moves f; the sum Y2e + Y3e is preserved exactly.
-  void SnapPhaseFraction(Real n, const Real *Y, Real *f, Real *yn,
+  //! \param[in]  Y2in,Y3in  the nucleon/quark lepton contents on entry, passed BY
+  //!   VALUE rather than as a pointer into the caller's array -- see ConvertPrimitive
+  //!   for why this function must stay pointer-free on its inputs.
+  //! \param[out] Y2e,Y3e  the same contents AFTER any phase transfer this routine
+  //!   performs. They differ from Y2in,Y3in only when the pressure floor actually
+  //!   moves f; the sum Y2e + Y3e is preserved exactly.
+  void SnapPhaseFraction(Real n, Real Y2in, Real Y3in, Real *f, Real *yn,
                          Real *Y2e, Real *Y3e) const {
-    const Real yqG_tot = Y[2] + Y[3];   // total leptons per baryon: invariant
-    *Y2e = Y[2];
-    *Y3e = Y[3];
+    const Real yqG_tot = Y2in + Y3in;   // total leptons per baryon: invariant
+    *Y2e = Y2in;
+    *Y3e = Y3in;
     // yn = Y_N is a fraction of the baryons and must lie in [0,1]. SpeciesLimits
     // enforces that before C2P, but the flux path evaluates the EOS on a RECONSTRUCTED
     // w0 that has never been through it, and WENOZ overshoots at extrema. Out of range
@@ -625,9 +628,8 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     // clamps Y[1] first) but a RECONSTRUCTED w0 state in the flux path can, since
     // WENOZ overshoots at extrema. A negative nQ is not caught downstream: measured
     // (unit test L) it returns P = +1.03e+23 instead of ~-1e-07 -- not NaN, so no
-    // tripwire fires, but instantly fatal. yqQ just below already has its own guard,
-    // and ResetFloorZlaBag guards the same quantity as fmax(1 - Y[1], q_snap); this
-    // makes the third site agree. nQ = 0 gives P_Q -> -Bag_B, the correct limit.
+    // tripwire fires, but instantly fatal. yqQ just below already has its own guard;
+    // this makes the two sites agree. nQ = 0 gives P_Q -> -Bag_B, the correct limit.
     const Real nQ = Kokkos::fmax(omyn0, 0.0) * n / omf;
     const Real yqQ = (omyn0 > yn_snap) ? (*Y3e)/omyn0 : 0.0;
     const Real P_Q = ColdPressureQuarks(nQ, yqQ);
@@ -679,17 +681,55 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     }
   }
 
-  /// Convert Primitive Variables to the mass fraction
-  /// Y: (f n, f n_N, f Y_qN n_N, (1-f) Y_qQ n_Q)
-  /// (n_N, n_Q, Y_qN, Y_qQ, f, Y_qG)
+  //! \brief Convert the advected scalars to the phase quantities the EOS uses.
+  //
+  //  The four advected scalars are the DECOUPLED set
+  //
+  //    Y = ( f,  Y_N,  y_lN,  y_lQ ),      Y_N = yn/f
+  //
+  //  with yn = f*n_N/n the nucleon-phase baryon fraction. Under a frozen composition
+  //  every comoving invariant q satisfies d_t(D q) + div(D q v) = 0, so any such set is
+  //  exactly conserved by the advection and the packing is free to choose. This one is
+  //  chosen because each scalar's limiter band then references uD alone rather than the
+  //  scalar above it, and because recovering the phase quantities is pure
+  //  multiplication. Measured against the nested alternative
+  //  ( f, yn, yn*y_lN, (1-yn)*y_lQ ) on the same grid: 3.3-4.7x smaller departure from
+  //  the equilibrium composition in every component at t = 300, and the nested packing's
+  //  error does not converge away -- all three resolutions homogenise the hadronic
+  //  mantle onto the same f ~ 0.925 attractor.
+  //
+  //  This is the single place in the file that reads the advected packing;
+  //  SnapPhaseFraction, which it calls, is always handed nested variables, so the rest
+  //  of the EOS never sees the choice.
+  //
+  //  Output: nY = (n_N, n_Q, Y_qN, Y_qQ, f, Y_qG)
   KOKKOS_INLINE_FUNCTION void ConvertPrimitive(Real n, const Real *Y, Real nY[6]) const{
+    // Recover the nested phase quantities. Pure multiplication, so nothing here can
+    // amplify noise the way the inverse map (y_lQ = Y[3]/(1-yn)) does -- in the mantle
+    // 1-yn reaches ~1e-3 and below, so that inverse is truncation error multiplied by
+    // its reciprocal. Avoiding it is the main reason this packing was adopted.
+    //
+    // KEEP THIS POINTER-FREE AND ARRAY-FREE, AND KEEP IT BRANCH-FREE. Two constructs
+    // measured to corrupt the fluid on PVC while remaining bit-identical on CPU:
+    //   * a local `Real Ynest[4]` with a `const Real *Yp` aliased onto it or onto the
+    //     caller's Y -- 2.4% of the rest mass lost in 3 M, 181,710 NO_SOLUTION;
+    //   * selecting the packing through a runtime `bool` member instead of at compile
+    //     time -- 18,896 NO_SOLUTION and 1.4e-4 relative mass loss, with sizeof
+    //     unchanged at 656 bytes, so it is the live branch and not object growth.
+    // Both were verified bit-identical to the unpatched tree on CPU across all 17
+    // history columns over a 4 M ZLA TOV, with and without AMR. This function inlines
+    // into the innermost C2P root solve, compiled with
+    // -ze-intel-enable-auto-large-GRF-mode. Scalars and straight-line code only.
+    const Real yn_in = Y[0]*Y[1];
+    const Real Y2in  = yn_in*Y[2];
+    const Real Y3in  = (1.0 - yn_in)*Y[3];
     // Work on snapped copies so that an unresolvably small phase fraction cannot
     // switch on the bag term. See SnapPhaseFraction() for why this matters.
     Real f = Y[0];
-    Real yn = Y[1];
-    Real Y2e = Y[2];
-    Real Y3e = Y[3];
-    SnapPhaseFraction(n, Y, &f, &yn, &Y2e, &Y3e);
+    Real yn = yn_in;
+    Real Y2e = Y2in;
+    Real Y3e = Y3in;
+    SnapPhaseFraction(n, Y2in, Y3in, &f, &yn, &Y2e, &Y3e);
 
     nY[4] = f;                                    // Volume fraction
     if ( f > 0.0 ) {
@@ -1523,6 +1563,9 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //! bound on 1.09e9 cell-visits. Below this tolerance the quark phase is treated as
   //! absent (y_lQ = 0) instead of dividing by the noise floor. The mirror guard on yn
   //! itself covers the pure-quark (yn -> 0) side, which has not been observed to fail.
+  //! Since y_lQ is advected directly (see ConvertPrimitive) the ratio, and therefore the
+  //! whole hazard, no longer arises: nY[3] is reached by a multiply and then a divide by
+  //! the same (1-yn), so this tolerance only decides whether an absent phase is zeroed.
   Real yn_snap;
   //! Enable the pressure floor on the phase fraction (<mhd>/zla_pfloor). Default
   //! false, i.e. bit-identical to the behaviour without it.
@@ -1570,6 +1613,37 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   Real m_idiff_mu_e;
   Real m_idiff_s_d;
 };
+
+//----------------------------------------------------------------------------------------
+// SIZE GUARD -- do not remove, and do not "fix" a failure here by updating the number.
+//
+// This EOS is copied BY VALUE into every device functor: PrimitiveSolver holds
+// EOS<EOSPolicy,ErrorPolicy> by value and the C2P kernels capture it through a [=]
+// lambda. Growing it, or introducing a runtime branch in the code it inlines into,
+// corrupts the fluid on Intel PVC while remaining bit-identical on CPU. Measured, not
+// suspected, in two separate incidents:
+//
+//   * adding one bool to the paired error policy took it 88 -> 96 bytes and
+//     EOS<ZlaBag,...> 744 -> 752. On 16 nodes: 2.4% of the rest mass gone in 3 M with
+//     181,710 NO_SOLUTION, on both the t=0 and the restart path, from an initial state
+//     matching the reference to 1e-16. Removing the member restored bit-identical
+//     agreement with zero NO_SOLUTION.
+//   * selecting the advected-scalar packing through a runtime bool member of THIS class
+//     left sizeof unchanged at 656 and still cost 18,896 NO_SOLUTION and 1.4e-4 relative
+//     mass loss. Only folding it to a compile-time constant restored bit-identity.
+//
+// A CPU build of the identical source was bit-identical across all 17 history columns
+// throughout both incidents, with and without AMR, so CPU testing cannot catch this. The
+// same signature killed an earlier attempt that added two Reals to SolverResult in this
+// same kernel (~8% mass loss, ~190k NO_SOLUTION); that investigation ended without a
+// cause and is now explained.
+//
+// If you need per-run state here, put it somewhere that does not enlarge the object and
+// does not branch in the kernel: a static constexpr, or a template parameter.
+static_assert(sizeof(EOSZlaBag<NormalLogs>) == 656,
+              "EOSZlaBag must not change size: it is captured by value into the C2P "
+              "SYCL kernel and growing it silently corrupts the fluid on PVC. See the "
+              "comment above this assert before changing anything here.");
 
 }; // namespace Primitive
 

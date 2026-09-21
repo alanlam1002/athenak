@@ -58,6 +58,25 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
   // default as f_snap, which guards the identical hazard for the volume fraction.
   yn_snap = pin->GetOrAddReal(block, "yn_snap", 1.0e-8);
 
+  // MIGRATION GUARD. The advected scalars are the decoupled set
+  // (f, Y_N, y_lN, y_lQ); the nested products (f, yn, yn*y_lN, (1-yn)*y_lQ) this EOS
+  // once supported are gone, along with the ResetFloorZlaBag cascade limiter that
+  // enforced their coupled bands. A parfile written for the nested packing carries no
+  // zla_flat_scalars key at all, so silently defaulting would have the pgen write one
+  // packing while the EOS reads the other -- a wrong star that still looks physical.
+  // Require the key, and require it true. Remove this guard once no nested parfiles
+  // remain in circulation.
+  if (!pin->GetOrAddBoolean(block, "zla_flat_scalars", false)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "EOSZlaBag advects the decoupled scalar set "
+              << "(f, Y_N, y_lN, y_lQ), so <" << block << ">/zla_flat_scalars must be "
+              << "set to true." << std::endl
+              << "A parfile without it was written for the nested packing "
+              << "(f, yn, yn*y_lN, (1-yn)*y_lQ), which this build no longer supports; "
+              << "its initial data would be mis-ordered." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
   // Pressure floor on the phase fraction. Quark matter is unbound below the transition
   // density -- ColdPressureQuarks tends to -Bag_B -- so a frozen composition holding a
   // quark phase there gives a negative total pressure. Measured on 400 real failing
@@ -263,11 +282,14 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
         Real yn = host_table(ECYN, in);
         Real yln = host_table(ECYLN, in);
         Real ylq = host_table(ECYLQ, in);
+        // Pack exactly as the pgen does, so the self-test also checks that
+        // ConvertPrimitive's recovery is the inverse of the packing written by the
+        // initial data.
         Real y[4] = {0.0};
         y[0] = f;
-        y[1] = yn;
-        y[2] = yn * yln;
-        y[3] = (1.0-yn) * ylq;
+        y[1] = (f > 0.0) ? yn/f : 0.0;
+        y[2] = yln;
+        y[3] = ylq;
         Real nY[6] = {0.0};
         Real nY_Q[5] = {0.0};
         ConvertPrimitive(n, y, nY);
@@ -407,7 +429,11 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
           Real yn  = eval_at_n_host(ECYN,   n_test);
           Real yln = eval_at_n_host(ECYLN,  n_test);
           Real ylq = eval_at_n_host(ECYLQ,  n_test);
-          Real y[4] = {f, yn, yn*yln, (1.0-yn)*ylq};
+          Real y[4];
+          y[0] = f;
+          y[1] = (f > 0.0) ? yn/f : 0.0;
+          y[2] = yln;
+          y[3] = ylq;
 
           Real p_tab = exp2_(eval_at_n_host(ECLOGP, n_test));
           Real e_tab = exp2_(eval_at_n_host(ECLOGE, n_test));

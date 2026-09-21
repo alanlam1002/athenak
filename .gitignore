@@ -24,3 +24,8 @@ Lorene
 
 # python cache
 __pycache__/
+# Binaries copied aside from a build dir, and source backups left by hand.
+# build*/ above already covers the build trees themselves.
+athena_*
+*.pre-*
+*.cur

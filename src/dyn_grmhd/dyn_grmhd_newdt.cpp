@@ -237,19 +237,5 @@ INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                           Primitive::ResetFloor)
 INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                           Primitive::ResetFloor)
-INSTANTIATE_NEW_TIME_STEP(Primitive::IdealGas, Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSCompOSE<Primitive::NormalLogs>,
-                          Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSCompOSE<Primitive::NQTLogs>,
-                          Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NormalLogs>,
-                          Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSHybrid<Primitive::NQTLogs>,
-                          Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                          Primitive::ResetFloorZlaBag)
-INSTANTIATE_NEW_TIME_STEP(Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                          Primitive::ResetFloorZlaBag)
 
 }  // namespace dyngr

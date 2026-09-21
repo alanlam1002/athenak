@@ -373,8 +373,8 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
   solver_result.species_adjusted = Y_adjusted;
   if (n_species > 3 && Y[3] != y3_in) { solver_result.y3_chan |= 2; }
   if (n_species > 3 && Y[3] != y3_in) {
-    // Must match ResetFloorZlaBag::SpeciesLimits exactly, floor included. Reporting
-    // the UNFLOORED 1 - Y[1] here made a correct clamp to -q_snap look out-of-band.
+    // Must match the band SpeciesLimits applies, floor included. Reporting the
+    // UNFLOORED 1 - Y[1] here made a correct clamp to -q_snap look out-of-band.
     const Real omYN = fmax(1.0 - Y[1], eos.GetQuarkSnapTol());
     solver_result.y3_clamped = true;
     solver_result.y3_before  = y3_in;
@@ -402,7 +402,7 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
   // does remove a non-conservative sink, but it also leaves the CONSERVED Y[3] unbounded
   // while only the primitive copy is clamped, so prim and cons diverge without limit.
   // The sink is instead closed at its source, by flooring the reference that defines
-  // Y[3]'s admissible band (ResetFloorZlaBag::SpeciesLimits): the band is then set by a
+  // Y[3]'s admissible band in SpeciesLimits: the band is then set by a
   // resolved quantity rather than by round-off, so the clamp stops firing on noise --
   // which is what was draining int(D*Y_3) -- and every clamp that does fire is a genuine
   // violation whose write-back is both correct and rare.

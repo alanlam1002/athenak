@@ -61,7 +61,9 @@ eos         = ideal              # placeholder (unused, required by parser)
 gamma       = 2.0                # placeholder (unused, required by parser)
 
 dyn_eos     = zla_bag
-dyn_error   = reset_floor        # silently upgraded to reset_floor_zla_bag
+dyn_error   = reset_floor
+zla_flat_scalars = true          # required: the advected set is
+                                 # (f, Y_N, y_lN, y_lQ), see EOSZlaBag
 reconstruct = ppm4
 rsolver     = hlle
 nscalars    = 4

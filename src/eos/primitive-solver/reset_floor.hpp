@@ -159,12 +159,11 @@ class ResetFloor : public ErrorPolicyInterface {
     adjust_conserved = adjust;
   }
 
-  /// Accepted for interface parity with ResetFloorZlaBag, which is the policy that
-  /// actually consumes q_snap. This box policy clamps each species independently
-  /// against absolute bounds, so it has no (1 - Y_N) denominator to protect. The setter
-  /// exists because EOS<EOSZlaBag, ResetFloor> is still instantiated even though
-  /// BuildDynGRMHD() remaps dyn_error=reset_floor to reset_floor_zla_bag whenever the
-  /// EOS is zla_bag (dyn_grmhd.cpp:112).
+  /// Accepted for interface parity: q_snap lives on ErrorPolicyInterface, but this
+  /// box policy clamps each species independently against absolute bounds and so has
+  /// no (1 - Y_N) denominator to protect. It is left at 0, which is inert everywhere
+  /// it is read. The setter exists so EOS<EOSZlaBag, ResetFloor> can be configured
+  /// through the same path as every other policy.
   KOKKOS_INLINE_FUNCTION void SetQuarkSnapTol(Real tol) {
     q_snap = tol;
   }

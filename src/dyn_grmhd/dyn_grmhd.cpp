@@ -36,7 +36,6 @@
 #include "eos/primitive-solver/piecewise_polytrope.hpp"
 #include "eos/primitive-solver/eos_zla_bag.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
-#include "eos/primitive-solver/reset_floor_zla_bag.hpp"
 
 namespace dyngr {
 
@@ -110,21 +109,18 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
     std::exit(EXIT_FAILURE);
   }
   if (error_string.compare("reset_floor") == 0) {
-    if (eos_string.compare("zla_bag") == 0) {
-      error_policy = DynGRMHD_Error::reset_floor_zla_bag;
-    } else {
-      error_policy = DynGRMHD_Error::reset_floor;
-    }
+    error_policy = DynGRMHD_Error::reset_floor;
   } else if (error_string.compare("reset_floor_zla_bag") == 0) {
-    if (eos_string.compare("zla_bag") != 0) {
-      std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
-                << std::endl << "<mhd> dyn_error = '" << error_string
-                << "' ERROR_POLICY reset_floor_zla_bag must be used with "
-                   "zla_bag EOS" << std::endl;
-      std::exit(EXIT_FAILURE);
-    } else {
-      error_policy = DynGRMHD_Error::reset_floor_zla_bag;
-    }
+    // Retired along with the nested ZLA scalar packing. That policy's SpeciesLimits
+    // enforced the cascade bands (Y1 in [0,1]*Y0, Y2 in [0,1]*Y1, Y3 in [-1,2]*(1-Y1))
+    // required by the nested products. The decoupled set the zla_bag EOS now advects
+    // has no nesting -- all four bands reference the total baryon density, which is
+    // what the generic ResetFloor already does.
+    std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
+              << std::endl << "<mhd> dyn_error = reset_floor_zla_bag has been removed "
+              << "together with the nested ZLA scalar packing it enforced."
+              << std::endl << "Use dyn_error = reset_floor." << std::endl;
+    std::exit(EXIT_FAILURE);
   } else {
     std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
               << std::endl << "<mhd> dyn_error = '" << error_string
@@ -137,9 +133,6 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
   switch (error_policy) {
     case DynGRMHD_Error::reset_floor:
       dyn_gr = SelectDynGRMHDEOS<Primitive::ResetFloor>(ppack, pin, eos_policy);
-      break;
-    case DynGRMHD_Error::reset_floor_zla_bag:
-      dyn_gr = SelectDynGRMHDEOS<Primitive::ResetFloorZlaBag>(ppack, pin, eos_policy);
       break;
   }
 
@@ -178,8 +171,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   enforce_maximum = pin->GetOrAddBoolean("mhd", "enforce_maximum", true);
   dmp_M = pin->GetOrAddReal("mhd", "dmp_M", 1.2);
   scalar_pplimiter = pin->GetOrAddBoolean("mhd", "scalar_pplimiter", true);
-  scalar_shared_theta = pin->GetOrAddBoolean("mhd", "scalar_shared_theta", false);
-  scalar_theta_verify = pin->GetOrAddBoolean("mhd", "scalar_theta_verify", false);
+  amr_scalar_repair = pin->GetOrAddBoolean("mhd", "amr_scalar_repair", false);
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
@@ -724,6 +716,240 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
   });
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::EnforceScalarBoundsAfterRefinement()
+//! \brief Restore per-species bounds on the conserved scalars in freshly prolongated
+//! cells, conservatively.
+//
+//  For each coarse parent cell of a newly refined MeshBlock, the implied primitive
+//  Y_i = u0(nmhd+i)/u0(IDN) is tested in every child. The test is
+//  EOS::ApplySpeciesLimits() applied to a scratch copy: it returns true iff the state
+//  had to be adjusted, and it dispatches to the ErrorPolicy, so this automatically
+//  gets that policy's admissible set with no duplicated bounds logic.
+//
+//  If any child is out of bounds, every child of that parent is reset to the *coarse*
+//  primitive Y vector: u0(nmhd+i, child) = u0(IDN, child) * Y_i_coarse. That conserves
+//  each scalar exactly, because ProlongCC writes the eight sign combinations
+//  ca +/- dvar1 +/- dvar2 +/- dvar3 so the children of any component sum to 8*parent:
+//    sum_c (sqrt(g) D Y_i)_c = Y_i_coarse * sum_c (sqrt(g) D)_c
+//                            = Y_i_coarse * 8 * (sqrt(g) D)_parent.
+//  Copying the whole vector (rather than only the offending component) also means the
+//  children inherit a composition that is self-consistent by construction, since the
+//  coarse state had already passed SpeciesLimits.
+//
+//  Must be called while coarse_u0 still holds the parent values, i.e. immediately after
+//  RefineCC inside RedistAndRefineMeshBlocks. The next RestrictU overwrites coarse_u0.
+
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::EnforceScalarBoundsAfterRefinement(
+     DualArray1D<int> &new_to_old, DualArray1D<int> &refine_flag,
+     int new_nmb, int ngids) {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nhyd = pmhd->nmhd;
+  const int nscal = pmhd->nscalars;
+  // Both of these are identical on every rank, so returning here cannot desynchronise
+  // the collective below. new_nmb is rank-local, so it must NOT short-circuit the
+  // reduce.
+  //
+  // amr_scalar_repair (<mhd>/amr_scalar_repair, default false) is a kill switch: this
+  // pass is under investigation as the cause of a conserved-scalar corruption and
+  // mass-loss regression, so it has to be opted into explicitly.
+  if (nscal <= 0 || !amr_scalar_repair) {
+    return;
+  }
+
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int cis = indcs.cis, cie = indcs.cie;
+  const int cjs = indcs.cjs, cje = indcs.cje;
+  const int cks = indcs.cks, cke = indcs.cke;
+  const bool multi_d = pmy_pack->pmesh->multi_d;
+  const bool three_d = pmy_pack->pmesh->three_d;
+
+  // The child indexing below is fi = 2*i - cis, which is only correct when the coarse
+  // and fine index origins coincide. RefineCC documents and relies on the same
+  // precondition, so this cannot silently drift apart from it.
+  if (indcs.cis != indcs.is || indcs.cjs != indcs.js || indcs.cks != indcs.ks) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl
+              << "EnforceScalarBoundsAfterRefinement assumes cis==is, cjs==js, "
+              << "cks==ks (the same precondition RefineCC documents); the child "
+              << "index fi = 2*i - cis is wrong otherwise." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
+  auto u0 = pmhd->u0;
+  auto cu0 = pmhd->coarse_u0;
+  auto n2o = new_to_old;
+  auto rflag = refine_flag;
+  auto eos_ = eos.ps.GetEOS();
+  const int ngids_ = ngids;
+
+  // Number of children per coarse cell in this dimensionality.
+  const int nchild = three_d ? 8 : (multi_d ? 4 : 2);
+
+  // Counters. A single "repaired" number was not enough to debug this pass: a run in
+  // which the conserved scalars were demonstrably corrupted still reported zero
+  // repairs, which is self-contradictory and means the write path and the counter
+  // disagree. Each stage now has its own counter, so the log can say which of them is
+  // lying.
+  //   0 visited      coarse cells that passed the refine_flag test
+  //   1 skip_Dc      skipped because the coarse density was not positive
+  //   2 bad_child    a child density was not positive (counts children, not parents)
+  //   3 limit_hit    ApplySpeciesLimits adjusted a child (counts children)
+  //   4 repaired     coarse cells whose children were reset
+  //   5..8          per-species count of which Y component the policy adjusted
+  const int NCNT = 5 + MAX_SPECIES;
+  Kokkos::View<int*, DevMemSpace> cnt("dyngr_amr_scalar_cnt", NCNT);
+  Kokkos::deep_copy(cnt, 0);
+  // Largest absolute adjustment per species, and the width of the admissible window it
+  // was measured against. For ZLA the Y[3] window is [Ymin3, Ymax3]*(1 - Y[1]), which
+  // collapses to zero width as f -> 1, i.e. across the whole atmosphere -- so a
+  // "violation" there can be arbitrarily small in absolute terms and still be a 100 %
+  // relative change. Both numbers are needed to tell those cases apart.
+  Kokkos::View<Real*, DevMemSpace> amax("dyngr_amr_scalar_amax", MAX_SPECIES);
+  Kokkos::deep_copy(amax, 0.0);
+  // Largest relative change, per species, in the octet sum sum_c sqrt(g)*D*Y_i caused
+  // by the repair. The scheme is supposed to conserve this exactly, because ProlongCC
+  // writes the eight sign combinations ca +/- dvar1 +/- dvar2 +/- dvar3 so that
+  // sum_c (sqrt(g)D)_c = 8*(sqrt(g)D)_parent, giving
+  //   sum_c (sqrt(g)DY_i)_c = Y_i_coarse * 8 * (sqrt(g)D)_parent.
+  // That is an argument, not a measurement -- so measure it. Anything above round-off
+  // means the pass is losing or creating conserved scalar, which is a different and
+  // worse problem than it merely being too blunt.
+  Kokkos::View<Real*, DevMemSpace> cerr("dyngr_amr_scalar_cerr", MAX_SPECIES);
+  Kokkos::deep_copy(cerr, 0.0);
+
+  // A rank can legitimately own no MeshBlocks after load balancing; new_nmb = 0 makes
+  // the range below empty, which Kokkos handles, so no guard is needed here. That also
+  // keeps the MPI reduction that follows unconditional -- guarding it on the rank-local
+  // new_nmb would deadlock.
+  Kokkos::parallel_for("dyngr_amr_scalar_bounds",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExeSpace(), {0, cks, cjs, cis},
+                                             {new_nmb, cke+1, cje+1, cie+1}),
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    if (rflag.d_view(n2o.d_view(m + ngids_)) <= 0) {
+      return;
+    }
+    Kokkos::atomic_add(&cnt(0), 1);
+    const Real Dc = cu0(m, IDN, k, j, i);
+    if (!(Dc > 0.0)) {
+      Kokkos::atomic_add(&cnt(1), 1);
+      return;
+    }
+
+    // Fine index of the first child; children are (fk|fk+1, fj|fj+1, fi|fi+1).
+    const int fi = 2*i - cis;
+    const int fj = 2*j - cjs;
+    const int fk = 2*k - cks;
+
+    Real Yc[MAX_SPECIES] = {0.0};
+    for (int n = 0; n < nscal; ++n) {
+      Yc[n] = cu0(m, nhyd + n, k, j, i)/Dc;
+    }
+
+    // Scan every child rather than breaking on the first violation, so the counters
+    // and the worst-violation reduction see the whole cell.
+    bool invalid = false;
+    for (int c = 0; c < nchild; ++c) {
+      const int ci = fi + (c & 1);
+      const int cj = fj + ((c >> 1) & 1);
+      const int ck = fk + ((c >> 2) & 1);
+      const Real Df = u0(m, IDN, ck, cj, ci);
+      if (!(Df > 0.0)) {
+        Kokkos::atomic_add(&cnt(2), 1);
+        invalid = true;
+        continue;
+      }
+      Real Yt[MAX_SPECIES] = {0.0};
+      Real Y0[MAX_SPECIES] = {0.0};
+      for (int n = 0; n < nscal; ++n) {
+        Yt[n] = u0(m, nhyd + n, ck, cj, ci)/Df;
+        Y0[n] = Yt[n];
+      }
+      // Oracle: returns true iff the ErrorPolicy had to adjust this composition.
+      if (eos_.ApplySpeciesLimits(Yt)) {
+        Kokkos::atomic_add(&cnt(3), 1);
+        invalid = true;
+        // Size of the violation, relative where that is meaningful. This is the
+        // number that decides whether the hits are genuine excursions or one-ulp
+        // noise against the float equality in SpeciesLimits.
+        for (int n = 0; n < nscal; ++n) {
+          const Real d = fabs(Yt[n] - Y0[n]);
+          if (d > 0.0) {
+            Kokkos::atomic_add(&cnt(5 + n), 1);
+            Kokkos::atomic_max(&amax(n), d);
+          }
+        }
+      }
+    }
+
+    if (invalid) {
+      Real pre[MAX_SPECIES] = {0.0};
+      Real post[MAX_SPECIES] = {0.0};
+      for (int c = 0; c < nchild; ++c) {
+        const int ci = fi + (c & 1);
+        const int cj = fj + ((c >> 1) & 1);
+        const int ck = fk + ((c >> 2) & 1);
+        const Real Df = u0(m, IDN, ck, cj, ci);
+        for (int n = 0; n < nscal; ++n) {
+          pre[n] += u0(m, nhyd + n, ck, cj, ci);
+          u0(m, nhyd + n, ck, cj, ci) = Df*Yc[n];
+          post[n] += u0(m, nhyd + n, ck, cj, ci);
+        }
+      }
+      for (int n = 0; n < nscal; ++n) {
+        const Real den = fmax(fabs(pre[n]), fabs(post[n]));
+        if (den > 0.0) {
+          Kokkos::atomic_max(&cerr(n), fabs(post[n] - pre[n])/den);
+        }
+      }
+      Kokkos::atomic_add(&cnt(4), 1);
+    }
+  });
+
+  // deep_copy fences, so the atomics are all visible by the time these are read. The
+  // previous version used Kokkos::Sum<int> into a host scalar and reported zero
+  // repairs in a production run whose conserved scalars were demonstrably corrupted --
+  // do not go back to reading a reducer result without an explicit copy.
+  auto cnt_h = Kokkos::create_mirror_view(cnt);
+  auto amax_h = Kokkos::create_mirror_view(amax);
+  auto cerr_h = Kokkos::create_mirror_view(cerr);
+  Kokkos::deep_copy(cnt_h, cnt);
+  Kokkos::deep_copy(amax_h, amax);
+  Kokkos::deep_copy(cerr_h, cerr);
+  int c[5 + MAX_SPECIES];
+  Real am[MAX_SPECIES], ce[MAX_SPECIES];
+  for (int n = 0; n < NCNT; ++n) { c[n] = cnt_h(n); }
+  for (int n = 0; n < MAX_SPECIES; ++n) { am[n] = amax_h(n); ce[n] = cerr_h(n); }
+
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, c, NCNT, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, am, MAX_SPECIES, MPI_ATHENA_REAL, MPI_MAX,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, ce, MAX_SPECIES, MPI_ATHENA_REAL, MPI_MAX,
+                MPI_COMM_WORLD);
+#endif
+
+  if (global_variable::my_rank == 0) {
+    if (c[1] > 0 || c[2] > 0 || c[3] > 0 || c[4] > 0) {
+      std::cout << "### AMR scalar-bound repair: visited " << c[0]
+                << "  skip_Dc " << c[1] << "  bad_child " << c[2]
+                << "  limit_hit " << c[3] << "  repaired " << c[4] << std::endl
+                << "###   per-species hits/max|dY|:";
+      for (int n = 0; n < nscal; ++n) {
+        std::cout << "  Y" << n << " " << c[5 + n] << "/" << am[n];
+      }
+      std::cout << std::endl << "###   per-species max rel. change in the conserved "
+                << "octet sum:";
+      for (int n = 0; n < nscal; ++n) {
+        std::cout << "  Y" << n << " " << ce[n];
+      }
+      std::cout << std::endl;
+    }
+  }
+
+  return;
+}
 
 // Instantiated templates
 template class DynGRMHDPS<Primitive::IdealGas, Primitive::ResetFloor>;
@@ -737,9 +963,9 @@ template class DynGRMHDPS<Primitive::EOSHybrid<Primitive::NormalLogs>,
 template class DynGRMHDPS<Primitive::EOSHybrid<Primitive::NQTLogs>,
                           Primitive::ResetFloor>;
 template class DynGRMHDPS<Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                          Primitive::ResetFloorZlaBag>;
+                          Primitive::ResetFloor>;
 template class DynGRMHDPS<Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                          Primitive::ResetFloorZlaBag>;
+                          Primitive::ResetFloor>;
 
 // Macro for defining CoordTerms templates
 #define INSTANTIATE_COORD_TERMS(EOSPolicy, ErrorPolicy) \
@@ -768,20 +994,6 @@ INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
                         Primitive::ResetFloor);
 INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                         Primitive::ResetFloor);
-INSTANTIATE_COORD_TERMS(Primitive::IdealGas, Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::PiecewisePolytrope, Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSCompOSE<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSHybrid<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NormalLogs>,
-                        Primitive::ResetFloorZlaBag);
-INSTANTIATE_COORD_TERMS(Primitive::EOSZlaBag<Primitive::NQTLogs>,
-                        Primitive::ResetFloorZlaBag);
 
 #undef INSTANTIATE_COORD_TERMS
 

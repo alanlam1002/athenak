@@ -18,8 +18,7 @@ enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr};   // Riemann solvers for dy
 // EOS policies for dynamical GR
 enum class DynGRMHD_EOS {eos_ideal, eos_piecewise_poly,
                          eos_compose, eos_hybrid, eos_zla_bag};
-// Error policies for dynamical GR
-enum class DynGRMHD_Error {reset_floor, reset_floor_zla_bag};
+enum class DynGRMHD_Error {reset_floor};        // Error policies for dynamical GR
 
 //----------------------------------------------------------------------------------------
 //! \struct DynGRMHDTaskIDs
@@ -107,6 +106,26 @@ class DynGRMHD {
   // the old, maximally conservative max_dv=1 behavior.
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage) = 0;
 
+  //! \brief Restore per-species bounds on the conserved passive scalars after AMR
+  //! prolongation.
+  //
+  //  MeshRefinement::RefineCC reconstructs every component of u0 independently, each
+  //  with its own min-mod slope, so sqrt(gamma)*D (slot IDN) and sqrt(gamma)*D*Y_i
+  //  (slot nmhd+i) are prolongated separately. The implied primitive
+  //  Y_i = u0(nmhd+i)/u0(IDN) is then a ratio of two separately limited
+  //  reconstructions: min-mod bounds each numerator and denominator against its own
+  //  coarse neighbours, but places no bound on the quotient, and where D is small the
+  //  overshoot is unbounded. Prolongation is the only writer of the scalars with no
+  //  bound enforcement -- reconstruction (the Riemann solvers), the flux update
+  //  (scalar_pplimiter) and C2P all clamp Y already.
+  //
+  //  This is declared on the non-templated base but implemented in DynGRMHDPS, because
+  //  the admissible set comes from the ErrorPolicy via EOS::ApplySpeciesLimits, which
+  //  only the templated class can reach from inside a device kernel.
+  virtual void EnforceScalarBoundsAfterRefinement(DualArray1D<int> &new_to_old,
+                                                  DualArray1D<int> &refine_flag,
+                                                  int new_nmb, int ngids) = 0;
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;
@@ -123,18 +142,10 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
-  // Share one theta across all scalars in the positivity limiter instead of giving
-  // each its own. The ZLA cascade makes scalar 3's admissible band a function of
-  // scalars 0 and 1, and a bound coupling several variables is only preserved by a
-  // convex combination if they are ALL interpolated with the SAME theta. See
-  // dyn_grmhd_fofc.cpp where wthe[] is applied.
-  bool scalar_shared_theta;
-  // Replace the cascade's a-priori certificate with a direct check (<mhd>/
-  // scalar_theta_verify). The per-scalar thetas are tried first and kept whenever the
-  // four cascade bounds actually hold at them; otherwise the uniform ray is walked down,
-  // starting at exactly the scalar_shared_theta value. Default false. When true it
-  // supersedes scalar_shared_theta, whose value is the first fallback anyway.
-  bool scalar_theta_verify;
+  // Gate for EnforceScalarBoundsAfterRefinement (<mhd>/amr_scalar_repair). Default
+  // false: the pass is under investigation as the cause of a conserved-scalar
+  // corruption and mass-loss regression, so it must be opted into explicitly.
+  bool amr_scalar_repair;
   // <time>/gr_dt (default false): opt-in to the real GR fast-magnetosonic-speed
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.
@@ -172,6 +183,10 @@ class DynGRMHDPS : public DynGRMHD {
 
   // dyn_grmhd_newdt.cpp
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage);
+
+  virtual void EnforceScalarBoundsAfterRefinement(DualArray1D<int> &new_to_old,
+                                                  DualArray1D<int> &refine_flag,
+                                                  int new_nmb, int ngids);
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,

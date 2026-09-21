@@ -112,7 +112,7 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
   MeshBlockPack *pmbp = pmesh->pmb_pack;
 
   using EOSPolicy = Primitive::EOSZlaBag<LogPolicy>;
-  using ErrorPolicy = Primitive::ResetFloorZlaBag;
+  using ErrorPolicy = Primitive::ResetFloor;
 
   // Same downcast as pgen/unit_tests/eos_compose.cpp, but we need the PrimitiveSolver
   // itself rather than just the EOS, so that ConToPrim can be exercised.
@@ -829,9 +829,15 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
     //           PrimToCon when a floor also fires. Asserted as a documented allowance,
     //           not a pass.
     {
-      Kokkos::printf("\n--- Test H1: y_lQ = Y[3]/(1-yn) conditioning across yn_snap\n");
+      Kokkos::printf("\n--- Test H1: y_lQ recovery across yn_snap\n");
+      // Slot 3 advects y_lQ itself, so ConvertPrimitive reaches nY[3] by multiplying
+      // by (1 - yn) and dividing by the SAME (1 - yn). The recovery is therefore exact
+      // to a rounding, however small the quark baryon fraction gets -- there is no
+      // longer an independently advected numerator whose truncation error is amplified
+      // by 1/(1 - yn). That amplification is what the nested packing suffered, and
+      // removing it is the reason this packing was adopted, so pin it here.
       Kokkos::printf("%-12s %-14s %-15s %-15s %s\n",
-                     "1-yn", "Y[3]", "y_lQ recovered", "y_lQ wanted", "verdict");
+                     "1-yn", "Y[3]=y_lQ", "y_lQ recovered", "y_lQ wanted", "verdict");
       const Real ylq_want = -0.5;      // inside the table range [-0.679, 0]
       // Well inside the mixed phase: n_tr = 0.2538, n_c = 0.4114 (table units).
       const Real n_h = 0.45;
@@ -840,19 +846,22 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
       for (int e = 2; e <= 12; ++e) {
         Real omyn = 1.0;
         for (int q = 0; q < e; ++q) { omyn *= 0.1; }
+        // Physical state: quark baryon fraction 1 - yn = omyn, with f just above yn
+        // so the quark VOLUME fraction stays resolvable while the baryon fraction is
+        // the small quantity. Packed as the code advects it: (f, yn/f, y_lN, y_lQ).
+        const Real f_h = 1.0 - 0.5*omyn;
+        const Real yn_h = 1.0 - omyn;
         Real Yh[MAX_SPECIES] = {0.0};
-        Yh[0] = 0.75;                          // f, comfortably mixed
-        Yh[1] = 1.0 - omyn;                    // Y_N
-        Yh[2] = 0.10*Yh[1];                    // Y_N * y_lN
-        Yh[3] = ylq_want*omyn;                 // (1-Y_N) * y_lQ
+        Yh[0] = f_h;                           // f
+        Yh[1] = yn_h/f_h;                      // Y_N = yn/f
+        Yh[2] = 0.10;                          // y_lN
+        Yh[3] = ylq_want;                      // y_lQ, advected directly
         Real nY[6] = {0.0};
         eos.GetPhaseDecomposition(n_h, Yh, nY);
         const Real got = nY[3];
-        // Forming Yh[1] = 1 - omyn and recovering (1 - Yh[1]) is a catastrophic
-        // cancellation: the recovered denominator carries an absolute error ~1e-16,
-        // hence a relative error ~1e-16/omyn. Tolerate exactly that much and no more --
-        // this IS the amplification the guard exists to bound.
-        const Real tol = 1.0e-15/omyn + 1.0e-12;
+        // A multiply followed by a divide by the same quantity: a couple of ulp,
+        // independent of omyn. Contrast the nested packing, which needed 1e-15/omyn.
+        const Real tol = 64.0*2.220446049250313e-16*fabs(ylq_want) + 1.0e-300;
         // Within a factor of 2 of the threshold the branch taken depends on that same
         // round-off, so do not predict it; report it instead of scoring it.
         const bool boundary = (omyn > 0.5*snap) && (omyn < 2.0*snap);
@@ -876,8 +885,9 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
       {
         Real Yh[MAX_SPECIES] = {0.0};
         const Real omyn = 1.0e-11;
-        Yh[0] = 0.75; Yh[1] = 1.0 - omyn; Yh[2] = 0.10*Yh[1];
-        Yh[3] = -5.0*omyn;                     // y_lQ = -5, far outside [-1, 2]
+        const Real f_r = 1.0 - 0.5*omyn;
+        Yh[0] = f_r; Yh[1] = (1.0 - omyn)/f_r; Yh[2] = 0.10;
+        Yh[3] = -5.0;                          // y_lQ = -5, far outside [-1, 2]
         Real nY[6] = {0.0};
         eos.GetPhaseDecomposition(n_h, Yh, nY);
         const bool ok = (nY[3] == 0.0);
@@ -889,8 +899,9 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
       {
         Real Yh[MAX_SPECIES] = {0.0};
         const Real omyn = 0.2403;              // the observed f-min mixed phase
-        Yh[0] = 1.0 - omyn; Yh[1] = 1.0 - omyn; Yh[2] = 0.10*Yh[1];
-        Yh[3] = ylq_want*omyn;
+        const Real f_m = 1.0 - 0.5*omyn;
+        Yh[0] = f_m; Yh[1] = (1.0 - omyn)/f_m; Yh[2] = 0.10;
+        Yh[3] = ylq_want;
         Real nY[6] = {0.0};
         eos.GetPhaseDecomposition(n_h, Yh, nY);
         const bool ok = (fabs(nY[3] - ylq_want) < 1.0e-12);
@@ -908,27 +919,30 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
       const Real n_h2 = 0.45;
       for (int e = 0; e < 7; ++e) {
         const Real omyn_c[7] = {1.0e-11, 1.0e-11, 0.25, 0.25, 1.0e-11, 0.25, 0.25};
-        const Real ylq_c[7]  = {-3.0,    -0.5,    -0.5, -3.0, -1.0e11, -0.5, -0.5};
+        const Real ylq_c[7]  = {-0.9,    -0.5,    -0.5, -3.0, -1.0e11, -0.5, -0.5};
+        // Slot 3 now carries y_lQ itself, so its band is the ABSOLUTE [-1, 2] rather
+        // than [-1, 2]*(1 - yn): whether a row is in band depends on y_lQ alone and no
+        // longer on how small the quark baryon fraction is.
         // rows 5,6 sit BELOW the density floors, so the atmosphere reset (Y := Y_atm,
         // and s3_atmosphere = 0) must delete D*Y_3 outright -- the floor channel.
-        // rows 0,1 : noise floor, |Y[3]| inside the FLOORED band -> must never move
+        // rows 0,1 : noise-floor quark fraction, y_lQ in band -> must never move
         //            (this is the measured sink)
         // row  2   : resolved, in band -> must never move
-        // row  3   : resolved, out of band -> clamp is CORRECT; cons may follow
-        // row  4   : noise floor with a RUNAWAY Y[3] (y_lQ = -1e11, i.e. Y[3] = -1) ->
-        //            must be CLAMPED and BOUNDED. Skipping the test here is what let
-        //            v7 inflate the atmosphere pressure and go NaN.
+        // row  3   : resolved, out of band (y_lQ = -3) -> clamp is CORRECT; cons may
+        //            follow
+        // row  4   : noise floor with a RUNAWAY y_lQ = -1e11 -> must be CLAMPED and
+        //            BOUNDED. Skipping the test here is what let v7 inflate the
+        //            atmosphere pressure and go NaN.
         const Real omyn = omyn_c[e];
-        // The state must satisfy Y_N <= f, which ResetFloorZlaBag enforces first: its
-        // cascade clamps Y[1] to Y_max[1]*Y[0] BEFORE evaluating Y[3]'s band. Violating
-        // it means Y[1] is repaired to f and (1 - Y[1]) becomes O(1 - f), so the row
-        // never reaches the noise floor it is meant to probe. Keep 1 - f just under
-        // 1 - Y_N so the quark BARYON fraction is the small quantity.
+        // Keep 1 - f just under 1 - yn so the quark BARYON fraction is the small
+        // quantity; otherwise the row never reaches the noise floor it is meant to
+        // probe. Packed as advected: (f, yn/f, y_lN, y_lQ).
+        const Real f_h2 = 1.0 - 0.5*omyn;
         Real Yh[MAX_SPECIES] = {0.0};
-        Yh[0] = 1.0 - 0.5*omyn;                // f
-        Yh[1] = 1.0 - omyn;                    // Y_N <= f
-        Yh[2] = 0.10*Yh[1];
-        Yh[3] = ylq_c[e]*omyn;
+        Yh[0] = f_h2;                          // f
+        Yh[1] = (1.0 - omyn)/f_h2;             // Y_N = yn/f
+        Yh[2] = 0.10;                          // y_lN
+        Yh[3] = ylq_c[e];                      // y_lQ, advected directly
         Real prim_in[NPRIM] = {0.0};
         prim_in[PRH] = (e >= 5) ? ((e == 5) ? n_a*0.1 : n_a*0.5) : n_h2;
         prim_in[PVX] = 0.0; prim_in[PVY] = 0.0; prim_in[PVZ] = 0.0;
@@ -952,11 +966,12 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
           ok = (res.error == Primitive::Error::SUCCESS);
           verdict = ok ? "allowed (real clamp)" : "FAIL (no solution)";
         } else if (e == 4) {
-          // Runaway at the noise floor: cons MUST move, and the result must land inside
-          // the floored band, |Y[3]| <= max(|Y_min[3]|, Y_max[3]) * q_snap.
+          // Runaway at the noise floor: cons MUST move, and the result must land
+          // inside the absolute band, |Y[3]| <= max(|Y_min[3]|, Y_max[3]).
           const Real Dn = cons[CDN];
           const Real y3_out = (Dn != 0.0) ? after/Dn : 0.0;
-          const Real cap = 2.0*eos.GetYnSnap()*1.000001;
+          const Real cap = fmax(fabs(eos.GetMinimumSpeciesFraction(3)),
+                                eos.GetMaximumSpeciesFraction(3))*1.000001;
           ok = isfinite(y3_out) && (fabs(y3_out) <= cap) &&
                (res.error == Primitive::Error::SUCCESS);
           verdict = ok ? "ok (bounded)" : "FAIL (Y[3] unbounded -> NaN risk)";
@@ -1046,18 +1061,21 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
         const Real nk_fixed = 0.200;
         const Real nk[8] = {nk_fixed,nk_fixed,nk_fixed,nk_fixed,
                             nk_fixed,nk_fixed,nk_fixed,nk_fixed};
+        // Packed as advected: (f, yn/f, y_lN, y_lQ), with yn chosen so the quark
+        // baryon fraction is half the quark volume fraction.
+        const Real f_k = 1.0 - omf_k[e];
         Real Yk[MAX_SPECIES] = {0.0};
-        Yk[0] = 1.0 - omf_k[e];         // f
-        Yk[1] = 1.0 - 0.5*omf_k[e];     // Y_N <= f, so (1-Y_N) = 0.5*(1-f)
-        Yk[2] = 0.10*Yk[1];
-        Yk[3] = ylq0*(1.0 - Yk[1]);     // (1-Y_N) * y_lQ
+        Yk[0] = f_k;                                  // f
+        Yk[1] = (1.0 - 0.5*omf_k[e])/f_k;             // Y_N = yn/f
+        Yk[2] = 0.10;                                 // y_lN
+        Yk[3] = ylq0;                                 // y_lQ, advected directly
         Real nY[6] = {0.0};
         eos.GetPhaseDecomposition(nk[e], Yk, nY);
         const Real f_out = nY[4];
         const Real ylq_out = nY[3];
         const Real A_obs  = (ylq0 != 0.0) ? ylq_out/ylq0 : 0.0;
-        const Real A_pred = (1.0 - f_out > 0.0) ? (1.0 - Yk[0])/(1.0 - f_out) : 0.0;
-        const bool moved = (f_out > Yk[0]*(1.0 + 1.0e-12));
+        const Real A_pred = (1.0 - f_out > 0.0) ? omf_k[e]/(1.0 - f_out) : 0.0;
+        const bool moved = (f_out > f_k*(1.0 + 1.0e-12));
         // CONTRACT (post-fix): raising f must leave y_lQ INVARIANT, because the
         // leptons move with the baryons transferred Q->N. A_pred is the amplification
         // the OLD code produced (y_lQ * (1-f_old)/(1-f_new)); it is printed only to
@@ -1065,7 +1083,7 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
         const bool ok = (fabs(A_obs - 1.0) < 1.0e-9);
         if (!ok) { kbad++; }
         Kokkos::printf("%-12.2e %-10.6f %-10.6f %-13.6e %-13.6e %-9.3f %-9.3f %s\n",
-                       1.0 - Yk[0], Yk[0], f_out, ylq0, ylq_out, A_obs, A_pred,
+                       omf_k[e], f_k, f_out, ylq0, ylq_out, A_obs, A_pred,
                        ok ? (moved ? "ok (f moved, y_lQ invariant)"
                                    : "ok (floor inactive)")
                           : "FAIL (y_lQ amplified)");
@@ -1267,6 +1285,115 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
                          eos.GetPressure(nN2, T_a, Yn), eos.GetEnergy(nN2, T_a, Yn));
         }
       }
+    }
+
+    // ------------------------------------------------------------------ Test P
+    // The advected packing must be the exact inverse of what the EOS recovers. The
+    // pgen writes ( f, Y_N, y_lN, y_lQ ) with Y_N = y_n/f from the table's physical
+    // ( f, y_n, y_lN, y_lQ ); ConvertPrimitive multiplies back to reach the phase
+    // decomposition nY = ( n_N, n_Q, y_qN, y_qQ, f, y_qG ). Wherever the pressure
+    // floor leaves f alone, that round trip must reproduce the physical state to a
+    // couple of ulp. A mismatch means a run is silently evolving a DIFFERENT
+    // composition from the one its initial data describes, which would look physical.
+    {
+      Kokkos::printf("\n--- Test P: advected packing round-trips to the physical "
+                     "composition\n");
+      // ( f, Y_N = y_n/f, y_lN, y_lQ ). Covers the pure-nucleon end, the production
+      // failure population, a genuine mixed phase, a quark-dominated state, and the
+      // pure-quark end. Y_N <= 1 everywhere, i.e. y_n <= f, as the ID enforces.
+      const int NP = 6;
+      const Real fv[NP]   = {1.0, 1.0 - 1.0e-9, 0.942282, 0.700000, 0.300000, 0.0};
+      const Real ynr[NP]  = {1.0, 1.0,          0.993865, 0.928571, 0.400000, 0.0};
+      const Real ylnv[NP] = {0.0640, 0.0640,    0.0904,   0.194462, 0.150000, 0.0};
+      const Real ylqv[NP] = {0.0, -0.20,       -0.9985,  -0.300000, -0.150000, -0.30};
+      // Three densities: atmosphere, just below the pressure-floor threshold, and a
+      // core density well above the transition.
+      const Real npv[3] = {n_a, 0.9*eos.GetPfloorForce(), 0.40};
+
+      Kokkos::printf("%-6s %-12s %-9s %-11s %-11s %-11s %-11s %s\n",
+                     "case", "n", "f_out", "d(n_N)", "d(n_Q)", "d(y_qN)", "d(y_qQ)",
+                     "partition");
+      Real pworst = 0.0, sworst = 0.0;
+      int pbad = 0, snapped = 0;
+      for (int c = 0; c < NP; ++c) {
+        Real Yf[MAX_SPECIES] = {0.0};
+        Yf[0] = fv[c];
+        Yf[1] = ynr[c];
+        Yf[2] = ylnv[c];
+        Yf[3] = ylqv[c];
+        const Real yn_c = fv[c]*ynr[c];
+        for (int q = 0; q < 3; ++q) {
+          const Real np_ = npv[q];
+          Real nYf[6] = {0.0};
+          eos.GetPhaseDecomposition(np_, Yf, nYf);
+          auto rd = [](Real a_, Real b_) {
+            const Real den = Kokkos::fmax(Kokkos::fabs(a_), Kokkos::fabs(b_));
+            return (den > 0.0) ? Kokkos::fabs(a_ - b_)/den : 0.0;
+          };
+          // The partition n == f*n_N + (1 - f)*n_Q must hold whether or not the
+          // pressure floor moved f; SnapPhaseFraction is written to preserve it.
+          const Real part = rd(np_, nYf[4]*nYf[0] + (1.0 - nYf[4])*nYf[1]);
+          sworst = Kokkos::fmax(sworst, part);
+
+          // The recovery is only the inverse of the packing where the floor left f
+          // where the initial data put it. Where it fired, f, y_n and the lepton
+          // contents were all deliberately moved, so only the partition is invariant.
+          const bool moved = (rd(nYf[4], fv[c]) > 1.0e-12);
+          Real dmax = 0.0;
+          if (!moved && fv[c] > 0.0 && fv[c] < 1.0) {
+            const Real d_nN = rd(nYf[0], yn_c*np_/fv[c]);
+            const Real d_nQ = rd(nYf[1], (1.0 - yn_c)*np_/(1.0 - fv[c]));
+            const Real d_qN = rd(nYf[2], ylnv[c]);
+            const Real d_qQ = rd(nYf[3], ylqv[c]);
+            dmax = Kokkos::fmax(Kokkos::fmax(d_nN, d_nQ), Kokkos::fmax(d_qN, d_qQ));
+            pworst = Kokkos::fmax(pworst, dmax);
+            // 64 ulp of headroom: the recovery multiplies where the encoding divided,
+            // so the two agree to a couple of ulp, not bit-exactly.
+            if (!(dmax < 64.0*2.220446049250313e-16)) { pbad++; }
+            Kokkos::printf("%-6d %-12.4e %-9.6f %-11.3e %-11.3e %-11.3e %-11.3e %.3e\n",
+                           c, np_, nYf[4], d_nN, d_nQ, d_qN, d_qQ, part);
+          } else {
+            snapped++;
+            Kokkos::printf("%-6d %-12.4e %-9.6f %-11s %-11s %-11s %-11s %.3e\n",
+                           c, np_, nYf[4], "snapped", "snapped", "snapped", "snapped",
+                           part);
+          }
+        }
+      }
+      Kokkos::printf("  Test P: worst round-trip error = %.3e over %d unsnapped "
+                     "states (%d snapped), %d above 64 ulp%s\n",
+                     pworst, NP*3 - snapped, snapped, pbad,
+                     (pbad == 0) ? "  PASS" : "  FAIL");
+      Kokkos::printf("  Test P: worst partition error n == f*n_N + (1-f)*n_Q = "
+                     "%.3e%s\n", sworst,
+                     (sworst < 64.0*2.220446049250313e-16) ? "  PASS" : "  FAIL");
+
+      // The direction the INITIAL DATA actually takes. The 1D table supplies
+      // ( f, y_n, y_lN, y_lQ ); the pgen writes y_n/f and the EOS multiplies it back
+      // by f. The loop above starts from the packed encoding, so its multiply
+      // reproduces y_n exactly by construction and never exercises that division.
+      // Round-tripping f*(y_n/f) is exact only to about an ulp, and the question is
+      // whether that ulp survives into the composition. Sweep y_n/f across its whole
+      // range at several f, including the f -> 0 end where the ratio is worst
+      // conditioned.
+      Real rworst = 0.0, rwf = 0.0, rwr = 0.0;
+      for (int a_ = 1; a_ <= 40; ++a_) {
+        const Real f_ = a_/40.0;
+        for (int b_ = 0; b_ <= 40; ++b_) {
+          const Real r_ = b_/40.0;            // the ratio y_n/f the pgen writes
+          const Real yn_ = f_*r_;             // the table's y_n, as the pgen sees it
+          // What the pgen computes, then what ConvertPrimitive multiplies back.
+          const Real r_id = (f_ > 0.0) ? yn_/f_ : 0.0;
+          const Real yn_back = f_*r_id;
+          const Real den = Kokkos::fmax(Kokkos::fabs(yn_), Kokkos::fabs(yn_back));
+          const Real d_ = (den > 0.0) ? Kokkos::fabs(yn_ - yn_back)/den : 0.0;
+          if (d_ > rworst) { rworst = d_; rwf = f_; rwr = r_; }
+        }
+      }
+      Kokkos::printf("  Test P: ID round trip f*(y_n/f) vs y_n, worst relative "
+                     "error = %.3e at f = %.4f, Y_N = %.4f%s\n",
+                     rworst, rwf, rwr,
+                     (rworst < 4.0*2.220446049250313e-16) ? "  PASS" : "  FAIL");
     }
 
     Kokkos::printf("\n");

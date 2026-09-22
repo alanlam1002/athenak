@@ -69,6 +69,23 @@ KOKKOS_INLINE_FUNCTION Real SquareVector(const Real vu[3], const Real g3d[NSPMET
         2.0*((g3d[S12]*vu[1] + g3d[S13]*vu[2])*vu[0] + g3d[S23]*vu[1]*vu[2]);
 }
 
+//! \brief Floor the lapse before it is used in a division
+//
+//  Near a coordinate degeneracy (an unexcised moving-puncture horizon, or a
+//  maximal-slicing trumpet throat) alpha can be exactly or nearly zero. Every
+//  1/alpha-bearing expression that consumes it has a finite physical limit as
+//  alpha->0 (the wave speeds saturate at a causal bound), but computing that
+//  limit via literal division by alpha gives Inf/NaN instead. The floor cancels
+//  homogeneously in the ratios that are actually used downstream, so this
+//  changes nothing except where alpha is already indistinguishable from zero.
+//
+//  \param[in] alpha The ADM lapse
+//  \return alpha, floored to a small positive value
+KOKKOS_INLINE_FUNCTION Real FloorLapse(const Real alpha) {
+  constexpr Real min_alpha = 1.0e-15;
+  return fmax(alpha, min_alpha);
+}
+
 //! \brief Invert a 3x3 matrix
 //
 //  \param[out] m_out The output matrix

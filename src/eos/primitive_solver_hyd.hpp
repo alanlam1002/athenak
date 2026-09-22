@@ -619,7 +619,7 @@ class PrimitiveSolverHydro {
 
     // Get spacetime quantities
     Real Wsq = 1.0 + usq;
-    Real ialpha = 1.0/alpha;
+    Real ialpha = 1.0/Primitive::FloorLapse(alpha);
     Real W = sqrt(Wsq);
     Real u0 = W*ialpha;
     Real u1 = uu[index] - u0*beta_u[index];

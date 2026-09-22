@@ -168,7 +168,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
         Real ud[3];
         Primitive::LowerVector(ud, uu, g3d);
         Real iWsq = 1.0/(1.0 + Primitive::Contract(uu, ud));
-        Real ialpha = 1.0/alpha;
+        Real ialpha = 1.0/Primitive::FloorLapse(alpha);
         Real bu0 = Primitive::Contract(Bu, ud)*ialpha;
         Real bsq = (Primitive::SquareVector(Bu, g3d) + SQR(alpha*bu0))*iWsq;
 

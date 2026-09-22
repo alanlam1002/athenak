@@ -38,7 +38,7 @@ void SingleStateFlux(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eos,
   constexpr int iby = ((ivx - IVX) + 1)%3;
   constexpr int ibz = ((ivx - IVX) + 2)%3;
 
-  const Real ialpha = 1.0/alpha;
+  const Real ialpha = 1.0/Primitive::FloorLapse(alpha);
 
   // Calculate conserved variables
   eos.ps.PrimToCon(prim_l, cons_l, Bu_l, g3d);

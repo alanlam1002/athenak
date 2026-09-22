@@ -71,7 +71,7 @@ void SingleStateHLLE_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& e
   Real lambda_r = fmax(lambda_pl, lambda_pr);
 
   // Calculate fluxes in HLL region
-  Real qa = lambda_r*lambda_l/alpha;
+  Real qa = lambda_r*lambda_l/Primitive::FloorLapse(alpha);
   Real qb = 1.0/(lambda_r - lambda_l);
   Real f_hll[NCONS], bf_hll[NMAG];
   f_hll[CDN] = (lambda_r*fl[CDN] - lambda_l*fr[CDN] +
@@ -221,7 +221,7 @@ void HLLE_DYNGR(TeamMember_t const &member,
     Real lambda_r = fmax(lambda_pl, lambda_pr);
 
     // Calculate fluxes in HLL region
-    Real qa = lambda_r*lambda_l/alpha;
+    Real qa = lambda_r*lambda_l/Primitive::FloorLapse(alpha);
     Real qb = 1.0/(lambda_r - lambda_l);
     Real f_hll[NCONS], bf_hll[NMAG];
     f_hll[CDN] = ((lambda_r*fl[CDN] - lambda_l*fr[CDN]) +

@@ -140,10 +140,13 @@ class PrimitiveSolverHydro {
     ps.GetRootSolverMutable().iterations = pin->GetOrAddInteger(block, "c2p_iter", 50);
     errcap = pin->GetOrAddInteger(block, "c2perrs", 1000);
 
-    // Calculate maximum allowed velocity
+    // Calculate maximum allowed velocity, for the root-find's internal estimate
+    // (SetMaxVelocity/v_max, primitive_solver.hpp's RootFunction) -- this does NOT
+    // by itself bound the converged output; SetMaxLorentzFactor below does that.
     Real Wmax = pin->GetOrAddReal(block, "gamma_max", 50.0);
     Real vmax = sqrt(1.0 - 1.0/(Wmax*Wmax));
     ps.GetEOSMutable().SetMaxVelocity(vmax);
+    ps.GetEOSMutable().SetMaxLorentzFactor(Wmax);
 
     // Set maximum B^2/D
     ps.GetEOSMutable().SetMaximumMagnetization(pin->GetOrAddReal(block, "max_bsq", 1e6));
@@ -333,12 +336,14 @@ class PrimitiveSolverHydro {
     int &ks = indcs.ks;
     auto &size = pmy_pack->pmb->mb_size;
 
-    // Captured by value for the excised-mass tally below (interior-cell guard and
-    // the accumulator itself).  ie/je/ke are copies because indcs members cannot be
-    // captured by reference into a device lambda.
+    // Captured by value for the excised-mass tally below (interior-cell guard).
+    // ie/je/ke are copies because indcs members cannot be captured by reference into
+    // a device lambda. The tally itself is accumulated via this call's own
+    // Kokkos::parallel_reduce below (see the reducer arguments and coordinates.hpp's
+    // excised_tally comment for why -- deterministic, unlike the atomic-add scatter
+    // this replaced).
     const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
     const bool floors_only_ = floors_only;
-    auto tally_ = pmy_pack->pcoord->excised_tally;
 
     const int ni = (iu - il + 1);
     const int nji = (ju - jl + 1)*ni;
@@ -363,8 +368,14 @@ class PrimitiveSolverHydro {
     // FIXME(JMF): We can short-circuit the primitive solve if FOFC is already enabled
     // due to a maximum principle violation.
     int count_errs=0;
+    // Excised-mass tally totals for THIS call, reduced deterministically alongside
+    // count_errs (see coordinates.hpp's excised_tally comment) rather than scattered
+    // via Kokkos::atomic_add into a per-MeshBlock array.
+    Real dE_tally = 0.0, dPx_tally = 0.0, dPy_tally = 0.0, dPz_tally = 0.0;
+    Real dEraw_tally = 0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int &idx, int &sumerrs) {
+    KOKKOS_LAMBDA(const int &idx, int &sumerrs, Real &dE_r, Real &dPx_r, Real &dPy_r,
+                  Real &dPz_r, Real &dEraw_r) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -470,14 +481,13 @@ class PrimitiveSolverHydro {
               Real dvol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
               Real dE = ((cons_pt_old[CTA] + cons_pt_old[CDN])
                         - (cons_pt[CTA] + cons_pt[CDN]))*sdetg*dvol;
-              Kokkos::atomic_add(&tally_(m,0), dE/psi_c);
-              Kokkos::atomic_add(&tally_(m,1),
-                                 (cons_pt_old[CSX] - cons_pt[CSX])*sdetg*dvol);
-              Kokkos::atomic_add(&tally_(m,2),
-                                 (cons_pt_old[CSY] - cons_pt[CSY])*sdetg*dvol);
-              Kokkos::atomic_add(&tally_(m,3),
-                                 (cons_pt_old[CSZ] - cons_pt[CSZ])*sdetg*dvol);
-              Kokkos::atomic_add(&tally_(m,4), dE);   // raw psi^6 E, validation only
+              // Contributed to this call's own reduction (deterministic), not
+              // atomic-added into a shared accumulator -- see coordinates.hpp.
+              dE_r   += dE/psi_c;
+              dPx_r  += (cons_pt_old[CSX] - cons_pt[CSX])*sdetg*dvol;
+              dPy_r  += (cons_pt_old[CSY] - cons_pt[CSY])*sdetg*dvol;
+              dPz_r  += (cons_pt_old[CSZ] - cons_pt[CSZ])*sdetg*dvol;
+              dEraw_r += dE;   // raw psi^6 E, validation only
             }
           } else {
             result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);
@@ -597,13 +607,25 @@ class PrimitiveSolverHydro {
           }
         }
       }
-    }, Kokkos::Sum<int>(count_errs));
+    }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<Real>(dE_tally), Kokkos::Sum<Real>(dPx_tally),
+       Kokkos::Sum<Real>(dPy_tally), Kokkos::Sum<Real>(dPz_tally),
+       Kokkos::Sum<Real>(dEraw_tally));
 
     if (floors_only) {
       ps.GetEOSMutable().SetPrimitiveFloorFailure(prim_failure);
       ps.GetEOSMutable().SetConservedFloorFailure(cons_failure);
     } else {
       nerrs += count_errs;
+      // Ordinary (non-atomic) accumulation on this rank's single controlling host
+      // thread: deterministic, since each call's own reduction above is deterministic
+      // and this simply adds that one already-combined result once, in the fixed
+      // order calls happen in. See coordinates.hpp's excised_tally comment.
+      auto &tally = pmy_pack->pcoord->excised_tally;
+      tally[0] += dE_tally;
+      tally[1] += dPx_tally;
+      tally[2] += dPy_tally;
+      tally[3] += dPz_tally;
+      tally[4] += dEraw_tally;
     }
   }
 

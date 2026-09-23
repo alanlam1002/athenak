@@ -119,6 +119,7 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   using ErrorPolicy::T_atm;
   using ErrorPolicy::Y_atm;
   using ErrorPolicy::v_max;
+  using ErrorPolicy::gamma_max;
   using ErrorPolicy::fail_conserved_floor;
   using ErrorPolicy::fail_primitive_floor;
   using ErrorPolicy::adjust_conserved;
@@ -139,6 +140,7 @@ class EOS : public EOSPolicy, public ErrorPolicy {
     n_threshold = 1.0;
     T_atm = 1e-10;
     v_max = 1.0 - 1e-15;
+    gamma_max = std::numeric_limits<Real>::max();
     max_bsq = std::numeric_limits<Real>::max();
     code_units = eos_units;
     for (int i = 0; i < MAX_SPECIES; i++) {
@@ -513,6 +515,25 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   //  \param[in] v The maximum velocity
   KOKKOS_INLINE_FUNCTION void SetMaxVelocity(Real v) {
     v_max = (v >= 0) ? ((v <= 1.0-1e-15) ? v : 1.0-1.0e-15) : 0.0;
+  }
+
+  //! \fn Real GetMaxLorentzFactor() const
+  //  \brief Get the ceiling on the Lorentz factor enforced on ConToPrim's converged
+  //         output (NOT the same thing as the root-find's internal velocity estimate,
+  //         which GetMaxVelocity/v_max bounds instead -- see ConToPrim's own comment
+  //         at the point of use).
+  KOKKOS_INLINE_FUNCTION Real GetMaxLorentzFactor() const {
+    return gamma_max;
+  }
+
+  //! \fn void SetMaxLorentzFactor(Real g)
+  //  \brief Set the ceiling on the Lorentz factor enforced on ConToPrim's converged
+  //         output. Values below 1 are non-physical and are clamped up to 1 (no
+  //         ceiling has no effect; exactly 1 would force zero velocity everywhere).
+  //
+  //  \param[in] g The maximum Lorentz factor
+  KOKKOS_INLINE_FUNCTION void SetMaxLorentzFactor(Real g) {
+    gamma_max = (g >= 1.0) ? g : 1.0;
   }
 
   //! \brief Get the maximum number density (in EOS units) permitted by the EOS.

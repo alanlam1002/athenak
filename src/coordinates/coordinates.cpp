@@ -108,8 +108,7 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
       int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
       Kokkos::realloc(excision_floor, nmb, ncells3, ncells2, ncells1);
       Kokkos::realloc(excision_flux, nmb, ncells3, ncells2, ncells1);
-      Kokkos::realloc(excised_tally, nmb, 5);
-      Kokkos::deep_copy(excised_tally, 0.0);
+      for (int c = 0; c < 5; ++c) { excised_tally[c] = 0.0; }
       if (coord_data.excision_scheme == ExcisionScheme::fixed) {
         SetExcisionMasks(excision_floor, excision_flux);
       }

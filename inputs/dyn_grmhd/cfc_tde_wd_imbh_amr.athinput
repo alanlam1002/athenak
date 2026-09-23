@@ -5,9 +5,13 @@
 #
 # WHY: cfc_tde_wd_imbh.athinput refines a single static level-5 "tube" spanning
 # the whole trajectory, which spends ~90% of its finest-level cost on space that
-# is empty at any given instant. Here two level-5 boxes are used instead -- one
-# fixed on the puncture, one following the star -- driven by TDERefineTracker in
-# dyngr_tov.cpp (<problem> amr_condition = tde_track).
+# is empty at any given instant. Here a level-5 box fixed on the puncture is
+# used instead, unioned with a relative-density region (rho > amr_density_frac
+# *rho_max) that follows the star/debris wherever it is -- driven by
+# TDERefineTracker in dyngr_tov.cpp (<problem> amr_condition = tde_track). See
+# TDERefineTracker's own doc comment for why this is a region criterion and not
+# a single tracked box (NANCASCADE_HANDOFF.md Sec 10.2/17.5/19.4/21.6: a tracked
+# density-MAXIMUM box thrashes between clumps once the star is disrupted).
 #
 # MEASURED SAVING (both runs to t=145, item 55): 2,283 cycles / 9.2M
 # MeshBlock-cycles / 7.5M core-seconds here, versus 2,299 cycles / 19.8M
@@ -164,7 +168,7 @@ star_center_x2 = 0.0     # puncture always fixed at the origin
 star_center_x3 = 0.0
 amr_condition   = tde_track   # enrol TDERefineTracker
 amr_radius_bh   = 2.0         # fine box around the fixed puncture
-amr_radius_star = 2.0         # fine box around the infalling star
+amr_density_frac = 1.0e-2     # debris region: rho > amr_density_frac*rho_max
 user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
 
 <output1>

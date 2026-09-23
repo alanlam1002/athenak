@@ -169,6 +169,84 @@ int main(int argc, char *argv[]) {
                     psi0, alpha0, zero_curvature);
       Check(Close(psi0, 1.0 + 0.5/3.0, 1.0e-12) && zero_curvature, msg);
     }
+
+    // ---- 6. Regression test for Sec 15's grad_ap6_0 0/0 defect at the throat -------
+    // cfc_puncture.cpp's FillPunctureBackground assembles
+    //   amp = psi0_inv6*(dalpha0 - 6*alpha0*dpsi0/psi0)
+    // which never divides by alpha0. The ORIGINAL code instead evaluated
+    // dalpha0/alpha0 directly, and alpha0^2 = 1 - 2/rrs + 1.6875/rrs^4 has a DOUBLE
+    // ROOT at rrs = kTrumpetThroat = 3/2 -- exactly where dalpha0's numerator
+    // (1 - 3.375/rrs^3) also vanishes -- so the old form was 0/0 = NaN there. Because
+    // it is a double root, alpha0^2 loses all significance to cancellation nearby
+    // (measured: within 1e-7 of the throat, 2.8% of samples give alpha0^2 == 0 exactly
+    // and 2.4% give it negative), so a single point-sample at rrs=1.5 does not exercise
+    // the defect the way it actually manifested in production -- this sweeps the
+    // neighbourhood instead of the point, at both the requested 1e-9 tolerance and the
+    // wider 1e-7 range the production measurement used.
+    {
+      const int kNumSamples = 2001;
+      const Real kMasses[] = {0.5, 1.0, 1.3, 2.7};
+      const Real kPositions[3][3] = {{0.4, -0.3, 0.2}, {1.0, 0.0, 0.0}, {-2.1, 0.9, 3.4}};
+
+      int n_checked = 0, n_bad_new = 0, n_bad_old_tight = 0, n_tight = 0;
+      for (Real m_bh : kMasses) {
+        for (const Real *x : kPositions) {
+          for (int s = 0; s < kNumSamples; ++s) {
+            Real frac = static_cast<Real>(s) / (kNumSamples - 1);  // in [0,1]
+            for (Real half_width : {1.0e-9, 1.0e-7}) {
+              Real delta = -half_width + 2.0*half_width*frac;
+              Real rrs = cfc::kTrumpetThroat + delta;
+              Real r_sch = m_bh*rrs;
+
+              Real psi0, alpha0, beta0[3], Aij0[6], a2, dpsi0, dalpha0;
+              cfc::TrumpetBackground(m_bh, x[0], x[1], x[2], r_sch, &psi0, &alpha0,
+                                     beta0, Aij0, &a2, &dpsi0, &dalpha0);
+
+              // Reproduces cfc_puncture.cpp:82 exactly (the fix under test).
+              Real psi0_inv6 = 1.0/(psi0*psi0*psi0*psi0*psi0*psi0);
+              Real amp = psi0_inv6*(dalpha0 - 6.0*alpha0*dpsi0/psi0);
+              Real r = std::sqrt(x[0]*x[0] + x[1]*x[1] + x[2]*x[2]);
+              Real grad0 = amp*x[0]/r, grad1 = amp*x[1]/r, grad2 = amp*x[2]/r;
+
+              ++n_checked;
+              if (!(std::isfinite(amp) && std::isfinite(grad0)
+                    && std::isfinite(grad1) && std::isfinite(grad2))) {
+                ++n_bad_new;
+              }
+
+              // Reproduces the ORIGINAL buggy form (dalpha0/alpha0), to confirm the
+              // tight (1e-9) sweep is actually landing on the defect and not sailing
+              // past it -- at that scale the double root's quadratic term is far below
+              // double precision, so alpha0 clamps to exactly 0 for virtually every
+              // sample and the old form is 0/0.
+              if (half_width == 1.0e-9) {
+                ++n_tight;
+                Real old_dfac = dalpha0/alpha0 - 6.0*dpsi0/psi0;
+                Real old_amp = alpha0*psi0_inv6*old_dfac;
+                if (!std::isfinite(old_amp)) { ++n_bad_old_tight; }
+              }
+            }
+          }
+        }
+      }
+      char msg[220];
+      std::snprintf(msg, sizeof(msg),
+                    "grad_ap6_0 finite for all %d samples near rrs=%.1f (widths 1e-9,1e-7)",
+                    n_checked, cfc::kTrumpetThroat);
+      Check(n_bad_new == 0, msg);
+      // At this scale the true alpha0^2 (~delta^2 ~ 1e-18) is far below the rounding
+      // error (~1e-16) in "1 - 2/rrs + 1.6875/rrs^4"'s catastrophic cancellation, so
+      // whether a given sample's alpha0^2 lands >=0 (old form finite-but-wrong) or
+      // <0/==0 (old form 0/0 = NaN) is effectively rounding noise -- not a fixed
+      // fraction, so the bound below is a loose sanity floor (measured ~74%), not a
+      // tight prediction.
+      std::snprintf(msg, sizeof(msg),
+                    "sanity: original buggy form is non-finite for a large fraction of "
+                    "the tight 1e-9 sweep (%d/%d) -- confirms the sweep exercises the "
+                    "double root, not just points comfortably away from it",
+                    n_bad_old_tight, n_tight);
+      Check(n_bad_old_tight > n_tight/4, msg);
+    }
   }
   Kokkos::finalize();
 

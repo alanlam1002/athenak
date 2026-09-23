@@ -283,17 +283,19 @@ void Coordinates::UpdateExcisionMasks() {
 //!
 //! Collective: uses MPI_Allreduce so every rank gets the same totals and can apply
 //! the same updated puncture mass.
+//!
+//! excised_tally is a plain per-rank host array (see its own doc comment in
+//! coordinates.hpp for why it is no longer a per-MeshBlock device array combined via
+//! atomics): reading and zeroing it here needs no device copy.
 
 void Coordinates::DrainExcisedTally(Real tot[5]) {
   for (int c = 0; c < 5; ++c) { tot[c] = 0.0; }
   if (!coord_data.bh_excise) { return; }
 
-  const int nmb = pmy_pack->nmb_thispack;
-  auto tally_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), excised_tally);
-  for (int m = 0; m < nmb; ++m) {
-    for (int c = 0; c < 5; ++c) { tot[c] += tally_h(m,c); }
+  for (int c = 0; c < 5; ++c) {
+    tot[c] = excised_tally[c];
+    excised_tally[c] = 0.0;
   }
-  Kokkos::deep_copy(excised_tally, 0.0);
 
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, tot, 5, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);

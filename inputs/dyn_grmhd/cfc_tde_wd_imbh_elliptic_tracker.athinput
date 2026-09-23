@@ -2,10 +2,13 @@
 # go-to-athenak-tde-read-memoized-dusk.md plan (2026-09-14) and DEVELOPMENT.md
 # items 38/39/42. Instead of a pre-drawn static disk covering the whole orbit,
 # this fixture uses refinement=adaptive with TDERefineTracker (dyngr_tov.cpp,
-# <problem> amr_condition=tde_track -- the same tracked two-box mechanism
-# validated for the radial fixture in cfc_tde_wd_imbh_amr.athinput/item 55)
-# recentering two fine boxes -- one on the fixed puncture, one on the star's
-# global density maximum -- every cycle. GENUINE, CURRENTLY-UNFIXED RISK:
+# <problem> amr_condition=tde_track -- the same mechanism validated for the
+# radial fixture in cfc_tde_wd_imbh_amr.athinput/item 55) recomputing, every
+# cycle, a fine box on the fixed puncture UNIONED with a relative-density
+# region (rho > amr_density_frac*rho_max) that covers the star/debris
+# wherever it is -- see TDERefineTracker's own doc comment for why this
+# replaced an earlier single tracked box on the density maximum.
+# GENUINE, CURRENTLY-UNFIXED RISK:
 # refinement=adaptive means real per-cycle regridding, and items 38/39/42
 # document a still-open MeshBlock::SetNeighbors registration bug under
 # irregular AMR topology. Item 55 confirmed this bug does NOT bite the radial
@@ -166,9 +169,9 @@ user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
 amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
                                 # fixture exists to test.
 amr_radius_bh   = 2.0          # fine box around the fixed puncture
-amr_radius_star = 2.0          # fine box around the star (density maximum)
+amr_density_frac = 1.0e-2      # debris region: rho > amr_density_frac*rho_max
 amr_level_bh    = 4            # matches this fixture's own level-4 resolution
-amr_level_star  = 4
+amr_level_debris = 4
 
 <output1>
 file_type   = hst      # History data dump -- mass/momentum/energy conservation check

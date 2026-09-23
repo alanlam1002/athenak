@@ -516,6 +516,24 @@ SolverResult PrimitiveSolver<EOSPolicy, ErrorPolicy>::ConToPrim(Real prim[NPRIM]
   Wv_u[1] = Wmux*(r_u[1] + rbmu*b_u[1]);
   Wv_u[2] = Wmux*(r_u[2] + rbmu*b_u[2]);
 
+  // Enforce the ceiling on the CONVERGED Lorentz factor W = D/rho. This is distinct
+  // from GetMaxVelocity/v_max above, which only bounds the root-find's internal
+  // velocity ESTIMATE inside RootFunction -- it has no effect on the value actually
+  // returned here, so without this clamp gamma_max silently does nothing on this
+  // path (measured: W ~ 1e7 at an unexcised puncture against gamma_max = 50,
+  // NANCASCADE_HANDOFF.md Sec 12.1/17.5/19.4/21.6). Same rescale as the
+  // ideal_grmhd.cpp/ideal_srmhd.cpp/ideal_grhyd.cpp/ideal_srhyd.cpp con2prim paths:
+  // it holds direction fixed and scales Wv_u down to exactly gamma_max, then
+  // cons_adjusted (below) resyncs the conserved variables to match.
+  Real gamma_max = eos.GetMaxLorentzFactor();
+  if (W > gamma_max) {
+    Real factor = sqrt((gamma_max*gamma_max - 1.0)/(W*W - 1.0));
+    Wv_u[0] *= factor;
+    Wv_u[1] *= factor;
+    Wv_u[2] *= factor;
+    solver_result.cons_adjusted = true;
+  }
+
   // Apply the flooring policy to the primitive variables.
   floored = eos.ApplyPrimitiveFloor(n, Wv_u, P, T, Y);
   solver_result.prim_floor = floored;

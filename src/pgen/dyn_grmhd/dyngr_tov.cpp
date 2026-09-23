@@ -52,13 +52,11 @@ void TDERefineTracker(MeshBlockPack *pmbp);
 namespace {
 // Parameters for TDERefineTracker (<problem> amr_condition = tde_track).
 struct TDERefineParams {
-  Real r0;          // star's initial x-position (<problem> star_center_x1),
-                    // used only to seed x1_star before the first reduction
   Real rad_bh;      // refinement radius around the (fixed) puncture at the origin
-  Real rad_star;    // refinement radius around the star
+  Real rho_frac;    // relative-density cut (rho > rho_frac*rho_max) for the debris
   Real rad_bh_fine; // inner, higher-level radius around the puncture (0 disables)
   int  lev_bh;      // target level within rad_bh
-  int  lev_star;    // target level within rad_star
+  int  lev_debris;  // target level for cells above the rho_frac*rho_max cut
   int  lev_bh_fine; // target level within rad_bh_fine (must exceed lev_bh)
 };
 TDERefineParams tde_ref;
@@ -498,12 +496,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Default "none" leaves user_ref_func null, so every existing fixture -- all of
   // which use static refinement -- is completely unaffected.
   if (pin->GetOrAddString("problem", "amr_condition", "none") == "tde_track") {
-    tde_ref.r0       = pin->GetOrAddReal("problem", "star_center_x1", 0.0);
     tde_ref.rad_bh      = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
-    tde_ref.rad_star    = pin->GetOrAddReal("problem", "amr_radius_star", 2.0);
+    // Default 1e-2: NANCASCADE_HANDOFF.md Sec 11.6 measured this as the largest
+    // fraction that stays affordable (~566 finest-level MeshBlocks in-plane, against
+    // ~1200-1275 total at the time). Smaller values (1e-3, 1e-4) refine more of the
+    // debris but were only measured without a level cap, which is not implemented
+    // here -- do not lower this without adding one.
+    tde_ref.rho_frac    = pin->GetOrAddReal("problem", "amr_density_frac", 1.0e-2);
     tde_ref.rad_bh_fine = pin->GetOrAddReal("problem", "amr_radius_bh_fine", 0.0);
     tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
-    tde_ref.lev_star    = pin->GetOrAddInteger("problem", "amr_level_star", 5);
+    tde_ref.lev_debris  = pin->GetOrAddInteger("problem", "amr_level_debris", 5);
     tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
     user_ref_func = &TDERefineTracker;
   }
@@ -687,23 +689,57 @@ void SetADMVariablesToTOV(MeshBlockPack *pmbp) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void TDERefineTracker(MeshBlockPack *pmbp)
-//! \brief Refinement criterion for the TDE setup: keep a fine box around the BH
-//! puncture (fixed at the origin) and a second one around the infalling star,
-//! instead of the single long static "tube" spanning the whole trajectory that
-//! wastes ~90% of its finest-level cost on space that is empty at any instant.
+//! \brief Refinement criterion for the TDE setup: a fine box fixed around the BH
+//! puncture (origin), UNIONED with a relative-density REGION criterion
+//! rho > amr_density_frac*rho_max that covers the disrupted star's debris.
 //!
-//! Follows dynbbh.cpp's RefineTracker (an analytic-trajectory user_ref_func that
-//! needs no z4c object) rather than z4c's CompactObjectTracker, which is
-//! unreachable here: <cfc> and <z4c> are mutually exclusive (meshblock_pack.cpp),
-//! so pz4c is always nullptr in a CFC run and ptracker never exists.
+//! Supersedes an earlier design that tracked a single box of radius amr_radius_star
+//! centered on the globally densest cell. That design is sound for an intact star,
+//! but degenerates once the star is disrupted (NANCASCADE_HANDOFF.md Sec 10.2,
+//! 17.5, 19.4, 21.6): post-disruption the density maximum jumps up to 6.1 code
+//! units between clumps agreeing to within 0.5% of each other, and at one point
+//! (t=436-437) it thrashed back and forth between two clumps ~4.6 apart in
+//! consecutive samples, fully de- and re-refining the tracked box each time. A
+//! FIXED density threshold does not fix this either: rho_max itself falls ~526x
+//! over a full run, so any fixed cut is either always-on or always-off depending
+//! on when you picked it -- hence RELATIVE to rho_max, recomputed every call.
 //!
-//! The star position comes from the analytic Schwarzschild radial free-fall from
-//! rest, r(t) = (r0/2)(1+cos eta) with t = sqrt(r0^3/2M)(eta+sin eta)/2, inverted
-//! by bisection. Checked against the production run: accurate to <0.19 code units
-//! through t~60, but it drifts badly later (-7 at t=180) because the collapsing
-//! lapse slows coordinate infall relative to the Schwarzschild areal result. So
-//! this is adequate for a short regrid-behaviour test, NOT for production -- a
-//! real run needs a genuine tracker (e.g. a density maximum).
+//! The region form is immune to which clump is nominally "the" maximum: every
+//! clump above the cut is refined simultaneously, which is the property that
+//! kills the thrashing (there is no longer a single tracked target to jump
+//! between). Measured (Sec 11.6, in-plane z=0 slice, single time) finest-level
+//! MeshBlock cost: amr_density_frac=1e-2 -> 566 (affordable, against ~1200-1275
+//! total at the time), 1e-3 -> 1020, 1e-4 -> 1410 (would need a level cap, not
+//! implemented here -- 1e-2 is the validated default, see its own doc comment
+//! above in ProblemGenerator::UserProblem).
+//!
+//! This is a fidelity fix for the debris' resolution, not a NaN-cascade fix: Sec
+//! 9.6 measured the disruption's growth rate as only weakly resolution-sensitive
+//! and NOT convergent (apparent order 0.02-0.24, differences growing under
+//! refinement). Treat it as what the debris deserves, not a cure for anything.
+//!
+//! IMPORTANT ASYMMETRY vs. the tracker this replaced: the old single-box design was
+//! naturally bounded no matter how bad the density field got (worst case, one small
+//! box in the wrong place). This region design is NOT bounded the same way -- if
+//! rho_max itself collapses toward the atmosphere floor (e.g. an unrelated NaN
+//! cascade corrupting the whole domain to a near-uniform floor value upstream of
+//! this function), "above rho_frac*rho_max" can become true almost everywhere
+//! simultaneously, producing a uniform mesh explosion instead of graceful failure.
+//! Measured smoke-test finding (2026-09-20): a pre-existing, unrelated cycle-1
+//! puncture NaN cascade (present even before this rewrite, at a 2-node/24-rank
+//! decomposition -- see NANCASCADE_FOLLOWUP_SESSION_PROMPT.md and the handoff doc's
+//! Sec 22 for the bisection) collapsed rho-max to ~1e-25 by cycle 1, and this
+//! criterion then asked for 1040 MeshBlocks/rank uniformly on all 24 ranks. Guarded
+//! below: a call whose rho_max drops by more than 1e6x from the last trustworthy
+//! value disables the density-region criterion for that call (BH box unaffected)
+//! rather than acting on a corrupted value.
+//!
+//! The BH-box half follows dynbbh.cpp's RefineTracker (an analytic-trajectory
+//! user_ref_func that needs no z4c object) rather than z4c's
+//! CompactObjectTracker, which is unreachable here: <cfc> and <z4c> are mutually
+//! exclusive (meshblock_pack.cpp), so pz4c is always nullptr in a CFC run and
+//! ptracker never exists. The per-MeshBlock density-maximum reduction follows
+//! refinement_criteria.cpp::CheckMinMax's TeamThreadRange pattern.
 //!
 //! Note this writes refine_flag through h_view, not d_view. dynbbh.cpp's version
 //! writes d_view from a host loop, which happens to work only because the two
@@ -717,61 +753,76 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   int nmb           = pmbp->nmb_thispack;
   int mbs           = pmesh->gids_eachrank[global_variable::my_rank];
 
-  // Locate the star as the global maximum of rest-mass density. (The earlier
-  // analytic Schwarzschild free-fall estimate was accurate to <0.19 through
-  // t~60 but drifts to ~-2.4 by t~145 -- larger than a sensible box half-width,
-  // so the box would slide off the star. Widening the box instead is not an
-  // option: radius 4 would cost ~4096 finest MeshBlocks, as much as the tube
-  // this design exists to replace.)
-  Real x1_star = tde_ref.r0, x2_star = 0.0, x3_star = 0.0;
-  {
-    auto &w0_    = pmbp->pmhd->w0;
-    auto &indcs  = pmesh->mb_indcs;
-    int is = indcs.is, js = indcs.js, ks = indcs.ks;
-    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
-    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
-    const int nmkji = nmb*nkji;
+  // Per-MeshBlock density maximum (this rank's blocks only -- no cross-rank
+  // communication needed here, unlike the single global rho_max below), and from
+  // it the global rho_max that sets the relative-density cut.
+  auto &w0_   = pmbp->pmhd->w0;
+  auto &indcs = pmesh->mb_indcs;
+  int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
 
-    using MaxLocR = Kokkos::MaxLoc<Real, int>;
-    typename MaxLocR::value_type mxl;
-    Kokkos::parallel_reduce("TDEStarLoc",
-      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-      KOKKOS_LAMBDA(const int &idx, typename MaxLocR::value_type &lmx) {
-        int m = idx/nkji;
-        int k = (idx - m*nkji)/nji;
-        int j = (idx - m*nkji - k*nji)/nx1;
-        int i = (idx - m*nkji - k*nji - j*nx1) + is;
-        k += ks; j += js;
-        Real d = w0_(m,IDN,k,j,i);
-        if (d > lmx.val) { lmx.val = d; lmx.loc = idx; }
-      }, MaxLocR(mxl));
+  DvceArray1D<Real> block_rho_max("tde_block_rho_max", nmb);
+  par_for_outer("TDEBlockRhoMax", DevExeSpace(), 0, 0, 0, nmb-1,
+  KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
+    Real team_max = std::numeric_limits<Real>::lowest();
+    Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+    [=](const int idx, Real &lmax) {
+      int k = (idx)/nji;
+      int j = (idx - k*nji)/nx1;
+      int i = (idx - k*nji - j*nx1) + is;
+      j += js; k += ks;
+      lmax = fmax(lmax, w0_(m,IDN,k,j,i));
+    }, Kokkos::Max<Real>(team_max));
+    block_rho_max(m) = team_max;
+  });
 
-    // Convert this rank's winning flat index back to coordinates.
-    int m = mxl.loc/nkji;
-    int k = (mxl.loc - m*nkji)/nji;
-    int j = (mxl.loc - m*nkji - k*nji)/nx1;
-    int i = (mxl.loc - m*nkji - k*nji - j*nx1);
-    Real xl = CellCenterX(i, nx1, size.h_view(m).x1min, size.h_view(m).x1max);
-    Real yl = CellCenterX(j, nx2, size.h_view(m).x2min, size.h_view(m).x2max);
-    Real zl = CellCenterX(k, nx3, size.h_view(m).x3min, size.h_view(m).x3max);
+  Real rho_max = std::numeric_limits<Real>::lowest();
+  Kokkos::parallel_reduce("TDERhoMax", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb),
+  KOKKOS_LAMBDA(const int &m, Real &lmx) {
+    lmx = fmax(lmx, block_rho_max(m));
+  }, Kokkos::Max<Real>(rho_max));
 
 #if MPI_PARALLEL_ENABLED
-    // Pick the globally-densest cell, then broadcast its position from the
-    // owning rank. MPI_MAXLOC on {value, rank} identifies the owner.
-    struct { double val; int rank; } lin, gout;
-    lin.val = static_cast<double>(mxl.val);
-    lin.rank = global_variable::my_rank;
-    MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
-    Real pos[3] = {xl, yl, zl};
-    MPI_Bcast(pos, 3, MPI_ATHENA_REAL, gout.rank, MPI_COMM_WORLD);
-    xl = pos[0]; yl = pos[1]; zl = pos[2];
+  MPI_Allreduce(MPI_IN_PLACE, &rho_max, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
-    x1_star = xl; x2_star = yl; x3_star = zl;
+
+  // Guard against a collapsed/corrupted rho_max feeding the relative-density
+  // criterion. A genuine disruption changes the GLOBAL density max gradually --
+  // bounded by the light-crossing time between successive calls, which happen
+  // every cycle here -- so a drop of several orders of magnitude in a SINGLE call
+  // means the density field itself has been corrupted upstream (e.g. by an
+  // unrelated NaN cascade collapsing everything to the atmosphere floor), not real
+  // debris physics. Trusting a corrupted, near-uniform-floor rho_max is dangerous
+  // specifically for this REGION criterion (unlike the single-target tracker this
+  // replaced): once every cell sits within noise of the same floor value, "above
+  // rho_frac*rho_max" becomes true almost everywhere simultaneously, producing a
+  // uniform, all-ranks mesh explosion rather than the old design's bounded single
+  // box. When the guard trips, fall back to the BH-only box for this call (same as
+  // rho_max never having been trustworthy) rather than act on it. 1e-6 is a huge
+  // margin: even a violent shock does not plausibly drop the surviving global
+  // density maximum by six orders of magnitude in one cycle.
+  static Real last_good_rho_max = -1.0;
+  static bool warned_bad_rho_max = false;
+  bool rho_max_ok = std::isfinite(rho_max) && rho_max > 0.0 &&
+      (last_good_rho_max < 0.0 || rho_max > 1.0e-6*last_good_rho_max);
+  if (rho_max_ok) {
+    last_good_rho_max = rho_max;
+  } else if (!warned_bad_rho_max && global_variable::my_rank == 0) {
+    std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "TDERefineTracker: rho_max=" << rho_max << " looks corrupted (last "
+              << "trustworthy value was " << last_good_rho_max << "). Disabling the "
+              << "density-region refinement criterion until rho_max recovers; the "
+              << "fixed puncture box is unaffected." << std::endl;
+    warned_bad_rho_max = true;
   }
 
+  auto block_rho_max_h = Kokkos::create_mirror_view(block_rho_max);
+  Kokkos::deep_copy(block_rho_max_h, block_rho_max);
+
   const Real r2_bh      = SQR(tde_ref.rad_bh);
-  const Real r2_star    = SQR(tde_ref.rad_star);
   const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
+  const Real rho_cut    = tde_ref.rho_frac*rho_max;
 
   for (int m = 0; m < nmb; ++m) {
     Real &x1min = size.h_view(m).x1min;
@@ -781,8 +832,8 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     Real &x3min = size.h_view(m).x3min;
     Real &x3max = size.h_view(m).x3max;
 
-    // Distance from each target to the closest point of this MeshBlock's AABB
-    // (0 when the target is inside it), matching z4c_amr.cpp's RefineTracker.
+    // Distance from the puncture to the closest point of this MeshBlock's AABB
+    // (0 when the origin is inside it), matching z4c_amr.cpp's RefineTracker.
     auto dist2_to_block = [&](Real px, Real py, Real pz) -> Real {
       Real cx = std::fmax(x1min, std::fmin(px, x1max));
       Real cy = std::fmax(x2min, std::fmin(py, x2max));
@@ -793,17 +844,19 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     // Per-target requested levels, compared against this block's CURRENT level
     // (the z4c_amr.cpp:84 pattern). A single "refine or derefine" flag is not
     // enough once different targets want different depths: the puncture needs a
-    // deeper level than the star, to widen the gap between the excision surface
-    // and the horizon, while refining the STAR that deep would halve dt (the
-    // star sits where alpha~1, so it is what sets the global timestep).
+    // deeper level than the debris, to widen the gap between the excision
+    // surface and the horizon, while refining the DEBRIS that deep would halve
+    // dt (the debris sits where alpha~1, so it is what sets the global
+    // timestep).
     int level = pmesh->lloc_eachmb[m + mbs].level - pmesh->root_level;
     Real d2_bh = dist2_to_block(0.0, 0.0, 0.0);
-    Real d2_st = dist2_to_block(x1_star, x2_star, x3_star);
 
     int want = -1;
     if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }
     if (r2_bh_fine > 0.0 && d2_bh < r2_bh_fine) { want = std::max(want, tde_ref.lev_bh_fine); }
-    if (d2_st < r2_star)                        { want = std::max(want, tde_ref.lev_star); }
+    if (rho_max_ok && block_rho_max_h(m) > rho_cut) {
+      want = std::max(want, tde_ref.lev_debris);
+    }
 
     int flag;
     if (want < 0)             { flag = -1; }        // outside every target

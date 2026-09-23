@@ -69,8 +69,8 @@ class Coordinates {
   DvceArray4D<bool> excision_floor;  // cell-centered mask for C2P flooring about horizon
   DvceArray4D<bool> excision_flux;   // cell-centered mask for FOFC about horizon
 
-  // Running tally of what excision has REMOVED from the grid, per MeshBlock:
-  // column 0 = energy (ADM-weighted, see below), columns 1-3 = momentum P_i.
+  // Running tally of what excision has REMOVED from the grid, THIS RANK, since the
+  // last drain: index 0 = energy (ADM-weighted, see below), 1-3 = momentum P_i.
   // Accumulated by DynGRMHDPS::ConsToPrim at the reset site and drained once per
   // cycle.  This exists because CFC recovers the metric from ELLIPTIC constraints
   // sourced by the instantaneous matter distribution -- it has no memory -- so
@@ -80,12 +80,27 @@ class Coordinates {
   // weighted by 1/psi so that it is the matter's ADM-mass contribution
   // int(psi^5 E)dV, NOT the raw conserved energy int(psi^6 E)dV -- see
   // Coordinates::DrainExcisedTally's comment for the derivation.
-  // column 4 additionally banks the RAW conserved energy int(psi^6 E)dV (no 1/psi).
+  // index 4 additionally banks the RAW conserved energy int(psi^6 E)dV (no 1/psi).
   // It is never fed to the puncture; it exists so the accounting can be validated
   // like-for-like against the history file's own conserved sums, and so the ratio
   // col0/col4 = <1/psi> reports the effective psi at which matter is being absorbed
   // -- i.e. exactly the size of the psi^5-vs-psi^6 weighting difference.
-  DvceArray2D<Real> excised_tally;
+  //
+  // Plain host scalars, NOT a per-MeshBlock device array: the per-cell contributions
+  // are combined by DynGRMHDPS::ConsToPrim's own Kokkos::parallel_reduce (deterministic
+  // by construction -- Kokkos's reduction tree shape is fixed by the kernel launch
+  // configuration, not by runtime thread-scheduling order) into five reduction
+  // results, which this rank's single controlling host thread then adds in here with
+  // ordinary (non-atomic) `+=`. This REPLACES an earlier version that scattered
+  // per-cell contributions into a per-MeshBlock DvceArray2D via Kokkos::atomic_add:
+  // atomic float addition is exact for each individual add, but the ORDER in which
+  // concurrent device threads perform theirs is not reproducible run-to-run, and
+  // float addition is not associative, so the accumulated total differed slightly
+  // between bitwise-identical runs (measured: first-accretion dM_adm 5.6429e-03 vs
+  // 5.6735e-03, diverging to a 335-cycle spread in failure onset --
+  // NANCASCADE_HANDOFF.md Sec 14.6/15.2/17.5/19.4/21.6). Never use onset cycle as an
+  // A/B metric on the excision path regardless; compare signatures (Sec 17.2).
+  Real excised_tally[5];
 
   // functions
   void CoordSrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos, const Real dt,

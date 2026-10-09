@@ -108,7 +108,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tab = new kstab::Table(tabfile);
     if (global_variable::my_rank == 0) {
       std::cout << "z4c_kerr_trumpet: KSTAB table " << tabfile << ", a = " << tab->a
-                << ", r_min = " << tab->rmin << std::endl;
+                << ", r_min = " << tab->rmin << ", azimuth " << tab->azimuth
+                << (tab->azimuth == "ingoing" ? "" : " (c " + std::to_string(tab->azimuth_c) + ")") << std::endl;
     }
   } else if (global_variable::my_rank == 0) {
     std::cout << "z4c_kerr_trumpet: analytic Schwarzschild trumpet (Eqs. 65-66)"

@@ -3,17 +3,17 @@
  * kstab.hpp -- header-only reader/evaluator for KSTAB v1 tables (analysis_kslice/KSTAB_v1.md, section 5;
  * kslice KC-8). Kerr's stationary maximal trumpet slice as 3+1 data in Cartesian components; M = 1.
  *
+ * Vendored verbatim from alanlam1002/spinning_trumpet, kslice/kstab/kstab.hpp (KC-8 a300e35; KC-14 adds the
+ * amendment-A3 "azimuth" header line), for the z4c_kerr_trumpet problem generator (KC-9, KC-14).
+ *
  * Coordinates: (x, y, z) = r_f (sin th cos phi, sin th sin phi, cos th), (r_f, th) the isothermal coordinates,
- * phi the ingoing azimuth; spin along +z.  Fields (index order of KSTAB::eval):
+ * phi the azimuth (ingoing phi~, or A3 Gamt^phi = 0: the "azimuth" header line); spin along +z.  Fields (index order of KSTAB::eval):
  *   0..5  gxx gxy gxz gyy gyz gzz      6..11 Kxx Kxy Kxz Kyy Kyz Kzz      12 alp      13..15 betax betay betaz
  * On the half-plane phi = 0 each field is sum_n T_n(x) sum_k A_{n,k} cos k th (even family) or B_{n,k} sin k th
  * (odd family: gxz gyz Kxz Kyz betax betay), per radial segment ("log": x = 2 (ln r - ln lo)/(ln hi - ln lo) - 1;
  * "inv": x = 2 r_1/r_f - 1).  Coefficients absent from the file are zero.  At azimuth phi: tensors
  * R_z(phi) T R_z(phi)^T, vectors R_z(phi) v, scalars unchanged.  r_f < r_min: f(r_min, th) (r_f/r_min)^p per
  * family (asymp line), with a warning on the first use (counted in fallback_count()).
- *
- * Vendored verbatim from alanlam1002/spinning_trumpet, kslice/kstab/kstab.hpp at a300e35 (KC-8),
- * for the z4c_kerr_trumpet problem generator (KC-9).
  *
  * Usage:  kstab::Table t("kstab_a0.60.txt");  double f[16];  t.eval(x, y, z, f);
  * No dependencies beyond the C++17 standard library.  Not thread-safe for the fallback counter only.
@@ -51,6 +51,8 @@ class Table
     double rmin = 0, r1 = 0;
     int Kmax = 0;
     std::vector<Segment> seg;
+    std::string azimuth = "ingoing"; // amendment A3: "gamt_phi0" when the header says so (KC-14)
+    double azimuth_c = 0;            // the A3 winding c
 
     explicit Table(const std::string& path)
     {
@@ -75,6 +77,9 @@ class Table
             } else if (tag == "asymp") {
                 std::string k;
                 ss >> k >> p[0] >> k >> p[1] >> k >> p[2] >> k >> p[3];
+            } else if (tag == "azimuth") { // amendment A3: azimuth <name> c <c>
+                std::string k;
+                ss >> azimuth >> k >> azimuth_c;
             } else if (tag == "rmin") {
                 std::string k;
                 ss >> rmin >> k >> r1 >> k >> Kmax >> k >> nseg;

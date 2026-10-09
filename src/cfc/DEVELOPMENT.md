@@ -9783,3 +9783,10 @@ t = 0.4; `athenak_run/cfc/dual_energy_tests/`):
     separately, so P = K rho^gamma is not exactly uniform at a contact.
 
   This is small against the 10-60% K errors being fixed, but it is a real trade.
+
+**E1 option** (research R-028 E1, a test; off by default). `<mhd>
+atmosphere_frame_velocity = true` gives floored cells (prim or cons floor) the Eulerian
+velocity xidot (`padm->frame_vel_u`) instead of 0, so the atmosphere is at rest on a
+comoving grid. The cons are re-derived. Purpose: to measure whether atmosphere streaming
+at −xidot sets dt in the comoving gauge (G2: 1,258 cycles vs G0's 179 to t = 100). It is
+unphysical near a BH (infall), so it is not for production as is.

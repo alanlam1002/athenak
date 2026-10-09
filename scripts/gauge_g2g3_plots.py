@@ -39,12 +39,13 @@ ISO = T.ISO
 T.RUNS.update({
     'G0':  (f'{RUN}/wd_gauge_G0_L4_si1', ISO, None, '#000000', '-'),
     'G2':  (f'{RUN}/wd_gauge_G2_L4_si1', ISO, None, '#d95f02', '-'),
+    'G2c': (f'{RUN}/wd_gauge_G2c_L4_si1', ISO, None, '#a6761d', '--'),
     'G3':  (f'{RUN}/wd_gauge_G3_L4_si1', ISO, None, '#7570b3', '-'),
     'G3b': (f'{RUN}/wd_gauge_G3b_L4_si1', ISO, None, '#e7298a', '--'),
 })
-LABELS = ['G0', 'iso_static', 'iso_boost', 'G2', 'G3', 'G3b']
+LABELS = ['G0', 'iso_static', 'iso_boost', 'G2', 'G2c', 'G3', 'G3b']
 NAMES = {'G0': 'G0 static (box ±32)', 'iso_static': 'old static (box ±16, t≤40)', 'iso_boost': 'boosted (v=V0, Xdot=0)',
-         'G2': 'G2 (v=V0, Xdot=V0)', 'G3': 'G3 (v=0, Xdot=-V0)', 'G3b': 'G3b (v=0, Xdot=-at)'}
+         'G2': 'G2 (v=V0, Xdot=V0)', 'G2c': 'G2c (contracted ID, Xdot=V0)', 'G3': 'G3 (v=0, Xdot=-V0)', 'G3b': 'G3b (v=0, Xdot=-at)'}
 
 
 def style(lab):

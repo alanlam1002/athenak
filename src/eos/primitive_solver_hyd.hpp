@@ -144,6 +144,10 @@ class PrimitiveSolverHydro {
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
   Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
+  // <mhd> atmosphere_frame_velocity (default false; research R-028 E1, a test): give
+  // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
+  // instead of v = 0, so the atmosphere is at rest on a comoving grid.
+  bool atm_frame_vel = false;
 
   //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
   //! D^2 h^2 (W^2 - 1) = S^2 with rho = D/W, h = 1 + g/(g-1) K rho^(g-1) for W by
@@ -167,6 +171,7 @@ class PrimitiveSolverHydro {
 //        pmy_pack(pp), ps{&eos} {
         pmy_pack(pp), nerrs(0) {
     SetPolicyParams(block, pin);
+    atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
     de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
     if (de_on) {
       int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
@@ -478,6 +483,9 @@ class PrimitiveSolverHydro {
       });
     }
     auto &de_shock_ = de_shock;
+    const bool atm_fv_ = atm_frame_vel && !floors_only;
+    const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
+    const Real fv2 = pmy_pack->padm->frame_vel_u[2];
 
     int count_errs=0;
     // Excised-mass tally totals for THIS call, reduced deterministically alongside
@@ -669,8 +677,19 @@ class PrimitiveSolverHydro {
                    nerrs_ + sumerrs,rank);
           }
         }
-        // ---- dual energy (see de_on): choose the energy or the entropy solution.
+        // ---- comoving atmosphere (see atm_frame_vel): floored cells move with the frame
         bool de_write = false;
+        if (atm_fv_ && (result.prim_floor || result.cons_floor) &&
+            (fv0 != 0.0 || fv1 != 0.0 || fv2 != 0.0)) {
+          Real vsq = g3d[S11]*fv0*fv0 + g3d[S22]*fv1*fv1 + g3d[S33]*fv2*fv2
+                   + 2.0*(g3d[S12]*fv0*fv1 + g3d[S13]*fv0*fv2 + g3d[S23]*fv1*fv2);
+          Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.99));
+          prim_pt[PVX] = wl*fv0; prim_pt[PVY] = wl*fv1; prim_pt[PVZ] = wl*fv2;
+          ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
+          de_write = true;
+        }
+
+        // ---- dual energy (see de_on): choose the energy or the entropy solution.
         if (de_on_) {
           const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
                                  k >= ks && k <= ke_);

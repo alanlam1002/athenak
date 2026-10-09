@@ -9504,3 +9504,45 @@ Knob and topic branch discarded; no source change kept.
 
 (Ported from `origin/cfc`, where it is item 63: commits `dd5b7d1c` + `15538dfe`.
 Renumbered here because `proj/tde` already uses 63-65.)
+
+## 67. Item 60's "two-tier InitializeOctets hang" re-examined: not the fleaf loop; likely memory exhaustion
+
+Status: **[open, leading hypothesis memory]** (2026-10-09). No source change.
+
+- **The `fleaf` scan is not the cause.**
+  - **Setup:** a standalone replica of `InitializeOctets`' octet build and its
+    O(n_l·n_{l+1}) `fleaf` scan (`multigrid_driver.cpp:292-385`), run on an Arm-B-like
+    static block list (46,716 L4+L5 blocks).
+  - **Measured:**
+    - octets per level: 72 / 200 / 648 / 4,624 / 3,132;
+    - build: 8 ms;
+    - fleaf scan: 9 ms, 1.5e7 comparisons.
+  - Octets are 2x2x2 groups of *MeshBlocks*, so the counts stay at ~1e3-1e4. The loop
+    cannot produce a > 20 min freeze.
+- **Item 60's arms all ran on 1 CPU node with 208 ranks, on the old image.** Item 60
+  itself later records that this configuration hung with the unmodified parent fixture
+  too.
+- **Reproduction, debug job 8917163:** 2 nodes x 12 PVC tiles, production binary md5
+  `987060baf1d4`, `nlim = 0`. Run dir:
+  `/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc/t15_twotier_repro/`.
+  - **Arm A** (single-tier, 21,288 blocks, 887/rank): mesh, all four multigrid
+    setups and `InitializeMetric` converged; cycle 0 reached in **23 s**.
+  - **Arm B** (two-tier, 48,560 blocks, 2,023/rank): **out of device memory**
+    within 23 s, right after the multigrid objects were constructed. The error was
+    `SYCLDeviceUSM ... failed to allocate 151 MiB` on every rank.
+  - So this job did not reach `InitializeOctets` for Arm B. It neither confirms nor
+    refutes a hang there.
+- **Memory bound (measured lower bound):** > 64 GB / 2,023 ≈ **32 MB per 16^3 block**
+  with this physics (CFC + 4 multigrid solvers + dyn_grmhd). That puts Arm B at
+  **> 1.5 TB**, against ~1.1 TB DDR+HBM on one CPU node, while Arm A (~0.7 TB at
+  the same rate) fits. That matches item 60's pattern exactly: A runs, B freezes at
+  the same point it dies here, and C (B with an 8-block patch) runs.
+  **Leading hypothesis: item 60's "hang" was host memory exhaustion on a single
+  node**, with the freeze coming from page reclaim/overcommit rather than an infinite
+  loop. Not yet confirmed.
+- **Decisive test (not yet run):** Arm B on ≥ 6 GPU nodes (≤ ~700 blocks/rank, below
+  the 887 Arm A used), `nlim = 0`, ~5 min, which needs `debug-scaling` or `capacity`.
+  If it reaches cycle 0, two-tier static refinement is fine and item 60's
+  "single-tier only" rule can be retired.
+- **Planning number in the meantime:** keep ≲ 900 blocks of 16^3 per 64 GB PVC tile
+  for CFC-TDE decks.

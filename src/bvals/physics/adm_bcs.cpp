@@ -81,8 +81,8 @@ ADMChannelInfo GetADMChannelInfo(int v, Real gx0, Real gx1, Real gx2) {
   } else if (v == ADM::I_ADM_ALPHA) {
     return {0, -1, -1, 1.0, 1};
   } else {                                            // beta_u: BETAX..BETAZ
-    // A uniform gauge shift (adm.gauge_xdot, comoving gauge) is beta's asymptotic
-    // value: the falloff and reflection act on beta - Xdot, so a uniform shift
+    // A uniform gauge shift (adm.frame_vel_u, comoving gauge) is beta's asymptotic
+    // value: the falloff and reflection act on beta - xidot, so a uniform shift
     // passes through the boundary unchanged. Zero for every non-gauge run.
     int row = v - ADM::I_ADM_BETAX;
     Real flat = (row == 0) ? gx0 : ((row == 1) ? gx1 : gx2);
@@ -117,9 +117,9 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
   int nmb = ppack->nmb_thispack;
   // uniform gauge shift (comoving gauge): beta_u's asymptotic value, see
   // GetADMChannelInfo. Captured by value; zero unless CFC's gauge is active.
-  const Real gx0 = ppack->padm->gauge_xdot[0];
-  const Real gx1 = ppack->padm->gauge_xdot[1];
-  const Real gx2 = ppack->padm->gauge_xdot[2];
+  const Real gx0 = ppack->padm->frame_vel_u[0];
+  const Real gx1 = ppack->padm->frame_vel_u[1];
+  const Real gx2 = ppack->padm->frame_vel_u[2];
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
     par_for("adm_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1), 0, (n2-1),

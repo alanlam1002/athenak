@@ -16,11 +16,12 @@ Measured on the elliptic production run: E, L equal to the design values to 1e-4
 t=0, then L decays ~0.015-0.02%/M (4.9% by t=250) -- the reason its achieved periapsis was
 R_areal=6.8, not the designed 10.0. Use this to check any new orbit before trusting it.
 
-Comoving gauge (<cfc> gauge_xdot*/gauge_accel*, src/cfc/DEVELOPMENT.md item 68): the
-dumps are in grid coordinates x' = x - X(t) and the dumped shift is beta' = beta + Xdot.
-If BASENAME.user.hst carries gauge-Xdot*/gauge-X* columns, both are mapped back to the
-BH frame before E and L are formed: x = x' + X(t), beta = beta' - Xdot, i.e.
-u_t(BH) = u_t' - u_i Xdot^i. Without those columns nothing changes.
+Comoving gauge (<cfc> frame_vel*/frame_accel*, src/cfc/DEVELOPMENT.md item 68): the
+dumps are in grid coordinates x' = x - xi(t) and the dumped shift is beta' = beta + xidot.
+If BASENAME.user.hst carries frame_vel_x*/frame_disp_x* columns (gauge-Xdot*/gauge-X* in
+runs made with the first build, md5 afdeffd9), both are mapped back to the
+BH frame before E and L are formed: x = x' + xi(t), beta = beta' - xidot, i.e.
+u_t(BH) = u_t' - u_i xidot^i. Without those columns nothing changes.
 
 Needs numpy+scipy (e.g. /opt/aurora/default/frameworks/*/bin/python3). h5py is stubbed:
 bin_convert only needs it for the athdf writer.
@@ -45,7 +46,7 @@ import tde_elliptical_orbit_ic as ic     # noqa: E402
 
 
 def gauge_from_hst(outdir, basename):
-    """(t -> Xdot[3], t -> X[3]) from the user history file's gauge columns, or None."""
+    """(t -> xidot[3], t -> xi[3]) from the user history file's gauge columns, or None."""
     f = os.path.join(outdir, f'{basename}.user.hst')
     if not os.path.exists(f):
         return None
@@ -57,8 +58,11 @@ def gauge_from_hst(outdir, basename):
                     i, name = tok.split('=', 1)
                     labels[name] = int(i.strip('[]')) - 1
             break
-    need = [f'gauge-Xdot{a}' for a in (1, 2, 3)] + [f'gauge-X{a}' for a in (1, 2, 3)]
-    if not all(n in labels for n in need):
+    for need in ([f'frame_vel_x{a}' for a in (1, 2, 3)] + [f'frame_disp_x{a}' for a in (1, 2, 3)],
+                 [f'gauge-Xdot{a}' for a in (1, 2, 3)] + [f'gauge-X{a}' for a in (1, 2, 3)]):
+        if all(n in labels for n in need):
+            break
+    else:
         return None
     h = np.loadtxt(f, comments='#', ndmin=2)
     t = h[:, labels['time']]

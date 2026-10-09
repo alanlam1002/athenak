@@ -3,19 +3,19 @@
 // Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
-//! \file dyngr_gauge_shift.cpp
+//! \file dyngr_frame_shift.cpp
 //! \brief Unit tests for the comoving (uniform-shift) gauge in dyn_grmhd: flat space,
 //! alpha = 1, gamma_ij = delta_ij, K_ij = 0, and a spatially uniform shift
-//! beta^i = <problem> gauge_xdot1/2/3. Under x' = x - X(t) only the shift changes,
-//! beta -> beta + Xdot, so every run here is the same physics as gauge_xdot = 0 seen
-//! from a translating grid: the coordinate velocity is V = v - Xdot
+//! beta^i = <problem> frame_vel1/2/3. Under x' = x - xi(t) only the shift changes,
+//! beta -> beta + xidot, so every run here is the same physics as frame_vel = 0 seen
+//! from a translating grid: the coordinate velocity is V = v - xidot
 //! (src/cfc/DEVELOPMENT.md item 68). Periodic boxes. <problem> type:
 //!   uniform      (T0a) uniform rho0, p0, Eulerian v: must stay uniform to round-off;
 //!   entropy_wave (T0b) rho = rho0 (1 + amp sin(2 pi x1/L1)), uniform p0 and v along x1:
-//!                an exact solution advected at V1 = v1 - Xdot1;
+//!                an exact solution advected at V1 = v1 - xidot1;
 //!   field_loop   (T0c) 2D, A_z = b0 (R - r) for r < R (Gardiner & Stone 2005), uniform
 //!                rho0, p0, v: B advected at V; div B must stay at round-off (CT).
-//! The pgen writes no error file: compare outputs offline (scripts/gauge_shift_tests.py).
+//! The pgen writes no error file: compare outputs offline (scripts/frame_shift_tests.py).
 
 #include <cmath>
 #include <iostream>
@@ -38,22 +38,22 @@ void SetADMVariablesFlatShift(MeshBlockPack *pmbp);
 }  // namespace
 
 //----------------------------------------------------------------------------------------
-//! \fn ProblemGenerator::DynGRGaugeShift()
+//! \fn ProblemGenerator::DynGRFrameShift()
 
-void ProblemGenerator::DynGRGaugeShift(ParameterInput *pin, const bool restart) {
+void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   for (int a = 0; a < 3; ++a) {
-    gshift[a] = pin->GetOrAddReal("problem", "gauge_xdot" + std::to_string(a + 1), 0.0);
+    gshift[a] = pin->GetOrAddReal("problem", "frame_vel" + std::to_string(a + 1), 0.0);
   }
   if (pmbp->padm == nullptr || pmbp->pmhd == nullptr ||
       !pmbp->pcoord->is_dynamical_relativistic) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "dyngr_gauge_shift needs <mhd> with dynamical GR (<adm> block)"
+              << "dyngr_frame_shift needs <mhd> with dynamical GR (<adm> block)"
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
   pmbp->padm->SetADMVariables = &SetADMVariablesFlatShift;
-  for (int a = 0; a < 3; ++a) { pmbp->padm->gauge_xdot[a] = gshift[a]; }
+  for (int a = 0; a < 3; ++a) { pmbp->padm->frame_vel_u[a] = gshift[a]; }
   if (restart) return;
 
   std::string type = pin->GetString("problem", "type");

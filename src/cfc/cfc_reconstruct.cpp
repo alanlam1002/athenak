@@ -203,14 +203,14 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
-                          Real alpha_floor, const Real gauge_xdot[3]) {
+                          Real alpha_floor, const Real frame_vel_u[3]) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
   int nmb = pmbp->nmb_thispack;
   auto &adm = pmbp->padm->adm;
-  const Real gx0 = gauge_xdot[0], gx1 = gauge_xdot[1], gx2 = gauge_xdot[2];
+  const Real gx0 = frame_vel_u[0], gx1 = frame_vel_u[1], gx2 = frame_vel_u[2];
   const bool gauge = (gx0 != 0.0) || (gx1 != 0.0) || (gx2 != 0.0);
 
   par_for("cfc_assemble_lapse_shift_k", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,

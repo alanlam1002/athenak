@@ -296,17 +296,17 @@ class CFC {
   // from ~/athenak_cfc; see DEVELOPMENT.md item 6.
   int cfc_solve_interval_;
 
-  // Comoving gauge (DEVELOPMENT.md item 68): x' = x - X(t) with the slicing
-  // unchanged, i.e. a spatially uniform Xdot^i(t) added to the shift that the fluid
-  // sees (adm.beta_u), never to the solved beta_u. <cfc> gauge_xdot1/2/3 and
-  // gauge_accel1/2/3 (default 0): Xdot(t) = gauge_xdot + gauge_accel*t, so
-  // X(t) = gauge_xdot*t + gauge_accel*t^2/2 (X(0) = 0). The value currently inside
-  // adm.beta_u is padm->gauge_xdot.
-  Real gauge_xdot0_[3], gauge_accel_[3];
-  bool gauge_enabled_;
-  bool gauge_assembled_;   // padm->gauge_xdot reflects adm.beta_u (false until the
+  // Comoving gauge (DEVELOPMENT.md item 68): x' = x - xi(t) with the slicing
+  // unchanged, i.e. a spatially uniform xidot^i(t) added to the shift that the fluid
+  // sees (adm.beta_u), never to the solved beta_u. <cfc> frame_vel1/2/3 and
+  // frame_accel1/2/3 (default 0): xidot(t) = frame_vel + frame_accel*t, so
+  // xi(t) = frame_vel*t + frame_accel*t^2/2 (xi(0) = 0). The value currently inside
+  // adm.beta_u is padm->frame_vel_u.
+  Real frame_vel0_[3], frame_accel_[3];
+  bool frame_enabled_;
+  bool frame_assembled_;   // padm->frame_vel_u reflects adm.beta_u (false until the
                            // first assembly; on a restart the rst's adm.beta_u is
-                           // taken to hold Xdot(time), see ApplyGaugeShiftUpdate)
+                           // taken to hold xidot(time), see ApplyFrameShiftUpdate)
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp differentiates (mirrors z4c::Z4c::pbval_u/
@@ -537,17 +537,17 @@ class CFC {
   // (InitializeMetric/ReinitializeMetricForAMR) is pmesh->time.
   Real StageTime(Driver *pdriver, int stage) const;
   // Non-solve stages (solve_interval > 1): shift adm.beta_u (all cells, ghosts
-  // included) by Xdot(time) - padm->gauge_xdot, so the gauge part is current every
+  // included) by xidot(time) - padm->frame_vel_u, so the gauge part is current every
   // stage even while the solved part is reused.
-  void ApplyGaugeShiftUpdate(Real time);
+  void ApplyFrameShiftUpdate(Real time);
 
  public:
-  bool GaugeEnabled() const { return gauge_enabled_; }
-  void GaugeXdot(Real t, Real xd[3]) const {
-    for (int a = 0; a < 3; ++a) xd[a] = gauge_xdot0_[a] + gauge_accel_[a]*t;
+  bool FrameShiftEnabled() const { return frame_enabled_; }
+  void FrameVel(Real t, Real xd[3]) const {
+    for (int a = 0; a < 3; ++a) xd[a] = frame_vel0_[a] + frame_accel_[a]*t;
   }
-  void GaugeX(Real t, Real x[3]) const {
-    for (int a = 0; a < 3; ++a) x[a] = gauge_xdot0_[a]*t + 0.5*gauge_accel_[a]*t*t;
+  void FrameDisp(Real t, Real x[3]) const {
+    for (int a = 0; a < 3; ++a) x[a] = frame_vel0_[a]*t + 0.5*frame_accel_[a]*t*t;
   }
 
  private:

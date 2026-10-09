@@ -109,7 +109,7 @@ void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta
 //! discretisation error can legitimately undershoot to a small negative value
 //! near the puncture (DEVELOPMENT.md item 59) -- not something the fluid update
 //! should ever see. Default 0.0 is a bit-for-bit no-op; set only for puncture runs.
-//! gauge_xdot: uniform comoving-gauge shift Xdot^i(t) added to adm.beta_u only (the
+//! frame_vel_u: uniform comoving-gauge shift xidot^i(t) added to adm.beta_u only (the
 //! solved beta_u is untouched, so the next solve's guess/BCs are unaffected). A
 //! uniform translation is a flat conformal Killing vector, so it is in the kernel of
 //! the xCFC shift operator and adds no source terms (DEVELOPMENT.md item 68). All
@@ -121,7 +121,7 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
                           const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
-                          Real alpha_floor, const Real gauge_xdot[3]);
+                          Real alpha_floor, const Real frame_vel_u[3]);
 
 }  // namespace cfc
 

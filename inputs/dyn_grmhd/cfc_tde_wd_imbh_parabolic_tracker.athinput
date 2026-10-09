@@ -1,0 +1,229 @@
+# PARABOLIC-ORBIT variant of cfc_tde_wd_imbh_elliptic_tracker.athinput.
+# Same WD (TOV rhoc/kappa/Gamma=5/3, M_*=7.47e-5 = 0.75 Msun), same IMBH
+# (puncture_mass=1.0 = 1e4 Msun), same release point (30,0,0) = 1.83 r_t, same
+# DESIGN periapsis R_areal=10.0 r_g (penetration beta = r_t/r_p = 1.64), same mesh
+# and region-tracker AMR. ONLY the orbit changes: Killing energy E=1 (marginally
+# bound) instead of the elliptic E=0.976865.
+#
+# ORBIT. scripts/tde_parabolic_orbit_ic.py. For E=1 the Schwarzschild turning-point
+# condition gives L^2 = 2 r_p^2/(r_p-2) exactly, so L=5 (elliptic: 4.391). Released at
+# finite x0 the star is already falling in, so unlike the elliptic case the velocity
+# has a RADIAL part and the shift enters the energy, E = alpha W - beta^i p_i
+# (beta^i p_i = -2.78e-4 here; identically zero in the elliptic case). Stage A
+# (closed form) and Stage B (geodesic integrated in the real trumpet gauge) agree on
+# the periapsis to 7e-9 r_g. Design periapsis at t=135.9, at (x,y)=(-6.61,6.07).
+#
+# !! THE DESIGN PERIAPSIS IS NOT WHAT THE SIMULATION ACHIEVES. Measured in the
+# elliptic production run (tde_prod_fixed_v3 + its parent v2): E and L are exactly
+# the design values at t=0 (to 1e-4 -- the IC pipeline is correct), but L then decays
+# ~0.015-0.02%/M during infall, 4.9% by t=250, before any disruption, with E drifting down
+# alongside: a numerical DRAG. The achieved periapsis was R_areal=6.8 at t=364, not
+# 10.0 at t=349. Cause not yet identified. The parabolic infall is ~2.6x shorter, so
+# the shortfall should be smaller, but it must be MEASURED (calibration stage of the
+# plan) before this deck is used for production.
+#
+# PRODUCTION RECIPE folded in (NANCASCADE_HANDOFF.md Sec 19.2/20.2), which the parent
+# in-repo input predates: excision (lapse scheme), psi_floor, src_nan_check, ADM-mass
+# surface integrals. Binary must contain the Sec 15 grad_ap6_0 fix (d9166815) and the
+# region tracker (bdc42eb1).
+#
+# AMR. Region tracker (rho > amr_density_frac*rho_max) UNIONED with the fixed puncture
+# box -- the configuration validated on 16 nodes to t=145 in
+# tde_tracker_nexteval_longrun_v1. CAVEAT: that validation was on the RADIAL deck
+# (+-32 box, level 5, every-substage solves); this is its first use on the elliptic/
+# parabolic deck (+-64, level 4, solve_interval=1), and nothing has yet run the
+# region tracker past t~150 cleanly (the second_deriv arm hung at t=150.9; the
+# region-only control, job 8912718, will tell whether that is second_deriv-specific).
+
+<comment>
+problem  = Parabolic-orbit TDE (E=1, r_p=10 r_g design), region-tracker AMR, excision
+
+<job>
+basename = cfc_tde_wd_imbh_parabolic_tracker
+
+<mesh>
+# Same cubic power-of-2 root grid as the parent fixture (see its header for why):
+# 128/16=8 root MeshBlocks/axis, multigrid root hierarchy halves cleanly to 1x1x1.
+nghost = 4        # Number of ghost cells
+nx1    = 128      # 8 MeshBlocks in x1-direction (root level), dx=1.0
+x1min  = -64.0    # minimum x1
+x1max  = 64.0     # maximum x1 -- orbit stays within +/-30, ample buffer beyond
+ix1_bc = diode    # inner boundary -- full domain, no reflection symmetry
+ox1_bc = diode    # outer boundary
+
+nx2    = 128      # 8 MeshBlocks in x2-direction (root level), dx=1.0
+x2min  = -64.0    # minimum x2
+x2max  = 64.0     # maximum x2
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 128      # 8 MeshBlocks in x3-direction (root level), dx=1.0
+x3min  = -64.0    # minimum x3
+x3max  = 64.0     # maximum x3
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive  # was static -- see header note on the SetNeighbors risk
+max_nmb_per_rank    = 400
+num_levels          = 5         # max_level=4, same as the static production fixture
+refinement_interval = 1
+ncycle_check        = 1         # check every cycle -- the star moves far less than
+                                 # one level-4 block-width per cycle (v0=0.1357c *
+                                 # dt~0.03), comfortably fast enough to keep up.
+
+<amr_criterion0>
+method = user           # dispatches to TDERefineTracker (dyngr_tov.cpp), enrolled
+                        # via <problem> amr_condition=tde_track below.
+
+# Two static SEED boxes (puncture + star's t=0 position), not the full disk the
+# static fixture uses -- required, not redundant with adaptive: there is no
+# initial-AMR pass, and CheckForRefinement's cooldown means adaptive alone would
+# take several cycles to reach level 4 from the root grid, during which the star
+# (R_*=0.677) would sit under-resolved (same reasoning as cfc_tde_wd_imbh_amr.
+# athinput). TDERefineTracker maintains/moves both boxes thereafter.
+<refined_region1>
+level = 4        # puncture, fixed at the origin
+x1min = -2.0
+x1max = 2.0
+x2min = -2.0
+x2max = 2.0
+x3min = -2.0
+x3max = 2.0
+
+<refined_region2>
+level = 4        # star, at its t=0 position
+x1min = 27.0
+x1max = 33.0
+x2min = -3.0
+x2max = 3.0
+x3min = -2.0
+x3max = 2.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 300        # design periapsis t=135.9 + ~165 M post-periapsis, matching
+                         # the elliptic run's ~150 M post-periapsis window. Star CoM
+                         # at r_iso~33 by then (Stage B); the unbound debris tip
+                         # reaches the +-64 boundary somewhat later -- extend only
+                         # after checking where the debris actually is.
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = true      # NANCASCADE Sec 17/19: removes the unexcised-puncture
+                        # pile-up that killed every no-excision run at t~445
+excision_scheme = lapse # NOT fixed: rexcise is hardcoded to 1.0, and M_BH grows by
+                        # accretion, so only a lapse surface tracks it (Sec 13.1)
+excise_lapse    = 0.25
+dexcise     = 1.0e-24   # = <mhd> dfloor
+texcise     = 1.0e-22   # = <mhd> tfloor
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-24    # atmosphere floor (as requested)
+tfloor      = 1.0e-22    # matches the established 100x-above-dfloor ratio
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 1.6666666666666667  # 5/3, per the WD-like polytrope
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+# Same production-validated CFC solver settings as the parent fixture (see its
+# header for the full measurement trail): mg_threshold/mg_poisson_threshold=1e-8,
+# mg_poisson_mporder=2, mg_npresmooth/npostsmooth=2, mg_norm=rms (R3). Unrelated to
+# the velocity boost -- accuracy of these settings is independent of star_vel_x2.
+mg_threshold   = 1.0e-8
+mg_poisson_threshold = 1.0e-8
+mg_poisson_mporder = 2
+mg_npresmooth  = 2
+mg_npostsmooth = 2
+mg_norm = rms
+puncture_enabled = true
+puncture_mass    = 1.0            # M_BH = 1e4 Msun, fixed at the coordinate origin
+# alpha_floor: REQUIRED -- default 0.0 clamps a negative lapse to EXACTLY zero,
+# causing a 1/alpha singularity/NANS_IN_CONS cascade near the puncture (item 59).
+alpha_floor = 1.0e-6
+# psi_floor: clamp at the psi SOLVE OUTPUT, before AssembleConformalMetric and before
+# the ghost exchange (CFC::ApplyPsiFloor). Hardening, validated non-regressing.
+psi_floor   = 1.0e-6
+# solve_interval = 1 (production). The 2026-10-08 calibration (t=0-40, 16 nodes)
+# showed si=10's stale self-potential drags the orbit: L drifts -0.0151 %/M at
+# si=10 vs -0.0024 %/M at si=1 (projected periapsis 9.2-9.6 vs 9.9 r_g). The same
+# drag is why the elliptic run reached R_p=6.8 instead of 10. si=1 costs 2.0x wall.
+# si=10 is kept only as a control (ensemble member tde_parabolic_rp10_si10).
+solve_interval = 1
+# Names the first non-finite elliptic source/output instead of a silent cascade.
+# One branch when clean. Fires only on solve cycles.
+src_nan_check = 1
+# ADM-mass surface integrals: the only INDEPENDENT check that the mass
+# AccreteExcisedMass hands the puncture really appears in the spacetime (item 57).
+adm_mass_r0 = 20.0
+adm_mass_r1 = 30.0
+adm_mass_r2 = 40.0
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric AND
+                         # is required by star_vel_x1/2/3 (see dyngr_tov.cpp)
+rhoc        = 3.24e-4   # converted from 3.24e-12 (Msun=1 units) via lambda^2
+kappa       = 1.2346626297e-2  # converted from 2.66e3 (Msun=1 units) via lambda^(-4/3)
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 2e-4      # npoints*dr = 2.0, ~3x the star's own R_*=0.677
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 30.0    # ~1.83x the tidal radius (r_t=16.4) -- release point
+star_center_x2 = 0.0     # puncture always fixed at the origin
+star_center_x3 = 0.0
+star_vel_x1    = -0.19262227  # PARABOLIC ORBIT (E=1, L=5): contravariant Eulerian
+star_vel_x2    =  0.15093084  # v^i, inward radial + tangential, from
+star_vel_x3    =  0.0         # scripts/tde_parabolic_orbit_ic.py --x0 30 --periapsis 10
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
+                                # fixture exists to test.
+amr_radius_bh   = 2.0          # fine box around the fixed puncture
+amr_density_frac = 1.0e-2      # debris region: rho > amr_density_frac*rho_max
+amr_level_bh    = 4            # matches this fixture's own level-4 resolution
+amr_level_debris = 4
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 0.1
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- psi/alpha near the puncture and star
+variable    = adm
+dt          = 1.0      # ~300 dumps over tlim=300; also the L(t)/E(t) calibration data
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- density, to follow the star and its debris
+variable    = mhd_w_bcc
+dt          = 1.0
+slice_x3    = 0.0
+id = prim_xy
+
+<output4>
+file_type   = rst      # Restart dumps -- ~29,000 cycles (2.5x the parent's
+dcycle      = 1000     # ~11,600) will not finish in one allocation.

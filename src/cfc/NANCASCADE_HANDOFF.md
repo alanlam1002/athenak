@@ -2263,3 +2263,134 @@ and all three were walked into at least once.
   and assert finiteness.
 - **Cause A's mechanism is attributed, not instrumented**: the `psi`-source
   overflow was never caught in the act. The fix is validated empirically.
+
+---
+
+## 22. Follow-up code items from Sec 21.6 (2026-09-19)
+
+All four still-open items were addressed in code (`d9166815`/`5c669aff`/`177cac40`'s
+successors). None of this reopens the closed cascade investigation; all four were
+already known and none is a NaN-cascade fix.
+
+### 22.1 Regression test for Sec 15 (highest priority, done)
+
+`tst/unit/test_cfc_puncture.cpp` gained a check that reproduces
+`cfc_puncture.cpp:82`'s fixed `amp = psi0_inv6*(dalpha0 - 6*alpha0*dpsi0/psi0)` form
+directly (not just re-running the same production code) and asserts finiteness over
+a dense sweep of `rrs` within 1e-9 AND 1e-7 of the throat, across several `m_bh` and
+off-axis positions -- per Sec 15.6's own instruction, the neighbourhood, not the
+point. A companion check confirms the sweep actually lands on the defect: it
+reproduces the ORIGINAL buggy `dalpha0/alpha0` form at the same samples and asserts
+it goes non-finite for a large fraction of them (measured ~74%; the double root's
+quadratic term is below double precision at 1e-9, so whether a sample's `alpha0^2`
+rounds to zero/negative or to positive noise is unpredictable per-sample, hence a
+loose >25% bound rather than a tight one). Passes clean; run via `test_cfc_puncture`
+(built by every CMake config in this repo). Four PRE-EXISTING, unrelated failures in
+`TrumpetIsoToAreal`'s round-trip check near the throat (items 1-1.6, rho=1.5-2.0)
+were found while verifying this and are untouched -- confirmed present before this
+session's changes by re-running the unmodified binary.
+
+### 22.2 TDERefineTracker: relative-density region criterion (done)
+
+Implemented Sec 11.6's proposed design in `dyngr_tov.cpp`: the star-tracking box
+(density MAXIMUM, radius `amr_radius_star`) is replaced by a relative-density REGION
+criterion, `rho > amr_density_frac*rho_max` (default `1e-2`, the measured-affordable
+value), unioned with the unchanged fixed puncture box. Per-MeshBlock density maxima
+are computed with a `TeamThreadRange` reduction (the `refinement_criteria.cpp::
+CheckMinMax` pattern) feeding a relative cut against the run's current global
+`rho_max` -- immune to which clump is nominally "the" maximum, which is what killed
+the old tracker's thrashing (Sec 10.2). This also DROPS the MPI_MAXLOC/Bcast
+machinery the old single-target tracker needed, since there is no longer a single
+position to agree on. Renamed input parameters (`amr_radius_star` ->
+`amr_density_frac`, `amr_level_star` -> `amr_level_debris`) and updated the two
+in-repo fixtures that use `amr_condition=tde_track`
+(`cfc_tde_wd_imbh_amr.athinput`, `cfc_tde_wd_imbh_elliptic_tracker.athinput`).
+Compiles clean; NOT run end-to-end in this session (no batch job submitted -- see
+Sec 22.5). `f=1e-4` still needs a level cap before it is safe to use (Sec 11.6); not
+implemented, default stays `1e-2`.
+
+### 22.3 gamma_max now binds the PrimitiveSolver c2p output (done)
+
+`primitive_solver.hpp::ConToPrim` now clamps the CONVERGED Lorentz factor
+`W = D/rho` to `eos.GetMaxLorentzFactor()` right after `Wv_u` is formed (rescaling
+`Wv_u` down, direction preserved, then `cons_adjusted=true` resyncs `cons` via the
+existing `PrimToCon` path) -- the same rescale `ideal_grmhd.cpp`/`ideal_srmhd.cpp`/
+`ideal_grhyd.cpp`/`ideal_srhyd.cpp` already use. `GetMaxVelocity`/`v_max` is
+UNCHANGED and still only bounds the root-find's internal estimate in `RootFunction`;
+a new `gamma_max` field (`GetMaxLorentzFactor`/`SetMaxLorentzFactor`, defaulting to
+"no ceiling") was added to `ErrorPolicyInterface`/`EOS` for the converged-output
+ceiling, and `primitive_solver_hyd.hpp` now sets it from the same `<block> gamma_max`
+input parameter that already fed `v_max`. **This is a real behavior change**: any
+PrimitiveSolver-based run (tabulated/hybrid/piecewise-poly EOS) where `W` previously
+exceeded `gamma_max` will now differ from before, wherever that happens. Excision
+already removes the region where this mattered for the completed `tde_prod_fixed_v3`
+run (Sec 21.6's own caveat), so it should be a no-op there, but this was NOT
+re-validated against that checkpoint in this session -- recommend a diff-check
+before trusting it silently on the next production run.
+
+### 22.4 excised_tally is now bit-reproducible (done)
+
+`Coordinates::excised_tally` changed from a per-MeshBlock `DvceArray2D<Real>`
+combined via `Kokkos::atomic_add` (order-dependent -- the actual cause of Sec 14.6's
+nondeterminism) to a plain per-rank host `Real[5]`. The five per-cell contributions
+in `primitive_solver_hyd.hpp`'s con2prim kernel are now reduced INSIDE that kernel's
+own pre-existing `Kokkos::parallel_reduce` (it already reduced `count_errs`; five
+`Kokkos::Sum<Real>` reducers were added alongside it) -- deterministic because a
+Kokkos reduction's combination tree is fixed by the launch configuration, not by
+runtime thread-scheduling races. The single controlling host thread then adds each
+call's already-combined result into `excised_tally` with ordinary (non-atomic) `+=`,
+in the fixed order calls happen in. `DrainExcisedTally` simplified to match (no more
+device mirror/copy). Onset cycle should now be a valid A/B metric on the excision
+path for identical configs -- NOT reverified against production in this session (no
+batch job submitted); worth a same-config two-run diff before relying on it.
+
+### 22.5 What was NOT done
+
+No batch job was submitted for any of 22.2-22.4 -- everything above was verified by
+CPU compilation only (`build_cpu`, `cmake`/`module load cmake/3.31.11` on
+aurora-uan-0010) plus the unit test in 22.1. All four items are explicitly
+"none blocking" per Sec 21.6, and none of them touches the two fixes (`grad_ap6_0`,
+excision) that production actually depends on. Recommend at minimum a short
+same-config two-run diff for 22.4 and a short tde_track smoke run for 22.2 before
+folding either into the next production recipe.
+
+### 22.6 22.2's smoke test (2026-09-20): found a NEW pre-existing bug, and a real
+gap in the region criterion
+
+Ran the recommended smoke test: `cfc_tde_wd_imbh_amr.athinput`, `nlim=120`,
+2 nodes/24 ranks (debug queue), `max_nmb_per_rank` raised to 250 (the static
+level-5 seed boxes alone need 167-168 MeshBlocks/rank at this rank count -- a
+resource-budget fix, not physics). Verdict: **NO-GO as submitted**, but the two
+findings separate cleanly.
+
+**Finding A -- pre-existing, NOT caused by today's session.** `NANS_IN_CONS` fires
+at cycle 1 (t=0.119), right at the fixed puncture (`excise=false` in this deck),
+with the same fingerprint as the production cascade's psi4-NaN pattern but at a
+wildly different timescale: cycle 1, not t~445. `rho-max` collapses to the
+atmosphere floor (~1e-25) domain-wide by the very first output. **Bisected against
+commit `177cac40` (before all of Sec 22's changes, via a git worktree) and it fails
+IDENTICALLY**: 243,662 NaNs vs 243,667 on the working tree -- same magnitude, same
+signature. This is a real, separate bug, specific to this exact
+`excise=false` + 2-node/24-rank decomposition (this fixture's own header only
+documents validation at other node counts). None of Sec 22's four items caused it.
+**Open, unowned, needs its own investigation** -- not chased further here.
+
+**Finding B -- a real gap in 22.2's region criterion, now fixed.** The baseline run
+(Finding A, old single-box tracker) never attempted a regrid despite the same
+corruption -- the old design is bounded no matter how bad the density field gets
+(worst case, one box in the wrong place). The working-tree run (new region
+criterion), fed the SAME corrupted, near-uniform-floor density field, asked for
+1040 MeshBlocks/rank UNIFORMLY on all 24 ranks and hit `mesh_refinement.cpp`'s own
+`max_nmb_per_rank` guard. Once `rho_max` itself is meaningless (every cell within
+noise of the same floor value), "above `rho_frac*rho_max`" becomes true almost
+everywhere at once -- an asymmetry the old point-tracker never had. **Fixed**:
+`TDERefineTracker` now tracks the last trustworthy `rho_max` and disables the
+density-region criterion for any call where `rho_max` drops by more than 1e6x from
+it (the BH box is unaffected) -- a margin far beyond any plausible single-cycle
+physical change, sized directly against the ~21-orders-of-magnitude collapse
+actually observed. Prints one rank-0 warning on the first trip, then stays quiet.
+Compiles clean (CPU); **not yet re-run** -- Finding A means this exact fixture will
+still fail at cycle 1 regardless, so confirming the guard requires either fixing
+Finding A first, or a targeted test that feeds the tracker a corrupted `rho_max`
+directly (e.g. a unit test, matching Sec 22.1's own pattern) rather than another
+full batch job.

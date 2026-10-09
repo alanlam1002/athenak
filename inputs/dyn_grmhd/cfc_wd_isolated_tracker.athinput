@@ -1,0 +1,196 @@
+# ISOLATED-STAR control for cfc_tde_wd_imbh_parabolic_tracker.athinput: the same WD
+# (TOV rhoc/kappa/Gamma=5/3, M_*=7.47e-5, isotropic radius ~0.68), the same hydro, CFC
+# solver and region-tracker AMR settings, but NO black hole (puncture_enabled=false,
+# no excision), no boost, star at the origin, and a small +-16 box (root dx=1.0 as in
+# the TDE deck, so level L has the same dx as there).
+#
+# PURPOSE. In the TDE runs the WD's central density rises secularly long before it
+# reaches r_t: rho_max/rho0 = 1.07 (solve_interval=10) and 1.12 (solve_interval=1) at
+# t=40 in the parabolic calibration runs, and 1.19 / 1.87 at t=40 / 100 in the elliptic
+# production run. This deck separates the candidate causes:
+#   - resolution (the WD has only ~11 cells per radius at level 4): run at level 4
+#     and level 5 -- override num_levels, refined_region1 level, amr_level_bh,
+#     amr_level_debris together;
+#   - stale self-potential: run at <cfc> solve_interval 10 and 1;
+#   - the BH tidal field / orbital motion: by elimination, if the isolated star is
+#     steady while the TDE star is not.
+# Compare rho_max(t) from the user.hst against the TDE calibration arms over the same
+# t=0-40 window.
+
+<comment>
+problem  = Isolated WD (no BH), TDE-deck CFC/hydro/AMR settings, resolution x solve_interval control
+
+<job>
+basename = cfc_wd_isolated
+
+<mesh>
+# Same cubic power-of-2 root grid as the parent fixture (see its header for why):
+# 128/16=8 root MeshBlocks/axis, multigrid root hierarchy halves cleanly to 1x1x1.
+nghost = 4        # Number of ghost cells
+nx1    = 32       # 2 MeshBlocks per direction at root, dx=1.0 (as TDE deck)
+x1min  = -16.0
+x1max  = 16.0
+ix1_bc = diode    # inner boundary -- full domain, no reflection symmetry
+ox1_bc = diode    # outer boundary
+
+nx2    = 32       # 2 MeshBlocks per direction at root, dx=1.0 (as TDE deck)
+x2min  = -16.0
+x2max  = 16.0
+ix2_bc = diode    # inner boundary
+ox2_bc = diode    # outer boundary
+
+nx3    = 32       # 2 MeshBlocks per direction at root, dx=1.0 (as TDE deck)
+x3min  = -16.0
+x3max  = 16.0
+ix3_bc = diode    # inner boundary
+ox3_bc = diode    # outer boundary
+
+<meshblock>
+nx1  = 16        # must be a power of 2 (multigrid requirement)
+nx2  = 16
+nx3  = 16
+
+<mesh_refinement>
+refinement          = adaptive  # was static -- see header note on the SetNeighbors risk
+max_nmb_per_rank    = 400
+num_levels          = 5         # level 4 arm; set 6 for the level 5 arm
+refinement_interval = 1
+ncycle_check        = 1         # check every cycle -- the star moves far less than
+                                 # one level-4 block-width per cycle (v0=0.1357c *
+                                 # dt~0.03), comfortably fast enough to keep up.
+
+<amr_criterion0>
+method = user           # dispatches to TDERefineTracker (dyngr_tov.cpp), enrolled
+                        # via <problem> amr_condition=tde_track below.
+
+# Two static SEED boxes (puncture + star's t=0 position), not the full disk the
+# static fixture uses -- required, not redundant with adaptive: there is no
+# initial-AMR pass, and CheckForRefinement's cooldown means adaptive alone would
+# take several cycles to reach level 4 from the root grid, during which the star
+# (R_*=0.677) would sit under-resolved (same reasoning as cfc_tde_wd_imbh_amr.
+# athinput). TDERefineTracker maintains/moves both boxes thereafter.
+<refined_region1>
+level = 4        # star at the origin; set 5 for the level 5 arm
+x1min = -2.0
+x1max = 2.0
+x2min = -2.0
+x2max = 2.0
+x3min = -2.0
+x3max = 2.0
+
+<time>
+evolution  = dynamic    # dynamic/kinematic/static
+gr_dt      = true
+integrator = rk3        # time integration algorithm
+cfl_number = 0.4
+nlim       = -1
+tlim       = 40         # same window as the parabolic calibration arms
+                         # the elliptic run's ~150 M post-periapsis window. Star CoM
+                         # at r_iso~33 by then (Stage B); the unbound debris tip
+                         # reaches the +-64 boundary somewhat later -- extend only
+                         # after checking where the debris actually is.
+ndiag      = 1          # cycles between diagnostic output
+
+<coord>
+general_rel = true      # general relativity
+m           = 1.0
+a           = 0.0
+excise      = false     # no black hole
+                        # pile-up that killed every no-excision run at t~445
+                        # accretion, so only a lapse surface tracks it (Sec 13.1)
+
+<mhd>
+eos         = ideal      # EOS type
+dyn_eos     = ideal      # EOS type
+dyn_error   = reset_floor # error policy
+reconstruct = ppmx       # spatial reconstruction method
+rsolver     = hlle       # Riemann solver to be used
+dfloor      = 1.0e-24    # atmosphere floor (as requested)
+tfloor      = 1.0e-22    # matches the established 100x-above-dfloor ratio
+dthreshold  = 1.02       # Threshold for flooring
+gamma       = 1.6666666666666667  # 5/3, per the WD-like polytrope
+dyn_scratch = 1
+fofc        = true
+enforce_maximum = false
+
+<adm>
+
+<cfc>
+init_verbose = true
+init_omega   = 1.0
+# Same production-validated CFC solver settings as the parent fixture (see its
+# header for the full measurement trail): mg_threshold/mg_poisson_threshold=1e-8,
+# mg_poisson_mporder=2, mg_npresmooth/npostsmooth=2, mg_norm=rms (R3). Unrelated to
+# the velocity boost -- accuracy of these settings is independent of star_vel_x2.
+mg_threshold   = 1.0e-8
+mg_poisson_threshold = 1.0e-8
+mg_poisson_mporder = 2
+mg_npresmooth  = 2
+mg_npostsmooth = 2
+mg_norm = rms
+puncture_enabled = false   # ISOLATED star
+# alpha_floor: REQUIRED -- default 0.0 clamps a negative lapse to EXACTLY zero,
+# causing a 1/alpha singularity/NANS_IN_CONS cascade near the puncture (item 59).
+alpha_floor = 1.0e-6
+# psi_floor: clamp at the psi SOLVE OUTPUT, before AssembleConformalMetric and before
+# the ghost exchange (CFC::ApplyPsiFloor). Hardening, validated non-regressing.
+psi_floor   = 1.0e-6
+# solve_interval: same production-validated cadence as the static-region fixture
+# (DEVELOPMENT.md item 61/62) -- 3.65x speedup, negligible accuracy cost.
+# Independent of TDERefineTracker, which locates the star directly from
+# pmhd->w0's density every check, not from any CFC-solved quantity.
+solve_interval = 10
+# Names the first non-finite elliptic source/output instead of a silent cascade.
+# One branch when clean. Fires only on solve cycles (every 10th here).
+src_nan_check = 1
+# ADM-mass surface integrals: the only INDEPENDENT check that the mass
+# AccreteExcisedMass hands the puncture really appears in the spacetime (item 57).
+adm_mass_r0 = 8.0
+adm_mass_r1 = 10.0
+adm_mass_r2 = 12.0
+<problem>
+isotropic   = true      # required: CFC solves for the isotropic-gauge metric AND
+                         # is required by star_vel_x1/2/3 (see dyngr_tov.cpp)
+rhoc        = 3.24e-4   # converted from 3.24e-12 (Msun=1 units) via lambda^2
+kappa       = 1.2346626297e-2  # converted from 2.66e3 (Msun=1 units) via lambda^(-4/3)
+npoints     = 10000.0   # buffer points for TOV calculation
+dr          = 2e-4      # npoints*dr = 2.0, ~3x the star's own R_*=0.677
+b_norm      = 0.0       # unmagnetized
+pcut        = 1e-6
+magindex    = 1
+star_center_x1 = 0.0
+star_center_x2 = 0.0
+star_center_x3 = 0.0
+star_vel_x1    = 0.0
+star_vel_x2    = 0.0
+star_vel_x3    = 0.0
+user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
+amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
+                                # fixture exists to test.
+amr_radius_bh   = 2.0          # fine box around the fixed puncture
+amr_density_frac = 1.0e-2      # debris region: rho > amr_density_frac*rho_max
+amr_level_bh    = 4            # box at the origin = the star here; 5 for level 5 arm
+amr_level_debris = 4           # 5 for the level 5 arm
+
+<output1>
+file_type   = hst      # History data dump -- mass/momentum/energy conservation check
+dt          = 0.1
+data_format = %20.15e
+
+<output2>
+file_type   = bin      # Binary output -- psi/alpha near the puncture and star
+variable    = adm
+dt          = 1.0      # ~300 dumps over tlim=300; also the L(t)/E(t) calibration data
+slice_x3    = 0.0
+id = adm_xy
+
+<output3>
+file_type   = bin      # Binary output -- density, to follow the star and its debris
+variable    = mhd_w_bcc
+dt          = 1.0
+slice_x3    = 0.0
+id = prim_xy
+
+<output4>
+file_type   = rst      # Restart dumps -- ~29,000 cycles (2.5x the parent's
+dcycle      = 1000     # ~11,600) will not finish in one allocation.

@@ -31,8 +31,10 @@ import tde_t11_surface_diag as T                   # noqa: E402
 from tde_ensemble_plots import dump_at, draw       # noqa: E402
 import bin_convert as bc                           # noqa: E402
 
+G.T.RUNS['E1b'] = (f'{G.RUN}/E1b_G2c_atmframe', G.ISO, None, '#66a61e', ':')
 RUNS = ['G0', 'iso_boost', 'G2', 'G3', 'G3b']
-TITLE = {'G0': 'G0 static', 'iso_boost': 'boosted (v=V0, ξ̇=0)', 'G2': 'G2 (v=V0, ξ̇=V0)',
+TITLE = {'G2c': 'G2c (contracted ID, ξ̇=V0)', 'E1b': 'E1b (G2c + comoving atm, t≤40)',
+         'G0': 'G0 static', 'iso_boost': 'boosted (v=V0, ξ̇=0)', 'G2': 'G2 (v=V0, ξ̇=V0)',
          'G3': 'G3 (v=0, ξ̇=−V0)', 'G3b': 'G3b (v=0, ξ̇=−at)'}
 NR = LogNorm(vmin=T.RHO0 * 1e-7, vmax=T.RHO0 * 1.2)
 NK = LogNorm(vmin=0.3, vmax=3.0)
@@ -69,7 +71,7 @@ def panel(ax, b, field, half, outline=False):
     ax.set_xticks([]); ax.set_yticks([])
 
 
-def snapshots(out, field, times=(0, 20, 40, 60, 80, 100), half=1.4):
+def snapshots(out, field, times=(0, 20, 40, 60, 80, 100), half=1.4, tag=''):
     fig, ax = plt.subplots(len(RUNS), len(times), figsize=(2.4 * len(times), 2.5 * len(RUNS)),
                            constrained_layout=True)
     for r, lab in enumerate(RUNS):
@@ -87,11 +89,12 @@ def snapshots(out, field, times=(0, 20, 40, 60, 80, 100), half=1.4):
     fig.colorbar(sm, ax=ax, shrink=0.6,
                  label=(r'$\rho$ (z=0)' if field == 'rho' else r'$K/K_0$ ($\rho>10^{-4}\rho_0$)')
                  + r';  star-centred $\pm$%.1f M, dashed = $R_*$' % half)
-    name = 'gauge_snapshots_density.png' if field == 'rho' else 'gauge_snapshots_entropy.png'
+    name = (f'gauge{tag}_snapshots_density.png' if field == 'rho'
+            else f'gauge{tag}_snapshots_entropy.png')
     fig.savefig(f'{out}/{name}', dpi=100); plt.close(fig)
 
 
-def grid_view(out, times=(0, 50, 100)):
+def grid_view(out, times=(0, 50, 100), tag=''):
     fig, ax = plt.subplots(len(times), len(RUNS), figsize=(3.2 * len(RUNS), 3.2 * len(times)),
                            constrained_layout=True)
     for c, lab in enumerate(RUNS):
@@ -109,11 +112,11 @@ def grid_view(out, times=(0, 50, 100)):
                 a.set_ylabel(f't = {t}  (grid coords)', fontsize=9)
     fig.suptitle("Where the star sits on the grid (x' = x − ξ). Cyan + = start (10, −8); "
                  'white lines = MeshBlocks', fontsize=11)
-    fig.savefig(f'{out}/gauge_grid_view.png', dpi=90); plt.close(fig)
+    fig.savefig(f'{out}/gauge{tag}_grid_view.png', dpi=90); plt.close(fig)
 
 
-def anim(out, every=1, half=1.4):
-    times = list(range(0, 101, every))
+def anim(out, every=1, half=1.4, tag='', tmax=100):
+    times = list(range(0, tmax + 1, every))
     frames = {lab: [blocks(lab, t) for t in times] for lab in RUNS}
     fig, ax = plt.subplots(2, len(RUNS), figsize=(3.0 * len(RUNS), 6.4), constrained_layout=True)
     fig.colorbar(plt.cm.ScalarMappable(norm=NR, cmap=CR), ax=ax[0], shrink=0.8, label=r'$\rho$')
@@ -136,7 +139,7 @@ def anim(out, every=1, half=1.4):
         return []
 
     an = animation.FuncAnimation(fig, update, frames=len(times), blit=False)
-    an.save(f'{out}/gauge_anim.gif', writer=animation.PillowWriter(fps=8), dpi=70)
+    an.save(f'{out}/gauge{tag}_anim.gif', writer=animation.PillowWriter(fps=8), dpi=70)
     plt.close(fig)
 
 
@@ -144,12 +147,19 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=f'{T.RUN}/plots/gauge_g2g3')
     ap.add_argument('--every', type=int, default=1)
+    ap.add_argument('--runs', default=','.join(RUNS), help='comma-separated labels')
+    ap.add_argument('--tag', default='', help='suffix for output names, e.g. _G2c')
+    ap.add_argument('--tmax', type=int, default=100)
+    ap.add_argument('--no-grid', action='store_true')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
-    snapshots(a.out, 'rho'); print('density snapshots', flush=True)
-    snapshots(a.out, 'K'); print('entropy snapshots', flush=True)
-    grid_view(a.out); print('grid view', flush=True)
-    anim(a.out, a.every); print('animation', flush=True)
+    RUNS[:] = a.runs.split(',')
+    times = tuple(t for t in (0, 20, 40, 60, 80, 100) if t <= a.tmax)
+    snapshots(a.out, 'rho', times, tag=a.tag); print('density snapshots', flush=True)
+    snapshots(a.out, 'K', times, tag=a.tag); print('entropy snapshots', flush=True)
+    if not a.no_grid:
+        grid_view(a.out, tag=a.tag); print('grid view', flush=True)
+    anim(a.out, a.every, tag=a.tag, tmax=a.tmax); print('animation', flush=True)
 
 
 if __name__ == '__main__':

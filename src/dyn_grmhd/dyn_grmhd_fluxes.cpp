@@ -64,6 +64,22 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     return TaskStatus::complete;
   }
 
+  // Dual energy with de_recon_rhoy (primitive_solver_hyd.hpp, DEVELOPMENT.md item 71):
+  // reconstruct A_p = rho Y (prop. to P^(1/gamma) for Y = (K/kmax)^(1/gamma)) instead of
+  // Y; Y_face = A_p,face/rho_face is formed after each reconstruction below and w0 is
+  // restored before FOFC. de_hll: the tracer flux is computed by HLLE_DYNGR itself.
+  const bool de_rhoy = eos.de_on && eos.de_recon_rhoy;
+  const bool de_hll = eos.de_on && eos.de_flux_hll &&
+                      rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr;
+  const int de_n = nhyd + eos.de_idx;
+  if (de_rhoy) {
+    par_for("de_rhoy_fwd", DevExeSpace(), 0, nmb1, 0, w0_.extent_int(2) - 1,
+            0, w0_.extent_int(3) - 1, 0, w0_.extent_int(4) - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      w0_(m, de_n, k, j, i) *= w0_(m, IDN, k, j, i);
+    });
+  }
+
   //--------------------------------------------------------------------------------------
   // i-direction
 
@@ -121,6 +137,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     }
     // Sync all threads in the team so that scratch memory is consistent
     member.team_barrier();
+    if (de_rhoy) {  // Y_face = (rho Y)_face/rho_face
+      par_for_inner(member, il, iu, [&](const int i) {
+        wl(de_n, i) = wl(de_n, i)/fmax(wl(IDN, i), 1.0e-300);
+        wr(de_n, i) = wr(de_n, i)/fmax(wr(IDN, i), 1.0e-300);
+      });
+      member.team_barrier();
+    }
 
     // compute fluxes over [is,ie+1]
     auto &dyn_eos = dyn_eos_;
@@ -149,6 +172,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Calculate fluxes of scalars (if any)
     if (nvars > nhyd) {
       for (int n=nhyd; n<nvars; ++n) {
+        if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
         par_for_inner(member, il, iu, [&](const int i) {
           if (flx1(m,IDN,k,j,i) >= 0.0) {
             flx1(m,n,k,j,i) = flx1(m,IDN,k,j,i)*wl(n,i);
@@ -233,6 +257,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         }
         // Sync all threads in the team so that scratch memory is consistent
         member.team_barrier();
+        if (de_rhoy) {  // Y_face = (rho Y)_face/rho_face
+          par_for_inner(member, is-1, ie+1, [&](const int i) {
+            wl_jp1(de_n, i) = wl_jp1(de_n, i)/fmax(wl_jp1(IDN, i), 1.0e-300);
+            wr(de_n, i) = wr(de_n, i)/fmax(wr(IDN, i), 1.0e-300);
+          });
+          member.team_barrier();
+        }
 
         // compute fluxes over [js,je+1]
         auto &dyn_eos = dyn_eos_;
@@ -261,6 +292,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         // Calculate fluxes of scalars (if any)
         if (nvars > nhyd) {
           for (int n=nhyd; n<nvars; ++n) {
+            if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
             par_for_inner(member, is-1, ie+1, [&](const int i) {
               if (flx2(m,IDN,k,j,i) >= 0.0) {
                 flx2(m,n,k,j,i) = flx2(m,IDN,k,j,i)*wl(n,i);
@@ -341,6 +373,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         }
         // Sync all threads in the team so that scratch memory is consistent
         member.team_barrier();
+        if (de_rhoy) {  // Y_face = (rho Y)_face/rho_face
+          par_for_inner(member, is-1, ie+1, [&](const int i) {
+            wl_kp1(de_n, i) = wl_kp1(de_n, i)/fmax(wl_kp1(IDN, i), 1.0e-300);
+            wr(de_n, i) = wr(de_n, i)/fmax(wr(IDN, i), 1.0e-300);
+          });
+          member.team_barrier();
+        }
 
         // compute fluxes over [ks,ke+1]
         auto &dyn_eos = dyn_eos_;
@@ -369,6 +408,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         // Calculate fluxes of scalars (if any)
         if (nvars > nhyd) {
           for (int n=nhyd; n<nvars; ++n) {
+            if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
             par_for_inner(member, is-1, ie+1, [&](const int i) {
               if (flx3(m,IDN,k,j,i) >= 0.0) {
                 flx3(m,n,k,j,i) = flx3(m,IDN,k,j,i)*wl(n,i);
@@ -380,6 +420,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         }
       } // end of loop over j
       member.team_barrier();
+    });
+  }
+
+  if (de_rhoy) {
+    par_for("de_rhoy_bwd", DevExeSpace(), 0, nmb1, 0, w0_.extent_int(2) - 1,
+            0, w0_.extent_int(3) - 1, 0, w0_.extent_int(4) - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      w0_(m, de_n, k, j, i) /= w0_(m, IDN, k, j, i);
     });
   }
 

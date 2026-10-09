@@ -291,6 +291,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::PrimToConInit(int is, int ie, int js, i
     if (global_variable::my_rank == 0) {
       std::cout << "dual energy V0 self-test: max relative error of the entropy inversion"
                 << " over dense cells = " << err << std::endl;
+      std::cout << "dual energy: Y = (K/kmax)^" << eos.de_ypow << ", reconstruct "
+                << (eos.de_recon_rhoy ? "rho*Y" : "Y") << ", tracer flux "
+                << (eos.de_flux_hll ? "hll" : "mass") << std::endl;
     }
   }
   if (pmy_pack->ptmunu != nullptr) {

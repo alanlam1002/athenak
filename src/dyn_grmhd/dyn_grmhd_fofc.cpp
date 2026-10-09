@@ -90,6 +90,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     bool &max_ = enforce_maximum;
     Real Rmax = std::numeric_limits<Real>::max();
     Real &dmp_M_ = dmp_M;
+    // scalars that may trigger FOFC: not the dual-energy tracer with the K^(1/gamma)
+    // scheme (see nscal_pp_ below; a flagged cell would get the inconsistent flux)
+    const int nflag_ = (eos.de_on && (eos.de_recon_rhoy || eos.de_flux_hll)) ?
+                       nscal_ - 1 : nscal_;
 
     // Index bounds
     int il = is-1, iu = ie+1, jl = js, ju = je, kl = ks, ku = ke;
@@ -138,7 +142,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
         // Enforce maximum principle for scalar
         if (nscal_ > 0) {
-          for (int n = 0; n < nscal_; ++n) {
+          for (int n = 0; n < nflag_; ++n) {
             Real varmax = eos_min_Y(n);
             Real varmin = eos_max_Y(n);
             for (int kt = k - kadd; kt <= k + kadd; kt++) {
@@ -158,7 +162,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       }
 
       if ( nscal_ > 0 ) {
-        for (int n=0; n<nscal_; ++n) {
+        for (int n=0; n<nflag_; ++n) {
           if ( utest_(m,IDN,k,j,i) > 0 ) {
             Real min_Y_ = eos_min_Y(n);
             Real max_Y_ = eos_max_Y(n);
@@ -515,7 +519,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     }
   });
 
-  if (use_fofc_ && scalar_pplimiter && nscal_ > 0) {
+  // The dual-energy tracer (the last scalar) is left out of this limiter with the
+  // K^(1/gamma) scheme (de_recon_rhoy / de_flux_hll, primitive_solver_hyd.hpp): its
+  // fallback flux, (high-order mass flux) x (cell-centred upwind Y), breaks the
+  // pressure-equilibrium property, and in 3D the one-sided density estimate
+  // D - 6 (dt/dx) F_D is <= 0 (theta = 0, full fallback) wherever the Courant number
+  // |v| dt/dx > 1/6, i.e. almost everywhere in a moving star (DEVELOPMENT.md item 71).
+  // Positivity of that tracer is not needed: C2P takes the energy branch when K <= 0.
+  const int nscal_pp_ = (eos.de_on && (eos.de_recon_rhoy || eos.de_flux_hll)) ?
+                        nscal_ - 1 : nscal_;
+  if (use_fofc_ && scalar_pplimiter && nscal_pp_ > 0) {
     Real &gam0 = pdriver->gam0[stage-1];
     Real &gam1 = pdriver->gam1[stage-1];
     Real beta_dt = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
@@ -528,7 +541,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     par_for("FOFC-flx", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       utest_(m,IDN,k,j,i) = gam0*u0_(m,IDN,k,j,i) + gam1*u1_(m,IDN,k,j,i);
-      for (int n=0; n<nscal_; ++n) {
+      for (int n=0; n < nscal_pp_; ++n) {
         utest_(m,nmhd_+n,k,j,i) = gam0*u0_(m,nmhd_+n,k,j,i) + gam1*u1_(m,nmhd_+n,k,j,i);
       }
     });
@@ -556,11 +569,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       // Evaluate LLF flux for scalar
       if ( flx1(m,IDN,k,j,i) >= 0.0 ) {
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           flx_llf[n] = w0_(m,nmhd_+n,k,j,i-1) * flx1(m,IDN,k,j,i);
         }
       } else {
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           flx_llf[n] = w0_(m,nmhd_+n,k,j,i) * flx1(m,IDN,k,j,i);
         }
       }
@@ -568,7 +581,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       // Estimate density D^- at boundary from i-1
       Real uD = utest_(m,IDN,k,j,i-1) - bet_pp * flx1(m,IDN,k,j,i);
       if ( uD > 0.0 ) {
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           Real uY_m = utest_(m,nmhd_+n,k,j,i-1) - bet_pp * flx1(m,nmhd_+n,k,j,i);
           Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
           Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -583,12 +596,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           }
         }
       } else {
-        for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+        for (int n=0; n < nscal_pp_; ++n) {wthe_m[n] = 0.0;}
       }
       // Estimate density D^+ at boundary from i
       uD = utest_(m,IDN,k,j,i) + bet_pp * flx1(m,IDN,k,j,i);
       if ( uD > 0.0 ) {
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx1(m,nmhd_+n,k,j,i);
           Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
           Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -603,9 +616,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           }
         }
       } else {
-        for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+        for (int n=0; n < nscal_pp_; ++n) {wthe_p[n] = 0.0;}
       }
-      for (int n=0; n < nscal_; ++n) {
+      for (int n=0; n < nscal_pp_; ++n) {
         wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
         flx1(m,nmhd_+n,k,j,i) = flx_llf[n]
           + wthe[n] * (flx1(m,nmhd_+n,k,j,i) - flx_llf[n]);
@@ -617,18 +630,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         bet_ppi = 1.0 / bet_pp;
 
         if ( flx2(m,IDN,k,j,i) >= 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             flx_llf[n] = w0_(m,nmhd_+n,k,j-1,i) * flx2(m,IDN,k,j,i);
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             flx_llf[n] = w0_(m,nmhd_+n,k,j,i) * flx2(m,IDN,k,j,i);
           }
         }
 
         uD = utest_(m,IDN,k,j-1,i) - bet_pp * flx2(m,IDN,k,j,i);
         if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             Real uY_m = utest_(m,nmhd_+n,k,j-1,i) - bet_pp * flx2(m,nmhd_+n,k,j,i);
             Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
             Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -643,11 +656,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             }
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          for (int n=0; n < nscal_pp_; ++n) {wthe_m[n] = 0.0;}
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx2(m,IDN,k,j,i);
         if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx2(m,nmhd_+n,k,j,i);
             Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
             Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -662,9 +675,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             }
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          for (int n=0; n < nscal_pp_; ++n) {wthe_p[n] = 0.0;}
         }
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
           flx2(m,nmhd_+n,k,j,i) = flx_llf[n]
             + wthe[n] * (flx2(m,nmhd_+n,k,j,i) - flx_llf[n]);
@@ -677,11 +690,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         bet_ppi = 1.0 / bet_pp;
 
         if ( flx3(m,IDN,k,j,i) >= 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             flx_llf[n] = w0_(m,nmhd_+n,k-1,j,i) * flx3(m,IDN,k,j,i);
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             flx_llf[n] = w0_(m,nmhd_+n,k,j,i) * flx3(m,IDN,k,j,i);
           }
           bet_pp = - utest_(m,IDN,k,j,i) / flx3(m,IDN,k,j,i);
@@ -689,7 +702,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
         uD = utest_(m,IDN,k-1,j,i) - bet_pp * flx3(m,IDN,k,j,i);
         if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             Real uY_m = utest_(m,nmhd_+n,k-1,j,i) - bet_pp * flx3(m,nmhd_+n,k,j,i);
             Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
             Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -704,11 +717,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             }
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_m[n] = 0.0;}
+          for (int n=0; n < nscal_pp_; ++n) {wthe_m[n] = 0.0;}
         }
         uD = utest_(m,IDN,k,j,i) + bet_pp * flx3(m,IDN,k,j,i);
         if ( uD > 0.0 ) {
-          for (int n=0; n < nscal_; ++n) {
+          for (int n=0; n < nscal_pp_; ++n) {
             Real uY_p = utest_(m,nmhd_+n,k,j,i) + bet_pp * flx3(m,nmhd_+n,k,j,i);
             Real min_DY_ = (eos_min_Y(n) + DBL_EPSILON) * uD;
             Real max_DY_ = (eos_max_Y(n) - DBL_EPSILON) * uD;
@@ -723,9 +736,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             }
           }
         } else {
-          for (int n=0; n < nscal_; ++n) {wthe_p[n] = 0.0;}
+          for (int n=0; n < nscal_pp_; ++n) {wthe_p[n] = 0.0;}
         }
-        for (int n=0; n < nscal_; ++n) {
+        for (int n=0; n < nscal_pp_; ++n) {
           wthe[n] = fmax(0.0, fmin(1.0, fmin(wthe_m[n], wthe_p[n])));
           flx3(m,nmhd_+n,k,j,i) = flx_llf[n]
             + wthe[n] * (flx3(m,nmhd_+n,k,j,i) - flx_llf[n]);

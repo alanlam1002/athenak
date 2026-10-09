@@ -260,6 +260,16 @@ void HLLE_DYNGR(TeamMember_t const &member,
     flx(m, IVX, k, j, i) = vol * f_interface[CSX];
     flx(m, IVY, k, j, i) = vol * f_interface[CSY];
     flx(m, IVZ, k, j, i) = vol * f_interface[CSZ];
+    if (eos.de_on && eos.de_flux_hll) {
+      // dual-energy tracer A = D Y: its own HLLE flux (primitive_solver_hyd.hpp), not
+      // the mass flux times the upwind Y, so a uniform A stays uniform in the HLL fan
+      const int ny = PYF + eos.de_idx;
+      Real al = cons_l[CDN]*prim_l[ny], ar = cons_r[CDN]*prim_r[ny];
+      Real fal = fl[CDN]*prim_l[ny], far = fr[CDN]*prim_r[ny];
+      Real fa = (lambda_l >= 0.) ? fal : ((lambda_r <= 0.) ? far :
+                ((lambda_r*fal - lambda_l*far) + qa*(ar - al)) * qb);
+      flx(m, nhyd + eos.de_idx, k, j, i) = vol * fa;
+    }
     // The notation here is slightly misleading, as it suggests that Ey = -Fx(By) and
     // Ez = Fx(Bz), rather than Ez = -Fx(By) and Ey = Fx(Bz). However, the appropriate
     // containers for ey and ez for each direction are passed in as arguments to this

@@ -9790,3 +9790,79 @@ velocity xidot (`padm->frame_vel_u`) instead of 0, so the atmosphere is at rest 
 comoving grid. The cons are re-derived. Purpose: to measure whether atmosphere streaming
 at −xidot sets dt in the comoving gauge (G2: 1,258 cycles vs G0's 179 to t = 100). It is
 unphysical near a BH (infall), so it is not for production as is.
+
+## 71. Dual energy, entropy variable D·K^(1/Γ); and the 3D scalar positivity limiter
+
+Research R-029 §3 / R-030 F. All numbers below are measured (CPU, `build_cpu_pe2626_tests`,
+`athenak_run/cfc/dual_energy_tests_F/`, `scripts/de_F_tests.py`) unless marked argued.
+
+**Why.** Item 70's tracer D·Y with Y = K/kmax mixes K mass-weighted. Across a contact in
+pressure equilibrium D·K = W P/ρ^(Γ−1) jumps, so a mixed cell gets the wrong P. At a
+stellar surface the light side's K is 1e2–1e6 × the star's, so a little mixed-in
+atmosphere heats the star. **V3 shows it in 3D** (boosted WD in the BH frame, t = 100):
+- central K +20%, ρ_max 0.870 and puffed mass 4.0e-2;
+- the same deck with dual energy off: K 0.991, ρ_max 0.949 and 1.4e-2;
+- the entropy maps show a K ramp growing from the trailing surface into the core.
+
+**What changed.**
+- **The variable.** `<mhd> dual_energy_variable = k_1g` (default) stores
+  Y = (K/kmax)^(1/Γ), so D·Y = W P^(1/Γ)/kmax^(1/Γ), uniform across such a contact. `= k`
+  keeps item 70's D·K.
+  - Helpers `DualEnergyY` / `DualEnergyK` (primitive_solver_hyd.hpp) at the four sites:
+    PrimToCons, the entropy branch, the resync, and the V0 self-test.
+- **`dual_energy_recon_rhoy`** (default true for k_1g).
+  - The flux kernel multiplies w0's tracer by ρ before CalcFluxes, forms Y_face =
+    (ρY)_face/ρ_face after each reconstruction (x1/x2/x3), and restores w0 before FOFC.
+  - So the reconstructed quantity is ∝ P^(1/Γ).
+- **`dual_energy_flux = hll`** (default for k_1g with `rsolver = hlle`; fatal with other
+  solvers).
+  - HLLE_DYNGR computes the tracer's own HLLE flux from (D_L Y_L, D_R Y_R) and the same
+    wave speeds, instead of (HLLE mass flux) × Y_upwind.
+  - Where the HLL fan is open (subsonic contacts, e.g. a star at rest on a comoving
+    grid), the mass flux carries the HLL diffusion λ(D_R − D_L), which mixes the tracer
+    inconsistently.
+- **FOFC and the scalar positivity limiter (`scalar_pplimiter`, dyn_grmhd_fofc.cpp)** now
+  skip the dual-energy tracer under k_1g. The limiter test is
+  `D_{i−1} − 2·dim·(dt/dx)·F_D ≤ 0 → θ = 0`, which gives the fallback flux
+  F_D(high order) × Y_cell(upwind).
+  - **That fallback is not consistent with the ρY faces.** In 3D the factor is 6, so it
+    fires fully wherever |v|dt/dx > 1/6: in practice everywhere in a moving star.
+  - With the limiter on, the x3 contact test errs 0.585; with it off, 8e-12.
+  - The FOFC per-scalar bound/DMP flags skip the tracer too (`nflag_`); otherwise a
+    flagged cell gets the same mixed flux.
+  - Tracer positivity is not needed: C2P takes the energy branch when K ≤ 0.
+  - **Side finding (argued from the code, not measured):** for any passive scalar (Ye) in
+    3D with FOFC, this limiter turns the scalar flux into "first-order Y × high-order mass
+    flux" wherever |v|dt/dx > 1/6. Upstream behaviour, untouched here.
+
+**Tests** (ppmx + HLLE + FOFC, rk3, 256 cells; max|P/P0 − 1| at the end):
+
+| test | energy only | D·K | D·K^(1/Γ), Y recon | ρY recon | ρY + hll |
+|---|---|---|---|---|---|
+| contact ρ 1\|0.1, v = 0.5 (supersonic) | 4e-12 | 1.3 | 0.35 | 2e-14 | 2e-14 |
+| contact ρ 1\|0.1, v = 0.005 (subsonic) | 2e-12 | 0.11 | 0.025 | 0.032 | 2e-14 |
+| surface ρ 1\|1e-4, v = 0.5 (1D) | 6e-10 | 371 | 23 | 2e-12 | 2e-12 |
+| same along x2 (2D) / x3 (3D, 4×4×256) | 5e-10 / 3e-10 | 484 / 761 | 20 / 13 | 8e-12 / 8e-12 | 8e-12 / 8e-12 |
+| entropy wave, grid Mach 200 | 4e-10 | 4.4e-5 | 4.5e-5 | 9e-12 | 9e-12 |
+| Sod plateau max\|ΔP/P*\| (contact dip) | 8e-4 | 0.18 | 0.17 | 1.8e-3 | 1.6e-3 |
+
+- Sod shock position (0.8301) and post-shock K (3.30) are unchanged in every variant.
+- V0 self-test ≤ 1.2e-15 everywhere.
+- The defaults (no options) reproduce the last column bitwise (4 decks).
+- **Regression:**
+  - DE off: Sod and wave bitwise identical to item 70's V1 runs.
+  - D·K: the wave is bitwise identical; Sod differs ≤ 3e-10 relative in the rarefaction.
+    That is argued to be icpx `-fp-model=fast` reordering after the intervening C2P
+    edits; not bisected.
+
+**Open: the shock flag at L4 (measured on G/V2 z = 0 slices, research R-030 G).**
+- `|ΔP|/P > 0.3` to a face neighbour holds for 200 of 216 cells with ρ > 0.1ρ0, from
+  r/R* = 0.28 outward. The hydrostatic gradient at ~11 cells/R* is enough.
+- The flag then reduces to `div v <= 0` (item 70's V1 fix). In a near-static star that
+  puts ~half the star on the energy branch at any instant: V2's entropy-branch fraction is
+  ~20%.
+- **Compression strength separates cleanly** (−div v·dx/c_s, in-plane):
+  - V2 and G: ≤ 0.018 (p99 ≈ 0.01);
+  - the Sod shock: 0.24.
+- **Proposed, not built:** flag = (−div v·dx/c_s > ~0.05 and |ΔP|/P > 0.3) or
+  |ΔP|/P > a large jump (Sod at t = 0). Needs approval.

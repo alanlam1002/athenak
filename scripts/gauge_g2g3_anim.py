@@ -32,10 +32,17 @@ from tde_ensemble_plots import dump_at, draw       # noqa: E402
 import bin_convert as bc                           # noqa: E402
 
 G.T.RUNS['E1b'] = (f'{G.RUN}/E1b_G2c_atmframe', G.ISO, None, '#66a61e', ':')
+for _lab, _d, _c in (('V2', 'de_V2_static_L4', '#1b9e77'),
+                     ('V3', 'de_V3_boost_contract_L4', '#d95f02'),
+                     ('V3c', 'de_V3c_boost_contract_noDE_L4', '#7570b3'),
+                     ('G2cDE', 'de_G_G2c_DE_L4', '#e7298a')):
+    G.T.RUNS[_lab] = (f'{G.RUN}/{_d}', G.ISO, None, _c, '--')
 RUNS = ['G0', 'iso_boost', 'G2', 'G3', 'G3b']
 TITLE = {'G2c': 'G2c (contracted ID, ξ̇=V0)', 'E1b': 'E1b (G2c + comoving atm, t≤40)',
          'G0': 'G0 static', 'iso_boost': 'boosted (v=V0, ξ̇=0)', 'G2': 'G2 (v=V0, ξ̇=V0)',
-         'G3': 'G3 (v=0, ξ̇=−V0)', 'G3b': 'G3b (v=0, ξ̇=−at)'}
+         'G3': 'G3 (v=0, ξ̇=−V0)', 'G3b': 'G3b (v=0, ξ̇=−at)',
+         'V2': 'V2 static, DE on', 'V3c': 'V3c boosted, contracted, DE off',
+         'V3': 'V3 boosted, contracted, DE on', 'G2cDE': 'G (G2c + DE)'}
 NR = LogNorm(vmin=T.RHO0 * 1e-7, vmax=T.RHO0 * 1.2)
 NK = LogNorm(vmin=0.3, vmax=3.0)
 CR = plt.get_cmap('inferno').copy(); CR.set_bad('k')

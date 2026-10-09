@@ -5,6 +5,7 @@
   V3   boosted WD, contracted ID, BH frame, dual energy on  vs V3c (same ID, off),
        the old boosted run (old ID, off) and G2c (comoving gauge, contracted ID, off)
   V4   rp16 L4, item-69 ID, dual energy on, t <= 160        vs ens1 rp16 (old ID, off)
+  G    G2c + dual energy (comoving gauge, research R-030 G)  vs G2c (off) and V3
 
 Per dump (z=0 slices, tde_t11_surface_diag.measure): rho_max, K/K_0 at the max, min K/K_0
 over rho > 0.1 rho_0, puffed mass fraction; plus the history's dual-energy counters
@@ -33,11 +34,14 @@ T.RUNS.update({
     'V3':  (f'{RUN}/de_V3_boost_contract_L4', ISO, None, '#d95f02', '--'),
     'V3c': (f'{RUN}/de_V3c_boost_contract_noDE_L4', ISO, None, '#d95f02', ':'),
     'V4':  (f'{RUN}/de_V4_rp16_L4', TDE, 16, '#e7298a', '-'),
+    'G2cDE': (f'{RUN}/de_G_G2c_DE_L4', ISO, None, '#a6761d', '-'),   # R-030 G
 })
+T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('#7570b3', ':')     # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'iso_boost': 'boosted, old ID, DE off', 'V3c': 'boosted, contracted ID, DE off',
          'V3': 'V3 boosted, contracted ID, DE on', 'G2c': 'G2c comoving, contracted ID, DE off',
-         'rp16': 'rp16 ens1 (old ID, DE off)', 'V4': 'V4 rp16 (new ID, DE on)'}
+         'rp16': 'rp16 ens1 (old ID, DE off)', 'V4': 'V4 rp16 (new ID, DE on)',
+         'G2cDE': 'G: G2c + DE (D·K)'}
 
 
 def style(lab):
@@ -88,6 +92,9 @@ def main():
     if not a.v4_only:
         groups.append((['G0', 'V2', 'iso_boost', 'V3c', 'V3', 'G2c'], 'de_V23_summary.png',
                        'T-13 V2/V3: isolated WD, L4 (dual energy on vs off; contracted ID)', 100))
+        groups.append((['G0', 'V2', 'G2c', 'G2cDE', 'V3c', 'V3'], 'de_G_summary.png',
+                       'R-030 G: G2c (comoving gauge) with dual energy (D·K), vs V3 (BH frame)',
+                       100))
     if not a.no_v4:
         groups.append((['rp16', 'V4'], 'de_V4_summary.png',
                        'T-13 V4: rp16 (beta=1.03), L4 -- the T-11 test', 160))

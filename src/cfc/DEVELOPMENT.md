@@ -8062,8 +8062,11 @@ only face ghosts, never edges/corners. `ComputeADualFromPotentials` needs
 those fills; the other three (Dx only) would fall from the mesh path's 4th-order
 Lagrange prolongation to locally 1st-order derivatives at refinement faces.
 
-**Side finding, not fixed:** the `is_z4c` high-order prolongation dispatch
-(`bvals/prolongation.cpp`, `HighOrderProlongCC<ng>`) has cases for ng=2 and 4
-only, so with `nghost=3` CFC/z4c prolongation silently does nothing.
+**Side note (corrected the same day):** the `is_z4c` high-order prolongation
+dispatch (`bvals/prolongation.cpp`, `HighOrderProlongCC<ng>`) has cases for
+ng=2 and 4 only. This is NOT a live `nghost=3` bug, as first written here:
+prolongation only runs under SMR/AMR, and `mesh.cpp:233` already aborts any
+multilevel run with an odd `nghost`. Only an even `nghost>=6` would fall
+through the switch silently.
 
 Knob and topic branch discarded; no source change kept.

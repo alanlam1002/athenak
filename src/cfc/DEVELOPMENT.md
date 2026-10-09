@@ -8024,3 +8024,46 @@ debug-scaling), `tov_frozen_nexteval_{1,8}node` / `tov_frozen_capacity_
 {1,8}node`, and the `_cache1024` suffix of each of the four next-eval dirs
 for the 1024 re-runs. Parfiles: `dyngr_grass_diff_v2_evolution_cfc_r3_grdt_
 si1_scaling.athinput`, `whisky_tov_scaling.athinput`.
+
+## 63. Derivatives from multigrid ghosts instead of the intermediate mesh
+exchanges: measured, not pursued (2026-10-09). Proposal
+(`MG_GHOST_DERIVATIVE_SESSION_PROMPT.md`): take 2nd-order derivatives of the
+multigrid solutions from the MG finest level's own `mg_nghost` ghosts and drop
+the four intermediate exchange quintets in `QueueCFCTasks()` (PiEtaX, Psi,
+AlphaPsi, PiEtaBeta), keeping only the final `u_adm` one.
+
+**Cost (measured).** A throwaway knob re-ran each of the four quintets N extra
+times, blocking and fenced, at the start of `ReconstructBetaTask` (idempotent,
+physics unchanged; history agreed across arms to the same level as a baseline
+repeat). Debug-queue job 8915163, GRASS CFC+R3+`gr_dt` fixture from item 62,
+2 nodes / 24 ranks, arms interleaved A B C D x2 on the same nodes:
+
+| arm | s/cycle r1 | s/cycle r2 |
+|---|---|---|
+| A baseline | 6.97 | 6.60 |
+| B +1 extra set of the 4 exchanges | 6.90 | 6.67 |
+| C +3 extra sets | 6.67 | 6.63 |
+| D `solve_interval=1000` (no CFC solves) | 0.447 | 0.433 |
+
+CFC is ~93% of the step. One set of the four exchanges costs ~0.015-0.02
+s/cycle (PiEtaX ~5 ms, PiEtaBeta ~5 ms, Psi 2-4 ms, AlphaPsi ~2 ms), i.e.
+**~0.25% of the step**; the s/cycle effect of 3 extra sets is invisible under
+the 5.5% A-vs-A spread. The cost is the V-cycles (items 60, 62), not these
+exchanges. Case dir: `~/scratch/athenak_run/cfc/mgderiv_exch_ab_2node`.
+
+**Accuracy (code reading, multigrid/).** The finest-level MG ghosts are valid
+when `SolveMG` returns (`SetMGTaskListToFiner` flag 2 adds a ghost-fill round
+after the last smoothing), and `Multigrid::RetrieveResult` already copies the
+first ghost ring, edges and corners included. But at coarse-fine boundaries
+`ProlongateFCMG` is 2nd order on faces (one layer only) and plain injection
+(0th order) on edges and corners, and the robin/multipole physical BCs fill
+only face ghosts, never edges/corners. `ComputeADualFromPotentials` needs
+`Dxy` of (P_i, eta), so the PiEtaX exchange could not be dropped without fixing
+those fills; the other three (Dx only) would fall from the mesh path's 4th-order
+Lagrange prolongation to locally 1st-order derivatives at refinement faces.
+
+**Side finding, not fixed:** the `is_z4c` high-order prolongation dispatch
+(`bvals/prolongation.cpp`, `HighOrderProlongCC<ng>`) has cases for ng=2 and 4
+only, so with `nghost=3` CFC/z4c prolongation silently does nothing.
+
+Knob and topic branch discarded; no source change kept.

@@ -50,20 +50,23 @@ def gauge_from_hst(outdir, basename):
     f = os.path.join(outdir, f'{basename}.user.hst')
     if not os.path.exists(f):
         return None
-    labels = {}
+    order = []
     for line in open(f):
         if line.startswith('#') and '[1]=' in line:
             for tok in line[1:].split():
                 if '=' in tok:
-                    i, name = tok.split('=', 1)
-                    labels[name] = int(i.strip('[]')) - 1
+                    order.append(tok.split('=', 1)[1])
             break
-    for need in ([f'frame_vel_x{a}' for a in (1, 2, 3)] + [f'frame_disp_x{a}' for a in (1, 2, 3)],
-                 [f'gauge-Xdot{a}' for a in (1, 2, 3)] + [f'gauge-X{a}' for a in (1, 2, 3)]):
-        if all(n in labels for n in need):
-            break
-    else:
-        return None
+    labels = {n: i for i, n in enumerate(order)}
+    need = [f'frame_vel_x{a}' for a in (1, 2, 3)] + [f'frame_disp_x{a}' for a in (1, 2, 3)]
+    if not all(n in labels for n in need):
+        # first build (afdeffd9): gauge-Xdot1..3, gauge-X1..3, header-truncated to
+        # 'gauge-Xdot' x3 -- take them by position
+        if 'gauge-Xdot' not in labels and 'gauge-Xdot1' not in labels:
+            return None
+        i0 = order.index('gauge-Xdot') if 'gauge-Xdot' in order else order.index('gauge-Xdot1')
+        for k, n in enumerate(need):
+            labels[n] = i0 + k
     h = np.loadtxt(f, comments='#', ndmin=2)
     t = h[:, labels['time']]
     xd = [h[:, labels[n]] for n in need[:3]]

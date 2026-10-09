@@ -9549,7 +9549,7 @@ Status: **[open, leading hypothesis memory]** (2026-10-09). No source change.
 
 ## 68. Comoving (uniform-shift) gauge: `<cfc> frame_vel*/frame_accel*`
 
-Status: **[implemented; unit tests pass; G2/G3/G3b pending]** (2026-10-09). Research
+Status: **[implemented; unit tests pass; G0/G2/G3/G3b run, see end]** (2026-10-09). Research
 derivation: athenak_tde_project `research/notes/comoving_gauge/comoving_gauge.pdf`
 (R-020/R-021).
 
@@ -9654,3 +9654,43 @@ G0/G2/G3/G3b/regression runs) named these `gauge_xdot*`/`gauge_accel*`, with hst
 **Lesson (process):** never `git stash` in a tree while a build of it is running. A
 stash/pop during the `build_gpu_pe2626_gauge` compile was repaired by an incremental
 re-make, since the popped sources are newer than any object compiled in the window.
+
+**Regression (xidot = 0), ensemble job 8917261:** static WD to t=10 (8 cycles), with the
+old binary 987060ba run twice and the new binary once.
+- The new binary is **within the GPU run-to-run spread**:
+  - rest mass: old vs old2 2e-9, new vs old 4e-9;
+  - rho_max: old vs old2 5.5e-4, new vs old 3.7e-4.
+- A bitwise check is impossible on this path: **the production GPU binary is not
+  deterministic run-to-run** (dt at cycle 8: 0.7998 vs 0.8081, same binary and deck).
+  Not chased here; the suspects are reductions in the multigrid or CFC centroids.
+
+**History labels were truncated to 10 characters** (`outputs/history.cpp`, `%.10s`), so
+`gauge-Xdot1..3` were all written as `gauge-Xdot`. The header now prints full labels
+(`%s`, identical for labels of ≤ 10 characters). `orbit_invariants.py` maps the
+truncated columns by position.
+
+**G-test pair** (R-021 §10; isolated WD, L4, si=1, ±32 box, star at (10,−8), t ≤ 100).
+G0 is debug job 8917270; G2/G3/G3b are job 8917261. Analysis:
+`scripts/gauge_g2g3_plots.py`.
+
+| run | rho_max t=40/100 | K_max/K0 t=100 | min K/K0 (rho>0.1rho0) worst | puff t=100 | physical CoM drift t=100 |
+|---|---|---|---|---|---|
+| G0 static | 1.013 / 1.021 | 0.986 | 0.982 | 7.1e-4 | 0 |
+| boosted (v=V0) | 1.059 / 1.071 | 0.963 | 0.48 (t≈45) | 1.1e-2 | 24.41 (V0 t = 24.47) |
+| G2 (v=V0, xidot=V0) | 1.041 / 1.069 | 1.016 | 0.886 (t=100) | 4.8e-4 | 24.49 |
+| G3 (v=0, xidot=−V0) | 1.032 / 1.017 | 0.925 | 0.57 (t≈35) | 1.6e-2 | 0.05 |
+| G3b (v=0, xidot=−a t) | 1.030 / 1.034 | 0.941 | 0.69 (t≈60) | 1.7e-2 | 0.03 |
+
+- **No fictitious force:** G3/G3b's star stays put physically (0.05 / 0.03 M) while
+  crossing ~24 / 22.5 M of grid, and G2 moves at V0. The gauge is implemented correctly.
+- **Advection causes the puffing and the outer-layer entropy loss:**
+  - G3 ≈ boosted, G2 ≈ G0 in the envelope;
+  - the density profiles beyond R_* at t = 40 and 100 overlay pairwise;
+  - G2's dense-gas min K stays ≥ 0.97 to t ≈ 60 (boosted 0.48, G3 0.57).
+- **Not everything is advection:**
+  - G2's rho_max rises like the boosted star's (+7%, smoothly), while G3's peaks at +4%
+    and returns to +2% (G0).
+  - G2's central K *rises* 1.6% and its dense-gas min K drifts to 0.89 by t=100.
+  - G2 shares the boosted run's IC: the TOV star plus a uniform v, not a boosted
+    equilibrium (W − 1 ≈ 3%). So the IC mismatch and the tau cancellation are
+    confounded in G2.

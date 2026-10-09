@@ -85,6 +85,9 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto &dyn_eos_ = eos;
   bool gr_dt_ = gr_dt;
+  const bool atm_fv_ = eos.atm_frame_vel;
+  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
+  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
   int nhyd = pmhd->nmhd;
   int nscal = pmhd->nscalars;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
@@ -154,8 +157,16 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
         prim[PPR] = w0_(m,IPR,k,j,i);
         prim[PTM] = dyn_eos_.ps.GetEOS().GetTemperatureFromP(prim[PRH], prim[PPR],
                                                               &prim[PYF]);
-        dyn_eos_.ps.GetEOS().ApplyPrimitiveFloor(prim[PRH], &prim[PVX], prim[PPR],
-                                                  prim[PTM], &prim[PYF]);
+        bool floored_ = dyn_eos_.ps.GetEOS().ApplyPrimitiveFloor(prim[PRH], &prim[PVX],
+                                                  prim[PPR], prim[PTM], &prim[PYF]);
+        if (floored_ && atm_fv_) {
+          // same comoving floor state as the C2P (<mhd> atmosphere_frame_velocity), so
+          // the floor's own v = 0 does not set dt in the comoving gauge (R-028 E1)
+          Real vsq = g3d[S11]*fv0*fv0 + g3d[S22]*fv1*fv1 + g3d[S33]*fv2*fv2
+                   + 2.0*(g3d[S12]*fv0*fv1 + g3d[S13]*fv0*fv2 + g3d[S23]*fv1*fv2);
+          Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.99));
+          prim[PVX] = wl*fv0; prim[PVY] = wl*fv1; prim[PVZ] = wl*fv2;
+        }
 
         // Undensitized cell-centered field (bcc0 stores sqrt(detg)*B^i, matching
         // dyn_grmhd_fluxes.cpp/the Riemann solvers' own convention).

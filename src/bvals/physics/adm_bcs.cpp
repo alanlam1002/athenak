@@ -66,7 +66,7 @@ struct ADMChannelInfo {
 };
 
 KOKKOS_INLINE_FUNCTION
-ADMChannelInfo GetADMChannelInfo(int v) {
+ADMChannelInfo GetADMChannelInfo(int v, Real gx0, Real gx1, Real gx2) {
   using adm::ADM;
   // (row,col) for the 6 SYM2 tensor channels, in I_ADM_GXX..GZZ/I_ADM_KXX..KZZ order.
   constexpr int kRow[6] = {0, 0, 0, 1, 1, 2};
@@ -81,7 +81,12 @@ ADMChannelInfo GetADMChannelInfo(int v) {
   } else if (v == ADM::I_ADM_ALPHA) {
     return {0, -1, -1, 1.0, 1};
   } else {                                            // beta_u: BETAX..BETAZ
-    return {1, v - ADM::I_ADM_BETAX, -1, 0.0, 2};
+    // A uniform gauge shift (adm.gauge_xdot, comoving gauge) is beta's asymptotic
+    // value: the falloff and reflection act on beta - Xdot, so a uniform shift
+    // passes through the boundary unchanged. Zero for every non-gauge run.
+    int row = v - ADM::I_ADM_BETAX;
+    Real flat = (row == 0) ? gx0 : ((row == 1) ? gx1 : gx2);
+    return {1, row, -1, flat, 2};
   }
 }
 
@@ -110,11 +115,16 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
 
   int nvar = u0.extent_int(1);
   int nmb = ppack->nmb_thispack;
+  // uniform gauge shift (comoving gauge): beta_u's asymptotic value, see
+  // GetADMChannelInfo. Captured by value; zero unless CFC's gauge is active.
+  const Real gx0 = ppack->padm->gauge_xdot[0];
+  const Real gx1 = ppack->padm->gauge_xdot[1];
+  const Real gx2 = ppack->padm->gauge_xdot[2];
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
     par_for("adm_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1), 0, (n2-1),
     KOKKOS_LAMBDA(int m, int v, int k, int j) {
-      ADMChannelInfo c = GetADMChannelInfo(v);
+      ADMChannelInfo c = GetADMChannelInfo(v, gx0, gx1, gx2);
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
       Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
@@ -126,7 +136,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
           bool flip = ChannelFlipsAtAxis(c, 0);
           for (int i=0; i<ng; ++i) {
             Real val = u0(m,v,k,j,is+i);
-            u0(m,v,k,j,is-i-1) = flip ? -val : val;
+            u0(m,v,k,j,is-i-1) = flip ? (2.0*c.flat - val) : val;
           }
           break;
         }
@@ -152,7 +162,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
           bool flip = ChannelFlipsAtAxis(c, 0);
           for (int i=0; i<ng; ++i) {
             Real val = u0(m,v,k,j,ie-i);
-            u0(m,v,k,j,ie+i+1) = flip ? -val : val;
+            u0(m,v,k,j,ie+i+1) = flip ? (2.0*c.flat - val) : val;
           }
           break;
         }
@@ -179,7 +189,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
   if (pm->mesh_bcs[BoundaryFace::inner_x2] != BoundaryFlag::periodic) {
     par_for("adm_bc_x2", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1), 0, (n1-1),
     KOKKOS_LAMBDA(int m, int v, int k, int i) {
-      ADMChannelInfo c = GetADMChannelInfo(v);
+      ADMChannelInfo c = GetADMChannelInfo(v, gx0, gx1, gx2);
       Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
       Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
       Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
@@ -191,7 +201,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
           bool flip = ChannelFlipsAtAxis(c, 1);
           for (int j=0; j<ng; ++j) {
             Real val = u0(m,v,k,js+j,i);
-            u0(m,v,k,js-j-1,i) = flip ? -val : val;
+            u0(m,v,k,js-j-1,i) = flip ? (2.0*c.flat - val) : val;
           }
           break;
         }
@@ -217,7 +227,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
           bool flip = ChannelFlipsAtAxis(c, 1);
           for (int j=0; j<ng; ++j) {
             Real val = u0(m,v,k,je-j,i);
-            u0(m,v,k,je+j+1,i) = flip ? -val : val;
+            u0(m,v,k,je+j+1,i) = flip ? (2.0*c.flat - val) : val;
           }
           break;
         }
@@ -244,7 +254,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
   if (pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::periodic) return;
   par_for("adm_bc_x3", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n2-1), 0, (n1-1),
   KOKKOS_LAMBDA(int m, int v, int j, int i) {
-    ADMChannelInfo c = GetADMChannelInfo(v);
+    ADMChannelInfo c = GetADMChannelInfo(v, gx0, gx1, gx2);
     Real &x1min = size.d_view(m).x1min; Real &x1max = size.d_view(m).x1max;
     Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
     Real &x2min = size.d_view(m).x2min; Real &x2max = size.d_view(m).x2max;
@@ -256,7 +266,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         bool flip = ChannelFlipsAtAxis(c, 2);
         for (int k=0; k<ng; ++k) {
           Real val = u0(m,v,ks+k,j,i);
-          u0(m,v,ks-k-1,j,i) = flip ? -val : val;
+          u0(m,v,ks-k-1,j,i) = flip ? (2.0*c.flat - val) : val;
         }
         break;
       }
@@ -282,7 +292,7 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         bool flip = ChannelFlipsAtAxis(c, 2);
         for (int k=0; k<ng; ++k) {
           Real val = u0(m,v,ke-k,j,i);
-          u0(m,v,ke+k+1,j,i) = flip ? -val : val;
+          u0(m,v,ke+k+1,j,i) = flip ? (2.0*c.flat - val) : val;
         }
         break;
       }

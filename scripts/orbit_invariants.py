@@ -16,6 +16,12 @@ Measured on the elliptic production run: E, L equal to the design values to 1e-4
 t=0, then L decays ~0.015-0.02%/M (4.9% by t=250) -- the reason its achieved periapsis was
 R_areal=6.8, not the designed 10.0. Use this to check any new orbit before trusting it.
 
+Comoving gauge (<cfc> gauge_xdot*/gauge_accel*, src/cfc/DEVELOPMENT.md item 68): the
+dumps are in grid coordinates x' = x - X(t) and the dumped shift is beta' = beta + Xdot.
+If BASENAME.user.hst carries gauge-Xdot*/gauge-X* columns, both are mapped back to the
+BH frame before E and L are formed: x = x' + X(t), beta = beta' - Xdot, i.e.
+u_t(BH) = u_t' - u_i Xdot^i. Without those columns nothing changes.
+
 Needs numpy+scipy (e.g. /opt/aurora/default/frameworks/*/bin/python3). h5py is stubbed:
 bin_convert only needs it for the athdf writer.
 
@@ -38,9 +44,36 @@ import bin_convert as bc                 # noqa: E402
 import tde_elliptical_orbit_ic as ic     # noqa: E402
 
 
-def measure(pf, af, core, comcut):
+def gauge_from_hst(outdir, basename):
+    """(t -> Xdot[3], t -> X[3]) from the user history file's gauge columns, or None."""
+    f = os.path.join(outdir, f'{basename}.user.hst')
+    if not os.path.exists(f):
+        return None
+    labels = {}
+    for line in open(f):
+        if line.startswith('#') and '[1]=' in line:
+            for tok in line[1:].split():
+                if '=' in tok:
+                    i, name = tok.split('=', 1)
+                    labels[name] = int(i.strip('[]')) - 1
+            break
+    need = [f'gauge-Xdot{a}' for a in (1, 2, 3)] + [f'gauge-X{a}' for a in (1, 2, 3)]
+    if not all(n in labels for n in need):
+        return None
+    h = np.loadtxt(f, comments='#', ndmin=2)
+    t = h[:, labels['time']]
+    xd = [h[:, labels[n]] for n in need[:3]]
+    xx = [h[:, labels[n]] for n in need[3:]]
+    return (lambda tt: np.array([np.interp(tt, t, c) for c in xd]),
+            lambda tt: np.array([np.interp(tt, t, c) for c in xx]))
+
+
+def measure(pf, af, core, comcut, gauge=None):
     p = bc.read_binary(pf)
     a = bc.read_binary(af)
+    xdot, xoff = np.zeros(3), np.zeros(3)
+    if gauge is not None:
+        xdot, xoff = gauge[0](p['time']), gauge[1](p['time'])
     nx, ny = p['nx1_out_mb'], p['nx2_out_mb']
     g = np.asarray(p['mb_geometry'])
     ga = {tuple(l): i for i, l in enumerate(np.asarray(a['mb_logical']).tolist())}
@@ -54,8 +87,8 @@ def measure(pf, af, core, comcut):
         rho = dens[m, 0]
         dx = (g[m, 1] - g[m, 0]) / nx
         dy = (g[m, 3] - g[m, 2]) / ny
-        X, Y = np.meshgrid(g[m, 0] + (np.arange(nx) + .5) * dx,
-                           g[m, 2] + (np.arange(ny) + .5) * dy)
+        X, Y = np.meshgrid(g[m, 0] + (np.arange(nx) + .5) * dx + xoff[0],
+                           g[m, 2] + (np.arange(ny) + .5) * dy + xoff[1])
         c = rho > comcut * rmax
         if c.any():
             w = rho[c] * dx * dy
@@ -69,7 +102,9 @@ def measure(pf, af, core, comcut):
         ps4 = A('adm_psi4')
         px, py = ps4 * ux, ps4 * uy
         W = np.sqrt(1.0 + ps4 * (ux * ux + uy * uy + uz * uz))
-        E = A('adm_alpha') * W - (A('adm_betax') * px + A('adm_betay') * py)
+        E = A('adm_alpha') * W - ((A('adm_betax') - xdot[0]) * px +
+                                   (A('adm_betay') - xdot[1]) * py +
+                                   (A('adm_betaz') - xdot[2]) * ps4 * uz)
         L = X[s] * py - Y[s] * px
         w = rho[s] * dx * dy
         acc['w'] += w.sum(); acc['E'] += (w * E).sum(); acc['L'] += (w * L).sum()
@@ -89,12 +124,15 @@ def main():
     ap.add_argument('--com', type=float, default=1e-2, help='CoM cut / rho_max')
     a = ap.parse_args()
     pfs = sorted(glob.glob(os.path.join(a.outdir, 'bin', f'{a.basename}.prim_xy.*.bin')))
+    gauge = gauge_from_hst(a.outdir, a.basename)
+    if gauge is not None:
+        print('comoving gauge: mapping positions and shift back to the BH frame')
     rows = []
     for pf in pfs[::a.every]:
         af = pf.replace('.prim_xy.', '.adm_xy.')
         if not os.path.exists(af):
             continue
-        r = measure(pf, af, a.core, a.com)
+        r = measure(pf, af, a.core, a.com, gauge)
         if r[0] > a.tmax:
             break
         rows.append(r)

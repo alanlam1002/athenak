@@ -25,6 +25,7 @@
 #include "eos/eos.hpp"
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "cfc/cfc.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
@@ -885,6 +886,20 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->nhist = 2;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
+  // Comoving gauge (<cfc> gauge_xdot*/gauge_accel*): append Xdot(t) and X(t), so
+  // diagnostics can map grid positions/shift back to the BH frame
+  // (x = x' + X, beta = beta' - Xdot). Absent otherwise: hst format unchanged.
+  cfc::CFC *pcfc_ = pm->pmb_pack->pcfc;
+  const bool gauge_cols = (pcfc_ != nullptr) && pcfc_->GaugeEnabled();
+  if (gauge_cols) {
+    pdata->nhist = 8;
+    pdata->label[2] = "gauge-Xdot1";
+    pdata->label[3] = "gauge-Xdot2";
+    pdata->label[4] = "gauge-Xdot3";
+    pdata->label[5] = "gauge-X1";
+    pdata->label[6] = "gauge-X2";
+    pdata->label[7] = "gauge-X3";
+  }
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
@@ -938,5 +953,16 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // store data in hdata array
   pdata->hdata[0] = rho_max;
   pdata->hdata[1] = alpha_min;
+  if (gauge_cols) {
+    // history columns are MPI_SUM-reduced across ranks: only rank 0 contributes
+    Real xd[3], x[3];
+    pcfc_->GaugeXdot(pm->time, xd);
+    pcfc_->GaugeX(pm->time, x);
+    bool root = (global_variable::my_rank == 0);
+    for (int a = 0; a < 3; ++a) {
+      pdata->hdata[2 + a] = root ? xd[a] : 0.0;
+      pdata->hdata[5 + a] = root ? x[a] : 0.0;
+    }
+  }
 }
 

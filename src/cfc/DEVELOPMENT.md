@@ -9546,3 +9546,105 @@ Status: **[open, leading hypothesis memory]** (2026-10-09). No source change.
   "single-tier only" rule can be retired.
 - **Planning number in the meantime:** keep ≲ 900 blocks of 16^3 per 64 GB PVC tile
   for CFC-TDE decks.
+
+## 68. Comoving (uniform-shift) gauge: `<cfc> gauge_xdot*/gauge_accel*`
+
+Status: **[implemented; unit tests pass; G2/G3/G3b pending]** (2026-10-09). Research
+derivation: athenak_tde_project `research/notes/comoving_gauge/comoving_gauge.pdf`
+(R-020/R-021).
+
+**What.** Coordinates x' = x - X(t), slicing unchanged. The only change to the 3+1 data
+is beta' = beta + Xdot(t), with Xdot uniform. alpha, gamma_ij, K_ij and every Eulerian
+fluid variable are unchanged. Xdot is a flat conformal Killing vector, in the kernel of
+the xCFC shift operator, so the elliptic solves and their BCs are untouched.
+
+**Inputs** (default 0, which is bit-for-bit the old code):
+- `<cfc> gauge_xdot1/2/3`, `gauge_accel1/2/3`;
+- Xdot(t) = gauge_xdot + gauge_accel t;
+- X(t) = gauge_xdot t + gauge_accel t²/2.
+
+**Implementation.**
+- `AssembleLapseShiftK` (`cfc_reconstruct.cpp`) adds Xdot to `adm.beta_u` only. The
+  solved `beta_u` is untouched, so the next solve's guess and BCs are unchanged. It is
+  skipped entirely when all components are zero.
+- Xdot is evaluated at the time of the state the assembly sees: `CFC::StageTime`.
+  - For the SSP-RK integrators, tau_s = gam0[s-1] tau_{s-1} + beta[s-1]; rk3 gives 1,
+    1/2, 1.
+  - stage < 1 (InitializeMetric, AMR re-init) uses pmesh->time.
+- **solve_interval > 1:** non-solve stages call `CFC::ApplyGaugeShiftUpdate`. It adds
+  Xdot(t_stage) − `padm->gauge_xdot` to every cell of `adm.beta_u`, ghosts included,
+  so no exchange is needed.
+  - On a restart before the first solve, the rst's `adm.beta_u` is taken to contain
+    Xdot(time).
+- **`adm.gauge_xdot[3]`** (new, `coordinates/adm.hpp`) records the value currently
+  inside `adm.beta_u`.
+- **Initial data:** InitializeMetric runs before the first NewTimeStep
+  (`driver.cpp:334`), so Xdot is in `adm.beta_u` before the first dt and the first
+  flux. On restarts InitializeMetric is skipped and the rst's `u_adm` already
+  carries it.
+- **History:** `TOVHistory` appends `gauge-Xdot1..3` and `gauge-X1..3` when the gauge
+  is on. The hst format is unchanged otherwise.
+
+**Readers of adm.beta_u, checked one by one:**
+- **Need the gauge, and a constant passes through exactly:**
+  - the Riemann solvers (hlle/llf/flux) and FOFC;
+  - newdt (coordinate speeds alpha lambda − beta, so dt shrinks by the extra |Xdot| in
+    the atmosphere — physical);
+  - `mhd_corner_e.cpp`, the coordinate EMFs, as the PDF's §8 requires;
+  - the face interpolation in `adm.hpp`;
+  - the `dyn_grmhd.cpp:602` FD d_j beta^k: the derivative of a constant is 0 to
+    round-off.
+- **Hidden reader that had to change: ADM physical BCs** (`bvals/physics/adm_bcs.cpp`).
+  - beta_u's ghost cells were extrapolated toward 0 as 1/r² from the origin. That
+    would bend a uniform Xdot over the last ghost layers at the outer boundary.
+  - Fixed: beta's asymptotic value is now `padm->gauge_xdot`, and reflection acts on
+    beta − Xdot (written as 2·flat − val, exact for flat = 0).
+  - A nonzero Xdot normal to a reflecting boundary is refused at start-up (the mirror
+    would move).
+- **Not readers:**
+  - the CFC solves and their sources (they use CFC's own `beta_u`/`beta0_u`, never
+    `adm.beta_u`);
+  - ADM mass and I_A, excision, `AccreteExcisedMass`;
+  - `outputs/derived_variables.cpp`;
+  - the C2P (prints beta only in error dumps);
+  - `SetTmunu` (Eulerian projections only).
+- **Diagnostics that do change: everything that reads the *dumped* shift or grid
+  positions.**
+  - The `adm` bin outputs contain beta' = beta + Xdot.
+  - `scripts/orbit_invariants.py` now maps back using the hst columns
+    (x = x' + X, beta = beta' − Xdot, i.e. u_t(BH) = u_t' − u_i Xdot^i).
+  - It also now includes the beta^z p_z term. That changes the old rp10 E by 1e-7.
+  - T-8's E = −u_t − 1 must do the same when it is written.
+- **Phase 2 (BH-frame TDE), not built:** the ADM-BC falloff radius, the puncture
+  background (`FillPunctureBackground`, r from the origin), the excision mask and the
+  BH refinement are all centred on the grid origin. They must follow
+  X_BH(t) = −X(t).
+
+**Unit tests** (built-in pgen `dyngr_gauge_shift`, `src/pgen/tests/dyngr_gauge_shift.cpp`):
+- **Setup:** flat space with uniform beta; CPU build `build_cpu_pe2626_tests`; ppmx +
+  hlle + rk3 + FOFC; periodic.
+- **Run dir:** `/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc/gauge_unit_tests/`.
+- **Analysis:** `scripts/gauge_shift_tests.py`.
+
+**Results:**
+- **T0a** (uniform medium; v = (0.3, 0.2), Xdot = (0.25, −0.1); t = 2, 161 cycles):
+  final == initial **bit for bit** in every primitive (double-precision tab cuts).
+- **T0b** (entropy wave, amp 0.1, v1 = 0.25, 128 cells, t = 8 = 2 periods):
+  - Xdot = 0: L1(rho − exact) = 1.55e-7.
+  - Xdot = v1: **0 exactly** (V = 0, so nothing moves).
+  - P stays uniform exactly in both.
+- **T0c** (field loop, b0 = 1e-3, R = 0.3, v = (0.2, 0.1), 64², t = 10 = (2, 1) periods,
+  so exact == initial):
+
+  | | magnetic energy kept | L1(\|B\|) | max\|div B\| dx/\|B\|max |
+  |---|---|---|---|
+  | Xdot = 0 | 0.893 | 0.156 | 9e-15 |
+  | Xdot = v | 0.937 | 0.091 | 3e-14 |
+
+  div B stays at round-off with Xdot ≠ 0, as the PDF §8 requires under CT. The
+  comoving loop still loses 6% to HLLE/UCT diffusion, which scales with the fast
+  speed, not V.
+
+**Lesson (process):** never `git stash` in a tree while a build of it is running. A
+stash/pop during the `build_gpu_pe2626_gauge` compile was repaired by an incremental
+re-make, since the popped sources are newer than any object compiled in the window.

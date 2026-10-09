@@ -60,6 +60,11 @@ class ADM {
   // the same way phydro/pmhd/prad/pz4c's own evolved arrays are.
   DvceArray5D<Real> coarse_u_adm;
   bool is_dynamic;                                        // is the metric time dependent?
+  // Uniform gauge shift Xdot^i currently included in adm.beta_u (comoving gauge,
+  // x' = x - X(t); CFC <cfc> gauge_xdot*/gauge_accel*). Zero unless CFC sets it.
+  // ADMBCs uses it as beta_u's asymptotic value so the outer-boundary falloff
+  // preserves a uniform shift. See src/cfc/DEVELOPMENT.md item 68.
+  Real gauge_xdot[3] = {0.0, 0.0, 0.0};
 
   void (*SetADMVariables)(MeshBlockPack *pm);
 

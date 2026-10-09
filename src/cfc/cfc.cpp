@@ -400,6 +400,43 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Delta-n-cycle solve cadence; see cfc.hpp. <=0 (default) is a no-op.
   cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
 
+  // Comoving gauge (uniform shift Xdot(t)); see cfc.hpp and DEVELOPMENT.md item 68.
+  // All zero (default) leaves every run bit-for-bit unchanged.
+  gauge_enabled_ = false;
+  gauge_assembled_ = false;
+  for (int a = 0; a < 3; ++a) {
+    std::string n = std::to_string(a + 1);
+    gauge_xdot0_[a] = pin->GetOrAddReal("cfc", "gauge_xdot" + n, 0.0);
+    gauge_accel_[a] = pin->GetOrAddReal("cfc", "gauge_accel" + n, 0.0);
+    if (gauge_xdot0_[a] != 0.0 || gauge_accel_[a] != 0.0) gauge_enabled_ = true;
+  }
+  if (gauge_enabled_) {
+    // A uniform translation normal to a reflecting boundary moves the mirror: not a
+    // pure gauge of the reflected problem. Refuse rather than silently mis-reflect.
+    auto &mbcs = pmy_pack->pmesh->mesh_bcs;
+    const BoundaryFace inner[3] = {BoundaryFace::inner_x1, BoundaryFace::inner_x2,
+                                   BoundaryFace::inner_x3};
+    const BoundaryFace outer[3] = {BoundaryFace::outer_x1, BoundaryFace::outer_x2,
+                                   BoundaryFace::outer_x3};
+    for (int a = 0; a < 3; ++a) {
+      bool moving = (gauge_xdot0_[a] != 0.0 || gauge_accel_[a] != 0.0);
+      if (moving && (mbcs[inner[a]] == BoundaryFlag::reflect ||
+                     mbcs[outer[a]] == BoundaryFlag::reflect)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<cfc> gauge_xdot/gauge_accel component " << a + 1
+                  << " is nonzero but a boundary normal to x" << a + 1
+                  << " is reflecting" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC comoving gauge: Xdot(t) = (" << gauge_xdot0_[0] << ", "
+                << gauge_xdot0_[1] << ", " << gauge_xdot0_[2] << ") + ("
+                << gauge_accel_[0] << ", " << gauge_accel_[1] << ", "
+                << gauge_accel_[2] << ")*t" << std::endl;
+    }
+  }
+
   // Elliptic source/output NaN scan; see cfc.hpp. Default 0 = off.
   src_nan_check_ = pin->GetOrAddInteger("cfc", "src_nan_check", 0);
   indcs_ng_ = pmy_pack->pmesh->mb_indcs.ng;
@@ -999,7 +1036,7 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   BCSPiEtaBetaTask(pdriver, 0);
 
   ReconstructShift();
-  AssembleADM();
+  AssembleADM(StageTime(pdriver, 0));
 
   RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
   while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
@@ -1468,8 +1505,12 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 // final step: vK_dd/alpha/beta_u -> padm->u_adm.
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
-  AssembleADM();
+  if (!DoSolveThisStage(pdriver, stage)) {
+    // The solved part of adm.beta_u is reused; keep the gauge part current.
+    ApplyGaugeShiftUpdate(StageTime(pdriver, stage));
+    return TaskStatus::complete;
+  }
+  AssembleADM(StageTime(pdriver, stage));
   AccreteExcisedMass(pdriver, stage);
   if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
   return TaskStatus::complete;
@@ -2443,9 +2484,63 @@ void CFC::ReconstructShift() {
   return;
 }
 
-void CFC::AssembleADM() {
+void CFC::AssembleADM(Real time) {
+  Real xd[3] = {0.0, 0.0, 0.0};
+  if (gauge_enabled_) { GaugeXdot(time, xd); }
   cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
-                           a_dd, beta_u, beta0_u, alpha_floor_);
+                           a_dd, beta_u, beta0_u, alpha_floor_, xd);
+  // ADMBCs reads this as beta_u's asymptotic value (adm_bcs.cpp).
+  for (int a = 0; a < 3; ++a) { pmy_pack->padm->gauge_xdot[a] = xd[a]; }
+  gauge_assembled_ = true;
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real CFC::StageTime(Driver *pdriver, int stage) const
+//! \brief see cfc.hpp. For the SSP-RK integrators u0 <- gam0*u0 + gam1*u1 + beta*dt*L
+//! (u1 = start-of-step state, mhd_update.cpp), so the stage-s state sits at
+//! tau_s = gam0[s-1]*tau_{s-1} + beta[s-1] (rk3: 1, 1/2, 1). Exact for rk1/rk2/rk3;
+//! rk4/ImEx's extra u1 updates are not modelled (only Xdot's O(dt) timing is affected).
+
+Real CFC::StageTime(Driver *pdriver, int stage) const {
+  Real t = pmy_pack->pmesh->time;
+  if (stage < 1) { return t; }
+  Real tau = 0.0;
+  for (int s = 0; s < stage; ++s) { tau = pdriver->gam0[s]*tau + pdriver->beta[s]; }
+  return t + tau*pmy_pack->pmesh->dt;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ApplyGaugeShiftUpdate(Real time)
+//! \brief see cfc.hpp. Adds the same constant to every cell (ghosts included), so no
+//! ghost exchange is needed and the update commutes with prolongation/restriction.
+
+void CFC::ApplyGaugeShiftUpdate(Real time) {
+  if (!gauge_enabled_) { return; }
+  auto &gx = pmy_pack->padm->gauge_xdot;
+  if (!gauge_assembled_) {
+    // Restart with solve_interval > 1 before the first solve: the restart file's
+    // adm.beta_u holds the shift assembled/updated at the end of the last cycle,
+    // i.e. Xdot(pmesh->time).
+    GaugeXdot(pmy_pack->pmesh->time, gx);
+    gauge_assembled_ = true;
+  }
+  Real xd[3];
+  GaugeXdot(time, xd);
+  const Real d0 = xd[0] - gx[0], d1 = xd[1] - gx[1], d2 = xd[2] - gx[2];
+  if (d0 != 0.0 || d1 != 0.0 || d2 != 0.0) {
+    auto &adm = pmy_pack->padm->adm;
+    int nmb = pmy_pack->nmb_thispack;
+    auto &u_adm = pmy_pack->padm->u_adm;
+    int n1 = u_adm.extent_int(4), n2 = u_adm.extent_int(3), n3 = u_adm.extent_int(2);
+    par_for("cfc_gauge_shift_update", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      adm.beta_u(m,0,k,j,i) += d0;
+      adm.beta_u(m,1,k,j,i) += d1;
+      adm.beta_u(m,2,k,j,i) += d2;
+    });
+  }
+  for (int a = 0; a < 3; ++a) { gx[a] = xd[a]; }
   return;
 }
 

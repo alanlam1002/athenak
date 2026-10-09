@@ -47,8 +47,6 @@ class FastFlow {
   void Find(int iter, Real time); // main functionality for finding AH
   void Write(int iter, Real time); // function for result writing
   template <int NGHOST>
-  void MetricDerivatives(Real time); // compute the metric derivatives
-  template <int NGHOST>
   void MetricInterp();
   void ComputeSphericalHarmonics();
   void RadiiFromSphericalHarmonics();
@@ -94,6 +92,10 @@ class FastFlow {
   int nh; // Counter variable
   bool wait_until_punc_are_close;
   [[maybe_unused]] bool use_stored_metric_drvts;
+  // True on a bitant mesh (reflecting inner-x3 boundary at x3min == 0). Surface points
+  // with z < 0 then lie outside the physical domain and must be interpolated from their
+  // z-reflected (in-domain) counterpart, with a parity sign applied per tensor component.
+  bool bitant_;
   int nhorizon; // Number of horizons
   std::string flow_function;
   int flowflag = 0;
@@ -143,9 +145,6 @@ class FastFlow {
   };
   static constexpr int kHnvar = 11;
   Real ah_prop[kHnvar]; // Array of horizon quantities
-
-  // 5D Device array for the metric derivatives
-  DvceArray5D<Real> dg;
 
   // Vectors to hold the DvceArray1D interpolated values of GaussLegendreGrid
   DvceArray2D<Real> g_interp, K_interp, dg_interp;

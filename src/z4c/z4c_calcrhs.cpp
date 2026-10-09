@@ -634,6 +634,18 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     }
 
     // shift vector
+    if (opt.shift_gamma_freezing) {
+      // Gamma-freezing shift without advection: rhs.vGam_u is complete above (before the
+      // dissipation kernel below, which acts on every variable, B^i included)
+      for(int a = 0; a < 3; ++a) {
+        rhs.beta_u(m,a,k,j,i) = opt.shift_B_coeff * z4c.vB_u(m,a,k,j,i);
+        rhs.vB_u(m,a,k,j,i) = rhs.vGam_u(m,a,k,j,i) - opt.eta_B * z4c.vB_u(m,a,k,j,i);
+      }
+      return;
+    }
+    for(int a = 0; a < 3; ++a) {
+      rhs.vB_u(m,a,k,j,i) = 0.0;
+    }
     for(int a = 0; a < 3; ++a) {
       rhs.beta_u(m,a,k,j,i) = opt.shift_ggamma * z4c.vGam_u(m,a,k,j,i)
                             + opt.shift_advect * Lbeta_u(a);

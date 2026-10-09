@@ -88,6 +88,9 @@ class DynGRMHD {
   virtual TaskStatus ConToPrim(Driver* pdrive, int stage) = 0;
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke) = 0;
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
+  // dual energy (item 70): {dense cells, entropy-branch cells, dE of the last full C2P,
+  // cumulative dE}; false if dual energy is off.
+  virtual bool GetDualEnergyStats(Real out[4]) { return false; }
   virtual void ConvertInternalEnergyToPressure(int is, int ie,
                                                int js, int je, int ks, int ke) = 0;
 
@@ -150,6 +153,12 @@ class DynGRMHDPS : public DynGRMHD {
   virtual TaskStatus ConToPrim(Driver* pdrive, int stage);
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke);
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
+  virtual bool GetDualEnergyStats(Real out[4]) {
+    if (!eos.de_on) return false;
+    out[0] = eos.de_ndense; out[1] = eos.de_nent; out[2] = eos.de_dE;
+    out[3] = eos.de_dE_total;
+    return true;
+  }
   virtual void ConvertInternalEnergyToPressure(int is, int ie,
                                                int js, int je, int ks, int ke);
 

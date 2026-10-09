@@ -128,10 +128,61 @@ class PrimitiveSolverHydro {
   unsigned int nerrs;
   unsigned int errcap;
 
+  // ---- Dual energy (src/cfc/DEVELOPMENT.md item 70; code/ENERGY_FIX_DESIGN.md) ----
+  // <mhd> dual_energy = true evolves the adiabat K = P/rho^gamma as the LAST passive
+  // scalar, stored as Y = K/de_kmax so it stays inside the ideal-gas species limits
+  // [0,1] (conserved: sqrt(gamma) D Y; same transport as Ye, no source term). In dense
+  // (D > de_rho_switch), unshocked gas the pressure comes from K via EntropyInversion
+  // and tau is resynced; elsewhere K is resynced from the energy solution. A
+  // primitive-floor hit in dense gas (the silent T < T_atm path of RESULTS §7.1) also
+  // takes the entropy branch. Ideal gas, B = 0 cells only.
+  bool de_on = false;
+  int de_idx = -1;                 // scalar index of the K tracer (nscalars - 1)
+  Real de_kmax = 1.0, de_rho_sw = 0.0, de_dp_shock = 0.3, de_eta1 = 0.0, de_gamma = 5./3.;
+  DvceArray4D<int> de_shock;       // per-cell shock flag from the previous primitives
+  // Diagnostics of the last full (non-floors_only) C2P call, interior cells only:
+  // dense cells, cells on the entropy branch, and the energy the tau resync added
+  // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
+  Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
+
+  //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
+  //! D^2 h^2 (W^2 - 1) = S^2 with rho = D/W, h = 1 + g/(g-1) K rho^(g-1) for W by
+  //! bisection on [1, sqrt(1 + S^2/D^2)] (f(1) = -S^2 <= 0, f(Whi) >= 0 since h >= 1).
+  KOKKOS_INLINE_FUNCTION
+  static bool EntropyInversion(Real D, Real ssq, Real K, Real gam, Real &W, Real &h) {
+    if (!(D > 0.0) || !(K > 0.0) || !(ssq >= 0.0)) return false;
+    const Real gfac = gam/(gam - 1.0);
+    Real wlo = 1.0, whi = sqrt(1.0 + ssq/(D*D));
+    for (int it = 0; it < 200 && (whi - wlo) > 1.0e-15*whi; ++it) {
+      Real wm = 0.5*(wlo + whi);
+      Real hm = 1.0 + gfac*K*pow(D/wm, gam - 1.0);
+      if (D*D*hm*hm*(wm*wm - 1.0) - ssq > 0.0) { whi = wm; } else { wlo = wm; }
+    }
+    W = 0.5*(wlo + whi);
+    h = 1.0 + gfac*K*pow(D/W, gam - 1.0);
+    return isfinite(W) && isfinite(h);
+  }
+
   PrimitiveSolverHydro(std::string block, MeshBlockPack *pp, ParameterInput *pin) :
 //        pmy_pack(pp), ps{&eos} {
         pmy_pack(pp), nerrs(0) {
     SetPolicyParams(block, pin);
+    de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
+    if (de_on) {
+      int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
+      if (!std::is_same_v<Primitive::IdealGas, EOSPolicy> || nsc < 1) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy needs the ideal-gas EOS"
+                  << " and nscalars >= 1 (the last scalar carries K)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      de_idx = nsc - 1;
+      de_gamma = pin->GetOrAddReal(block, "gamma", 5.0/3.0);
+      de_kmax = pin->GetReal(block, "dual_energy_kmax");
+      de_rho_sw = pin->GetReal(block, "dual_energy_rho_switch");
+      de_dp_shock = pin->GetOrAddReal(block, "dual_energy_dp_shock", 0.3);
+      de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
+    }
     Real mb = ps.GetEOS().GetBaryonMass();
     ps.GetEOSMutable().SetDensityFloor(pin->GetOrAddReal(block, "dfloor", (FLT_MIN))/mb);
     ps.GetEOSMutable().SetTemperatureFloor(pin->GetOrAddReal(block, "tfloor", (FLT_MIN)));
@@ -233,6 +284,9 @@ class PrimitiveSolverHydro {
     int &nmb = pmy_pack->nmb_thispack;
 
     Real mb = eos_.GetBaryonMass();
+    const bool de_on_ = de_on;
+    const int de_idx_ = de_idx;
+    const Real de_kmax_ = de_kmax, de_gamma_ = de_gamma;
 
 
     par_for("pshyd_prim2cons", DevExeSpace(), 0, (nmb-1), kl, ku, jl, ju, il, iu,
@@ -273,6 +327,13 @@ class PrimitiveSolverHydro {
       prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], prim_pt[PPR], &prim_pt[PYF]);
       bool floor = eos_.ApplyPrimitiveFloor(prim_pt[PRH], &prim_pt[PVX],
                                            prim_pt[PPR], prim_pt[PTM], &prim_pt[PYF]);
+      if (de_on_) {
+        // the K tracer is always derived from P and rho at prim->cons time
+        Real rho_ = prim_pt[PRH]*mb;
+        Real yk = prim_pt[PPR]/pow(rho_, de_gamma_)/de_kmax_;
+        prim_pt[PYF + de_idx_] = fmin(fmax(yk, 0.0), 1.0);
+        prim(m, nhyd + de_idx_, k, j, i) = prim_pt[PYF + de_idx_];
+      }
 
       ps_.PrimToCon(prim_pt, cons_pt, b, g3d);
 
@@ -367,15 +428,67 @@ class PrimitiveSolverHydro {
 
     // FIXME(JMF): We can short-circuit the primitive solve if FOFC is already enabled
     // due to a maximum principle violation.
+    // ---- dual energy: shock flag from the previous primitives (before they are
+    // overwritten below): compressive (div v <= 0) and a pressure jump > de_dp_shock
+    // to any face neighbour (neighbours clamped to this call's index range).
+    const bool de_on_ = de_on && !floors_only;
+    const int de_idx_ = de_idx;
+    const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_eta1_ = de_eta1;
+    const Real de_gamma_ = de_gamma;
+    if (de_on_) {
+      int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
+      if (de_shock.extent_int(0) != prim.extent_int(0) || de_shock.extent_int(1) != e3 ||
+          de_shock.extent_int(2) != e2 || de_shock.extent_int(3) != e1) {
+        Kokkos::realloc(de_shock, prim.extent_int(0), e3, e2, e1);
+      }
+      auto &shk = de_shock;
+      const Real dpsh = de_dp_shock;
+      par_for("de_shock_flag", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        auto vel = [&](int a, int kk, int jj, int ii) {
+          Real u0 = prim(m, IVX, kk, jj, ii), u1 = prim(m, IVY, kk, jj, ii);
+          Real u2 = prim(m, IVZ, kk, jj, ii);
+          Real usq = adm.g_dd(m,0,0,kk,jj,ii)*u0*u0 + adm.g_dd(m,1,1,kk,jj,ii)*u1*u1
+                   + adm.g_dd(m,2,2,kk,jj,ii)*u2*u2
+                   + 2.0*(adm.g_dd(m,0,1,kk,jj,ii)*u0*u1 + adm.g_dd(m,0,2,kk,jj,ii)*u0*u2
+                          + adm.g_dd(m,1,2,kk,jj,ii)*u1*u2);
+          Real ua = (a == 0) ? u0 : ((a == 1) ? u1 : u2);
+          return ua/sqrt(1.0 + usq);
+        };
+        Real p0 = prim(m, IPR, k, j, i);
+        Real divv = 0.0, dpmax = 0.0;
+        for (int a = 0; a < 3; ++a) {
+          int ip = i, im = i, jp = j, jm = j, kp = k, km = k;
+          Real dx;
+          if (a == 0) { ip = (i < iu) ? i+1 : i; im = (i > il) ? i-1 : i;
+                        dx = size.d_view(m).dx1*(ip - im); }
+          else if (a == 1) { jp = (j < ju) ? j+1 : j; jm = (j > jl) ? j-1 : j;
+                             dx = size.d_view(m).dx2*(jp - jm); }
+          else { kp = (k < ku) ? k+1 : k; km = (k > kl) ? k-1 : k;
+                 dx = size.d_view(m).dx3*(kp - km); }
+          if (dx <= 0.0) continue;
+          divv += (vel(a, kp, jp, ip) - vel(a, km, jm, im))/dx;
+          Real pp = prim(m, IPR, kp, jp, ip), pm = prim(m, IPR, km, jm, im);
+          dpmax = fmax(dpmax, fabs(pp - p0)/fmax(fmin(pp, p0), 1.0e-300));
+          dpmax = fmax(dpmax, fabs(pm - p0)/fmax(fmin(pm, p0), 1.0e-300));
+        }
+        // <= so a discontinuity between states at rest (t = 0 of a Riemann problem)
+        // counts as a shock: with < it ran entropy-conserving and never formed one (V1).
+        shk(m, k, j, i) = (divv <= 0.0 && dpmax > dpsh) ? 1 : 0;
+      });
+    }
+    auto &de_shock_ = de_shock;
+
     int count_errs=0;
     // Excised-mass tally totals for THIS call, reduced deterministically alongside
     // count_errs (see coordinates.hpp's excised_tally comment) rather than scattered
     // via Kokkos::atomic_add into a per-MeshBlock array.
     Real dE_tally = 0.0, dPx_tally = 0.0, dPy_tally = 0.0, dPz_tally = 0.0;
     Real dEraw_tally = 0.0;
+    Real de_nden = 0.0, de_nent_c = 0.0, de_dE_c = 0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, int &sumerrs, Real &dE_r, Real &dPx_r, Real &dPy_r,
-                  Real &dPz_r, Real &dEraw_r) {
+                  Real &dPz_r, Real &dEraw_r, Real &nden_r, Real &nent_r, Real &dede_r) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -556,6 +669,67 @@ class PrimitiveSolverHydro {
                    nerrs_ + sumerrs,rank);
           }
         }
+        // ---- dual energy (see de_on): choose the energy or the entropy solution.
+        bool de_write = false;
+        if (de_on_) {
+          const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
+                                 k >= ks && k <= ke_);
+          const Real D = cons_pt_old[CDN];
+          const bool dense = D > de_rho_sw_;
+          const bool bzero = (b3u[IBX] == 0.0 && b3u[IBY] == 0.0 && b3u[IBZ] == 0.0);
+          const bool bad = result.prim_floor ||
+                           (result.error != Primitive::Error::SUCCESS);
+          bool use_ent = dense && bzero && (de_shock_(m,k,j,i) == 0 || bad);
+          if (use_ent && !bad && de_eta1_ > 0.0) {
+            // optional energy-ratio gate: entropy only where eps is a small part of tau
+            Real eps = prim_pt[PPR]/((de_gamma_ - 1.0)*prim_pt[PRH]*mb);
+            if (eps > de_eta1_*cons_pt_old[CTA]/D) use_ent = false;
+          }
+          if (use_ent) {
+            Real K = cons_pt_old[CYD + de_idx_]/D*de_kmax_;
+            Real S_d[3] = {cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ]};
+            Real S_u[3] = {g3u[S11]*S_d[0] + g3u[S12]*S_d[1] + g3u[S13]*S_d[2],
+                           g3u[S12]*S_d[0] + g3u[S22]*S_d[1] + g3u[S23]*S_d[2],
+                           g3u[S13]*S_d[0] + g3u[S23]*S_d[1] + g3u[S33]*S_d[2]};
+            Real ssq = S_u[0]*S_d[0] + S_u[1]*S_d[1] + S_u[2]*S_d[2];
+            Real W, h;
+            if (EntropyInversion(D, ssq, K, de_gamma_, W, h)) {
+              Real rho_ = D/W;
+              Real P_ = K*pow(rho_, de_gamma_);
+              for (int n = 0; n < NCONS; ++n) { cons_pt[n] = cons_pt_old[n]; }
+              prim_pt[PRH] = rho_/mb;
+              prim_pt[PPR] = P_;
+              prim_pt[PVX] = S_u[0]/(D*h);
+              prim_pt[PVY] = S_u[1]/(D*h);
+              prim_pt[PVZ] = S_u[2]/(D*h);
+              for (int n = 0; n < nscal; n++) {
+                prim_pt[PYF + n] = cons_pt_old[CYD + n]/D;
+              }
+              prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], P_, &prim_pt[PYF]);
+              Real tau_new = D*h*W - P_ - D;
+              if (interior) {
+                Real dvol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+                dede_r += (tau_new - cons_pt_old[CTA])*sdetg*dvol;
+                nent_r += 1.0;
+              }
+              cons_pt[CTA] = tau_new;
+              de_write = true;
+            } else {
+              use_ent = false;
+            }
+          }
+          if (!use_ent && !(dense && bad)) {
+            // resync K from the energy solution (never from a floored dense state)
+            Real rho_ = prim_pt[PRH]*mb;
+            Real yk = (rho_ > 0.0) ? prim_pt[PPR]/pow(rho_, de_gamma_)/de_kmax_ : 0.0;
+            yk = fmin(fmax(yk, 0.0), 1.0);
+            prim_pt[PYF + de_idx_] = yk;
+            cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
+            de_write = true;
+          }
+          if (interior && dense) { nden_r += 1.0; }
+        }
+
         // Regardless of failure, we need to copy the primitives.
         prim(m, IDN, k, j, i) = prim_pt[PRH]*mb;
         prim(m, IVX, k, j, i) = prim_pt[PVX];
@@ -570,7 +744,7 @@ class PrimitiveSolverHydro {
 
         // If the conservative variables were floored or adjusted for consistency,
         // we need to copy the conserved variables, too.
-        if (result.cons_floor || result.cons_adjusted) {
+        if (result.cons_floor || result.cons_adjusted || de_write) {
           /*if (fabs((cons_pt[CDN] - cons_pt_old[CDN])/cons_pt_old[CDN]) > 1e-12) {
             Real &x1min = size.d_view(m).x1min;
             Real &x1max = size.d_view(m).x1max;
@@ -609,7 +783,14 @@ class PrimitiveSolverHydro {
       }
     }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<Real>(dE_tally), Kokkos::Sum<Real>(dPx_tally),
        Kokkos::Sum<Real>(dPy_tally), Kokkos::Sum<Real>(dPz_tally),
-       Kokkos::Sum<Real>(dEraw_tally));
+       Kokkos::Sum<Real>(dEraw_tally), Kokkos::Sum<Real>(de_nden),
+       Kokkos::Sum<Real>(de_nent_c), Kokkos::Sum<Real>(de_dE_c));
+    if (de_on_) {
+      de_dE_total += de_dE_c;
+      if (il == 0 && jl == 0 && kl == 0) {   // the full-array call, not a BC strip
+        de_ndense = de_nden; de_nent = de_nent_c; de_dE = de_dE_c;
+      }
+    }
 
     if (floors_only) {
       ps.GetEOSMutable().SetPrimitiveFloorFailure(prim_failure);
@@ -627,6 +808,57 @@ class PrimitiveSolverHydro {
       tally[3] += dPz_tally;
       tally[4] += dEraw_tally;
     }
+  }
+
+  //! V0 self-test of the dual-energy entropy inversion on real data: for every dense
+  //! interior cell, recover (rho, P, Wv) from (D, S_i, K) of the just-built conserved
+  //! state and return the max relative error against the primitives (0 if off).
+  Real DualEnergySelfTest(const DvceArray5D<Real> &cons, const DvceArray5D<Real> &prim) {
+    if (!de_on) return 0.0;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+    int ks = indcs.ks, ke = indcs.ke;
+    int nmb = pmy_pack->nmb_thispack;
+    auto &adm = pmy_pack->padm->adm;
+    int nhyd = pmy_pack->pmhd->nmhd;
+    const int idx_ = de_idx;
+    const Real kmax_ = de_kmax, rsw_ = de_rho_sw, gam_ = de_gamma;
+    Real errmax = 0.0;
+    const int ni = ie - is + 1, nji = (je - js + 1)*ni, nkji = (ke - ks + 1)*nji;
+    Kokkos::parallel_reduce("de_selftest", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int &n, Real &emax) {
+      int m = n/nkji, k = (n - m*nkji)/nji, j = (n - m*nkji - k*nji)/ni;
+      int i = n - m*nkji - k*nji - j*ni + is; j += js; k += ks;
+      Real g3d[NSPMETRIC], g3u[NSPMETRIC];
+      g3d[S11] = adm.g_dd(m,0,0,k,j,i); g3d[S12] = adm.g_dd(m,0,1,k,j,i);
+      g3d[S13] = adm.g_dd(m,0,2,k,j,i); g3d[S22] = adm.g_dd(m,1,1,k,j,i);
+      g3d[S23] = adm.g_dd(m,1,2,k,j,i); g3d[S33] = adm.g_dd(m,2,2,k,j,i);
+      Real detg = Primitive::GetDeterminant(g3d), sdetg = sqrt(detg);
+      adm::SpatialInv(1.0/detg, g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23],
+                      g3d[S33], &g3u[S11], &g3u[S12], &g3u[S13], &g3u[S22], &g3u[S23],
+                      &g3u[S33]);
+      Real D = cons(m, IDN, k, j, i)/sdetg;
+      if (!(D > rsw_)) return;
+      Real S_d[3] = {cons(m, IM1, k, j, i)/sdetg, cons(m, IM2, k, j, i)/sdetg,
+                     cons(m, IM3, k, j, i)/sdetg};
+      Real S_u[3] = {g3u[S11]*S_d[0] + g3u[S12]*S_d[1] + g3u[S13]*S_d[2],
+                     g3u[S12]*S_d[0] + g3u[S22]*S_d[1] + g3u[S23]*S_d[2],
+                     g3u[S13]*S_d[0] + g3u[S23]*S_d[1] + g3u[S33]*S_d[2]};
+      Real ssq = S_u[0]*S_d[0] + S_u[1]*S_d[1] + S_u[2]*S_d[2];
+      Real K = cons(m, nhyd + idx_, k, j, i)/sdetg/D*kmax_;
+      Real W, h;
+      if (!EntropyInversion(D, ssq, K, gam_, W, h)) { emax = fmax(emax, 1.0); return; }
+      Real rho = D/W, P = K*pow(rho, gam_);
+      Real e = fabs(rho/prim(m, IDN, k, j, i) - 1.0);
+      e = fmax(e, fabs(P/prim(m, IPR, k, j, i) - 1.0));
+      Real u0 = prim(m, IVX, k, j, i), wv = S_u[0]/(D*h);
+      e = fmax(e, fabs(wv - u0)/fmax(fabs(u0), 1.0e-3));
+      emax = fmax(emax, e);
+    }, Kokkos::Max<Real>(errmax));
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &errmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    return errmax;
   }
 
   // Get the transformed magnetosonic speeds at a point in a given direction.

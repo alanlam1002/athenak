@@ -9694,3 +9694,92 @@ G0 is debug job 8917270; G2/G3/G3b are job 8917261. Analysis:
   - G2 shares the boosted run's IC: the TOV star plus a uniform v, not a boosted
     equilibrium (W − 1 ≈ 3%). So the IC mismatch and the tau cancellation are
     confounded in G2.
+
+## 69. TOV placement for moving stars and stars inside the puncture background
+
+Status: **[implemented, t = 0 validated]** (2026-10-09; research R-027/R-028 B).
+
+**Problem (measured).** `dyngr_tov.cpp` put the rest-frame TOV profile rho_TOV(|x − x0|)
+on the grid. It set u^i = W v^i with W built from the star's own psi4 only. After
+`CFC::InitializeMetric` the rest mass ∫ rho W psi^6 dV was:
+- **W M_TOV for the isolated boosted star:** 1.03141, against W = 1.0313 for |v| = 0.2447;
+- **W psi_bg^6 M_TOV for the parabolic TDE decks:** 1.1413 (rp10/rp16, released at
+  r_iso = 30), against psi_bg^6 = 1.104 (trumpet psi_bg = sqrt(r_areal/r_iso) = 1.0167)
+  times W ≈ 1.034.
+
+So every TDE star started 14% overweight, and every moving isolated star 3.1%. The
+research side had predicted 3.4% for the TDE decks; they missed the psi_bg^6 factor.
+
+**Fix:** `<problem> boost_contract` and `bg_conformal_rescale`, both default true.
+- The TOV is evaluated at r~ = psi_bg(x0)² sqrt(|dx_perp|² + W0² |dx_par|²), i.e. Lorentz
+  contraction along v plus the local proper-length scale of the (≈ uniform over the star)
+  background.
+- W includes psi_bg^4.
+- psi_bg is read from `<cfc> puncture_enabled/puncture_mass` without creating a
+  `<cfc>` block in decks that lack one.
+- Both flags false reproduces the old placement bit for bit (G2 old 7.704113937e-5 vs
+  7.704113671e-5 in the original run — GPU noise floor). The old decks rerun with the new
+  default, so set both false to reproduce past runs.
+
+**Validation (measured, nlim = 0, debug job 8917520):**
+
+| deck | rest mass t = 0 | / static TOV 7.46952e-5 |
+|---|---|---|
+| G2 old placement | 7.70411e-5 | 1.0314 |
+| G2c (contracted) | 7.46964e-5 | **1.000016** |
+| rp16 old placement | 8.52545e-5 | 1.1414 |
+| rp16 new placement | 7.47008e-5 | **1.000075** |
+
+The rp16 orbit at t = 0 (orbit_invariants), against the design E = 1, L = 6.0474:
+- old placement: E = 0.999662, L = 6.03744;
+- new placement: E = 0.999819, L = 6.05039.
+
+Including psi_bg in W halves the long-standing t = 0 energy deficit.
+
+## 70. Dual energy: entropy tracer K for dense, unshocked gas (T-13)
+
+Status: **[implemented; V0/V1 pass; V2-V4 running]** (2026-10-09). Design:
+athenak_tde_project `code/ENERGY_FIX_DESIGN.md`.
+
+**What it does.**
+- `<mhd> dual_energy = true` (ideal gas, nscalars ≥ 1). The last passive scalar carries
+  Y = K/`dual_energy_kmax`, with K = P/rho^gamma. It is transported as D·Y, exactly like
+  Ye, with no source term, and lies inside the ideal-gas species limits [0, 1].
+- **Shock flag:** a per-call pre-pass on the previous primitives sets the flag where
+  div v ≤ 0 and the max face-neighbour |dP|/P > `dual_energy_dp_shock` (0.3).
+- **Entropy branch** (`EntropyInversion`, bisection for W in D² h² (W² − 1) = S², B = 0):
+  - **Conditions:** dense (D > `dual_energy_rho_switch`), B = 0, and either unshocked or
+    the energy solution hit a primitive floor or failed.
+  - **The last condition is the C-007 silent-cooling path:** a T < T_atm reset in dense
+    gas now falls back to K.
+  - **Optional gate** `dual_energy_eta1` (eps < eta1·tau/D) is off by default.
+  - **On this branch:** P = K rho^gamma, Wv^i = S^i/(D h), and tau is resynced to
+    D h W − P − D.
+- **Everywhere else:** K is resynced from the energy solution, but never from a floored
+  dense state.
+- **PrimToCons** always derives Y from P and rho, so the initial data and the excision
+  resets carry the right K.
+- **History** (TOVHistory): `de-ndense`, `de-nentropy`, `de-dE` (sqrt(gamma) dtau dV of
+  the last full C2P) and `de-dE-total`.
+
+**V0** (self-test in `PrimToConInit`, inverting every dense cell's conserved state):
+- max relative error 2e-16 (Sod) and 1e-15 (high-Mach wave).
+
+**V1** (CPU, 1D relativistic Sod, Gamma = 5/3, ppmx/hlle/rk3/FOFC, 256 cells,
+t = 0.4; `athenak_run/cfc/dual_energy_tests/`):
+- **First attempt failed, and that is a finding.** With the flag `div v < 0` the initial
+  discontinuity (both sides at rest, div v = 0 exactly) never flagged. The flow went
+  isentropic and no shock formed (post-shock K = 1.00 instead of 3.30). Fixed to ≤.
+- **After the fix:**
+  - shock at x = 0.826 with post-shock K = 3.30, as with energy only;
+  - K = 1 exactly through the rarefaction (energy only: 0.9998-1.0001);
+  - contact at 0.674.
+- **Cost, the known contact noise of entropy schemes:** a single-cell P dip at the contact
+  (16%), and ~2% rho/P ripple in the post-rarefaction plateau from the t = 0
+  discontinuity. Energy-only is flat there to 1e-4.
+- **High-Mach entropy wave** (grid Mach ~200, v = 0.25, smooth, 2 periods):
+  - L1(rho) 1.51e-7 (on) vs 1.54e-7 (off);
+  - pressure uniformity 4e-5 (on) vs 4e-10 (off) — K and rho are reconstructed
+    separately, so P = K rho^gamma is not exactly uniform at a contact.
+
+  This is small against the 10-60% K errors being fixed, but it is a real trade.

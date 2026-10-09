@@ -286,6 +286,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::PrimToConInit(int is, int ie, int js, i
                                                     int ks, int ke) {
   eos.PrimToCons(pmy_pack->pmhd->w0, pmy_pack->pmhd->bcc0, pmy_pack->pmhd->u0,
                  is, ie, js, je, ks, ke);
+  if (eos.de_on) {
+    Real err = eos.DualEnergySelfTest(pmy_pack->pmhd->u0, pmy_pack->pmhd->w0);
+    if (global_variable::my_rank == 0) {
+      std::cout << "dual energy V0 self-test: max relative error of the entropy inversion"
+                << " over dense cells = " << err << std::endl;
+    }
+  }
   if (pmy_pack->ptmunu != nullptr) {
     bool fixed = fixed_evolution;
     fixed_evolution = false;

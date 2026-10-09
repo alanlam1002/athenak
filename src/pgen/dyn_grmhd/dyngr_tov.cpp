@@ -26,6 +26,7 @@
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cfc/cfc.hpp"
+#include "cfc/cfc_puncture.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
@@ -136,6 +137,49 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
 
+  // Equilibrium placement of a moving star and/or one inside the CFC puncture
+  // background (DEVELOPMENT.md item 69; research R-027/R-028 B). The old placement
+  // put the rest-frame TOV profile rho_TOV(|x - x0|) on the grid and set
+  // u^i = W v^i with the star's own psi4 only, so after the CFC solve the rest mass
+  // was W * psi_bg^6 * M_TOV (measured 1.0314 for the isolated boosted star, 1.141
+  // for the parabolic TDE decks) and u^i was ~0.2% low.
+  //   boost_contract (default true): Lorentz-contract the profile along v,
+  //     rho(x) = rho_TOV(r~), r~^2 = |dx_perp|^2 + W0^2 |dx_par|^2;
+  //   bg_conformal_rescale (default true): the puncture background is ~uniform
+  //     psi_bg^4 delta_ij over the star, so evaluate the TOV at proper radius
+  //     psi_bg(x0)^2 r~ and include psi_bg^4 in W.
+  // Rest mass is then M_TOV to O(compactness). Both false reproduces the old
+  // placement bit for bit; with no boost and no puncture both are no-ops.
+  bool boost_contract = pin->GetOrAddBoolean("problem", "boost_contract", true);
+  bool bg_rescale = pin->GetOrAddBoolean("problem", "bg_conformal_rescale", true);
+  Real psi_bg = 1.0;
+  // read-only: never create a <cfc> block in a deck that has none
+  if (pin->DoesParameterExist("cfc", "puncture_enabled") &&
+      pin->GetBoolean("cfc", "puncture_enabled")) {
+    Real m_bh = pin->DoesParameterExist("cfc", "puncture_mass") ?
+                pin->GetReal("cfc", "puncture_mass") : 1.0;
+    Real r0 = sqrt(x0*x0 + y0*y0 + z0*z0);
+    if (r0 > 0.0) { psi_bg = sqrt(m_bh*cfc::TrumpetIsoToAreal(r0/m_bh)/r0); }
+  }
+  const bool rescale = bg_rescale && (psi_bg != 1.0);
+  const bool contract = boost_contract && has_boost;
+  const bool new_place = rescale || contract;
+  const Real len_scale = rescale ? psi_bg*psi_bg : 1.0;     // coordinate -> proper
+  const Real psi4_bg = rescale ? SQR(SQR(psi_bg)) : 1.0;
+  Real vmag = sqrt(SQR(star_vel_x1) + SQR(star_vel_x2) + SQR(star_vel_x3));
+  Real w0sq_m1 = 0.0;                                        // W0^2 - 1
+  Real vh1 = 0.0, vh2 = 0.0, vh3 = 0.0;
+  if (contract) {
+    Real vsq0 = psi4_bg*vmag*vmag;
+    w0sq_m1 = vsq0/(1.0 - vsq0);
+    vh1 = star_vel_x1/vmag; vh2 = star_vel_x2/vmag; vh3 = star_vel_x3/vmag;
+  }
+  if (new_place && global_variable::my_rank == 0) {
+    std::cout << "TOV placement: psi_bg(x0) = " << psi_bg << (rescale ? " (rescaled)" : "")
+              << ", W0 = " << sqrt(1.0 + w0sq_m1) << (contract ? " (contracted)" : "")
+              << std::endl;
+  }
+
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
 
   // Use the TOV solver with the specified EOS.
@@ -194,6 +238,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     Real r = sqrt(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0));
     Real s = sqrt(SQR(x1v-x0) + SQR(x2v-y0));
     Real rho, p, mass, alp, r_schw;
+    Real r_iso_t = r;
     Real vr = 0.;
     Real p_pert = 0.;
     Real ye = ye_atmo;
@@ -212,8 +257,14 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
         }
       }
     } else {
-      tov_.GetPrimitivesAtIsoPoint(eos_, r, rho, p, mass, alp);
-      r_schw = tov_.FindSchwarzschildR(r, mass);
+      Real rt = r;   // isotropic radius in the star's (proper-scaled) rest frame
+      if (new_place) {
+        Real dpar = (x1v-x0)*vh1 + (x2v-y0)*vh2 + (x3v-z0)*vh3;
+        rt = len_scale*sqrt(r*r + w0sq_m1*dpar*dpar);
+      }
+      tov_.GetPrimitivesAtIsoPoint(eos_, rt, rho, p, mass, alp);
+      r_schw = tov_.FindSchwarzschildR(rt, mass);
+      r_iso_t = rt;
       if (r_schw <= tov_.R_edge) {
         Real x = r_schw/tov_.R_edge;
         vr = 0.5*v_pert*(3.0*x - x*x*x);
@@ -243,8 +294,8 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       // gamma_ij = psi4*delta_ij (CFC gauge); psi4 of the star's own isolated TOV
       // field -- same template as xns_rotstar.cpp's Wv assembly.
       Real fmet_local = 1.;
-      if (r > 0) { fmet_local = r_schw/r; }
-      Real psi4_local = fmet_local*fmet_local;
+      if (r_iso_t > 0) { fmet_local = r_schw/r_iso_t; }
+      Real psi4_local = fmet_local*fmet_local*psi4_bg;
       Real vsq = psi4_local*(vx_tot*vx_tot + vy_tot*vy_tot + vz_tot*vz_tot);
       vsq = fmin(vsq, 0.9999);
       Real lorentz_w = 1.0/sqrt(1.0 - vsq);
@@ -289,8 +340,8 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       adm.psi4(m,k,j,i) = pow(det, 1./3.);
     } else {
       Real fmet = 1.;
-      if (r > 0) {
-        fmet = r_schw/r;
+      if (r_iso_t > 0) {
+        fmet = r_schw/r_iso_t;
       }
       Real psi4 = fmet*fmet;
 
@@ -891,6 +942,9 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // (x = x' + X, beta = beta' - xidot). Absent otherwise: hst format unchanged.
   cfc::CFC *pcfc_ = pm->pmb_pack->pcfc;
   const bool frame_cols = (pcfc_ != nullptr) && pcfc_->FrameShiftEnabled();
+  Real de_stats[4];
+  const bool de_cols = (pm->pmb_pack->pdyngr != nullptr) &&
+                       pm->pmb_pack->pdyngr->GetDualEnergyStats(de_stats);
   if (frame_cols) {
     pdata->nhist = 8;
     pdata->label[2] = "frame_vel_x1";
@@ -899,6 +953,13 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     pdata->label[5] = "frame_disp_x1";
     pdata->label[6] = "frame_disp_x2";
     pdata->label[7] = "frame_disp_x3";
+  }
+  if (de_cols) {
+    // dual energy (item 70): summed over ranks like every history column
+    int b = pdata->nhist;
+    pdata->label[b] = "de-ndense"; pdata->label[b+1] = "de-nentropy";
+    pdata->label[b+2] = "de-dE"; pdata->label[b+3] = "de-dE-total";
+    pdata->nhist += 4;
   }
 
   // capture class variables for kernel
@@ -963,6 +1024,10 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
       pdata->hdata[2 + a] = root ? xd[a] : 0.0;
       pdata->hdata[5 + a] = root ? x[a] : 0.0;
     }
+  }
+  if (de_cols) {
+    int b = pdata->nhist - 4;
+    for (int a = 0; a < 4; ++a) { pdata->hdata[b + a] = de_stats[a]; }
   }
 }
 

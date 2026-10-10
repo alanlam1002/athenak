@@ -164,6 +164,10 @@ class DynGRMHD {
   // e_cold(n,Y_new)] dV in code units (rank-local; the TOV history sums it over ranks).
   // Read-only: the relaxed state is identical with the diagnostic on or off.
   bool zla_relax_heat_diag;
+  // <mhd>/zla_relax_ncur (default false = bit-identical): take n for Y_eq(n) from the
+  // CURRENT stage's conserved density, n = D/(sqrt(gamma) W m_b) with W from the previous
+  // stage's velocities, instead of from the previous stage's primitive rho (one stage stale).
+  bool zla_relax_ncur;
   Real zla_relax_heat = 0.0;
   // <mhd>/fofc_count_diag (default false): read-only FOFC activation counters, cumulative
   // cell-stage counts on this rank: [0] hydro cells flagged by the D/tau maximum principle,

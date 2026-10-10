@@ -193,6 +193,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
   zla_relax_tau = pin->GetOrAddReal("mhd", "zla_relax_tau", 0.0);
   zla_relax_heat_diag = pin->GetOrAddBoolean("mhd", "zla_relax_heat_diag", false);
+  zla_relax_ncur = pin->GetOrAddBoolean("mhd", "zla_relax_ncur", false);
   fofc_count_diag = pin->GetOrAddBoolean("mhd", "fofc_count_diag", false);
   fofc_count_rho_lo = pin->GetOrAddReal("mhd", "fofc_count_rho_lo", 0.0);
   fofc_count_rho_hi = pin->GetOrAddReal("mhd", "fofc_count_rho_hi",
@@ -390,8 +391,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
 //
 //  Acts on the conserved sqrt(gamma) D Y_i only: D, S_i and tau are untouched, so baryon
 //  number and energy are conserved and the conversion's latent heat appears as thermal
-//  energy in the following C2P. n is taken from the previous stage's primitives; over
-//  one step it moves by O(dt), far below what Y_eq(n) needs to change appreciably.
+//  energy in the following C2P. By default n is taken from the previous stage's
+//  primitives; over one step it moves by O(dt), far below what Y_eq(n) needs to change
+//  appreciably -- except at the mixed-phase onset, where Y_eq(n) has a kink and a cell
+//  crossing n_on is snapped with a one-stage lag. <mhd>/zla_relax_ncur = true instead uses
+//  the current stage's conserved density, n = D/(sqrt(gamma) W m_b), with the current
+//  metric and W = sqrt(1 + g_ij Wv^i Wv^j) from the previous stage's velocities (the C2P
+//  has not run yet; W changes by O(v^2) per stage).
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RelaxComposition(Real dt) {
   if constexpr (IsZlaBag<EOSPolicy>::value) {
@@ -407,6 +413,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RelaxComposition(Real dt) {
     auto &eos_ = eos.ps.GetEOS();
     const Real mb = eos_.GetBaryonMass();
     const Real decay = Kokkos::exp(-dt/zla_relax_tau);
+    const bool ncur = zla_relax_ncur;
+    auto &g_dd = pmy_pack->padm->adm.g_dd;
+    // n for Y_eq(n): previous-stage primitive, or current-stage conserved (see above)
+    auto n_of = [=] KOKKOS_FUNCTION (const int m, const int k, const int j, const int i,
+                                      const Real D) -> Real {
+      if (!ncur) { return w0(m, IDN, k, j, i)/mb; }
+      Real g3d[NSPMETRIC];
+      g3d[S11] = g_dd(m, 0, 0, k, j, i); g3d[S12] = g_dd(m, 0, 1, k, j, i);
+      g3d[S13] = g_dd(m, 0, 2, k, j, i); g3d[S22] = g_dd(m, 1, 1, k, j, i);
+      g3d[S23] = g_dd(m, 1, 2, k, j, i); g3d[S33] = g_dd(m, 2, 2, k, j, i);
+      const Real sdetg = Kokkos::sqrt(Primitive::GetDeterminant(g3d));
+      const Real u1 = w0(m, IVX, k, j, i), u2 = w0(m, IVY, k, j, i), u3 = w0(m, IVZ, k, j, i);
+      const Real usq = g3d[S11]*u1*u1 + g3d[S22]*u2*u2 + g3d[S33]*u3*u3
+                     + 2.0*(g3d[S12]*u1*u2 + g3d[S13]*u1*u3 + g3d[S23]*u2*u3);
+      return D/(sdetg*Kokkos::sqrt(1.0 + usq)*mb);
+    };
 
     // Heat diagnostic: a separate read-only reduction BEFORE the update, over interior
     // cells only, so the update kernel below is unchanged. Per cell, the cold energy the
@@ -427,7 +449,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RelaxComposition(Real dt) {
         const int i = idx - m*nkji - (k-ks)*nji - (j-js)*nx1 + is;
         const Real D = u0(m, IDN, k, j, i);
         const Real rho = w0(m, IDN, k, j, i);
-        const Real n = rho/mb;
+        const Real n = n_of(m, k, j, i, D);
         if (D > 0.0 && n > 0.0) {
           Real ye0, ye1, ye2, ye3;
           eos_.GetEquilibriumScalars(n, ye0, ye1, ye2, ye3);
@@ -449,7 +471,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RelaxComposition(Real dt) {
     par_for("zla_relax", DevExeSpace(), 0, nmb-1, 0, n3m1, 0, n2m1, 0, n1m1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const Real D = u0(m, IDN, k, j, i);
-      const Real n = w0(m, IDN, k, j, i)/mb;
+      const Real n = n_of(m, k, j, i, D);
       if (D > 0.0 && n > 0.0) {
         Real ye0, ye1, ye2, ye3;
         eos_.GetEquilibriumScalars(n, ye0, ye1, ye2, ye3);

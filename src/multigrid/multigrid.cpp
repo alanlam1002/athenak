@@ -236,7 +236,14 @@ void Multigrid::UpdateBlockDx() {
 void Multigrid::ReallocateForAMR() {
   if (pmy_pack_ == nullptr) return;
   int new_nmmb = pmy_pack_->nmb_thispack;
-  if (new_nmmb == nmmb_) return;
+  if (new_nmmb == nmmb_) {
+    // Same count does not mean same blocks: after a regrid + load balance a rank often
+    // keeps its MeshBlock count but owns different blocks (other levels/octants), so the
+    // per-block spacing and child-octant arrays must still be refreshed. (Returning
+    // early here left them stale; measured on V5-L5 checkpoints, RESULTS §11.10.)
+    UpdateBlockDx();
+    return;
+  }
   nmmb_ = new_nmmb;
 
   Kokkos::realloc(block_rdx_, nmmb_);

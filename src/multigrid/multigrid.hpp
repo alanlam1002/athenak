@@ -462,7 +462,10 @@ class Multigrid {
   DualArray1D<Real> block_rdx_;
   DvceArray1D<int> fc_childx_, fc_childy_, fc_childz_;
   DualArray5D<Real> *u_, *def_, *src_, *uold_, *coeff_, *matrix_;
-  Coordinates *coord_, *ccoord_;
+  // never allocated, but ~Multigrid delete[]s them: must start as nullptr (an
+  // uninitialised value made the destructor run ~Coordinates on garbage -- the teardown
+  // segfault in SharedAllocationRecord::decrement seen at the end of every CFC run)
+  Coordinates *coord_ = nullptr, *ccoord_ = nullptr;
 };
 
 

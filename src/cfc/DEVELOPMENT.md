@@ -9949,3 +9949,44 @@ solution instead when K_energy ≤ K_tracer·(1 + tol).
 - **Risk (argued):** the excision-boundary faces' first-order fluxes still see the throat
   shift, so the effective Courant number there rises. V4dt tests it (rp16 to t = 60 vs
   V4G).
+
+## 74. Two multigrid lifetime bugs found from a crash backtrace (V5-L5)
+
+Found with the opt-in `ATHENA_SEGV_BACKTRACE` handler (src/main.cpp) and a
+`-gline-tables-only` build (`build_aurora_pe2626_variant.sh gpu_gauge_dbg`), on a V5-L5
+restart (debug-scaling job 8919113). Measured unless marked argued.
+
+1. **Teardown segfault (every CFC run):** `Multigrid` declares `Coordinates *coord_,
+   *ccoord_` (multigrid.hpp), never allocates them, and `~Multigrid` `delete[]`s them.
+   - The pointers were uninitialised. When the heap memory was not zero, `delete[]` ran
+     `~Coordinates` on garbage, and its Kokkos views crashed in
+     `SharedAllocationRecord::decrement`.
+   - Backtrace (all 192 ranks, after "Terminating on time limit"):
+     `main` → `~Mesh` → `~MeshBlockPack` → `~CFC` → `~MGCFCVectorPoissonDriver`
+     (`delete mglevels_`) → `~Multigrid` → `decrement`.
+   - The rank count varies run to run (V4F 12, V4G-rst3 21, V3FJ 1), as uninitialised
+     memory does.
+   - **Fix:** initialise both to nullptr.
+2. **Stale per-block multigrid arrays after a regrid:** `Multigrid::ReallocateForAMR`
+   returned early when the rank's MeshBlock count was unchanged, so it skipped
+   `UpdateBlockDx`.
+   - A regrid + load balance often keeps the count but changes which blocks a rank owns.
+     Then `block_rdx_` (the cell spacing in every Smooth/CalculateDefect/FASRHS kernel)
+     and `fc_childx/y/z_` (child-octant parities for the coarse-fine ghost fills in
+     multigrid_bvals.cpp) keep the previous blocks' values.
+   - **Measured on V5-L5 checkpoints 6 → 7 (cycles 3600 → 4200):** 94 of 192 ranks kept
+     their count, and 79 of those own different blocks with a level or octant change.
+     The per-regrid rate is argued from this.
+   - **Argued consequences:**
+     - wrong spacing in the metric solve on affected blocks until the count next changes;
+     - wrong ghost-fill offsets at coarse-fine faces, a plausible source of the
+       intermittent mid-run segfaults that came 2-29 cycles after a regrid (V4G
+       t = 156.6; V5-L5 t = 165.1 and 175.7).
+     - **Not proven:** the backtrace run itself did not hit a mid-run crash.
+   - **Fix:** always call `UpdateBlockDx` in ReallocateForAMR, and resize only when the
+     count changes.
+
+**Impact on earlier AMR runs** (ens1, V4F/V4G, V5): the metric on blocks that changed
+owner without a count change was solved with stale spacing for some cycles after
+regrids. The size of the effect is untested. The ReinitializeMetricForAMR deltas stayed
+small (max|δψ − guess| ~1e-6). A rerun with the fix is needed to quantify it.

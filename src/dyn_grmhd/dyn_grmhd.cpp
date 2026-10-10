@@ -42,11 +42,6 @@
 
 namespace dyngr {
 
-// Composition relaxation needs the tabulated equilibrium, which only the ZLA bag EOS has.
-template<class EOSPolicy> struct IsZlaBag : std::false_type {};
-template<class LogPolicy>
-struct IsZlaBag<Primitive::EOSZlaBag<LogPolicy>> : std::true_type {};
-
 // A dumb template function containing the switch statement needed to select an EOS.
 template<class ErrorPolicy>
 DynGRMHD* SelectDynGRMHDEOS(MeshBlockPack *ppack, ParameterInput *pin,
@@ -194,6 +189,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   zla_relax_tau = pin->GetOrAddReal("mhd", "zla_relax_tau", 0.0);
   zla_relax_heat_diag = pin->GetOrAddBoolean("mhd", "zla_relax_heat_diag", false);
   zla_relax_ncur = pin->GetOrAddBoolean("mhd", "zla_relax_ncur", false);
+  zla_face_eq = pin->GetOrAddBoolean("mhd", "zla_face_eq", false);
+  zla_relax_all_stages = pin->GetOrAddBoolean("mhd", "zla_relax_all_stages", false);
   fofc_count_diag = pin->GetOrAddBoolean("mhd", "fofc_count_diag", false);
   fofc_count_rho_lo = pin->GetOrAddReal("mhd", "fofc_count_rho_lo", 0.0);
   fofc_count_rho_hi = pin->GetOrAddReal("mhd", "fofc_count_rho_hi",
@@ -370,7 +367,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   // Lie-split composition relaxation, once per step: after the last stage's conserved
   // update (ghosts included) and before its C2P, so the C2P sees the relaxed scalars
   // and the primitives stay consistent with the conserved state.
-  if (zla_relax_tau > 0.0 && stage == pdrive->nexp_stages) {
+  if (zla_relax_tau > 0.0 && (stage == pdrive->nexp_stages || zla_relax_all_stages)) {
     RelaxComposition(pmy_pack->pmesh->dt);
   }
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,

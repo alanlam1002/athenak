@@ -69,6 +69,12 @@ struct DynGRMHDTaskIDs {
 
 namespace dyngr {
 
+// Composition relaxation and the face projection need the tabulated equilibrium, which only
+// the ZLA bag EOS has.
+template<class EOSPolicy> struct IsZlaBag : std::false_type {};
+template<class LogPolicy>
+struct IsZlaBag<Primitive::EOSZlaBag<LogPolicy>> : std::true_type {};
+
 class DynGRMHD {
  public:
   DynGRMHD(MeshBlockPack *ppack, ParameterInput *pin);
@@ -168,6 +174,12 @@ class DynGRMHD {
   // CURRENT stage's conserved density, n = D/(sqrt(gamma) W m_b) with W from the previous
   // stage's velocities, instead of from the previous stage's primitive rho (one stage stale).
   bool zla_relax_ncur;
+  // Test G (asymptotic-preserving closure for tau <~ dt, default false = unchanged):
+  // <mhd>/zla_face_eq projects every reconstructed face state's composition onto
+  // Y_eq(rho_f/m_b) (ProjectFaceComposition); <mhd>/zla_relax_all_stages applies the
+  // composition relaxation before the C2P of EVERY RK stage, not just the last one.
+  bool zla_face_eq;
+  bool zla_relax_all_stages;
   Real zla_relax_heat = 0.0;
   // <mhd>/fofc_count_diag (default false): read-only FOFC activation counters, cumulative
   // cell-stage counts on this rank: [0] hydro cells flagged by the D/tau maximum principle,
@@ -192,6 +204,8 @@ class DynGRMHDPS : public DynGRMHD {
   // CalculateFluxes function templated over Riemann Solvers
   template<DynGRMHD_RSolver T>
   TaskStatus CalcFluxes(Driver *d, int stage);
+  void ProjectFaceComposition(int nmb1, int kl, int ku, int jl, int ju, int il, int iu,
+                              int nhyd, int nvars);
 
   template<DynGRMHD_RSolver T>
   void FOFC(Driver *d, int stage);

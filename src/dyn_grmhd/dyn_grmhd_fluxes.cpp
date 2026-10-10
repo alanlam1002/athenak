@@ -120,6 +120,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Reconstruct Bcc over cells i in [il-1, iu], components n in [0, 2]
     ReconDispatch<IVX>(recon_method_, "dyngrflux_x1_recon_b", nmb1,
         kl, ku, jl, ju, il-1, iu, eos_, false, 3,     bcc0_, bl_, br_);
+    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, jl, ju, il, iu, nhyd, nvars); }
 
     // Riemann solve over faces i in [il, iu]
     par_for("dyngrflux_x1_rsolve", DevExeSpace(),
@@ -172,6 +173,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Reconstruct Bcc over cells j in [jl-1, ju], i in [is-1, ie+1], n in [0, 2]
     ReconDispatch<IVY>(recon_method_, "dyngrflux_x2_recon_b", nmb1,
         kl, ku, jl-1, ju, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, jl, ju, is-1, ie+1, nhyd, nvars); }
 
     // Riemann solve over faces j in [jl, ju], i in [is-1, ie+1]
     par_for("dyngrflux_x2_rsolve", DevExeSpace(),
@@ -221,6 +223,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Reconstruct Bcc over the same cells, components n in [0, 2]
     ReconDispatch<IVZ>(recon_method_, "dyngrflux_x3_recon_b", nmb1,
         kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
+    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, js-1, je+1, is-1, ie+1, nhyd, nvars); }
 
     // Riemann solve over faces k in [kl, ku], j in [js-1, je+1], i in [is-1, ie+1]
     par_for("dyngrflux_x3_rsolve", DevExeSpace(),
@@ -261,6 +264,42 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
 // function definitions for each template parameter
 // Macro for instantiating every flux function for each Riemann solver
+//----------------------------------------------------------------------------------------
+//! \fn  void DynGRMHDPS::ProjectFaceComposition
+//! \brief <mhd>/zla_face_eq (Test G, asymptotic-preserving closure for tau <~ dt): after
+//! reconstruction, replace the composition of every reconstructed face state by the cold
+//! equilibrium at that face's own density, Y = Y_eq(rho_f/m_b). The Riemann solver and the
+//! upwind scalar flux then see faces that lie on the equilibrium manifold, instead of
+//! independently reconstructed (rho, Y) that straddle the mixed-phase onset kink
+//! (RESULTS 16). Only meaningful in the snap limit; zla_bag only; no-op otherwise.
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ProjectFaceComposition(int nmb1, int kl, int ku,
+                                     int jl, int ju, int il, int iu, int nhyd, int nvars) {
+  if constexpr (IsZlaBag<EOSPolicy>::value) {
+    if (nvars - nhyd != 4) { return; }
+    auto wl_ = pmy_pack->pmhd->wl3d;
+    auto wr_ = pmy_pack->pmhd->wr3d;
+    auto &eos_ = eos.ps.GetEOS();
+    const Real mb = eos_.GetBaryonMass();
+    par_for("dyngrflux_face_eq", DevExeSpace(), 0, nmb1, kl, ku, jl, ju, il, iu,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real y0, y1, y2, y3;
+      const Real nl = wl_(m, IDN, k, j, i)/mb;
+      if (nl > 0.0) {
+        eos_.GetEquilibriumScalars(nl, y0, y1, y2, y3);
+        wl_(m, nhyd+0, k, j, i) = y0; wl_(m, nhyd+1, k, j, i) = y1;
+        wl_(m, nhyd+2, k, j, i) = y2; wl_(m, nhyd+3, k, j, i) = y3;
+      }
+      const Real nr = wr_(m, IDN, k, j, i)/mb;
+      if (nr > 0.0) {
+        eos_.GetEquilibriumScalars(nr, y0, y1, y2, y3);
+        wr_(m, nhyd+0, k, j, i) = y0; wr_(m, nhyd+1, k, j, i) = y1;
+        wr_(m, nhyd+2, k, j, i) = y2; wr_(m, nhyd+3, k, j, i) = y3;
+      }
+    });
+  }
+}
+
 #define INSTANTIATE_CALC_FLUXES(EOSPolicy, ErrorPolicy) \
 template \
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
@@ -285,3 +324,4 @@ INSTANTIATE_CALC_FLUXES(Primitive::EOSZlaBag<Primitive::NQTLogs>,
                         Primitive::ResetFloor)
 
 } // namespace dyngr
+

@@ -35,13 +35,14 @@ T.RUNS.update({
     'V3c': (f'{RUN}/de_V3c_boost_contract_noDE_L4', ISO, None, '#7570b3', '-'),
     'V4':  (f'{RUN}/de_V4_rp16_L4', TDE, 16, '#e7298a', '-'),
     'G2cDE': (f'{RUN}/de_G_G2c_DE_L4', ISO, None, '#a6761d', '-'),   # R-030 G
+    'V3F': (f'{RUN}/de_V3F_boost_contract_L4', ISO, None, '#1b9e77', '-'),   # R-031 I
 })
 T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('0.55', ':')         # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'iso_boost': 'boosted, old ID, DE off', 'V3c': 'boosted, contracted ID, DE off',
          'V3': 'V3 boosted, contracted ID, DE on', 'G2c': 'G2c comoving, contracted ID, DE off',
          'rp16': 'rp16 ens1 (old ID, DE off)', 'V4': 'V4 rp16 (new ID, DE on)',
-         'G2cDE': 'G: G2c + DE (D·K)'}
+         'G2cDE': 'G: G2c + DE (D·K)', 'V3F': 'V3F boosted, contracted ID, DE with F'}
 
 
 def style(lab):
@@ -92,6 +93,9 @@ def main():
     if not a.v4_only:
         groups.append((['G0', 'V2', 'iso_boost', 'V3c', 'V3', 'G2c'], 'de_V23_summary.png',
                        'T-13 V2/V3: isolated WD, L4 (dual energy on vs off; contracted ID)', 100))
+        groups.append((['G0', 'V3c', 'V3', 'V3F'], 'de_V3F_summary.png',
+                       'R-031 I: V3F (BH-frame boosted star, DE with F = D·K^(1/Γ)) vs V3 (D·K)'
+                       ' and V3c (DE off)', 100))
         groups.append((['G0', 'V2', 'G2c', 'G2cDE', 'V3c', 'V3'], 'de_G_summary.png',
                        'R-030 G: G2c (comoving gauge) with dual energy (D·K), vs V3 (BH frame)',
                        100))

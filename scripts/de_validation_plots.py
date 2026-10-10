@@ -42,6 +42,9 @@ T.RUNS.update({
     'V4G': (f'{RUN}/de_V4G_rp16_L4', TDE, 16, '#e6ab02', '-'),                # + 2nd law
     'V4dt': (f'{RUN}/de_V4dt_rp16_L4', TDE, 16, '#7570b3', '--'),             # + dt_skip
     'V4Gr': (f'{RUN}/de_V4G_rst3', TDE, 16, '#e6ab02', ':'),                  # V4G restart t>133
+    'V5L4': (f'{RUN}/de_V5_rp10_L4', TDE, 10, '#e6ab02', '-'),               # V5
+    'V5L5': (f'{RUN}/de_V5_rp10_L5', TDE, 10, '#1b9e77', '-'),
+    'V5L5r': (f'{RUN}/de_V5_rp10_L5_rst8', TDE, 10, '#1b9e77', ':'),
 })
 T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('0.55', ':')         # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
@@ -51,10 +54,13 @@ NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'G2cDE': 'G: G2c + DE (D·K)', 'V3F': 'V3F boosted, contracted ID, DE with F',
          'V3FJ': 'V3FJ boosted, DE with F + J', 'GJ': 'GJ: G2c + DE with F + J',
          'V4F': 'V4F rp16 (new ID, DE with F + J)', 'V4G': 'V4G rp16 (F + J + 2nd law)',
-         'V4dt': 'V4dt (V4G + dt_skip_excised)', 'V4Gr': 'V4G restart (t > 133)'}
+         'V4dt': 'V4dt (V4G + dt_skip_excised)', 'V4Gr': 'V4G restart (t > 133)',
+         'rp10': 'ens1 rp10 L4 (old ID, DE off)', 'rp10_L5': 'ens1 rp10 L5 (old ID, DE off)',
+         'V5L4': 'V5 rp10 L4 (F+J+2nd law, dt_skip)', 'V5L5': 'V5 rp10 L5 (F+J+2nd law, dt_skip)',
+         'V5L5r': 'V5 L5 continuation'}
 
 
-PARENT = {'V4Gr': 'V4G'}   # restart segments: normalise to / continue from the parent run
+PARENT = {'V4Gr': 'V4G', 'V5L5r': 'V5L5'}   # restart segments: normalise to / continue from the parent run
 
 
 def style(lab):
@@ -104,6 +110,7 @@ def main():
     ap.add_argument('--out', default=f'{RUN}/plots/dual_energy')
     ap.add_argument('--v4-only', action='store_true')
     ap.add_argument('--no-v4', action='store_true')
+    ap.add_argument('--v5', action='store_true', help='only the V5 group')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     S = {}
@@ -120,14 +127,18 @@ def main():
         groups.append((['G0', 'V2', 'G2c', 'G2cDE', 'V3c', 'V3'], 'de_G_summary.png',
                        'R-030 G: G2c (comoving gauge) with dual energy (D·K), vs V3 (BH frame)',
                        100))
-    if not a.no_v4:
+    if a.v5:
+        groups[:] = []
+        groups.append((['rp10', 'rp10_L5', 'V5L4', 'V5L5', 'V5L5r'], 'de_V5_summary.png',
+                       'V5: rp10 (beta=1.64) through periapsis (t=135.9), L4 and L5', 200))
+    elif not a.no_v4:
         groups.append((['rp16', 'V4', 'V4F', 'V4G', 'V4Gr', 'V4dt'], 'de_V4_summary.png',
                        'T-13 V4/V4F: rp16 (beta=1.03), L4 -- the T-11 test', 160))
     rows = []
     for labs, name, title, tmax in groups:
         for lab in labs:
             d = T.RUNS[lab][0]
-            if os.path.isdir(f'{d}/bin'):
+            if os.path.isdir(f'{d}/bin') and os.listdir(f'{d}/bin'):
                 S[lab] = T.series(lab, a.out)
         panels(S, labs, a.out, name, title, tmax)
         for lab in labs:

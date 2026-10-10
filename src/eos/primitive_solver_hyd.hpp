@@ -147,8 +147,18 @@ class PrimitiveSolverHydro {
   int de_idx = -1;                 // scalar index of the K tracer (nscalars - 1)
   Real de_kmax = 1.0, de_rho_sw = 0.0, de_dp_shock = 0.3, de_eta1 = 0.0, de_gamma = 5./3.;
   Real de_ypow = 1.0;              // Y = (K/kmax)^de_ypow
+  // shock sensor (item 72; default vcurv + one hysteresis dilation pass): 0 = jump
+  // (|dP|/P > de_dp_shock, item 70), 1 = jameson
+  // (psi_P > de_psi_shock), 2 = vcurv (psi_v > de_vcurv_shock, or psi_P > de_psi_jump for
+  // discontinuities between states at rest); all of them also need div v <= 0.
+  //   psi_P = max_a |P+ - 2P + P-|/(P+ + 2P + P-),  psi_v = max_a |v_a+ - 2v_a + v_a-|/c_s
+  int de_sensor = 2;
+  Real de_psi_shock = 0.25, de_vcurv_shock = 0.05, de_psi_jump = 1.0e30;
   bool de_recon_rhoy = false, de_flux_hll = false;
   DvceArray4D<int> de_shock;       // per-cell shock flag from the previous primitives
+  DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
+  int de_dilate = 1;               // also flag the face neighbours of flagged cells
+  Real de_dilate_weak = 0.5;       // ... if their own sensor exceeds this x the threshold
   // Diagnostics of the last full (non-floors_only) C2P call, interior cells only:
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
@@ -206,6 +216,24 @@ class PrimitiveSolverHydro {
       de_kmax = pin->GetReal(block, "dual_energy_kmax");
       de_rho_sw = pin->GetReal(block, "dual_energy_rho_switch");
       de_dp_shock = pin->GetOrAddReal(block, "dual_energy_dp_shock", 0.3);
+      std::string sen = pin->GetOrAddString(block, "dual_energy_shock_sensor", "vcurv");
+      if (sen == "jump") {
+        de_sensor = 0;
+      } else if (sen == "jameson") {
+        de_sensor = 1;
+      } else if (sen == "vcurv") {
+        de_sensor = 2;
+      } else {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy_shock_sensor = '" << sen
+                  << "' (use jump, jameson or vcurv)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      de_psi_shock = pin->GetOrAddReal(block, "dual_energy_psi_shock", 0.25);
+      de_vcurv_shock = pin->GetOrAddReal(block, "dual_energy_vcurv_shock", 0.05);
+      de_psi_jump = pin->GetOrAddReal(block, "dual_energy_psi_jump", 1.0e30);  // off
+      de_dilate = pin->GetOrAddInteger(block, "dual_energy_shock_dilate", 1);
+      de_dilate_weak = pin->GetOrAddReal(block, "dual_energy_shock_dilate_weak", 0.5);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
@@ -492,6 +520,10 @@ class PrimitiveSolverHydro {
       }
       auto &shk = de_shock;
       const Real dpsh = de_dp_shock;
+      const int sensor = de_sensor;
+      const Real psish = de_psi_shock, vcsh = de_vcurv_shock, psijp = de_psi_jump;
+      const Real gam_ = de_gamma;
+      const Real wk = de_dilate_weak;
       par_for("de_shock_flag", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         auto vel = [&](int a, int kk, int jj, int ii) {
@@ -505,7 +537,7 @@ class PrimitiveSolverHydro {
           return ua/sqrt(1.0 + usq);
         };
         Real p0 = prim(m, IPR, k, j, i);
-        Real divv = 0.0, dpmax = 0.0;
+        Real divv = 0.0, dpmax = 0.0, psip = 0.0, psiv = 0.0;
         for (int a = 0; a < 3; ++a) {
           int ip = i, im = i, jp = j, jm = j, kp = k, km = k;
           Real dx;
@@ -520,10 +552,58 @@ class PrimitiveSolverHydro {
           Real pp = prim(m, IPR, kp, jp, ip), pm = prim(m, IPR, km, jm, im);
           dpmax = fmax(dpmax, fabs(pp - p0)/fmax(fmin(pp, p0), 1.0e-300));
           dpmax = fmax(dpmax, fabs(pm - p0)/fmax(fmin(pm, p0), 1.0e-300));
+          // second differences only where both neighbours exist (a clamped edge would
+          // turn them into one-sided first differences)
+          if ((ip - im) + (jp - jm) + (kp - km) == 2) {
+            psip = fmax(psip, fabs(pp - 2.0*p0 + pm)/fmax(pp + 2.0*p0 + pm, 1.0e-300));
+            psiv = fmax(psiv, fabs(vel(a, kp, jp, ip) - 2.0*vel(a, k, j, i)
+                                   + vel(a, km, jm, im)));
+          }
         }
         // <= so a discontinuity between states at rest (t = 0 of a Riemann problem)
         // counts as a shock: with < it ran entropy-conserving and never formed one (V1).
-        shk(m, k, j, i) = (divv <= 0.0 && dpmax > dpsh) ? 1 : 0;
+        // 2 = flagged; 1 = weak candidate (sensor > wk x threshold), joins a flagged
+        // face neighbour in the dilation pass; 0 = not flagged
+        bool sh, weak;
+        if (sensor == 0) {
+          sh = dpmax > dpsh; weak = dpmax > wk*dpsh;
+        } else if (sensor == 1) {
+          sh = psip > psish; weak = psip > wk*psish;
+        } else {
+          Real rho0 = prim(m, IDN, k, j, i);
+          Real h0 = 1.0 + gam_/(gam_ - 1.0)*p0/fmax(rho0, 1.0e-300);
+          Real cs0 = sqrt(fmax(gam_*p0/(fmax(rho0, 1.0e-300)*h0), 1.0e-300));
+          sh = (psiv > vcsh*cs0) || (psip > psijp);
+          weak = (psiv > wk*vcsh*cs0) || (psip > wk*psijp);
+        }
+        shk(m, k, j, i) = (divv <= 0.0) ? (sh ? 2 : (weak ? 1 : 0)) : 0;
+      });
+      // optional dilation: a shock is smeared over ~3 cells but the sensor peaks on the
+      // central ones (item 72), so also put the face neighbours on the energy branch
+      for (int pass = 0; pass < de_dilate; ++pass) {
+        if (de_shock2.extent_int(0) != de_shock.extent_int(0) ||
+            de_shock2.extent_int(1) != e3 || de_shock2.extent_int(2) != e2 ||
+            de_shock2.extent_int(3) != e1) {
+          Kokkos::realloc(de_shock2, de_shock.extent_int(0), e3, e2, e1);
+        }
+        auto &sh2 = de_shock2;
+        par_for("de_shock_dilate", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          int s0 = shk(m, k, j, i), nb = 0;
+          if (i > il) nb = (shk(m, k, j, i-1) == 2) ? 1 : nb;
+          if (i < iu) nb = (shk(m, k, j, i+1) == 2) ? 1 : nb;
+          if (j > jl) nb = (shk(m, k, j-1, i) == 2) ? 1 : nb;
+          if (j < ju) nb = (shk(m, k, j+1, i) == 2) ? 1 : nb;
+          if (k > kl) nb = (shk(m, k-1, j, i) == 2) ? 1 : nb;
+          if (k < ku) nb = (shk(m, k+1, j, i) == 2) ? 1 : nb;
+          sh2(m, k, j, i) = (s0 == 2 || (s0 == 1 && nb)) ? 2 : s0;
+        });
+        Kokkos::deep_copy(DevExeSpace(), de_shock, de_shock2);
+      }
+      // final flag: 1 for shocked (2), else 0
+      par_for("de_shock_final", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        shk(m, k, j, i) = (shk(m, k, j, i) == 2) ? 1 : 0;
       });
     }
     auto &de_shock_ = de_shock;

@@ -9873,3 +9873,44 @@ trumpet background, excision masks, BH refinement and ADM falloff at the grid or
 a nonzero xidot would describe a different spacetime, not a gauge change. Moving-puncture
 support is Phase 2 (`code/COMOVING_GAUGE_DESIGN.md`). Checked on CPU: a 16³ deck with the
 frame shift fires the guard with the puncture on, and passes the constructor with it off.
+
+## 72. Dual-energy shock flag: velocity-curvature sensor with hysteresis (R-031 J)
+
+`<mhd> dual_energy_shock_sensor = vcurv` (new default). A cell is flagged when ∇·v ≤ 0
+and ψ_v = max_a |v_a⁺ − 2v_a + v_a⁻|/c_s > 0.05 (`dual_energy_vcurv_shock`). One
+hysteresis pass follows (`dual_energy_shock_dilate = 1`, `_dilate_weak = 0.5`): a face
+neighbour of a flagged cell is also flagged if its own ψ_v is above half the threshold.
+- `jump` (item 70) and `jameson` (ψ_P > `dual_energy_psi_shock`) remain available.
+- The ψ_P discontinuity clause (`dual_energy_psi_jump`) is off by default; Sod forms
+  without it.
+
+CPU 1D tests at WD-centre state and 11 cells/R* (`scripts/de_J_tests.py`,
+`athenak_run/cfc/dual_energy_tests_J/`). All numbers measured.
+
+**Sensor distributions.**
+- Homologous slab (an exact shock-free solution), interior at dx/(τ c_s) ≤ 0.2:
+  −∇·v·dx/c_s ≤ 0.29, ψ_P ≤ 0.087, ψ_v ≤ 0.036.
+- Hydrostatic outer star (V2/G slices): ψ_P 0.15–0.17.
+- Shocks at Mach 1.2 / 1.5 / 2 / 3: ψ_v 0.11 / 0.26 / 0.62 / 1.29;
+  ψ_P 0.04 / 0.13 / 0.29 / 0.55; −∇·v·dx/c_s 0.11 / 0.26 / 0.44 / 0.65.
+- Only ψ_v separates smooth flow from shocks.
+
+**Captured fraction of the entropy jump (Mach 1.2 / 1.5 / 2 / 3):**
+
+| sensor | captured | Sod post-shock K |
+|---|---|---|
+| jump | 0 / 0.97 / 1 / 1 | — |
+| jameson | 0 / 0 / 0.38 / 0.50 | 3.200 |
+| vcurv | 0.61 / 0.85 / 0.93 / 0.95 | — |
+| default | 0.75 / 0.91 / 0.96 / 0.97 | 3.288 (energy only 3.30) |
+
+**Homologous interior** (ρ > 0.3ρ_max, c = 0.1 / 0.2), max K/K0 − 1:
+- default: +0.25% / +0.28%;
+- jump: +0.9% / +1.6%;
+- energy only: +0.5% / +1.6%.
+
+**Star dumps, offline in-plane evaluation:** the flagged fraction above 0.1ρ0 is 0–1%,
+against 97% with jump. It is 41–79% at 1e-3–1e-1 ρ0, where the surface has real flows.
+
+**Regression.** With `jump`, Sod is bitwise identical to item 71's default. F's contact
+tests stay at round-off under the new default.

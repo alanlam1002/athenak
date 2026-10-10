@@ -293,7 +293,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::PrimToConInit(int is, int ie, int js, i
                 << " over dense cells = " << err << std::endl;
       std::cout << "dual energy: Y = (K/kmax)^" << eos.de_ypow << ", reconstruct "
                 << (eos.de_recon_rhoy ? "rho*Y" : "Y") << ", tracer flux "
-                << (eos.de_flux_hll ? "hll" : "mass") << std::endl;
+                << (eos.de_flux_hll ? "hll" : "mass") << ", shock sensor "
+                << (eos.de_sensor == 0 ? "jump" : (eos.de_sensor == 1 ? "jameson" : "vcurv"))
+                << ", dilate " << eos.de_dilate << std::endl;
     }
   }
   if (pmy_pack->ptmunu != nullptr) {

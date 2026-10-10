@@ -15,6 +15,8 @@
 //!                an exact solution advected at V1 = v1 - xidot1;
 //!   field_loop   (T0c) 2D, A_z = b0 (R - r) for r < R (Gardiner & Stone 2005), uniform
 //!                rho0, p0, v: B advected at V; div B must stay at round-off (CT).
+//!   homologous   isentropic slab with v1 = -(x1 - x1c)/tau, smoothly compressing (outflow
+//!                boundaries): the dual-energy shock flag must stay off (item 72).
 //! The pgen writes no error file: compare outputs offline (scripts/frame_shift_tests.py).
 
 #include <cmath>
@@ -64,6 +66,8 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     itype = 1;
   } else if (type == "field_loop") {
     itype = 2;
+  } else if (type == "homologous") {
+    itype = 3;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "unknown <problem> type = " << type << std::endl;
@@ -77,6 +81,14 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
   const Real amp = pin->GetOrAddReal("problem", "amp", 0.1);
   const Real b0 = pin->GetOrAddReal("problem", "b0", 1.0e-3);
   const Real rloop = pin->GetOrAddReal("problem", "rloop", 0.3);
+  // homologous: isentropic slab rho = rho_atm + rho0 (1 - (x1/slab_l)^2)^slab_n about the
+  // box centre, P = (p0/rho0^gamma) rho^gamma, Eulerian v1 = -(x1 - x1c)/tau (+ v1);
+  // a smooth compression: the dual-energy shock flag must stay off (item 72)
+  const Real tau = pin->GetOrAddReal("problem", "tau", 40.0);
+  const Real slab_l = pin->GetOrAddReal("problem", "slab_l", 1.0);
+  const Real slab_n = pin->GetOrAddReal("problem", "slab_n", 1.5);
+  const Real rho_atm = pin->GetOrAddReal("problem", "rho_atm", 1.0e-8);
+  const Real gam = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
   const Real x1m = pmy_mesh_->mesh_size.x1min;
   const Real lx1 = pmy_mesh_->mesh_size.x1max - x1m;
   const Real x1c = 0.5*(pmy_mesh_->mesh_size.x1max + pmy_mesh_->mesh_size.x1min);
@@ -99,11 +111,19 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
     Real rho = rho0;
     if (itype == 1) { rho = rho0*(1.0 + amp*sin(2.0*M_PI*(x1v - x1m)/lx1)); }
+    Real p = p0, u1 = v1, u2 = v2, u3 = v3, lor = lorentz;
+    if (itype == 3) {
+      Real xi = (x1v - x1c)/slab_l;
+      rho = rho_atm + rho0*pow(fmax(1.0 - xi*xi, 0.0), slab_n);
+      p = p0*pow(rho/rho0, gam);
+      u1 = v1 - (x1v - x1c)/tau;
+      lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
+    }
     w0(m,IDN,k,j,i) = rho;
-    w0(m,IVX,k,j,i) = lorentz*v1;      // dyn_grmhd primitives carry W v^i
-    w0(m,IVY,k,j,i) = lorentz*v2;
-    w0(m,IVZ,k,j,i) = lorentz*v3;
-    w0(m,IPR,k,j,i) = p0;
+    w0(m,IVX,k,j,i) = lor*u1;          // dyn_grmhd primitives carry W v^i
+    w0(m,IVY,k,j,i) = lor*u2;
+    w0(m,IVZ,k,j,i) = lor*u3;
+    w0(m,IPR,k,j,i) = p;
 
     // face fields from the corner vector potential A_z (zero unless field_loop)
     Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2;

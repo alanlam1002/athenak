@@ -120,6 +120,10 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
   const Real gx0 = ppack->padm->frame_vel_u[0];
   const Real gx1 = ppack->padm->frame_vel_u[1];
   const Real gx2 = ppack->padm->frame_vel_u[2];
+  // falloff centre (moving puncture, Phase 2 M1): zero unless CFC sets it
+  const Real bc0 = ppack->padm->bc_center[0];
+  const Real bc1 = ppack->padm->bc_center[1];
+  const Real bc2 = ppack->padm->bc_center[2];
 
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic) {
     par_for("adm_bc_x1", DevExeSpace(), 0, (nmb-1), 0, (nvar-1), 0, (n3-1), 0, (n2-1),
@@ -144,11 +148,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
           Real x1_i = CellCenterX(is-is, nx1, x1min, x1max);
-          Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+          Real r_i = Kokkos::sqrt(SQR(x1_i - bc0) + SQR(x2v - bc1) + SQR(x3v - bc2));
           Real f_i = u0(m,v,k,j,is) - c.flat;
           for (int i=0; i<ng; ++i) {
             Real x1_g = CellCenterX(is-i-1-is, nx1, x1min, x1max);
-            Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+            Real r_g = Kokkos::sqrt(SQR(x1_g - bc0) + SQR(x2v - bc1) + SQR(x3v - bc2));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,j,is-i-1) = c.flat + f_i*ratio;
           }
@@ -170,11 +174,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
           Real x1_i = CellCenterX(ie-is, nx1, x1min, x1max);
-          Real r_i = Kokkos::sqrt(SQR(x1_i) + SQR(x2v) + SQR(x3v));
+          Real r_i = Kokkos::sqrt(SQR(x1_i - bc0) + SQR(x2v - bc1) + SQR(x3v - bc2));
           Real f_i = u0(m,v,k,j,ie) - c.flat;
           for (int i=0; i<ng; ++i) {
             Real x1_g = CellCenterX(ie+i+1-is, nx1, x1min, x1max);
-            Real r_g = Kokkos::sqrt(SQR(x1_g) + SQR(x2v) + SQR(x3v));
+            Real r_g = Kokkos::sqrt(SQR(x1_g - bc0) + SQR(x2v - bc1) + SQR(x3v - bc2));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,j,ie+i+1) = c.flat + f_i*ratio;
           }
@@ -209,11 +213,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
           Real x2_i = CellCenterX(js-js, nx2, x2min, x2max);
-          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+          Real r_i = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2_i - bc1) + SQR(x3v - bc2));
           Real f_i = u0(m,v,k,js,i) - c.flat;
           for (int j=0; j<ng; ++j) {
             Real x2_g = CellCenterX(js-j-1-js, nx2, x2min, x2max);
-            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+            Real r_g = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2_g - bc1) + SQR(x3v - bc2));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,js-j-1,i) = c.flat + f_i*ratio;
           }
@@ -235,11 +239,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
         case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
         case BoundaryFlag::user: {
           Real x2_i = CellCenterX(je-js, nx2, x2min, x2max);
-          Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2_i) + SQR(x3v));
+          Real r_i = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2_i - bc1) + SQR(x3v - bc2));
           Real f_i = u0(m,v,k,je,i) - c.flat;
           for (int j=0; j<ng; ++j) {
             Real x2_g = CellCenterX(je+j+1-js, nx2, x2min, x2max);
-            Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2_g) + SQR(x3v));
+            Real r_g = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2_g - bc1) + SQR(x3v - bc2));
             Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
             u0(m,v,k,je+j+1,i) = c.flat + f_i*ratio;
           }
@@ -274,11 +278,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
       case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
       case BoundaryFlag::user: {
         Real x3_i = CellCenterX(ks-ks, nx3, x3min, x3max);
-        Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+        Real r_i = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2v - bc1) + SQR(x3_i - bc2));
         Real f_i = u0(m,v,ks,j,i) - c.flat;
         for (int k=0; k<ng; ++k) {
           Real x3_g = CellCenterX(ks-k-1-ks, nx3, x3min, x3max);
-          Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+          Real r_g = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2v - bc1) + SQR(x3_g - bc2));
           Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
           u0(m,v,ks-k-1,j,i) = c.flat + f_i*ratio;
         }
@@ -300,11 +304,11 @@ void ADMBCsImpl(MeshBlockPack *ppack, DvceArray5D<Real> u0, int is, int ie, int 
       case BoundaryFlag::vacuum: case BoundaryFlag::inflow:
       case BoundaryFlag::user: {
         Real x3_i = CellCenterX(ke-ks, nx3, x3min, x3max);
-        Real r_i = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_i));
+        Real r_i = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2v - bc1) + SQR(x3_i - bc2));
         Real f_i = u0(m,v,ke,j,i) - c.flat;
         for (int k=0; k<ng; ++k) {
           Real x3_g = CellCenterX(ke+k+1-ks, nx3, x3min, x3max);
-          Real r_g = Kokkos::sqrt(SQR(x1v) + SQR(x2v) + SQR(x3_g));
+          Real r_g = Kokkos::sqrt(SQR(x1v - bc0) + SQR(x2v - bc1) + SQR(x3_g - bc2));
           Real ratio = Kokkos::pow(r_i/(r_g + 1.0e-30), c.order);
           u0(m,v,ke+k+1,j,i) = c.flat + f_i*ratio;
         }

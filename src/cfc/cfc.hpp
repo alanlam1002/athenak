@@ -303,6 +303,8 @@ class CFC {
   // xi(t) = frame_vel*t + frame_accel*t^2/2 (xi(0) = 0). The value currently inside
   // adm.beta_u is padm->frame_vel_u.
   Real frame_vel0_[3], frame_accel_[3];
+  bool puncture_moving_ = false;    // <cfc> puncture_moving (Phase 2 M1)
+  Real xbh0_[3] = {0.0, 0.0, 0.0};  // <cfc> puncture_x1/2/3: x_BH at t = 0
   bool frame_enabled_;
   bool frame_assembled_;   // padm->frame_vel_u reflects adm.beta_u (false until the
                            // first assembly; on a restart the rst's adm.beta_u is
@@ -549,6 +551,16 @@ class CFC {
   void FrameDisp(Real t, Real x[3]) const {
     for (int a = 0; a < 3; ++a) x[a] = frame_vel0_[a]*t + 0.5*frame_accel_[a]*t*t;
   }
+  // Phase 2 M1 (design §2.1): puncture position on the grid at time t,
+  // x_BH(t) = x_BH(0) - xi(t) when <cfc> puncture_moving, else x_BH(0) (origin default).
+  bool PunctureMoving() const { return puncture_moving_; }
+  void BHPosition(Real t, Real x[3]) const {
+    Real d[3] = {0.0, 0.0, 0.0};
+    if (puncture_moving_) { FrameDisp(t, d); }
+    for (int a = 0; a < 3; ++a) x[a] = xbh0_[a] - d[a];
+  }
+  // refill the analytic background at x_BH(t) and point the ADM outer-BC falloff there
+  void RefillMovingPuncture(Real t);
 
  private:
 

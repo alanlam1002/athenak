@@ -171,7 +171,7 @@ void WormholeBackground(Real m_bh, Real x1, Real x2, Real x3,
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
+//! \fn void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
 //!            DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
 //!            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
 //!            AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
@@ -189,7 +189,7 @@ void WormholeBackground(Real m_bh, Real x1, Real x2, Real x3,
 //! item 7) -- the bare form is what's needed there (dotted against the matter-only
 //! Ahats^ij = Ahat^ij-Ahat0^ij at the call site), not a pre-contracted-with-Ahat0
 //! quantity, which cancels out of the final residual entirely (Sec 3.9).
-void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
+void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
                             DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,

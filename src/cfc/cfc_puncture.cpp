@@ -14,7 +14,7 @@
 
 namespace cfc {
 
-void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
+void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
                             DvceArray5D<Real> &u_psi0, DvceArray5D<Real> &u_alpha0_psi0,
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
@@ -30,13 +30,16 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh,
   int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
   int nmb = pmbp->nmb_thispack;
   int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  // puncture position (Phase 2 M1: x_BH(t) = x_BH(0) - xi(t); the origin otherwise).
+  // A translated static trumpet is exact in the comoving gauge (design §2.1).
+  const Real xb0 = xbh[0], xb1 = xbh[1], xb2 = xbh[2];
 
   par_for("cfc_fill_puncture_background", DevExeSpace(), 0, nmb-1, ksg, keg, jsg, jeg,
   isg, ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
-    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
-    Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - xb0;
+    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - xb1;
+    Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - xb2;
     Real r = sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
 
     Real rho = TrumpetIsoToAreal(r/m_bh);

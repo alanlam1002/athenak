@@ -300,6 +300,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Ahat0_ij=0, Ahat0^2=0, beta0^i=0, grad_ap6_0^i=0) when disabled, so every existing
   // non-TDE run is a bit-for-bit no-op.
   puncture_enabled_ = pin->GetOrAddBoolean("cfc", "puncture_enabled", false);
+  // Phase 2 Milestone 1 (code/COMOVING_GAUGE_DESIGN.md §2.1; DEVELOPMENT.md item 75):
+  // a puncture that moves on the grid as x_BH(t) = x_BH(0) - xi(t) in the comoving gauge.
+  puncture_moving_ = pin->GetOrAddBoolean("cfc", "puncture_moving", false);
+  for (int a = 0; a < 3; ++a) {
+    xbh0_[a] = pin->GetOrAddReal("cfc", "puncture_x" + std::to_string(a + 1), 0.0);
+  }
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
@@ -352,8 +358,21 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   beta0_u.InitWithShallowSlice(u_beta0, 0, 2);
   grad_ap6_0.InitWithShallowSlice(u_grad_ap6_0, 0, 2);
   if (puncture_enabled_) {
-    FillPunctureBackground(pmbp, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u, a0_dd,
-                           a0_sq, grad_ap6_0);
+    // x_BH at the current (start or restart) time; the frame parameters are read
+    // further below, so evaluate xi(t) from the input directly here.
+    Real xbh[3];
+    {
+      Real t0 = pmbp->pmesh->time;
+      for (int a = 0; a < 3; ++a) {
+        std::string n = std::to_string(a + 1);
+        Real v0 = pin->GetOrAddReal("cfc", "frame_vel" + n, 0.0);
+        Real a0 = pin->GetOrAddReal("cfc", "frame_accel" + n, 0.0);
+        xbh[a] = xbh0_[a] - (puncture_moving_ ? (v0*t0 + 0.5*a0*t0*t0) : 0.0);
+        pmbp->padm->bc_center[a] = puncture_moving_ ? xbh[a] : 0.0;
+      }
+    }
+    FillPunctureBackground(pmbp, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
+                           a0_dd, a0_sq, grad_ap6_0);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
     Kokkos::deep_copy(u_alpha0_psi0, 1.0);
@@ -410,14 +429,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     frame_accel_[a] = pin->GetOrAddReal("cfc", "frame_accel" + n, 0.0);
     if (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0) frame_enabled_ = true;
   }
-  if (frame_enabled_ && puncture_enabled_) {
+  if (frame_enabled_ && puncture_enabled_ && !puncture_moving_) {
     // Phase 1 has no moving BH: the trumpet background, excision masks, BH refinement
     // and ADM falloff all stay at the grid origin, so xidot != 0 would describe a
     // different spacetime, not a gauge change. Needs Phase 2 (COMOVING_GAUGE_DESIGN.md).
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "<cfc> frame_vel/frame_accel cannot be combined with "
-              << "puncture_enabled = true (no moving-puncture support, DEVELOPMENT.md "
-              << "item 68)" << std::endl;
+              << "puncture_enabled = true unless <cfc> puncture_moving = true (Phase 2 "
+              << "M1, DEVELOPMENT.md items 68 and 75)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (frame_enabled_) {
@@ -1077,7 +1096,9 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   // this function's own treatment of every other CFC-owned field (re-seed/re-solve,
   // never a cross-layout data transfer). No-op when puncture_enabled_ is false.
   if (puncture_enabled_) {
-    FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
+    Real xbh[3];
+    BHPosition(pmy_pack->pmesh->time, xbh);
+    FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
   }
 
@@ -1410,6 +1431,9 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  // Phase 2 M1: the analytic background follows the puncture; refilled once per solve
+  // (the solved delta fields are re-solved right after, so nothing needs re-anchoring)
+  if (puncture_moving_) { RefillMovingPuncture(StageTime(pdriver, stage)); }
   // Matter FIRST, before any elliptic work this cycle. This is the ordering test the
   // first instrumented run (job 8835173) could not make: if the conserved state is
   // already non-finite when the cycle's solves begin, every elliptic NaN downstream is
@@ -1843,7 +1867,9 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     // Re-derive the analytic background at the new mass.  Cheap: one ghost-inclusive
     // par_for with a root-find per cell, against the ~4.5 finest-grid-equivalent
     // sweeps the per-level coefficient fills already do every stage.
-    FillPunctureBackground(pmy_pack, puncture_mass_, u_psi0, u_alpha0_psi0, beta0_u,
+    Real xbh[3];
+    BHPosition(pmy_pack->pmesh->time, xbh);
+    FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
 
     // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
@@ -2492,6 +2518,15 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
 void CFC::ReconstructShift() {
   cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3, r_com_beta_);
   return;
+}
+
+void CFC::RefillMovingPuncture(Real t) {
+  if (!puncture_enabled_) { return; }
+  Real xbh[3];
+  BHPosition(t, xbh);
+  for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
+  FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
+                         a0_dd, a0_sq, grad_ap6_0);
 }
 
 void CFC::AssembleADM(Real time) {

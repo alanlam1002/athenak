@@ -65,6 +65,9 @@ class ADM {
   // ADMBCs uses it as beta_u's asymptotic value so the outer-boundary falloff
   // preserves a uniform shift. See src/cfc/DEVELOPMENT.md item 68.
   Real frame_vel_u[3] = {0.0, 0.0, 0.0};
+  // centre of the 1/r^n outer-BC falloff (adm_bcs.cpp); CFC sets it to the moving
+  // puncture's position when <cfc> puncture_moving (Phase 2 M1). Zero otherwise.
+  Real bc_center[3] = {0.0, 0.0, 0.0};
 
   void (*SetADMVariables)(MeshBlockPack *pm);
 

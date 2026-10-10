@@ -599,6 +599,22 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
   int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
 
+  // <problem> star_enabled = false (default true): replace the star by the floor
+  // atmosphere at rest everywhere -- the vacuum-puncture tests of Phase 2 M1
+  // (DEVELOPMENT.md item 75). Pair with amr_density_frac > 1 so the density tracker
+  // does not refine the uniform atmosphere.
+  if (!pin->GetOrAddBoolean("problem", "star_enabled", true)) {
+    const Real rho_v = pin->GetReal("mhd", "dfloor");
+    const Real p_v = rho_v*pin->GetReal("mhd", "tfloor");
+    auto &w0v = pmbp->pmhd->w0;
+    par_for("pgen_vacuum", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, n3-1, 0, n2-1,
+            0, n1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      w0v(m,IDN,k,j,i) = rho_v;
+      w0v(m,IPR,k,j,i) = p_v;
+      w0v(m,IVX,k,j,i) = 0.0; w0v(m,IVY,k,j,i) = 0.0; w0v(m,IVZ,k,j,i) = 0.0;
+    });
+  }
+
   // Convert primitives to conserved
   pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
 
@@ -872,6 +888,9 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   auto block_rho_max_h = Kokkos::create_mirror_view(block_rho_max);
   Kokkos::deep_copy(block_rho_max_h, block_rho_max);
 
+  // puncture position (moves on the grid with <cfc> puncture_moving; Phase 2 M1)
+  Real xbh[3] = {0.0, 0.0, 0.0};
+  if (pmbp->pcfc != nullptr) { pmbp->pcfc->BHPosition(pmbp->pmesh->time, xbh); }
   const Real r2_bh      = SQR(tde_ref.rad_bh);
   const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
   const Real rho_cut    = tde_ref.rho_frac*rho_max;
@@ -901,7 +920,7 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     // dt (the debris sits where alpha~1, so it is what sets the global
     // timestep).
     int level = pmesh->lloc_eachmb[m + mbs].level - pmesh->root_level;
-    Real d2_bh = dist2_to_block(0.0, 0.0, 0.0);
+    Real d2_bh = dist2_to_block(xbh[0], xbh[1], xbh[2]);
 
     int want = -1;
     if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }

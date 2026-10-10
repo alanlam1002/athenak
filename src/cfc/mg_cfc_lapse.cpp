@@ -287,7 +287,8 @@ void MGCFCLapse::CalculateFASRHSPack() {
 //! version also keeps alpha0 (which the psi-side version discards) to build
 //! channel 5.
 
-void MGCFCLapse::FillPunctureCoefficients(Real m_bh) {
+void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3]) {
+  const Real xb0 = xbh[0], xb1 = xbh[1], xb2 = xbh[2];
   int is = ngh_, js = ngh_, ks = ngh_;
   int nmmb = nmmb_;
 
@@ -318,9 +319,9 @@ void MGCFCLapse::FillPunctureCoefficients(Real m_bh) {
         Real dx1 = (blk_h(m).x1max-blk_h(m).x1min)/static_cast<Real>(ncx);
         Real dx2 = (blk_h(m).x2max-blk_h(m).x2min)/static_cast<Real>(ncy);
         Real dx3 = (blk_h(m).x3max-blk_h(m).x3min)/static_cast<Real>(ncz);
-        Real x1v = blk_h(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
-        Real x2v = blk_h(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
-        Real x3v = blk_h(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real x1v = blk_h(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1 - xb0;
+        Real x2v = blk_h(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2 - xb1;
+        Real x3v = blk_h(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3 - xb2;
         Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
@@ -339,9 +340,9 @@ void MGCFCLapse::FillPunctureCoefficients(Real m_bh) {
         Real dx1 = (blk_d(m).x1max-blk_d(m).x1min)/static_cast<Real>(ncx);
         Real dx2 = (blk_d(m).x2max-blk_d(m).x2min)/static_cast<Real>(ncy);
         Real dx3 = (blk_d(m).x3max-blk_d(m).x3min)/static_cast<Real>(ncz);
-        Real x1v = blk_d(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1;
-        Real x2v = blk_d(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2;
-        Real x3v = blk_d(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3;
+        Real x1v = blk_d(m).x1min + (static_cast<Real>(i-is)+0.5)*dx1 - xb0;
+        Real x2v = blk_d(m).x2min + (static_cast<Real>(j-js)+0.5)*dx2 - xb1;
+        Real x3v = blk_d(m).x3min + (static_cast<Real>(k-ks)+0.5)*dx3 - xb2;
         Real r = Kokkos::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
@@ -504,8 +505,8 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // psi0=1/Ahat0^2=0/alpha0*psi0=1 there (restriction of a uniform field is a
   // no-op).
   if (puncture_enabled_) {
-    static_cast<MGCFCLapse*>(mglevels_)->FillPunctureCoefficients(puncture_mass_);
-    static_cast<MGCFCLapse*>(mgroot_)->FillPunctureCoefficients(puncture_mass_);
+    static_cast<MGCFCLapse*>(mglevels_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_);
+    static_cast<MGCFCLapse*>(mgroot_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_);
   }
 
   SetupMultigrid(dt, false);

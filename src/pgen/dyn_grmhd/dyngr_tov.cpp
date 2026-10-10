@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <fstream>
 #include <sstream>
+#include <string>
 #include <utility>
 
 #include "athena.hpp"
@@ -87,6 +89,52 @@ template<class TOVEOS>
 void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
   Real v_pert = pin->GetOrAddReal("problem", "v_pert", 0.0);
   Real p_pert_amp = pin->GetOrAddReal("problem", "p_pert", 0.0);
+  // Axisymmetric l = 2 (m = 0) velocity perturbation for exciting non-radial
+  // modes (f- and g-modes): v^i = v_pert_l2 * (-x, -y, 2z)/R * (1 - (r/R)^2),
+  // i.e. grad(r^2 P_2(cos theta))/2 tapered to zero at the surface. Even in z,
+  // so it is compatible with bitant symmetry. Default 0 = no change.
+  Real v_pert_l2 = pin->GetOrAddReal("problem", "v_pert_l2", 0.0);
+  // Tabulated l = 2 (m = 0) velocity perturbation, for exciting ONE mode (e.g. a
+  // g-mode from a Cowling eigenfunction) rather than the smooth f-mode-like shape
+  // above. The file holds a uniform grid of xr = r/R_edge in [0,1] (areal r, as for
+  // xr below) with the coordinate-velocity profiles Ur, Uh, and the field is
+  //   v = v_pert_prof_amp * ( Ur(xr) P2(cos th) e_r + Uh(xr) dP2/dth e_th ),
+  // with e_r, e_th orthonormal. In the isotropic branch the components are converted
+  // from Schwarzschild to isotropic coordinates. Format: '#' comment lines, then N,
+  // then N lines "xr Ur Uh". Default: no file, no change.
+  std::string v_prof_file = pin->GetOrAddString("problem", "v_pert_profile", "");
+  Real v_prof_amp = pin->GetOrAddReal("problem", "v_pert_prof_amp", 0.0);
+  int nprof = 0;
+  DvceArray1D<Real> prof_ur("prof_ur", 2), prof_uh("prof_uh", 2);
+  if (!v_prof_file.empty() && v_prof_amp != 0.0) {
+    std::ifstream fin(v_prof_file);
+    std::string line;
+    while (std::getline(fin, line) && (line.empty() || line[0] == '#')) {}
+    if (fin) nprof = std::stoi(line);
+    if (nprof < 2) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "cannot read <problem>/v_pert_profile = '"
+                << v_prof_file << "'" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    Kokkos::realloc(prof_ur, nprof);
+    Kokkos::realloc(prof_uh, nprof);
+    auto hur = Kokkos::create_mirror_view(prof_ur);
+    auto huh = Kokkos::create_mirror_view(prof_uh);
+    for (int n = 0; n < nprof; ++n) {
+      Real xn;
+      fin >> xn >> hur(n) >> huh(n);
+      // The kernel indexes the table as xr*(N-1), so the grid must be uniform on [0,1].
+      if (!fin || Kokkos::fabs(xn - static_cast<Real>(n)/(nprof - 1)) > 1.0e-6) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "v_pert_profile row " << n << " is unreadable or "
+                  << "not on a uniform grid of r/R in [0,1]" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+    Kokkos::deep_copy(prof_ur, hur);
+    Kokkos::deep_copy(prof_uh, huh);
+  }
   bool isotropic = pin->GetOrAddBoolean("problem", "isotropic", false);
 
   bool minkowski = pin->GetOrAddBoolean("problem", "minkowski", false);
@@ -156,6 +204,8 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     Real s = sqrt(SQR(x1v) + SQR(x2v));
     Real rho, p, mass, alp, r_schw;
     Real vr = 0.;
+    Real xr = 2.0;   // r/R_edge (Schwarzschild); > 1 means outside the star
+    Real fr_iso = 1.0, ft_iso = 1.0;   // Schwarzschild -> grid velocity components
     Real p_pert = 0.;
     Real ye = ye_atmo;
     Real y0 = y0_atmo;
@@ -167,6 +217,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       tov_.GetPrimitivesAtPoint(eos_, r, rho, p, mass, alp);
       if (r <= tov_.R_edge) {
         Real x = r/tov_.R_edge;
+        xr = x;
         vr = 0.5*v_pert*(3.0*x - x*x*x);
         auto rand_gen = rand_pool64.get_state();
         p_pert = 2.0*p_pert_amp*(rand_gen.frand() - 0.5);
@@ -187,6 +238,11 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       r_schw = tov_.FindSchwarzschildR(r, mass);
       if (r_schw <= tov_.R_edge) {
         Real x = r_schw/tov_.R_edge;
+        xr = x;
+        // Isotropic grid: v_grid = v_orthonormal / psi^2 with psi^2 = r_schw/r, and the
+        // orthonormal radial component is e^Lambda times the Schwarzschild one.
+        ft_iso = r/r_schw;
+        fr_iso = ft_iso/Kokkos::sqrt(1.0 - 2.0*mass/r_schw);
         vr = 0.5*v_pert*(3.0*x - x*x*x);
         auto rand_gen = rand_pool64.get_state();
         p_pert = 2.0*p_pert_amp*(rand_gen.frand() - 0.5);
@@ -212,6 +268,29 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     w0_(m,IVX,k,j,i) = vr*x1v/r;
     w0_(m,IVY,k,j,i) = vr*x2v/r;
     w0_(m,IVZ,k,j,i) = vr*x3v/r;
+    if (xr <= 1.0) {
+      // l = 2 field in the coordinate the star edge is measured in; xr is
+      // r/R_edge in that coordinate, so (x,y,z)/R = (x1v,x2v,x3v)*xr/r.
+      Real a2 = v_pert_l2*(1.0 - xr*xr)*xr/r;
+      w0_(m,IVX,k,j,i) += -a2*x1v;
+      w0_(m,IVY,k,j,i) += -a2*x2v;
+      w0_(m,IVZ,k,j,i) += 2.0*a2*x3v;
+    }
+    if (nprof > 0 && xr <= 1.0 && r > 0.0) {
+      Real fi = xr*(nprof - 1);
+      int i0 = static_cast<int>(fi);
+      i0 = (i0 > nprof - 2) ? nprof - 2 : i0;
+      Real tw = fi - i0;
+      Real ur = v_prof_amp*((1.0 - tw)*prof_ur(i0) + tw*prof_ur(i0 + 1))*fr_iso;
+      Real uh = v_prof_amp*((1.0 - tw)*prof_uh(i0) + tw*prof_uh(i0 + 1))*ft_iso;
+      Real mu = x3v/r;
+      Real p2 = 0.5*(3.0*mu*mu - 1.0);
+      // dP2/dth e_th = -(3 z / r^3) (x z, y z, -(x^2 + y^2)): regular on the axis.
+      Real ct = -3.0*x3v/(r*r*r);
+      w0_(m,IVX,k,j,i) += ur*p2*x1v/r + uh*ct*x1v*x3v;
+      w0_(m,IVY,k,j,i) += ur*p2*x2v/r + uh*ct*x2v*x3v;
+      w0_(m,IVZ,k,j,i) += ur*p2*x3v/r - uh*ct*s*s;
+    }
     auto &nvars = nvars_;
     auto &nscal = nscal_;
     if (use_ye && nscal >= 1) {

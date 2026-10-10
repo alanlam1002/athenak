@@ -195,19 +195,25 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           for (int n = 0; n < nscal_; ++n) {
             Real varmax = eos_min_Y(n);
             Real varmin = eos_max_Y(n);
-            if ( varmin >= 0.0 ) {
-              for (int kt = k - kadd; kt <= k + kadd; kt++) {
-                for (int jt = j - jadd; jt <= j + jadd; jt++) {
-                  for (int it = i-1; it <= i+1; it++) {
-                    varmax = fmax(varmax, u1_(m,nmhd_+n,kt,jt,it));
-                    varmin = fmin(varmin, u1_(m,nmhd_+n,kt,jt,it));
-                  }
+            for (int kt = k - kadd; kt <= k + kadd; kt++) {
+              for (int jt = j - jadd; jt <= j + jadd; jt++) {
+                for (int it = i-1; it <= i+1; it++) {
+                  varmax = fmax(varmax, u1_(m,nmhd_+n,kt,jt,it));
+                  varmin = fmin(varmin, u1_(m,nmhd_+n,kt,jt,it));
                 }
               }
-              if (utest_(m,nmhd_+n,k,j,i) > dmp_M_*varmax ||
-                  utest_(m,nmhd_+n,k,j,i) < varmin/dmp_M_) {
-                fofc_scal_(m,n,k,j,i) = true;
-              }
+            }
+            // Sign-aware tolerance band. For non-negative bounds these are exactly the
+            // historical expressions [varmin/dmp_M, dmp_M*varmax], so non-negative scalars
+            // are unchanged bit for bit. The historical multiplicative form inverts for
+            // negative values (dmp_M*varmax < varmax), and its guard `varmin >= 0` tested
+            // the SEED eos_max_Y rather than the scalar's range, so a scalar allowed to be
+            // negative (zla_bag Y3 = y_qQ in [-1,2], ~ -0.6 in the star) was flagged -- and
+            // advected first-order -- almost everywhere.
+            const Real hi = (varmax >= 0.0) ? dmp_M_*varmax : varmax/dmp_M_;
+            const Real lo = (varmin >= 0.0) ? varmin/dmp_M_ : varmin*dmp_M_;
+            if (utest_(m,nmhd_+n,k,j,i) > hi || utest_(m,nmhd_+n,k,j,i) < lo) {
+              fofc_scal_(m,n,k,j,i) = true;
             }
           }
         }

@@ -128,6 +128,11 @@ class DynGRMHD {
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.
   bool gr_dt;
+  // <time>/dt_skip_excised (default false; DEVELOPMENT.md item 73, research H): leave
+  // cells inside the excision mask (excision_flux) out of the CFL reduction. Their
+  // primitives are reset to the excision floor every step and their face fluxes are
+  // first order, so their own (gauge) shift need not set dt.
+  bool dt_skip_excised;
 };
 
 template<class EOSPolicy, class ErrorPolicy>

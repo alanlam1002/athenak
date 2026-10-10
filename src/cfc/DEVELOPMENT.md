@@ -9914,3 +9914,38 @@ against 97% with jump. It is 41–79% at 1e-3–1e-1 ρ0, where the surface has 
 
 **Regression.** With `jump`, Sod is bitwise identical to item 71's default. F's contact
 tests stay at round-off under the new default.
+
+## 73. Dual-energy second-law guard; `<time> dt_skip_excised` (V4F follow-up)
+
+**Second-law guard** (`<mhd> dual_energy_second_law`, default true; `_tol`, default −1e-3).
+A dense, B = 0, non-floored cell that the flag puts on the energy branch takes the entropy
+solution instead when K_energy ≤ K_tracer·(1 + tol).
+- **Why:** shocks only raise K. In V4F (RESULTS §11.5) the flag caught the star's
+  tidal-compression caps, and the energy solution there lowered K by ~0.25% per call,
+  down to 1e-5. The resync wrote that into the tracer.
+- **Tolerance scan** (CPU, `dual_energy_tests_J`). The table gives the captured fraction
+  of the entropy jump at Mach 1.2 / 1.5 / 2 / 3, Sod post-shock K, and the homologous
+  slab surface band (ρ > 0.1ρ_max) at c = 0.4:
+
+| tol | captured | Sod K | slab band, c = 0.4 |
+|---|---|---|---|
+| no guard | 0.75 / 0.91 / 0.96 / 0.97 | 3.288 | min K 0.88 |
+| 0 (plain max) | 0.88 / 1.02 / 1.07 / 1.05 | 3.355 | — |
+| −1e-3 (default) | 0.75 / 0.91 / 0.96 / 0.97 | 3.348 | min K 0.9986 |
+| −1e-2 | as no guard | — | 0.87: misses the cooling |
+| +1e-3 to +3e-2 | ≤ 0.81 at Mach 3 | — | — |
+
+  - With tol = 0, clipping the low post-shock wiggles biases K up.
+  - With tol = −1e-3, collisions are identical to no guard; the cost is Sod +1.4% (from a
+    discontinuity at rest).
+  - With positive tol, shock capture is lost, because shock heating arrives in < 1e-3
+    steps.
+- F's contact tests are unchanged (round-off).
+
+**`<time> dt_skip_excised`** (default false; `dyn_grmhd_newdt.cpp`). Cells with
+`excision_flux` set are left out of the CFL reduction.
+- **Why (H, RESULTS §11.6):** dt = 0.0442 in the rp16 runs is set by the excised throat
+  (|β| = 0.577, α ≈ 0). The next limiter outside it would allow 1.6-2.1× before periapsis.
+- **Risk (argued):** the excision-boundary faces' first-order fluxes still see the throat
+  shift, so the effective Courant number there rises. V4dt tests it (rp16 to t = 60 vs
+  V4G).

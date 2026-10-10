@@ -48,6 +48,7 @@
 #include "dyn_grmhd.hpp"
 #include "driver/driver.hpp"
 #include "coordinates/adm.hpp"
+#include "coordinates/coordinates.hpp"
 #include "eos/eos.hpp"
 #include "eos/primitive-solver/geom_math.hpp"
 #include "mhd/mhd.hpp"
@@ -85,6 +86,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   auto &mbsize = pmy_pack->pmb->mb_size;
   auto &dyn_eos_ = eos;
   bool gr_dt_ = gr_dt;
+  const bool skip_exc_ = dt_skip_excised && pmy_pack->pcoord->coord_data.bh_excise;
+  auto &exc_flux_ = pmy_pack->pcoord->excision_flux;
   const bool atm_fv_ = eos.atm_frame_vel;
   const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
   const Real fv2 = pmy_pack->padm->frame_vel_u[2];
@@ -123,6 +126,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
       k += ks;
       j += js;
 
+      if (skip_exc_ && exc_flux_(m,k,j,i)) return;   // excised: not in the CFL
       // Conservative fallback: the speed of light, always correct (see file doc
       // comment). Overwritten below when gr_dt_ requests the real wavespeed.
       Real max_dv1 = 1.0, max_dv2 = 1.0, max_dv3 = 1.0;

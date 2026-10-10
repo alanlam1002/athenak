@@ -150,6 +150,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
+  dt_skip_excised = pin->GetOrAddBoolean("time", "dt_skip_excised", false);
 
   // allocate memory for temperature
   {
@@ -295,7 +296,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::PrimToConInit(int is, int ie, int js, i
                 << (eos.de_recon_rhoy ? "rho*Y" : "Y") << ", tracer flux "
                 << (eos.de_flux_hll ? "hll" : "mass") << ", shock sensor "
                 << (eos.de_sensor == 0 ? "jump" : (eos.de_sensor == 1 ? "jameson" : "vcurv"))
-                << ", dilate " << eos.de_dilate << std::endl;
+                << ", dilate " << eos.de_dilate << ", second-law guard "
+                << (eos.de_second_law ? "on" : "off") << std::endl;
     }
   }
   if (pmy_pack->ptmunu != nullptr) {

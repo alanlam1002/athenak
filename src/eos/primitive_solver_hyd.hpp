@@ -159,6 +159,11 @@ class PrimitiveSolverHydro {
   DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
   int de_dilate = 1;               // also flag the face neighbours of flagged cells
   Real de_dilate_weak = 0.5;       // ... if their own sensor exceeds this x the threshold
+  // second-law guard (item 73, default on): a dense flagged cell whose energy solution has
+  // K < K_tracer takes the entropy solution instead -- a shock can only raise K, so a drop
+  // there is the energy equation's numerical loss (V4F's tidal caps, RESULTS §11.5)
+  bool de_second_law = true;
+  Real de_second_law_tol = -1.0e-3; // entropy solution if K_en <= K_tr (1 + tol): ignore drops < 1e-3
   // Diagnostics of the last full (non-floors_only) C2P call, interior cells only:
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
@@ -234,6 +239,8 @@ class PrimitiveSolverHydro {
       de_psi_jump = pin->GetOrAddReal(block, "dual_energy_psi_jump", 1.0e30);  // off
       de_dilate = pin->GetOrAddInteger(block, "dual_energy_shock_dilate", 1);
       de_dilate_weak = pin->GetOrAddReal(block, "dual_energy_shock_dilate_weak", 0.5);
+      de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
+      de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
@@ -512,6 +519,8 @@ class PrimitiveSolverHydro {
     const int de_idx_ = de_idx;
     const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_eta1_ = de_eta1;
     const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
+    const bool de_2law_ = de_second_law;
+    const Real de_2tol_ = de_second_law_tol;
     if (de_on_) {
       int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
       if (de_shock.extent_int(0) != prim.extent_int(0) || de_shock.extent_int(1) != e3 ||
@@ -827,6 +836,13 @@ class PrimitiveSolverHydro {
             // optional energy-ratio gate: entropy only where eps is a small part of tau
             Real eps = prim_pt[PPR]/((de_gamma_ - 1.0)*prim_pt[PRH]*mb);
             if (eps > de_eta1_*cons_pt_old[CTA]/D) use_ent = false;
+          }
+          if (!use_ent && de_2law_ && dense && bzero && !bad) {
+            // second-law guard: the energy solution may raise K (a shock), never lower it
+            Real rho_e = prim_pt[PRH]*mb;
+            Real k_en = prim_pt[PPR]/pow(rho_e, de_gamma_);
+            Real k_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
+            if (k_en <= k_tr*(1.0 + de_2tol_)) use_ent = true;
           }
           if (use_ent) {
             Real K = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);

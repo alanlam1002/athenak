@@ -61,8 +61,14 @@
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 
+#if ZLA_DEBUG_TRACE
+int zla_trace_on = 0;
+#endif
 template<class LogPolicy>
 void PerformC2PTests(Mesh* pmesh, ParameterInput *pin);
+template<class LogPolicy>
+void ReplayThroughProductionKernel(Mesh* pmesh, ParameterInput *pin);
+static int ReadStatesFile(const std::string &path, std::vector<Real> *flat);
 
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::C2PZlaBag()
@@ -92,8 +98,10 @@ void ProblemGenerator::C2PZlaBag(ParameterInput *pin, const bool restart) {
 
   if (pin->GetOrAddBoolean("mhd", "use_NQT", false)) {
     PerformC2PTests<Primitive::NQTLogs>(pmy_mesh_, pin);
+    ReplayThroughProductionKernel<Primitive::NQTLogs>(pmy_mesh_, pin);
   } else {
     PerformC2PTests<Primitive::NormalLogs>(pmy_mesh_, pin);
+    ReplayThroughProductionKernel<Primitive::NormalLogs>(pmy_mesh_, pin);
   }
 
   // Initialize the ADM variables to Minkowski, otherwise the pgen finishes with a pile
@@ -169,6 +177,9 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
 
   const int nf = pin->GetOrAddInteger("problem", "nf", 7);
   const int nn = pin->GetOrAddInteger("problem", "nn", 7);
+  // Print every Test O sample (n, P per composition) instead of only the violations,
+  // for plotting the P(n) curve a violation sits on.
+  const bool dump_o = pin->GetOrAddBoolean("problem", "testO_dump", false);
 
   // Test E input: explicit conserved states, 18 numbers per line. Read on the host and
   // pushed to the device so the same kernel serves CPU and GPU builds.
@@ -177,32 +188,7 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
   std::vector<Real> flat;
   int nst = 0;
   if (!states_file.empty()) {
-    std::ifstream fh(states_file);
-    if (!fh) {
-      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "Could not open <problem>/states_file = '"
-                << states_file << "'" << std::endl;
-      exit(EXIT_FAILURE);
-    }
-    std::string line;
-    int lineno = 0;
-    while (std::getline(fh, line)) {
-      lineno++;
-      std::size_t first = line.find_first_not_of(" \t\r");
-      if (first == std::string::npos || line[first] == '#') { continue; }
-      std::istringstream iss(line);
-      Real v[NSTF];
-      int k = 0;
-      while (k < NSTF && (iss >> v[k])) { k++; }
-      if (k != NSTF) {
-        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                  << std::endl << states_file << ":" << lineno << ": expected " << NSTF
-                  << " numbers, read " << k << std::endl;
-        exit(EXIT_FAILURE);
-      }
-      for (int i = 0; i < NSTF; ++i) { flat.push_back(v[i]); }
-      nst++;
-    }
+    nst = ReadStatesFile(states_file, &flat);
     std::cout << "  Test E: read " << nst << " conserved state(s) from " << states_file
               << std::endl << std::endl;
   }
@@ -519,7 +505,14 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
                          /(mb_*ne);
 
         Real prim_out[NPRIM] = {0.0};
+#if ZLA_DEBUG_TRACE
+        zla_trace_on = 1;
+        Kokkos::printf("TRACE state %d\n", m);
+#endif
         auto res = ps_.ConToPrim(prim_out, cons, bu, ge, gi);
+#if ZLA_DEBUG_TRACE
+        zla_trace_on = 0;
+#endif
         const char *tag = "OTHER";
         switch (res.error) {
           case Primitive::Error::SUCCESS:           tag = "SUCCESS";      break;
@@ -1263,7 +1256,12 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
       // previous two attempts through -- the changed band sits near n_tr, where a real
       // mixed phase behaves differently from the nearly-pure-nucleon case.
       const int NN = 48;
-      const Real nlo = Kokkos::fmax(min_n, 1.0e-3);
+      // Lower bound was 1e-3, which is TWO DECADES above the failures it was
+      // written to catch: the production NO_SOLUTION population sits at
+      // n ~ 1.2e-5. Diffed between zla_pfloor_fastpath true/false the old range
+      // showed no difference at all, so it passed a change that then cost 6% of
+      // the star. Reach the tenuous envelope instead.
+      const Real nlo = Kokkos::fmax(min_n, 1.0e-12);
       const Real nhi = Kokkos::fmin(max_n, 1.0);
       for (int cc = 0; cc < 2; ++cc) {
         Real Yn[MAX_SPECIES] = {0.0};
@@ -1285,6 +1283,72 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
                          eos.GetPressure(nN2, T_a, Yn), eos.GetEnergy(nN2, T_a, Yn));
         }
       }
+    }
+
+    // ------------------------------------------------------------------ Test O
+    // CONTINUITY of P(n) at fixed composition -- an ASSERTION, not a print.
+    //
+    // Every snap/floor branch in SnapPhaseFraction is a threshold, and C2P varies n
+    // through W as it solves, so any branch the solve can cross mid-bracket removes
+    // the sign change FalsePosition needs and the inversion fails. Both failed
+    // attempts at this code changed WHERE a threshold sits without removing the jump
+    // across it; each looked green because every existing test only PRINTS its sweep
+    // and the eye accepted a flipped column. This asserts the property that actually
+    // matters: at fixed Y, P(n) must have no jump the root solve could fall into.
+    //
+    // The criterion is MONOTONICITY, not step size. A relative-step bound flags the
+    // genuinely steep but perfectly healthy rise through the phase transition, where P
+    // can move 70% across one 7% step in n. What is never physical for a cold EOS at
+    // fixed composition is dP/dn < 0: thermodynamic stability forbids it, and it is
+    // exactly the shape a snap threshold leaves behind, since crossing one discards a
+    // pressure contribution as n INCREASES. A small relative tolerance absorbs
+    // round-off on the flat parts.
+    {
+      Kokkos::printf("\n--- Test O: P(n) continuity at fixed composition\n");
+      const int NO = 400;
+      const Real olo = Kokkos::fmax(min_n, 1.0e-12);
+      const Real ohi = Kokkos::fmin(max_n, 1.0);
+      const Real drop_tol = 1.0e-6;    // relative; anything larger is a real drop
+      int obad = 0;
+      // Comp C is the MEDIAN residual failure in res_vlr_pfloorfix (4532 unique
+      // cells to merger): the stellar surface, n ~ 1e-5, contaminated by composition
+      // diffusion to 1-f ~ 4e-3. Written directly in the advected (f, Y_N, y_lN,
+      // y_lQ) packing, so it is guarded exactly as production evaluates it.
+      for (int cc = 0; cc < 3; ++cc) {
+        Real Yo[MAX_SPECIES] = {0.0};
+        if (cc == 0) {
+          Yo[0] = 0.942282; Yo[1] = 0.936501; Yo[2] = 0.084680; Yo[3] = -0.063302;
+        } else if (cc == 1) {
+          Yo[0] = 0.700000; Yo[1] = 0.650000; Yo[2] = 0.126400; Yo[3] = -0.105000;
+        } else {
+          Yo[0] = 0.995750; Yo[1] = 0.999060; Yo[2] = 0.050509; Yo[3] = -0.640270;
+        }
+        Real Pprev = 0.0, nprev = 0.0;
+        Real worst = 0.0, worst_n = 0.0;
+        for (int q = 0; q < NO; ++q) {
+          const Real nq = olo*Kokkos::pow(ohi/olo, q/(NO - 1.0));
+          const Real Pq = eos.GetPressure(nq, T_a, Yo);
+          if (dump_o) { Kokkos::printf("  O-dump %c %.9e %.9e\n", "ABC"[cc], nq, Pq); }
+          if (q > 0) {
+            const Real den = Kokkos::fmax(Kokkos::fabs(Pq), Kokkos::fabs(Pprev));
+            const Real drop = (den > 0.0) ? (Pprev - Pq)/den : 0.0;
+            if (drop > worst) { worst = drop; worst_n = nq; }
+            if (drop > drop_tol) {
+              obad++;
+              if (obad <= 8) {
+                Kokkos::printf("    dP/dn < 0  comp %c  n = %.6e : P %.6e -> %.6e "
+                               "(drop %.3e)\n", "ABC"[cc],
+                               nq, Pprev, Pq, drop);
+              }
+            }
+          }
+          Pprev = Pq; nprev = nq;
+        }
+        Kokkos::printf("  comp %c: worst relative DROP %.3e at n = %.6e\n",
+                       "ABC"[cc], worst, worst_n);
+      }
+      Kokkos::printf("  Test O: %d point%s with dP/dn < 0 (expect 0)\n",
+                     obad, (obad == 1) ? "" : "s");
     }
 
     // ------------------------------------------------------------------ Test P
@@ -1401,4 +1465,184 @@ void PerformC2PTests(Mesh *pmesh, ParameterInput *pin) {
   Kokkos::fence();
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int ReadStatesFile()
+//! \brief Reads a states_file -- 18 numbers per line, see Test E -- into flat. Returns
+//!        the number of states.
+
+static int ReadStatesFile(const std::string &path, std::vector<Real> *flat) {
+  const int NSTF = 18;
+  std::ifstream fh(path);
+  if (!fh) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "Could not open <problem>/states_file = '"
+              << path << "'" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  std::string line;
+  int lineno = 0, nst = 0;
+  while (std::getline(fh, line)) {
+    lineno++;
+    std::size_t first = line.find_first_not_of(" \t\r");
+    if (first == std::string::npos || line[first] == '#') { continue; }
+    std::istringstream iss(line);
+    Real v[NSTF];
+    int k = 0;
+    while (k < NSTF && (iss >> v[k])) { k++; }
+    if (k != NSTF) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << path << ":" << lineno << ": expected " << NSTF
+                << " numbers, read " << k << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    for (int i = 0; i < NSTF; ++i) { flat->push_back(v[i]); }
+    nst++;
+  }
+  return nst;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void ReplayThroughProductionKernel()
+//! \brief Test Q: replay states_file through the PRODUCTION C2P kernel.
+//
+//  Tests E/F1/F4 call PrimitiveSolver::ConToPrim from the single-element test kernel.
+//  Production calls it from PrimitiveSolverHydro::ConsToPrim, a different and much
+//  larger kernel -- and a 16-node PVC run produced NO_SOLUTION on states that invert
+//  cleanly in the test kernel, on CPU and on a PVC tile alike. This loads every state
+//  into cells of the MeshBlock (u0 densitized by sqrt(det g), the state's own g_dd)
+//  and runs exactly the production ConsToPrim over them, so a difference confined to
+//  that kernel becomes reproducible on one device in seconds.
+//
+//  Opt-in via <problem>/testQ. u0, w0, bcc0, the temperature and the C2P error count
+//  are restored afterwards; g_dd is reset to Minkowski by the pgen right after.
+
+template<class LogPolicy>
+void ReplayThroughProductionKernel(Mesh *pmesh, ParameterInput *pin) {
+  if (!pin->GetOrAddBoolean("problem", "testQ", false)) { return; }
+  std::string states_file = pin->GetOrAddString("problem", "states_file", "");
+  std::vector<Real> flat;
+  const int nst = states_file.empty() ? 0 : ReadStatesFile(states_file, &flat);
+  std::cout << std::endl << "--- Test Q: states_file through the PRODUCTION C2P kernel"
+            << std::endl;
+  if (nst == 0) {
+    std::cout << "  Test Q: no states_file, skipped" << std::endl;
+    return;
+  }
+
+  using EOSPolicy = Primitive::EOSZlaBag<LogPolicy>;
+  using ErrorPolicy = Primitive::ResetFloor;
+  MeshBlockPack *pmbp = pmesh->pmb_pack;
+  auto *pdg = static_cast<dyngr::DynGRMHDPS<EOSPolicy, ErrorPolicy>*>(pmbp->pdyngr);
+  auto &indcs = pmesh->mb_indcs;
+  const int ng = indcs.ng;
+  const int n1 = indcs.nx1 + 2*ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+  const int nmb = pmbp->nmb_thispack;
+  const int ncell = nmb*n3*n2*n1;
+
+  DualArray2D<Real> st("testQ_states", nst, 18);
+  for (int q = 0; q < nst; ++q) {
+    for (int c = 0; c < 18; ++c) { st.h_view(q, c) = flat[q*18 + c]; }
+  }
+  st.template modify<HostMemSpace>();
+  st.template sync<DevExeSpace>();
+
+  auto &u0 = pmbp->pmhd->u0;
+  auto &w0 = pmbp->pmhd->w0;
+  auto &bcc0 = pmbp->pmhd->bcc0;
+  auto &b0 = pmbp->pmhd->b0;
+  auto &tem = pdg->temperature;
+  auto &adm = pmbp->padm->adm;
+  const int nhyd = pmbp->pmhd->nmhd;
+  DvceArray5D<Real> u0s("testQ_u0", u0.extent(0), u0.extent(1), u0.extent(2),
+                        u0.extent(3), u0.extent(4));
+  DvceArray5D<Real> w0s("testQ_w0", w0.extent(0), w0.extent(1), w0.extent(2),
+                        w0.extent(3), w0.extent(4));
+  DvceArray5D<Real> bcs("testQ_bcc", bcc0.extent(0), bcc0.extent(1), bcc0.extent(2),
+                        bcc0.extent(3), bcc0.extent(4));
+  DvceArray5D<Real> tms("testQ_T", tem.extent(0), tem.extent(1), tem.extent(2),
+                        tem.extent(3), tem.extent(4));
+  Kokkos::deep_copy(u0s, u0);
+  Kokkos::deep_copy(w0s, w0);
+  Kokkos::deep_copy(bcs, bcc0);
+  Kokkos::deep_copy(tms, tem);
+  const unsigned int nerrs0 = pdg->eos.nerrs;
+
+  // One state per cell, cycling through the file, over EVERY cell including ghosts:
+  // production's ConsToPrim covers the full range, so the replay does too.
+  auto st_ = st;
+  Kokkos::parallel_for("testQ_fill", Kokkos::RangePolicy<>(DevExeSpace(), 0, ncell),
+  KOKKOS_LAMBDA(const int c) {
+    const int m = c/(n3*n2*n1);
+    const int k = (c/(n2*n1)) % n3;
+    const int j = (c/n1) % n2;
+    const int i = c % n1;
+    const int q = c % nst;
+    Real g[NSPMETRIC];
+    for (int a = 0; a < 6; ++a) { g[a] = st_.d_view(q, 12 + a); }
+    adm.g_dd(m, 0, 0, k, j, i) = g[S11];
+    adm.g_dd(m, 0, 1, k, j, i) = g[S12];
+    adm.g_dd(m, 0, 2, k, j, i) = g[S13];
+    adm.g_dd(m, 1, 1, k, j, i) = g[S22];
+    adm.g_dd(m, 1, 2, k, j, i) = g[S23];
+    adm.g_dd(m, 2, 2, k, j, i) = g[S33];
+    const Real sdetg = sqrt(Primitive::GetDeterminant(g));
+    for (int v = 0; v < 5; ++v) { u0(m, v, k, j, i) = st_.d_view(q, v)*sdetg; }
+    for (int s = 0; s < 4; ++s) { u0(m, nhyd + s, k, j, i) = st_.d_view(q, 5 + s)*sdetg; }
+    b0.x1f(m, k, j, i) = 0.0;
+    b0.x2f(m, k, j, i) = 0.0;
+    b0.x3f(m, k, j, i) = 0.0;
+    if (i == n1 - 1) { b0.x1f(m, k, j, i + 1) = 0.0; }
+    if (j == n2 - 1) { b0.x2f(m, k, j + 1, i) = 0.0; }
+    if (k == n3 - 1) { b0.x3f(m, k + 1, j, i) = 0.0; }
+  });
+  Kokkos::fence();
+
+  pdg->eos.ConsToPrim(u0, b0, bcc0, w0, tem, 0, n1 - 1, 0, n2 - 1, 0, n3 - 1, false);
+  Kokkos::fence();
+  const unsigned int nerrs_q = pdg->eos.nerrs - nerrs0;
+
+  // A failed cell is reset to the atmosphere, so its output density drops to the floor
+  // while the state's D sits orders of magnitude above it.
+  const Real dfl = pin->GetOrAddReal("mhd", "dfloor", 0.0);
+  DualArray1D<int> fails("testQ_fails", nst);
+  Kokkos::deep_copy(fails.d_view, 0);
+  auto fails_d = fails.d_view;
+  int nbad = 0;
+  Kokkos::parallel_reduce("testQ_scan", Kokkos::RangePolicy<>(DevExeSpace(), 0, ncell),
+  KOKKOS_LAMBDA(const int c, int &sum) {
+    const int m = c/(n3*n2*n1);
+    const int k = (c/(n2*n1)) % n3;
+    const int j = (c/n1) % n2;
+    const int i = c % n1;
+    const int q = c % nst;
+    if (st_.d_view(q, 0) > 100.0*dfl && w0(m, IDN, k, j, i) <= 1.01*dfl) {
+      Kokkos::atomic_add(&fails_d(q), 1);
+      sum += 1;
+    }
+  }, Kokkos::Sum<int>(nbad));
+  fails.template modify<DevExeSpace>();
+  fails.template sync<HostMemSpace>();
+  int nstate_bad = 0;
+  for (int q = 0; q < nst; ++q) { if (fails.h_view(q) > 0) { nstate_bad++; } }
+  std::cout << "  Test Q: " << nst << " states over " << ncell << " cells; C2P errors "
+            << nerrs_q << ", cells reset to atmosphere " << nbad << ", distinct failing "
+            << "states " << nstate_bad << " (expect 0)" << std::endl;
+  int shown = 0;
+  for (int q = 0; q < nst && shown < 10; ++q) {
+    if (fails.h_view(q) > 0) {
+      std::cout << "    failing state idx " << q << " in " << fails.h_view(q)
+                << " cell(s)" << std::endl;
+      shown++;
+    }
+  }
+
+  Kokkos::deep_copy(u0, u0s);
+  Kokkos::deep_copy(w0, w0s);
+  Kokkos::deep_copy(bcc0, bcs);
+  Kokkos::deep_copy(tem, tms);
+  pdg->eos.nerrs = nerrs0;
 }

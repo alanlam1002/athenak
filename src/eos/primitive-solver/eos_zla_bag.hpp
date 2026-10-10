@@ -32,6 +32,36 @@
 #define ZL_POW8(x) ((x)*(x)*(x)*(x)*(x)*(x)*(x)*(x))
 #define ZL_POW12(x) ((x)*(x)*(x)*(x)*(x)*(x)*(x)*(x)*(x)*(x)*(x)*(x))
 
+// Continuous pressure floor (see SnapPhaseFraction)? 0 reproduces the historical
+// behaviour bit-for-bit. This is a COMPILE-TIME switch on purpose: a runtime member or
+// branch in this class corrupts the fluid on PVC (see the SIZE GUARD at the bottom of
+// this file), so the alternative is selected by building a separate binary with
+// -DZLA_PFLOOR_CONTINUOUS=1.
+#ifndef ZLA_PFLOOR_CONTINUOUS
+#define ZLA_PFLOOR_CONTINUOUS 0
+#endif
+
+// TEMPORARY investigation aid: -DZLA_SPF_NOINLINE=1 keeps SnapPhaseFraction out of the
+// C2P kernel body, to test whether inlining it into the divergent root-solve loop is
+// what the PVC compiler mishandles. Compiles to nothing by default.
+#if ZLA_SPF_NOINLINE
+#define ZLA_SPF_ATTR __attribute__((noinline))
+#else
+#define ZLA_SPF_ATTR
+#endif
+
+// TEMPORARY investigation aid (CPU builds only): per-call trace of the pressure-floor
+// path, switched on per state by the c2p_zla_bag unit test. Compiles to nothing unless
+// -DZLA_DEBUG_TRACE=1.
+#ifndef ZLA_TRACE
+#if ZLA_DEBUG_TRACE
+extern int zla_trace_on;
+#define ZLA_TRACE(...) do { if (zla_trace_on) { printf(__VA_ARGS__); } } while (0)
+#else
+#define ZLA_TRACE(...) do { } while (0)
+#endif
+#endif
+
 namespace Primitive {
 
 template<typename LogPolicy>
@@ -542,6 +572,7 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //! \param[out] Y2e,Y3e  the same contents AFTER any phase transfer this routine
   //!   performs. They differ from Y2in,Y3in only when the pressure floor actually
   //!   moves f; the sum Y2e + Y3e is preserved exactly.
+  ZLA_SPF_ATTR
   void SnapPhaseFraction(Real n, Real Y2in, Real Y3in, Real *f, Real *yn,
                          Real *Y2e, Real *Y3e) const {
     const Real yqG_tot = Y2in + Y3in;   // total leptons per baryon: invariant
@@ -636,7 +667,10 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     const Real yqG = yqG_tot;
 
     Real f_new = *f;
+    int zt_it = -1;
+    char zt_why = 'n';
     for (int it = 0; it < 3; ++it) {
+      zt_it = it;
       const Real yn_t = 1.0 - (1.0 - (*yn))*(1.0 - f_new)/omf;
       const Real nN_t = yn_t * n / f_new;
       // Leptons follow the baryons this trial f would transfer, so the nucleon
@@ -645,21 +679,61 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
       const Real Y3_t = (omyn0 > yn_snap) ? (*Y3e)*(omyn_t/omyn0) : 0.0;
       const Real yqN = (yn_t > 0.0) ? (yqG_tot - Y3_t)/yn_t : 0.0;
       const Real P_N = SinglePhasePressure(nN_t, yqN, yqG);
-      const Real P_floor = pfloor_frac * P_N;
+      // Historical target: a*P_N with a = pfloor_frac. The CONTINUOUS target adds a
+      // plateau P_min = f_snap*(P_N - P_Q) and caps the result at P_N:
+      //   P_floor = min(P_N, a*P_N + (1-a)*P_min)
+      // which gives 1-f_new = (1-a)*(x - f_snap), x = P_N/(P_N - P_Q), so (1-f_new)
+      // reaches EXACTLY 0 -- through the fmin(..., 1.0) below, not a snap -- once
+      // P_N <= P_min. The floored P is then a*P_N + (1-a)*P_min above that density
+      // and P_N below it: continuous there, with dP/dn >= 0 on both sides. P_min is
+      // ~1e-8 of |P_Q|, so outside the tenuous surface the target is unchanged.
+      const Real P_floor = ZLA_PFLOOR_CONTINUOUS
+          ? Kokkos::fmin(P_N, pfloor_frac*P_N + (1.0 - pfloor_frac)*f_snap
+                                                 *Kokkos::fmax(P_N - P_Q, 0.0))
+          : pfloor_frac * P_N;
       // Mixture pressure at the current trial f, with P_Q fixed by construction.
-      if (P_N*f_new + P_Q*(1.0 - f_new) >= P_floor) { break; }
+      if (P_N*f_new + P_Q*(1.0 - f_new) >= P_floor) { zt_why = 'm'; break; }
       const Real den = P_N - P_Q;
-      if (!(den > 0.0)) { f_new = 1.0; break; }
-      const Real f_next = Kokkos::fmin((P_floor - P_Q)/den, 1.0);
-      if (f_next <= f_new*(1.0 + 1.0e-12)) { break; }
+      if (!(den > 0.0)) { f_new = 1.0; zt_why = 'd'; break; }
+      // Historical: f_next = (P_floor - P_Q)/den, clipped at 1. The CONTINUOUS floor
+      // must land on f = 1 EXACTLY once P_floor == P_N, and that quotient is exactly 1
+      // only under IEEE division; the device build uses icpx's default -fp-model=fast.
+      // Forming 1-f instead makes it exact under any division: the numerator
+      // P_N - P_floor is exactly 0 there, and 0 times any reciprocal is still 0.
+      // (With the quotient, a 16-node PVC run gave 15k NO_SOLUTION at D ~ 1e-17..1e-14
+      // that neither the CPU nor a single-tile PVC replay of the same states reproduces;
+      // whether this form cures it is what the production A/B measures.)
+      const Real f_next = ZLA_PFLOOR_CONTINUOUS
+          ? 1.0 - Kokkos::fmax((P_N - P_floor)/den, 0.0)
+          : Kokkos::fmin((P_floor - P_Q)/den, 1.0);
+      if (f_next <= f_new*(1.0 + 1.0e-12)) { zt_why = 's'; break; }
       f_new = f_next;
     }
+    ZLA_TRACE("    SPF n=%.6e omf_in=%.3e fp_exit_it=%d why=%c omf_new=%.3e\n",
+              n, omf, zt_it, zt_why, 1.0 - f_new);
 
     // The fixed point approaches f = 1 asymptotically, so without the fast path it
     // returns 1 - eps rather than exactly 1. Re-apply the f_snap collapse that Stage 1
     // already applied on entry: an unresolvable (1-f) still injects (1-f)*Bag_B into
     // the energy and -(1-f)*Bag_B into the pressure, which cancel only to round-off.
-    if (1.0 - f_new < f_snap) {
+    //
+    // WARNING -- with the historical floor this collapse is what leaves the residual
+    // NO_SOLUTION at the stellar surface. The fixed point leaves 1-f_new ~ (1-a)*x and
+    // a floored pressure a*P_N; collapsing gives P_N instead. So the EOS jumps UP by a
+    // relative (1-a) as n DECREASES through P_N ~ f_snap*|P_Q|/(1-a) -- for a = 0 from
+    // exactly 0 to P_N at n ~ 1e-5 fm^-3, where the stellar surface sits once
+    // composition diffusion has put 1-f ~ 1e-3 there. C2P crosses the jump inside its
+    // bracket: measured on 600 production failures, median 35 iterations (vs 2-5) and
+    // a tail at the 500 cap. It cannot simply be dropped: without it 1-f_new keeps
+    // falling like P_N, passes 1e-16 by n ~ 1e-10, and P = P_N - (1-f)*|P_Q| becomes
+    // quantisation noise that changes sign (unit test O). Nor can it be tapered: any
+    // continuous bridge from a*P_N to the larger P_N at LOWER n has dP/dn < 0.
+    //
+    // The CONTINUOUS floor removes the reason for it: there 1-f_new already reaches 0
+    // exactly and continuously, so snapping at f_snap would only re-open a jump of
+    // f_snap*|P_Q|. It still takes this branch once f_new is EXACTLY 1, so the absent
+    // quark phase hands its leptons over just as before -- at that point both give P_N.
+    if (ZLA_PFLOOR_CONTINUOUS ? (f_new >= 1.0) : (1.0 - f_new < f_snap)) {
       *f = 1.0;
       *yn = 1.0;
       *Y2e = yqG_tot;

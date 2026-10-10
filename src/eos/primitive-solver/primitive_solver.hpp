@@ -25,6 +25,16 @@
 #include "ps_error.hpp"
 #include "ps_types.hpp"
 
+// TEMPORARY investigation aid, see eos_zla_bag.hpp.
+#ifndef ZLA_TRACE
+#if ZLA_DEBUG_TRACE
+extern int zla_trace_on;
+#define ZLA_TRACE(...) do { if (zla_trace_on) { printf(__VA_ARGS__); } } while (0)
+#else
+#define ZLA_TRACE(...) do { } while (0)
+#endif
+#endif
+
 namespace Primitive {
 
 template<typename EOSPolicy, typename ErrorPolicy>
@@ -131,6 +141,7 @@ class PrimitiveSolver {
       // Now we can get an estimate of the temperature, and from that, the pressure and
       // enthalpy.
       Real That = peos->GetTemperatureFromE(nhat, ehat, Y);
+      ZLA_TRACE("  RF mu=%.10e nhat=%.6e ehat=%.6e That=%.6e\n", mu, nhat, ehat, That);
       peos->ApplyTemperatureLimits(That);
       ehat = peos->GetEnergy(nhat, That, Y);
       Real Phat = peos->GetPressure(nhat, That, Y);

@@ -9866,3 +9866,10 @@ atmosphere heats the star. **V3 shows it in 3D** (boosted WD in the BH frame, t 
   - the Sod shock: 0.24.
 - **Proposed, not built:** flag = (−div v·dx/c_s > ~0.05 and |ΔP|/P > 0.3) or
   |ΔP|/P > a large jump (Sod at t = 0). Needs approval.
+
+**Item 68 addendum (2026-10-10): guard.** `<cfc> frame_vel*/frame_accel*` together with
+`puncture_enabled = true` is now a fatal error in the CFC constructor. Phase 1 keeps the
+trumpet background, excision masks, BH refinement and ADM falloff at the grid origin, so
+a nonzero xidot would describe a different spacetime, not a gauge change. Moving-puncture
+support is Phase 2 (`code/COMOVING_GAUGE_DESIGN.md`). Checked on CPU: a 16³ deck with the
+frame shift fires the guard with the puncture on, and passes the constructor with it off.

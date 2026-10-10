@@ -410,6 +410,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     frame_accel_[a] = pin->GetOrAddReal("cfc", "frame_accel" + n, 0.0);
     if (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0) frame_enabled_ = true;
   }
+  if (frame_enabled_ && puncture_enabled_) {
+    // Phase 1 has no moving BH: the trumpet background, excision masks, BH refinement
+    // and ADM falloff all stay at the grid origin, so xidot != 0 would describe a
+    // different spacetime, not a gauge change. Needs Phase 2 (COMOVING_GAUGE_DESIGN.md).
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<cfc> frame_vel/frame_accel cannot be combined with "
+              << "puncture_enabled = true (no moving-puncture support, DEVELOPMENT.md "
+              << "item 68)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   if (frame_enabled_) {
     // A uniform translation normal to a reflecting boundary moves the mirror: not a
     // pure gauge of the reflected problem. Refuse rather than silently mis-reflect.

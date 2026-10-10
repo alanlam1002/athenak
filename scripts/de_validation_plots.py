@@ -39,6 +39,8 @@ T.RUNS.update({
     'V3FJ': (f'{RUN}/de_V3FJ_boost_contract_L4', ISO, None, '#e7298a', '-'),  # F + J
     'GJ': (f'{RUN}/de_GJ_G2c_DE_L4', ISO, None, '#e6ab02', '-'),             # F + J
     'V4F': (f'{RUN}/de_V4F_rp16_L4', TDE, 16, '#1b9e77', '-'),                # R-031 K
+    'V4G': (f'{RUN}/de_V4G_rp16_L4', TDE, 16, '#e6ab02', '-'),                # + 2nd law
+    'V4dt': (f'{RUN}/de_V4dt_rp16_L4', TDE, 16, '#7570b3', '--'),             # + dt_skip
 })
 T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('0.55', ':')         # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
@@ -47,7 +49,8 @@ NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'rp16': 'rp16 ens1 (old ID, DE off)', 'V4': 'V4 rp16 (new ID, DE on)',
          'G2cDE': 'G: G2c + DE (D·K)', 'V3F': 'V3F boosted, contracted ID, DE with F',
          'V3FJ': 'V3FJ boosted, DE with F + J', 'GJ': 'GJ: G2c + DE with F + J',
-         'V4F': 'V4F rp16 (new ID, DE with F + J)'}
+         'V4F': 'V4F rp16 (new ID, DE with F + J)', 'V4G': 'V4G rp16 (F + J + 2nd law)',
+         'V4dt': 'V4dt (V4G + dt_skip_excised)'}
 
 
 def style(lab):
@@ -108,7 +111,7 @@ def main():
                        'R-030 G: G2c (comoving gauge) with dual energy (D·K), vs V3 (BH frame)',
                        100))
     if not a.no_v4:
-        groups.append((['rp16', 'V4', 'V4F'], 'de_V4_summary.png',
+        groups.append((['rp16', 'V4', 'V4F', 'V4G', 'V4dt'], 'de_V4_summary.png',
                        'T-13 V4/V4F: rp16 (beta=1.03), L4 -- the T-11 test', 160))
     rows = []
     for labs, name, title, tmax in groups:

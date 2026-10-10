@@ -685,11 +685,11 @@ class EOS : public EOSPolicy, public ErrorPolicy {
     code_units = units;
   }
 
-  KOKKOS_INLINE_FUNCTION UnitSystem& GetCodeUnitSystem() const {
+  KOKKOS_INLINE_FUNCTION const UnitSystem& GetCodeUnitSystem() const {
     return code_units;
   }
 
-  KOKKOS_INLINE_FUNCTION UnitSystem& GetEOSUnitSystem() const {
+  KOKKOS_INLINE_FUNCTION const UnitSystem& GetEOSUnitSystem() const {
     return eos_units;
   }
 };

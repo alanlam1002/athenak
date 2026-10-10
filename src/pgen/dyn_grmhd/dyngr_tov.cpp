@@ -731,7 +731,7 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // (f) mixed-phase shell -- for the g=0 Gibbs construction the transition is gradual (no
   // sharp interface), so these bracket where f crosses 0.01, 0.5 (from below and above),
   // and 0.99, letting the shell width and any drift/smearing be monitored over time.
-  pdata->nhist = 10;
+  pdata->nhist = 18;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "press-max";
@@ -742,6 +742,20 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[7] = "r_f_hi";
   pdata->label[8] = "f-min";
   pdata->label[9] = "f-max";
+  // Sums over ranks (history's default MPI_SUM): the cumulative cold energy the
+  // composition relaxation released as heat (0 unless <mhd>/zla_relax_heat_diag), and the
+  // EOS-independent pressure integral sum (D/rho) P dV for normalising it.
+  pdata->label[10] = "relax-heat";
+  pdata->label[11] = "P-int";
+  // FOFC activation counters (0 unless <mhd>/fofc_count_diag), cumulative cell-stages:
+  // D/tau maximum-principle flags, all hydro flags, hydro flags in the
+  // fofc_count_rho_lo/hi band, cells in that band, scalar-only flags, all cells.
+  pdata->label[12] = "fofc-dmp";
+  pdata->label[13] = "fofc-hydro";
+  pdata->label[14] = "fofc-band";
+  pdata->label[15] = "n-band";
+  pdata->label[16] = "fofc-scal";
+  pdata->label[17] = "n-cells";
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
@@ -858,6 +872,30 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[7] = r_f_hi;
   pdata->hdata[8] = f_min;
   pdata->hdata[9] = f_max;
+
+  auto &u0_ = pm->pmb_pack->pmhd->u0;
+  Real p_int = 0.0;
+  Kokkos::parallel_reduce("TOVHistPint", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &sum) {
+    int m = (idx)/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks;
+    j += js;
+    const Real rho = w0_(m, IDN, k, j, i);
+    if (rho > 0.0) {
+      sum += u0_(m, IDN, k, j, i)/rho*w0_(m, IPR, k, j, i)
+             *size_.d_view(m).dx1*size_.d_view(m).dx2*size_.d_view(m).dx3;
+    }
+  }, Kokkos::Sum<Real>(p_int));
+  pdata->hdata[10] = (pm->pmb_pack->pdyngr != nullptr)
+                      ? pm->pmb_pack->pdyngr->GetZlaRelaxHeat() : 0.0;
+  pdata->hdata[11] = p_int;
+  for (int n = 0; n < 6; ++n) {
+    pdata->hdata[12 + n] = (pm->pmb_pack->pdyngr != nullptr)
+                           ? pm->pmb_pack->pdyngr->GetFofcCount(n) : 0.0;
+  }
 }
 
 void TOVRefinementCondition(MeshBlockPack *pmbp) {

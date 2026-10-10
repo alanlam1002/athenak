@@ -255,11 +255,68 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       }
     });
 
+    // FOFC activation diagnostic (<mhd>/fofc_count_diag), part 1: hydro cells flagged by
+    // the D/tau maximum principle alone, before the trial C2P adds its own flags.
+    Real dmp_cnt = 0.0;
+    if (fofc_count_diag) {
+      const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+      const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+      auto fofc_c = fofc_;
+      Kokkos::parallel_reduce("FOFC-count-dmp",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &sum) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k-ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k-ks)*nji - (j-js)*nx1 + is;
+        if (fofc_c(m,k,j,i)) { sum += 1.0; }
+      }, Kokkos::Sum<Real>(dmp_cnt));
+    }
+
     // Test whether conversion to primitives requires floors
     // Note b0 and w0 passed to function, but not used/changed.
     eos.ConsToPrim(utest_, pmy_pack->pmhd->b0, bcctest_,
                            pmy_pack->pmhd->w0, temperature,
                            il, iu, jl, ju, kl, ku, true);
+
+    // Part 2: all hydro flags (DMP or trial-C2P floors), the same inside a density band
+    // (w0 = previous-stage primitives), the band's cell count, and scalar-only flags.
+    // Read-only; cumulative cell-stage counts on this rank, reported by the TOV history.
+    if (fofc_count_diag) {
+      const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+      const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+      auto fofc_c = fofc_;
+      auto fofc_sc = fofc_scal_;
+      auto &w0c = pmy_pack->pmhd->w0;
+      const Real rlo = fofc_count_rho_lo, rhi = fofc_count_rho_hi;
+      const int nsc = nscal_;
+      Real all = 0.0, band = 0.0, nband = 0.0, sonly = 0.0;
+      Kokkos::parallel_reduce("FOFC-count",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &a, Real &b, Real &nb, Real &so) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k-ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k-ks)*nji - (j-js)*nx1 + is;
+        const bool h = fofc_c(m,k,j,i);
+        const Real rho = w0c(m,IDN,k,j,i);
+        const bool inb = (rho >= rlo && rho < rhi);
+        if (h) { a += 1.0; }
+        if (inb) { nb += 1.0; if (h) { b += 1.0; } }
+        if (!h) {
+          bool sc = false;
+          for (int n = 0; n < nsc; ++n) { sc = sc || fofc_sc(m,n,k,j,i); }
+          if (sc) { so += 1.0; }
+        }
+      }, Kokkos::Sum<Real>(all), Kokkos::Sum<Real>(band), Kokkos::Sum<Real>(nband),
+         Kokkos::Sum<Real>(sonly));
+      fofc_cnt[0] += dmp_cnt;
+      fofc_cnt[1] += all;
+      fofc_cnt[2] += band;
+      fofc_cnt[3] += nband;
+      fofc_cnt[4] += sonly;
+      fofc_cnt[5] += static_cast<Real>(nmb*nkji);
+    }
   }
 
   auto &use_fofc_ = pmy_pack->pmhd->use_fofc;

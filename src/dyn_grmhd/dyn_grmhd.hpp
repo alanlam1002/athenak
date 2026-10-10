@@ -74,6 +74,11 @@ class DynGRMHD {
   DynGRMHD(MeshBlockPack *ppack, ParameterInput *pin);
   virtual ~DynGRMHD();
 
+  // Cumulative relaxation heat on this rank (see zla_relax_heat_diag); for history output.
+  Real GetZlaRelaxHeat() const { return zla_relax_heat; }
+  // FOFC activation counters (see fofc_count_diag); for history output.
+  Real GetFofcCount(int n) const { return fofc_cnt[n]; }
+
   // container to hold names of TaskIDs
   DynGRMHDTaskIDs id;
 
@@ -150,6 +155,24 @@ class DynGRMHD {
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.
   bool gr_dt;
+  // <mhd>/zla_relax_tau (code units, default 0 = off): relax every advected composition
+  // scalar toward its cold beta-equilibrium value, dY/dt = -(Y - Y_eq(n))/tau, as an
+  // operator-split exact-exponential update once per step. zla_bag only.
+  Real zla_relax_tau;
+  // <mhd>/zla_relax_heat_diag (default false): accumulate the cold energy the relaxation
+  // releases into heat, sum over steps of sum_cells (D/rho) [e_cold(n,Y_old) -
+  // e_cold(n,Y_new)] dV in code units (rank-local; the TOV history sums it over ranks).
+  // Read-only: the relaxed state is identical with the diagnostic on or off.
+  bool zla_relax_heat_diag;
+  Real zla_relax_heat = 0.0;
+  // <mhd>/fofc_count_diag (default false): read-only FOFC activation counters, cumulative
+  // cell-stage counts on this rank: [0] hydro cells flagged by the D/tau maximum principle,
+  // [1] all hydro-flagged cells (DMP or trial-C2P floors), [2] those with
+  // fofc_count_rho_lo <= rho < fofc_count_rho_hi, [3] all cells in that band, [4] cells
+  // with only a scalar flagged, [5] all interior cells.
+  bool fofc_count_diag;
+  Real fofc_count_rho_lo, fofc_count_rho_hi;
+  Real fofc_cnt[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 };
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -175,6 +198,7 @@ class DynGRMHDPS : public DynGRMHD {
   virtual TaskStatus ConToPrim(Driver* pdrive, int stage);
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke);
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
+  void RelaxComposition(Real dt);
   virtual void ConvertInternalEnergyToPressure(int is, int ie,
                                                int js, int je, int ks, int ke);
 

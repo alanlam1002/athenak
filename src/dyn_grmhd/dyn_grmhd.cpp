@@ -10,6 +10,8 @@
 #include <math.h>
 
 #include <iostream>
+#include <limits>
+#include <type_traits>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -27,6 +29,7 @@
 #include "coordinates/coordinates.hpp"
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
+#include "driver/driver.hpp"
 #include "tasklist/numerical_relativity.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
@@ -38,6 +41,11 @@
 #include "eos/primitive-solver/reset_floor.hpp"
 
 namespace dyngr {
+
+// Composition relaxation needs the tabulated equilibrium, which only the ZLA bag EOS has.
+template<class EOSPolicy> struct IsZlaBag : std::false_type {};
+template<class LogPolicy>
+struct IsZlaBag<Primitive::EOSZlaBag<LogPolicy>> : std::true_type {};
 
 // A dumb template function containing the switch statement needed to select an EOS.
 template<class ErrorPolicy>
@@ -139,6 +147,14 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
   dyn_gr->eos_policy = eos_policy;
   dyn_gr->error_policy = error_policy;
 
+  if (pin->GetOrAddReal("mhd", "zla_relax_tau", 0.0) > 0.0 &&
+      eos_policy != DynGRMHD_EOS::eos_zla_bag) {
+    std::cout << "### FATAL ERROR in " <<__FILE__ << " at line " << __LINE__
+              << std::endl << "<mhd> zla_relax_tau > 0 requires dyn_eos = zla_bag"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+
   return dyn_gr;
 }
 
@@ -175,6 +191,12 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
+  zla_relax_tau = pin->GetOrAddReal("mhd", "zla_relax_tau", 0.0);
+  zla_relax_heat_diag = pin->GetOrAddBoolean("mhd", "zla_relax_heat_diag", false);
+  fofc_count_diag = pin->GetOrAddBoolean("mhd", "fofc_count_diag", false);
+  fofc_count_rho_lo = pin->GetOrAddReal("mhd", "fofc_count_rho_lo", 0.0);
+  fofc_count_rho_hi = pin->GetOrAddReal("mhd", "fofc_count_rho_hi",
+                                        std::numeric_limits<Real>::max());
 
   // allocate memory for temperature
   {
@@ -344,9 +366,100 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   int n1m1 = indcs.nx1 + 2*ng - 1;
   int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
   int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
+  // Lie-split composition relaxation, once per step: after the last stage's conserved
+  // update (ghosts included) and before its C2P, so the C2P sees the relaxed scalars
+  // and the primitives stay consistent with the conserved state.
+  if (zla_relax_tau > 0.0 && stage == pdrive->nexp_stages) {
+    RelaxComposition(pmy_pack->pmesh->dt);
+  }
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn  void DynGRMHDPS::RelaxComposition(Real dt)
+//  \brief Relax the advected composition toward cold beta equilibrium over one step.
+//
+//  Solves dY_i/dt = -(Y_i - Y_i,eq(n))/tau for every scalar with the same tau, holding n
+//  fixed over the step: Y_i <- Y_i,eq + (Y_i - Y_i,eq) exp(-dt/tau). The exact
+//  exponential is stable for any dt/tau, so the same update covers the stiff (tau <~ dt,
+//  equilibrium limit) and non-stiff (frozen limit as tau -> inf) regimes. The new Y_i is
+//  a convex combination of two admissible states, so it stays inside every per-scalar
+//  bound without clamping.
+//
+//  Acts on the conserved sqrt(gamma) D Y_i only: D, S_i and tau are untouched, so baryon
+//  number and energy are conserved and the conversion's latent heat appears as thermal
+//  energy in the following C2P. n is taken from the previous stage's primitives; over
+//  one step it moves by O(dt), far below what Y_eq(n) needs to change appreciably.
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RelaxComposition(Real dt) {
+  if constexpr (IsZlaBag<EOSPolicy>::value) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    int &ng = indcs.ng;
+    int n1m1 = indcs.nx1 + 2*ng - 1;
+    int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
+    int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
+    int nmb = pmy_pack->nmb_thispack;
+    int nmhd = pmy_pack->pmhd->nmhd;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &w0 = pmy_pack->pmhd->w0;
+    auto &eos_ = eos.ps.GetEOS();
+    const Real mb = eos_.GetBaryonMass();
+    const Real decay = Kokkos::exp(-dt/zla_relax_tau);
+
+    // Heat diagnostic: a separate read-only reduction BEFORE the update, over interior
+    // cells only, so the update kernel below is unchanged. Per cell, the cold energy the
+    // step releases at fixed n, e_cold(n,Y_old) - e_cold(n,Y_new) (thermal energy gained,
+    // since D, S_i and tau are untouched), weighted by D/rho = sqrt(gamma) W and dV.
+    if (zla_relax_heat_diag) {
+      auto &size = pmy_pack->pmb->mb_size;
+      const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+      const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+      const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+      Real heat = 0.0;
+      Kokkos::parallel_reduce("zla_relax_heat",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &sum) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k-ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k-ks)*nji - (j-js)*nx1 + is;
+        const Real D = u0(m, IDN, k, j, i);
+        const Real rho = w0(m, IDN, k, j, i);
+        const Real n = rho/mb;
+        if (D > 0.0 && n > 0.0) {
+          Real ye0, ye1, ye2, ye3;
+          eos_.GetEquilibriumScalars(n, ye0, ye1, ye2, ye3);
+          const Real yeq[4] = {ye0, ye1, ye2, ye3};
+          Real yold[4], ynew[4];
+          for (int s = 0; s < 4; ++s) {
+            yold[s] = u0(m, nmhd+s, k, j, i)/D;
+            ynew[s] = yeq[s] + (yold[s] - yeq[s])*decay;
+          }
+          const Real de = eos_.GetColdEnergyDiag(n, yold) - eos_.GetColdEnergyDiag(n, ynew);
+          const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+          sum += (D/rho)*de*dv;
+        }
+      }, Kokkos::Sum<Real>(heat));
+      zla_relax_heat += heat*eos_.GetEOSUnitSystem().PressureConversion(
+                                eos_.GetCodeUnitSystem());
+    }
+
+    par_for("zla_relax", DevExeSpace(), 0, nmb-1, 0, n3m1, 0, n2m1, 0, n1m1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const Real D = u0(m, IDN, k, j, i);
+      const Real n = w0(m, IDN, k, j, i)/mb;
+      if (D > 0.0 && n > 0.0) {
+        Real ye0, ye1, ye2, ye3;
+        eos_.GetEquilibriumScalars(n, ye0, ye1, ye2, ye3);
+        u0(m, nmhd+0, k, j, i) = D*ye0 + (u0(m, nmhd+0, k, j, i) - D*ye0)*decay;
+        u0(m, nmhd+1, k, j, i) = D*ye1 + (u0(m, nmhd+1, k, j, i) - D*ye1)*decay;
+        u0(m, nmhd+2, k, j, i) = D*ye2 + (u0(m, nmhd+2, k, j, i) - D*ye2)*decay;
+        u0(m, nmhd+3, k, j, i) = D*ye3 + (u0(m, nmhd+3, k, j, i) - D*ye3)*decay;
+      }
+    });
+  }
 }
 
 //----------------------------------------------------------------------------------------

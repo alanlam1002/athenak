@@ -108,6 +108,28 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
   //  branch rather than hardcoding a value that ReadTableFromFile computes by bisection.
   KOKKOS_INLINE_FUNCTION Real GetPfloorForce() const { return n_pfloor_force; }
 
+  //! \brief Cold beta-equilibrium composition at baryon density n, in the advected
+  //  (decoupled) packing ( f, Y_N, y_lN, y_lQ ). Packed exactly as the pgen and the
+  //  table self-test do, so a state relaxed fully onto it is the initial-data state.
+  //  Used by the composition relaxation (<mhd>/zla_relax_tau); never called from C2P.
+  KOKKOS_INLINE_FUNCTION
+  void GetEquilibriumScalars(Real n, Real &y0, Real &y1, Real &y2, Real &y3) const {
+    const Real f  = eval_at_n(ECFVOL, n);
+    // Interpolated yn can exceed f by ~0.6% in the core band n ~ 0.44-0.5; clip as the
+    // pgen does so Y_N = yn/f stays in [0,1] and the relaxed state stays admissible.
+    const Real yn = Kokkos::fmin(eval_at_n(ECYN, n), f);
+    y0 = f;
+    y1 = (f > 0.0) ? yn/f : 0.0;
+    y2 = eval_at_n(ECYLN, n);
+    y3 = eval_at_n(ECYLQ, n);
+  }
+
+  //! \brief Cold energy density at (n, Y) in EOS units, for the relaxation heat diagnostic
+  //  (<mhd>/zla_relax_heat_diag). Never called from C2P.
+  KOKKOS_INLINE_FUNCTION Real GetColdEnergyDiag(Real n, const Real *Y) const {
+    return ColdEnergy(n, Y);
+  }
+
  protected:
   /// Constructor
   EOSZlaBag() :

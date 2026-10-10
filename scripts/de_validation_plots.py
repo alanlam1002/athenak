@@ -32,11 +32,11 @@ RUN, ISO, TDE = T.RUN, T.ISO, 'cfc_tde_wd_imbh_parabolic_tracker'
 T.RUNS.update({
     'V2':  (f'{RUN}/de_V2_static_L4', ISO, None, '#1b9e77', '--'),
     'V3':  (f'{RUN}/de_V3_boost_contract_L4', ISO, None, '#d95f02', '--'),
-    'V3c': (f'{RUN}/de_V3c_boost_contract_noDE_L4', ISO, None, '#d95f02', ':'),
+    'V3c': (f'{RUN}/de_V3c_boost_contract_noDE_L4', ISO, None, '#7570b3', '-'),
     'V4':  (f'{RUN}/de_V4_rp16_L4', TDE, 16, '#e7298a', '-'),
     'G2cDE': (f'{RUN}/de_G_G2c_DE_L4', ISO, None, '#a6761d', '-'),   # R-030 G
 })
-T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('#7570b3', ':')     # was V2's colour
+T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('0.55', ':')         # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'iso_boost': 'boosted, old ID, DE off', 'V3c': 'boosted, contracted ID, DE off',
          'V3': 'V3 boosted, contracted ID, DE on', 'G2c': 'G2c comoving, contracted ID, DE off',

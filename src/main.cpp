@@ -30,6 +30,9 @@
 #include <memory>
 #include <cstdio> // sscanf
 #include <fstream>  // Include this for std::ifstream
+#include <csignal>
+#include <execinfo.h>
+#include <unistd.h>
 
 // Athena headers
 #include "athena.hpp"
@@ -57,6 +60,22 @@
 //----------------------------------------------------------------------------------------
 //! \fn int main(int argc, char *argv[])
 //! \brief Athena main program
+
+//! Opt-in crash diagnostics (env ATHENA_SEGV_BACKTRACE set): on SIGSEGV/SIGBUS/SIGFPE/
+//! SIGABRT print the rank, signal, faulting address and a raw backtrace to stderr, then
+//! re-raise with the default action. Async-signal-safe calls only (write, backtrace_*).
+//! Map frames with addr2line -e athena +offset (build with -gline-tables-only).
+static void AthenaCrashHandler(int sig, siginfo_t *si, void *) {
+  char buf[160];
+  int n = snprintf(buf, sizeof(buf), "\n### ATHENA_SEGV_BACKTRACE rank %d signal %d addr %p\n",
+                   global_variable::my_rank, sig, si ? si->si_addr : nullptr);
+  if (n > 0) { ssize_t w = write(STDERR_FILENO, buf, n); (void)w; }
+  void *frames[64];
+  int nf = backtrace(frames, 64);
+  backtrace_symbols_fd(frames, nf, STDERR_FILENO);
+  signal(sig, SIG_DFL);
+  raise(sig);
+}
 
 int main(int argc, char *argv[]) {
   std::string input_file, restart_file, run_dir;
@@ -119,6 +138,14 @@ int main(int argc, char *argv[]) {
 #endif  // MPI_PARALLEL_ENABLED
 
   Kokkos::initialize(argc, argv);
+  if (std::getenv("ATHENA_SEGV_BACKTRACE") != nullptr) {
+    struct sigaction sa = {};
+    sa.sa_sigaction = AthenaCrashHandler;
+    sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
+    sigemptyset(&sa.sa_mask);
+    for (int sg : {SIGSEGV, SIGBUS, SIGFPE, SIGABRT}) { sigaction(sg, &sa, nullptr); }
+    void *warm[2]; backtrace(warm, 2);   // pre-load libgcc so backtrace() is safe later
+  }
 
   //--- Step 2. --------------------------------------------------------------------------
   // Check for command line options and respond.

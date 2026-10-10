@@ -40,6 +40,9 @@ for _lab, _d, _c in (('V2', 'de_V2_static_L4', '#1b9e77'),
                      ('V3FJ', 'de_V3FJ_boost_contract_L4', '#e7298a'),
                      ('GJ', 'de_GJ_G2c_DE_L4', '#e6ab02')):
     G.T.RUNS[_lab] = (f'{G.RUN}/{_d}', G.ISO, None, _c, '--')
+for _lab, _d, _c in (('V4', 'de_V4_rp16_L4', '#e7298a'), ('V4F', 'de_V4F_rp16_L4', '#1b9e77'),
+                     ('V4G', 'de_V4G_rp16_L4', '#e6ab02'), ('V4Gr', 'de_V4G_rst3', '#e6ab02')):
+    G.T.RUNS[_lab] = (f'{G.RUN}/{_d}', 'cfc_tde_wd_imbh_parabolic_tracker', 16, _c, '-')
 RUNS = ['G0', 'iso_boost', 'G2', 'G3', 'G3b']
 TITLE = {'G2c': 'G2c (contracted ID, ξ̇=V0)', 'E1b': 'E1b (G2c + comoving atm, t≤40)',
          'G0': 'G0 static', 'iso_boost': 'boosted (v=V0, ξ̇=0)', 'G2': 'G2 (v=V0, ξ̇=V0)',
@@ -47,7 +50,9 @@ TITLE = {'G2c': 'G2c (contracted ID, ξ̇=V0)', 'E1b': 'E1b (G2c + comoving atm,
          'V2': 'V2 static, DE on', 'V3c': 'V3c boosted, contracted, DE off',
          'V3': 'V3 boosted, contracted, DE on', 'G2cDE': 'G (G2c + DE)',
          'V3F': 'V3F boosted, DE with F', 'V3FJ': 'V3FJ boosted, F + J',
-         'GJ': 'GJ comoving, F + J'}
+         'GJ': 'GJ comoving, F + J', 'rp16': 'ens1 rp16 (DE off, old ID)',
+         'V4': 'V4 rp16 (D·K)', 'V4F': 'V4F rp16 (F + J)', 'V4G': 'V4G rp16 (F + J + 2nd law)',
+         'V4Gr': 'V4G rp16 (F + J + 2nd law)'}
 NR = LogNorm(vmin=T.RHO0 * 1e-7, vmax=T.RHO0 * 1.2)
 NK = LogNorm(vmin=0.3, vmax=3.0)
 CR = plt.get_cmap('inferno').copy(); CR.set_bad('k')

@@ -41,6 +41,7 @@ T.RUNS.update({
     'V4F': (f'{RUN}/de_V4F_rp16_L4', TDE, 16, '#1b9e77', '-'),                # R-031 K
     'V4G': (f'{RUN}/de_V4G_rp16_L4', TDE, 16, '#e6ab02', '-'),                # + 2nd law
     'V4dt': (f'{RUN}/de_V4dt_rp16_L4', TDE, 16, '#7570b3', '--'),             # + dt_skip
+    'V4Gr': (f'{RUN}/de_V4G_rst3', TDE, 16, '#e6ab02', ':'),                  # V4G restart t>133
 })
 T.RUNS['iso_boost'] = T.RUNS['iso_boost'][:3] + ('0.55', ':')         # was V2's colour
 NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
@@ -50,12 +51,16 @@ NAMES = {'G0': 'G0 static, DE off', 'V2': 'V2 static, DE on',
          'G2cDE': 'G: G2c + DE (D·K)', 'V3F': 'V3F boosted, contracted ID, DE with F',
          'V3FJ': 'V3FJ boosted, DE with F + J', 'GJ': 'GJ: G2c + DE with F + J',
          'V4F': 'V4F rp16 (new ID, DE with F + J)', 'V4G': 'V4G rp16 (F + J + 2nd law)',
-         'V4dt': 'V4dt (V4G + dt_skip_excised)'}
+         'V4dt': 'V4dt (V4G + dt_skip_excised)', 'V4Gr': 'V4G restart (t > 133)'}
+
+
+PARENT = {'V4Gr': 'V4G'}   # restart segments: normalise to / continue from the parent run
 
 
 def style(lab):
     _, _, _, c, ls = T.RUNS[lab]
-    return dict(color=c, ls=ls, lw=1.5, label=NAMES.get(lab, lab))
+    lw = 2.4 if lab in ('V4G', 'V4Gr') else 1.5
+    return dict(color=c, ls=ls, lw=lw, label=NAMES.get(lab, lab), zorder=3)
 
 
 def panels(S, labs, out, name, title, tmax):
@@ -67,7 +72,8 @@ def panels(S, labs, out, name, title, tmax):
         h = G.hst_cols(lab, ['rho-max', 'de-ndense', 'de-nentropy', 'de-dE-total'])
         if 'rho-max' in h:
             t, v = h['rho-max']; kk = t <= tmax
-            ax[0, 0].semilogy(t[kk], v[kk] / v[0], **style(lab))
+            v0 = G.hst_cols(PARENT[lab], ['rho-max'])['rho-max'][1][0] if lab in PARENT else v[0]
+            ax[0, 0].semilogy(t[kk], v[kk] / v0, **style(lab))
         ax[0, 1].semilogy(s['t'][k], np.maximum(s['Kmax'][k], 1e-20), **style(lab))
         ax[0, 2].semilogy(s['t'][k], np.maximum(s['Kmin01'][k], 1e-20), **style(lab))
         ax[1, 0].semilogy(s['t'][k], np.maximum(s['puff'][k], 1e-6), **style(lab))
@@ -76,14 +82,18 @@ def panels(S, labs, out, name, title, tmax):
             ax[1, 1].plot(t[kk], ne[kk] / np.maximum(nd[kk], 1), **style(lab))
         if 'de-dE-total' in h:
             t, v = h['de-dE-total']; kk = t <= tmax
-            ax[1, 2].plot(t[kk], v[kk], **style(lab))
+            off = 0.0
+            if lab in PARENT:
+                tp, vp = G.hst_cols(PARENT[lab], ['de-dE-total'])['de-dE-total']
+                off = vp[np.argmin(abs(tp - t[0]))]
+            ax[1, 2].plot(t[kk], v[kk] + off, **style(lab))
     ttl = [r'$\rho_{max}/\rho_{max}(0)$ (hst, 3D)', r'$K/K_0$ at the density max',
            r'min $K/K_0$ over $\rho>0.1\rho_0$', r'slice-mass fraction beyond $R_*$',
            'fraction of dense cells on the entropy branch', r'cumulative $\int\sqrt{\gamma}\,\Delta\tau\,dV$ from the resync']
     for x, tl in zip(ax.flat, ttl):
         x.set_title(tl); x.set_xlabel('t [M]'); x.grid(alpha=0.3)
     for x in (ax[0, 1], ax[0, 2]):
-        x.axhline(1, color='0.5', lw=0.8)
+        x.axhline(1, color='0.5', lw=0.6, zorder=1)
     ax[0, 0].legend(fontsize=8)
     fig.suptitle(title)
     fig.savefig(f'{out}/{name}', dpi=110); plt.close(fig)
@@ -111,7 +121,7 @@ def main():
                        'R-030 G: G2c (comoving gauge) with dual energy (D·K), vs V3 (BH frame)',
                        100))
     if not a.no_v4:
-        groups.append((['rp16', 'V4', 'V4F', 'V4G', 'V4dt'], 'de_V4_summary.png',
+        groups.append((['rp16', 'V4', 'V4F', 'V4G', 'V4Gr', 'V4dt'], 'de_V4_summary.png',
                        'T-13 V4/V4F: rp16 (beta=1.03), L4 -- the T-11 test', 160))
     rows = []
     for labs, name, title, tmax in groups:

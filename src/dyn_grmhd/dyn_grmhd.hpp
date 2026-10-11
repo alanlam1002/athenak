@@ -180,6 +180,13 @@ class DynGRMHD {
   // composition relaxation before the C2P of EVERY RK stage, not just the last one.
   bool zla_face_eq;
   bool zla_relax_all_stages;
+  // <mhd>/zla_face_dev (R-013 deviation closure, default false = unchanged; overrides
+  // zla_face_eq): reconstruct only the deviation dY = Y - Y_eq(rho/m_b) of each cell and
+  // set each face to Y_f = Y_eq(rho_f/m_b) + dY_f. Reduces to zla_face_eq when dY = 0 (snap
+  // limit) and keeps off-equilibrium composition for finite tau. wdev holds the
+  // reconstruction input (w0 with the scalars replaced by dY); allocated on first use.
+  bool zla_face_dev;
+  DvceArray5D<Real> wdev;
   Real zla_relax_heat = 0.0;
   // <mhd>/fofc_count_diag (default false): read-only FOFC activation counters, cumulative
   // cell-stage counts on this rank: [0] hydro cells flagged by the D/tau maximum principle,
@@ -205,7 +212,8 @@ class DynGRMHDPS : public DynGRMHD {
   template<DynGRMHD_RSolver T>
   TaskStatus CalcFluxes(Driver *d, int stage);
   void ProjectFaceComposition(int nmb1, int kl, int ku, int jl, int ju, int il, int iu,
-                              int nhyd, int nvars);
+                              int nhyd, int nvars, bool add_dev);
+  bool FillCompositionDeviation(int nhyd, int nvars);
 
   template<DynGRMHD_RSolver T>
   void FOFC(Driver *d, int stage);

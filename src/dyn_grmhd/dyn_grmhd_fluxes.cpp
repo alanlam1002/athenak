@@ -97,6 +97,16 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     return TaskStatus::complete;
   }
 
+  // Reconstruction input for W: w0, or with <mhd>/zla_face_dev its copy whose composition
+  // scalars hold the deviation Y - Y_eq(n) (FillCompositionDeviation).
+  DvceArray5D<Real> wrec_ = w0_;
+  bool face_dev = false;
+  if (zla_face_dev) {
+    face_dev = FillCompositionDeviation(nhyd, nvars);
+    if (face_dev) { wrec_ = wdev; }
+  }
+  const bool face_proj = zla_face_eq || face_dev;
+
   //------------------------------------------------------------------------------------
   // x1 direction
   {
@@ -116,11 +126,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
     // Reconstruct W over cells i in [il-1, iu], variables n in [0, nvars-1]
     ReconDispatch<IVX>(recon_method_, "dyngrflux_x1_recon_w", nmb1,
-        kl, ku, jl, ju, il-1, iu, eos_, false, nvars, w0_, wl_, wr_);
+        kl, ku, jl, ju, il-1, iu, eos_, false, nvars, wrec_, wl_, wr_);
     // Reconstruct Bcc over cells i in [il-1, iu], components n in [0, 2]
     ReconDispatch<IVX>(recon_method_, "dyngrflux_x1_recon_b", nmb1,
         kl, ku, jl, ju, il-1, iu, eos_, false, 3,     bcc0_, bl_, br_);
-    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, jl, ju, il, iu, nhyd, nvars); }
+    if (face_proj) {
+      ProjectFaceComposition(nmb1, kl, ku, jl, ju, il, iu, nhyd, nvars, face_dev);
+    }
 
     // Riemann solve over faces i in [il, iu]
     par_for("dyngrflux_x1_rsolve", DevExeSpace(),
@@ -169,11 +181,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
     // Reconstruct W over cells j in [jl-1, ju], i in [is-1, ie+1], n in [0, nvars-1]
     ReconDispatch<IVY>(recon_method_, "dyngrflux_x2_recon_w", nmb1,
-        kl, ku, jl-1, ju, is-1, ie+1, eos_, false, nvars, w0_, wl_, wr_);
+        kl, ku, jl-1, ju, is-1, ie+1, eos_, false, nvars, wrec_, wl_, wr_);
     // Reconstruct Bcc over cells j in [jl-1, ju], i in [is-1, ie+1], n in [0, 2]
     ReconDispatch<IVY>(recon_method_, "dyngrflux_x2_recon_b", nmb1,
         kl, ku, jl-1, ju, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
-    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, jl, ju, is-1, ie+1, nhyd, nvars); }
+    if (face_proj) {
+      ProjectFaceComposition(nmb1, kl, ku, jl, ju, is-1, ie+1, nhyd, nvars, face_dev);
+    }
 
     // Riemann solve over faces j in [jl, ju], i in [is-1, ie+1]
     par_for("dyngrflux_x2_rsolve", DevExeSpace(),
@@ -219,11 +233,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Reconstruct W over cells k in [kl-1, ku], j in [js-1, je+1], i in [is-1, ie+1],
     // variables n in [0, nvars-1]
     ReconDispatch<IVZ>(recon_method_, "dyngrflux_x3_recon_w", nmb1,
-        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, nvars, w0_, wl_, wr_);
+        kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, nvars, wrec_, wl_, wr_);
     // Reconstruct Bcc over the same cells, components n in [0, 2]
     ReconDispatch<IVZ>(recon_method_, "dyngrflux_x3_recon_b", nmb1,
         kl-1, ku, js-1, je+1, is-1, ie+1, eos_, false, 3,     bcc0_, bl_, br_);
-    if (zla_face_eq) { ProjectFaceComposition(nmb1, kl, ku, js-1, je+1, is-1, ie+1, nhyd, nvars); }
+    if (face_proj) {
+      ProjectFaceComposition(nmb1, kl, ku, js-1, je+1, is-1, ie+1, nhyd, nvars, face_dev);
+    }
 
     // Riemann solve over faces k in [kl, ku], j in [js-1, je+1], i in [is-1, ie+1]
     par_for("dyngrflux_x3_rsolve", DevExeSpace(),
@@ -272,31 +288,78 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 //! upwind scalar flux then see faces that lie on the equilibrium manifold, instead of
 //! independently reconstructed (rho, Y) that straddle the mixed-phase onset kink
 //! (RESULTS 16). Only meaningful in the snap limit; zla_bag only; no-op otherwise.
+//! With add_dev (<mhd>/zla_face_dev) the faces hold the reconstructed deviation dY_f and
+//! become Y_eq(rho_f/m_b) + dY_f instead (R-013 deviation closure).
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ProjectFaceComposition(int nmb1, int kl, int ku,
-                                     int jl, int ju, int il, int iu, int nhyd, int nvars) {
+                       int jl, int ju, int il, int iu, int nhyd, int nvars, bool add_dev) {
   if constexpr (IsZlaBag<EOSPolicy>::value) {
     if (nvars - nhyd != 4) { return; }
     auto wl_ = pmy_pack->pmhd->wl3d;
     auto wr_ = pmy_pack->pmhd->wr3d;
     auto &eos_ = eos.ps.GetEOS();
     const Real mb = eos_.GetBaryonMass();
+    const Real a = add_dev ? 1.0 : 0.0;   // 1: Y_eq + dY_f, 0: Y_eq
     par_for("dyngrflux_face_eq", DevExeSpace(), 0, nmb1, kl, ku, jl, ju, il, iu,
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real y0, y1, y2, y3;
       const Real nl = wl_(m, IDN, k, j, i)/mb;
       if (nl > 0.0) {
         eos_.GetEquilibriumScalars(nl, y0, y1, y2, y3);
-        wl_(m, nhyd+0, k, j, i) = y0; wl_(m, nhyd+1, k, j, i) = y1;
-        wl_(m, nhyd+2, k, j, i) = y2; wl_(m, nhyd+3, k, j, i) = y3;
+        wl_(m, nhyd+0, k, j, i) = y0 + a*wl_(m, nhyd+0, k, j, i);
+        wl_(m, nhyd+1, k, j, i) = y1 + a*wl_(m, nhyd+1, k, j, i);
+        wl_(m, nhyd+2, k, j, i) = y2 + a*wl_(m, nhyd+2, k, j, i);
+        wl_(m, nhyd+3, k, j, i) = y3 + a*wl_(m, nhyd+3, k, j, i);
       }
       const Real nr = wr_(m, IDN, k, j, i)/mb;
       if (nr > 0.0) {
         eos_.GetEquilibriumScalars(nr, y0, y1, y2, y3);
-        wr_(m, nhyd+0, k, j, i) = y0; wr_(m, nhyd+1, k, j, i) = y1;
-        wr_(m, nhyd+2, k, j, i) = y2; wr_(m, nhyd+3, k, j, i) = y3;
+        wr_(m, nhyd+0, k, j, i) = y0 + a*wr_(m, nhyd+0, k, j, i);
+        wr_(m, nhyd+1, k, j, i) = y1 + a*wr_(m, nhyd+1, k, j, i);
+        wr_(m, nhyd+2, k, j, i) = y2 + a*wr_(m, nhyd+2, k, j, i);
+        wr_(m, nhyd+3, k, j, i) = y3 + a*wr_(m, nhyd+3, k, j, i);
       }
     });
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn  bool DynGRMHDPS::FillCompositionDeviation
+//! \brief <mhd>/zla_face_dev: wdev = w0 with each cell's composition scalars replaced by the
+//! deviation from cold equilibrium, Y - Y_eq(rho/m_b), over the whole array (ghosts
+//! included). Returns false (wdev unused) unless the EOS is zla_bag with 4 scalars.
+template<class EOSPolicy, class ErrorPolicy>
+bool DynGRMHDPS<EOSPolicy, ErrorPolicy>::FillCompositionDeviation(int nhyd, int nvars) {
+  if constexpr (IsZlaBag<EOSPolicy>::value) {
+    if (nvars - nhyd != 4) { return false; }
+    auto &w0_ = pmy_pack->pmhd->w0;
+    if (wdev.extent(0) != w0_.extent(0) || wdev.extent(1) != w0_.extent(1) ||
+        wdev.extent(2) != w0_.extent(2) || wdev.extent(3) != w0_.extent(3) ||
+        wdev.extent(4) != w0_.extent(4)) {
+      Kokkos::realloc(wdev, w0_.extent(0), w0_.extent(1), w0_.extent(2), w0_.extent(3),
+                      w0_.extent(4));
+    }
+    Kokkos::deep_copy(DevExeSpace(), wdev, w0_);
+    auto wdev_ = wdev;
+    auto &eos_ = eos.ps.GetEOS();
+    const Real mb = eos_.GetBaryonMass();
+    const int nmb1 = static_cast<int>(w0_.extent(0)) - 1;
+    const int nk = static_cast<int>(w0_.extent(2)) - 1;
+    const int nj = static_cast<int>(w0_.extent(3)) - 1;
+    const int ni = static_cast<int>(w0_.extent(4)) - 1;
+    par_for("dyngrflux_face_dev", DevExeSpace(), 0, nmb1, 0, nk, 0, nj, 0, ni,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real n = w0_(m, IDN, k, j, i)/mb;
+      if (n > 0.0) {
+        Real y0, y1, y2, y3;
+        eos_.GetEquilibriumScalars(n, y0, y1, y2, y3);
+        wdev_(m, nhyd+0, k, j, i) -= y0; wdev_(m, nhyd+1, k, j, i) -= y1;
+        wdev_(m, nhyd+2, k, j, i) -= y2; wdev_(m, nhyd+3, k, j, i) -= y3;
+      }
+    });
+    return true;
+  } else {
+    return false;
   }
 }
 

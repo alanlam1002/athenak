@@ -49,6 +49,7 @@
 #include "driver/driver.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/coordinates.hpp"
+#include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
 #include "eos/primitive-solver/geom_math.hpp"
 #include "mhd/mhd.hpp"
@@ -91,6 +92,9 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   const bool atm_fv_ = eos.atm_frame_vel;
   const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
   const Real fv2 = pmy_pack->padm->frame_vel_u[2];
+  const Real fg2_ = eos.atm_frame_gate*eos.atm_frame_gate;
+  const Real fgx_ = pmy_pack->padm->bc_center[0], fgy_ = pmy_pack->padm->bc_center[1];
+  const Real fgz_ = pmy_pack->padm->bc_center[2];
   int nhyd = pmhd->nmhd;
   int nscal = pmhd->nscalars;
   const int nmkji = (pmy_pack->nmb_thispack)*nx3*nx2*nx1;
@@ -163,7 +167,17 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
                                                               &prim[PYF]);
         bool floored_ = dyn_eos_.ps.GetEOS().ApplyPrimitiveFloor(prim[PRH], &prim[PVX],
                                                   prim[PPR], prim[PTM], &prim[PYF]);
-        if (floored_ && atm_fv_) {
+        bool fv_here = floored_ && atm_fv_;
+        if (fv_here && fg2_ > 0.0) {      // <mhd> atmosphere_frame_gate, as in the C2P
+          Real xg = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min,
+                                mbsize.d_view(m).x1max) - fgx_;
+          Real yg = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min,
+                                mbsize.d_view(m).x2max) - fgy_;
+          Real zg = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min,
+                                mbsize.d_view(m).x3max) - fgz_;
+          fv_here = (xg*xg + yg*yg + zg*zg > fg2_);
+        }
+        if (fv_here) {
           // same comoving floor state as the C2P (<mhd> atmosphere_frame_velocity), so
           // the floor's own v = 0 does not set dt in the comoving gauge (R-028 E1)
           Real vsq = g3d[S11]*fv0*fv0 + g3d[S22]*fv1*fv1 + g3d[S33]*fv2*fv2

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -48,6 +49,23 @@ MultigridBoundaryValues::~MultigridBoundaryValues() {
 }
 
 #if MPI_PARALLEL_ENABLED
+//----------------------------------------------------------------------------------------
+//! Complete every non-null request in v (MPI_Wait) before its handle is discarded.
+//! Rank-packed MG sends are deliberately left in flight between exchanges and completed
+//! at the level's next PackAndSendMG/ClearSendMG; dropping a handle instead (per-level
+//! cache reset on regrid, metadata rebuild) leaked the request and released its send
+//! buffer while MPI could still read it (DEVELOPMENT.md item 76: Q4's 15-25k pending
+//! requests and the heap-corruption crash in MPI_Isend). Returns the number completed.
+static int CompleteRequests(std::vector<MPI_Request> &v) {
+  int n = 0;
+  for (auto &r : v) {
+    if (r != MPI_REQUEST_NULL) { MPI_Wait(&r, MPI_STATUS_IGNORE); ++n; }
+  }
+  return n;
+}
+#endif
+
+#if MPI_PARALLEL_ENABLED
 void MultigridBoundaryValues::BuildRankPackedMGMetadata(const int nvars, const int lev,
                                                         const bool skip_fc) {
   int nmb = pmy_pack->nmb_thispack;
@@ -56,6 +74,10 @@ void MultigridBoundaryValues::BuildRankPackedMGMetadata(const int nvars, const i
   auto &nghbr = pmy_pack->pmb->nghbr;
   auto &mblev = pmy_pack->pmb->mb_lev;
 
+  // the active vectors may hold this level's in-flight sends: complete before clearing
+  mg_req_completed_ += CompleteRequests(mg_send_var_reqs_) + CompleteRequests(mg_recv_var_reqs_)
+                     + CompleteRequests(mg_send_var_hdr_reqs_)
+                     + CompleteRequests(mg_recv_var_hdr_reqs_);
   mg_send_var_entries_.clear();
   mg_recv_var_entries_.clear();
   mg_send_var_msgs_.clear();
@@ -2591,6 +2613,22 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     mg_rp_cache_.resize(kMaxMGLevels);
   }
   if (mg_rp_cache_seq_ != mesh_seq) {            // AMR/regrid: invalidate all levels
+    // Complete every cached level's in-flight requests first (see CompleteRequests).
+    // The active level's live handles are in the bare members (its cache slot is a
+    // stale copy from its last Load, whose handles may already be freed: skip it).
+    int n = CompleteRequests(mg_send_var_reqs_) + CompleteRequests(mg_recv_var_reqs_);
+    for (int l = 0; l < static_cast<int>(mg_rp_cache_.size()); ++l) {
+      if (l == mg_rp_active_level_) continue;
+      n += CompleteRequests(mg_rp_cache_[l].send_reqs)
+         + CompleteRequests(mg_rp_cache_[l].recv_reqs);
+    }
+    mg_req_completed_ += n;
+    static const bool report = (std::getenv("ATHENA_MG_REQ_REPORT") != nullptr);
+    if (report) {
+      std::cout << "MG_REQ rank " << global_variable::my_rank << " mesh_seq " << mesh_seq
+                << " completed-before-drop " << n << " total " << mg_req_completed_
+                << std::endl;
+    }
     for (auto &s : mg_rp_cache_) s = MGRankPackLevelState();
     mg_rp_cache_seq_ = mesh_seq;
     mg_rp_active_level_ = -1;
@@ -2601,6 +2639,10 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     if (lev_ != mg_rp_active_level_ || !key_ok) {
       if (mg_rp_active_level_ >= 0 && mg_rp_active_level_ != lev_) {
         SaveRankPackState(mg_rp_cache_[mg_rp_active_level_]);
+        // the saved slot now owns that level's in-flight requests: drop the bare
+        // copies so the rebuild below cannot complete them behind the cache's back
+        mg_send_var_reqs_.clear(); mg_recv_var_reqs_.clear();
+        mg_send_var_hdr_reqs_.clear(); mg_recv_var_hdr_reqs_.clear();
       }
       if (!key_ok) {
         BuildRankPackedMGMetadata(nvars, lev_, skip_fc_ir);

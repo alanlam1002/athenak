@@ -158,7 +158,17 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
       pin->GetBoolean("cfc", "puncture_enabled")) {
     Real m_bh = pin->DoesParameterExist("cfc", "puncture_mass") ?
                 pin->GetReal("cfc", "puncture_mass") : 1.0;
-    Real r0 = sqrt(x0*x0 + y0*y0 + z0*z0);
+    // distance from the puncture at t = 0 (x_BH(0) = <cfc> puncture_x* when it moves on
+    // the grid, Phase 2; the origin otherwise)
+    Real xb[3] = {0.0, 0.0, 0.0};
+    if (pin->DoesParameterExist("cfc", "puncture_moving") &&
+        pin->GetBoolean("cfc", "puncture_moving")) {
+      for (int a = 0; a < 3; ++a) {
+        std::string key = "puncture_x" + std::to_string(a + 1);
+        if (pin->DoesParameterExist("cfc", key)) { xb[a] = pin->GetReal("cfc", key); }
+      }
+    }
+    Real r0 = sqrt(SQR(x0 - xb[0]) + SQR(y0 - xb[1]) + SQR(z0 - xb[2]));
     if (r0 > 0.0) { psi_bg = sqrt(m_bh*cfc::TrumpetIsoToAreal(r0/m_bh)/r0); }
   }
   const bool rescale = bg_rescale && (psi_bg != 1.0);
@@ -973,6 +983,15 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     pdata->label[6] = "frame_disp_x2";
     pdata->label[7] = "frame_disp_x3";
   }
+  // Phase 2 M2 controller: the tracked gas's grid velocity V', mass and centroid offset
+  // from the target (the test-2 diagnostics: V' ~ 0 means the star is pinned)
+  const bool ctrl_cols = frame_cols && pcfc_->FrameController();
+  if (ctrl_cols) {
+    pdata->label[8] = "fc_vg_x1"; pdata->label[9] = "fc_vg_x2";
+    pdata->label[10] = "fc_vg_x3"; pdata->label[11] = "fc_mass";
+    pdata->label[12] = "fc_offset";
+    pdata->nhist = 13;
+  }
   if (de_cols) {
     // dual energy (item 70): summed over ranks like every history column
     int b = pdata->nhist;
@@ -1042,6 +1061,10 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     for (int a = 0; a < 3; ++a) {
       pdata->hdata[2 + a] = root ? xd[a] : 0.0;
       pdata->hdata[5 + a] = root ? x[a] : 0.0;
+    }
+    if (ctrl_cols) {
+      const Real *fm = pcfc_->FrameMeasurement();
+      for (int a = 0; a < 5; ++a) { pdata->hdata[8 + a] = root ? fm[a] : 0.0; }
     }
   }
   if (de_cols) {

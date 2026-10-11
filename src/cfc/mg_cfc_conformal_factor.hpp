@@ -70,7 +70,7 @@ class MGCFCConformalFactor : public Multigrid {
   // coefficient-storage gap). No-op cost-wise if called with m_bh<=0, but callers
   // should just skip calling this entirely when <cfc> puncture_enabled is false
   // (see MGCFCConformalFactorDriver::Solve).
-  void FillPunctureCoefficients(Real m_bh, const Real xbh[3]);
+  void FillPunctureCoefficients(Real m_bh, const Real xbh[3], bool ahat_conformal);
 
  private:
   // Two algebraically-identical matter-source formulations, see ConformalFactorRHS's
@@ -90,6 +90,8 @@ class MGCFCConformalFactor : public Multigrid {
 class MGCFCConformalFactorDriver : public MultigridDriver {
   public:
   void SetPunctureCenter(const Real x[3]) { for (int a = 0; a < 3; ++a) puncture_xbh_[a] = x[a]; }
+  // <cfc> puncture_ahat_conformal (see cfc_puncture.hpp TrumpetBackground)
+  void SetPunctureAhatConformal(bool b) { puncture_ahat_conf_ = b; }
     MGCFCConformalFactorDriver(MeshBlockPack *pmbp, ParameterInput *pin);
     ~MGCFCConformalFactorDriver();
 
@@ -176,6 +178,7 @@ class MGCFCConformalFactorDriver : public MultigridDriver {
     bool puncture_enabled_;
     Real puncture_mass_;
     Real puncture_xbh_[3] = {0.0, 0.0, 0.0};  // moving puncture centre (Phase 2 M1)
+    bool puncture_ahat_conf_ = false;
 
  public:
   //! \brief Update the puncture mass mid-run (CFC accretes swallowed matter into the

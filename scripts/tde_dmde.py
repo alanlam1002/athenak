@@ -79,7 +79,8 @@ def energies(fn, rcut=3.0, nscal=1):
 
 
 def cells(fn, rcut=3.0, nscal=1):
-    """per-cell E, E_B, dM, rho, P outside r_BH < rcut (rcut=0: all cells)"""
+    """per-cell E, E_B, dM, rho, P outside r_BH < rcut (rcut=0: all cells); also position,
+    Eulerian v^i, covariant u_i and the MeshBlock level above the root (lev)"""
     t = header(fn)
     nmb, root = t['nmb'], t['root']
     x1min, x2min, x3min, x1max, x2max, x3max = t['size'][:6]
@@ -98,6 +99,7 @@ def cells(fn, rcut=3.0, nscal=1):
     lo = np.array([x1min, x2min, x3min])
     Es, EBs, dMs, rhos, Ps = [], [], [], [], []
     Xs, Ys, Zs, Vx, Vy, Vz = [], [], [], [], [], []
+    Ls, Ux, Uy, Uz = [], [], [], []
     s = slice(ng, ng + nx)
     ic = (np.arange(nx) + 0.5)
     for b in range(nmb):
@@ -145,10 +147,12 @@ def cells(fn, rcut=3.0, nscal=1):
         Vx.append(sum(gi[0][j] * uj[j] for j in range(3)) / W)
         Vy.append(sum(gi[1][j] * uj[j] for j in range(3)) / W)
         Vz.append(sum(gi[2][j] * uj[j] for j in range(3)) / W)
+        Ux.append(uj[0]); Uy.append(uj[1]); Uz.append(uj[2])
+        Ls.append(np.full(len(uj[0]), lev[b] - root))
     cat = np.concatenate
     return dict(t=t['time'], E=cat(Es), EB=cat(EBs), dM=cat(dMs), rho=cat(rhos), P=cat(Ps),
                 par=t['par'], x=cat(Xs), y=cat(Ys), z=cat(Zs), vx=cat(Vx), vy=cat(Vy),
-                vz=cat(Vz))
+                vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls))
 
 
 def hist(E, dM, dE, edges):

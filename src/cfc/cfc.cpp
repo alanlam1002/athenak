@@ -307,6 +307,43 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     xbh0_[a] = pin->GetOrAddReal("cfc", "puncture_x" + std::to_string(a + 1), 0.0);
   }
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  // <cfc> puncture_ahat_conformal (default false): the trumpet's Ahat0_ij/Ahat0^2 with
+  // the psi^6/psi^12 factors (cfc_puncture.hpp TrumpetBackground; DEVELOPMENT.md item 77)
+  puncture_ahat_conf_ = pin->GetOrAddBoolean("cfc", "puncture_ahat_conformal", false);
+  pmgd_psi->SetPunctureAhatConformal(puncture_ahat_conf_);
+  pmgd_alpha->SetPunctureAhatConformal(puncture_ahat_conf_);
+  // Phase 2 M2 xidot controller (see cfc.hpp). Parsed here, before the puncture fill
+  // below, because a restart's x_BH comes from the restored xi.
+  frame_ctrl_ = pin->GetOrAddBoolean("cfc", "frame_controller", false);
+  if (frame_ctrl_) {
+    fc_rho_thr_ = pin->GetReal("cfc", "frame_track_rho");        // required (code units)
+    fc_rtrk_ = pin->GetReal("cfc", "frame_track_radius");        // required
+    fc_tau_x_ = pin->GetOrAddReal("cfc", "frame_tau_x", 20.0);
+    fc_tau_a_ = pin->GetOrAddReal("cfc", "frame_tau_a", 2.0);
+    fc_atm_rho_ = pin->GetOrAddReal("cfc", "frame_atm_rho", 0.0);
+    fc_atm_gate_ = pin->GetOrAddReal("cfc", "frame_atm_gate", 0.0);
+    // target point x'_tgt: given, or (default) the t = 0 centroid of the gas tracked
+    // around these coordinates (the origin unless set)
+    fc_tgt_given_ = pin->DoesParameterExist("cfc", "frame_target_x1") ||
+                    pin->DoesParameterExist("cfc", "frame_target_x2") ||
+                    pin->DoesParameterExist("cfc", "frame_target_x3");
+    for (int a = 0; a < 3; ++a) {
+      fc_tgt_[a] = pin->GetOrAddReal("cfc", "frame_target_x" + std::to_string(a + 1), 0.0);
+    }
+    // restored state (written by SaveFrameState into the restart's parameter copy)
+    fc_init_ = pin->DoesParameterExist("cfc", "frame_ctrl_t");
+    if (fc_init_) {
+      fc_t_ = pin->GetReal("cfc", "frame_ctrl_t");
+      for (int a = 0; a < 3; ++a) {
+        std::string n = std::to_string(a + 1);
+        fc_xi_[a] = pin->GetReal("cfc", "frame_ctrl_xi" + n);
+        fc_xd_[a] = pin->GetReal("cfc", "frame_ctrl_xidot" + n);
+        fc_tgt_[a] = pin->GetReal("cfc", "frame_ctrl_tgt" + n);
+        fc_vprev_[a] = pin->GetReal("cfc", "frame_ctrl_vprev" + n);
+        fc_acc_[a] = pin->GetReal("cfc", "frame_ctrl_acc" + n);
+      }
+    }
+  }
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
@@ -367,12 +404,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
         std::string n = std::to_string(a + 1);
         Real v0 = pin->GetOrAddReal("cfc", "frame_vel" + n, 0.0);
         Real a0 = pin->GetOrAddReal("cfc", "frame_accel" + n, 0.0);
-        xbh[a] = xbh0_[a] - (puncture_moving_ ? (v0*t0 + 0.5*a0*t0*t0) : 0.0);
+        Real xi = frame_ctrl_ ? (fc_init_ ? fc_xi_[a] + fc_xd_[a]*(t0 - fc_t_) : 0.0)
+                              : v0*t0 + 0.5*a0*t0*t0;
+        xbh[a] = xbh0_[a] - (puncture_moving_ ? xi : 0.0);
         pmbp->padm->bc_center[a] = puncture_moving_ ? xbh[a] : 0.0;
       }
     }
     FillPunctureBackground(pmbp, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0);
+                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
@@ -430,6 +469,15 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     frame_accel_[a] = pin->GetOrAddReal("cfc", "frame_accel" + n, 0.0);
     if (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0) frame_enabled_ = true;
   }
+  if (frame_ctrl_) {
+    if (frame_enabled_) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> frame_controller replaces frame_vel/frame_accel; "
+                << "set only one" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    frame_enabled_ = true;
+  }
   if (frame_enabled_ && puncture_enabled_ && !puncture_moving_) {
     // Phase 1 has no moving BH: the trumpet background, excision masks, BH refinement
     // and ADM falloff all stay at the grid origin, so xidot != 0 would describe a
@@ -449,7 +497,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     const BoundaryFace outer[3] = {BoundaryFace::outer_x1, BoundaryFace::outer_x2,
                                    BoundaryFace::outer_x3};
     for (int a = 0; a < 3; ++a) {
-      bool moving = (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0);
+      bool moving = frame_ctrl_ || frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0;
       if (moving && (mbcs[inner[a]] == BoundaryFlag::reflect ||
                      mbcs[outer[a]] == BoundaryFlag::reflect)) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -459,7 +507,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
         std::exit(EXIT_FAILURE);
       }
     }
-    if (global_variable::my_rank == 0) {
+    if (global_variable::my_rank == 0 && frame_ctrl_) {
+      std::cout << "CFC comoving gauge: xidot controller, track rho > " << fc_rho_thr_
+                << " within " << fc_rtrk_ << " of the target, tau_x = " << fc_tau_x_
+                << ", tau_a = " << fc_tau_a_
+                << (fc_init_ ? " (state restored)" : "") << std::endl;
+    } else if (global_variable::my_rank == 0) {
       std::cout << "CFC comoving gauge: xidot(t) = (" << frame_vel0_[0] << ", "
                 << frame_vel0_[1] << ", " << frame_vel0_[2] << ") + ("
                 << frame_accel_[0] << ", " << frame_accel_[1] << ", "
@@ -1027,6 +1080,8 @@ void CFC::InitializeMetric(Driver *pdriver) {
   // function already run once before this solve (Driver::Initialize()); safe to
   // call again since it doesn't touch padm->SetADMVariables.
   pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
+  // Phase 2 M2: xidot(0) from the star (fresh starts only; restarts restore the state)
+  if (frame_ctrl_ && !fc_init_) { InitFrameControl(pdriver); }
   return;
 }
 
@@ -1100,7 +1155,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     Real xbh[3];
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0);
+                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   }
 
@@ -1544,11 +1599,18 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) {
     // The solved part of adm.beta_u is reused; keep the gauge part current.
     ApplyFrameShiftUpdate(StageTime(pdriver, stage));
+    if (frame_ctrl_ && stage == pdriver->nexp_stages) {
+      FrameControlStep(StageTime(pdriver, stage));
+    }
     return TaskStatus::complete;
   }
   AssembleADM(StageTime(pdriver, stage));
   AccreteExcisedMass(pdriver, stage);
   if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
+  // Phase 2 M2: next step's xidot (before CFC_RestADM packs adm.beta_u's ghosts)
+  if (frame_ctrl_ && stage == pdriver->nexp_stages) {
+    FrameControlStep(StageTime(pdriver, stage));
+  }
   return TaskStatus::complete;
 }
 
@@ -1872,7 +1934,7 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     Real xbh[3];
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0);
+                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 
     // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
@@ -2529,7 +2591,7 @@ void CFC::RefillMovingPuncture(Real t) {
   BHPosition(t, xbh);
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
   FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                         a0_dd, a0_sq, grad_ap6_0);
+                         a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
   pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 }
 
@@ -2591,6 +2653,187 @@ void CFC::ApplyFrameShiftUpdate(Real time) {
   }
   for (int a = 0; a < 3; ++a) { gx[a] = xd[a]; }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureTracked(Real out[7])
+//! \brief Phase 2 M2 controller input (see cfc.hpp): over interior cells with
+//! rho > frame_track_rho and |x' - x'_tgt| < frame_track_radius, the sums
+//! {m, m x', m y', m z', m V'^x, m V'^y, m V'^z}, m = sqrt(gamma) D dV (u0's IDN),
+//! V'^i = alpha u^i/W - beta^i the grid velocity (beta = adm.beta_u, which carries the
+//! current xidot). rho and u^i come from w0, which at the last RK stage may lag the
+//! conserved state by one stage (C2P is not ordered against CFC_AssembleFinal).
+//! Summed over ranks, then broadcast from rank 0 so every rank holds identical values.
+
+void CFC::MeasureTracked(Real out[7]) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &u0 = pmy_pack->pmhd->u0;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &adm = pmy_pack->padm->adm;
+  const Real rho_thr = fc_rho_thr_, r2trk = fc_rtrk_*fc_rtrk_;
+  const Real tx = fc_tgt_[0], ty = fc_tgt_[1], tz = fc_tgt_[2];
+  Real s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0;
+  Kokkos::parallel_reduce("cfc_frame_track", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
+                Real &a5, Real &a6) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > rho_thr)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if ((x - tx)*(x - tx) + (y - ty)*(y - ty) + (z - tz)*(z - tz) >= r2trk) return;
+    const Real dm = u0(m, IDN, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*
+                    size.d_view(m).dx3;
+    const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i), uz = w0(m, IVZ, k, j, i);
+    const Real usq = adm.g_dd(m,0,0,k,j,i)*ux*ux + adm.g_dd(m,1,1,k,j,i)*uy*uy
+                   + adm.g_dd(m,2,2,k,j,i)*uz*uz
+                   + 2.0*(adm.g_dd(m,0,1,k,j,i)*ux*uy + adm.g_dd(m,0,2,k,j,i)*ux*uz
+                          + adm.g_dd(m,1,2,k,j,i)*uy*uz);
+    const Real aw = adm.alpha(m,k,j,i)/sqrt(1.0 + usq);
+    a0 += dm; a1 += dm*x; a2 += dm*y; a3 += dm*z;
+    a4 += dm*(aw*ux - adm.beta_u(m,0,k,j,i));
+    a5 += dm*(aw*uy - adm.beta_u(m,1,k,j,i));
+    a6 += dm*(aw*uz - adm.beta_u(m,2,k,j,i));
+  }, Kokkos::Sum<Real>(s0), Kokkos::Sum<Real>(s1), Kokkos::Sum<Real>(s2),
+     Kokkos::Sum<Real>(s3), Kokkos::Sum<Real>(s4), Kokkos::Sum<Real>(s5),
+     Kokkos::Sum<Real>(s6));
+  out[0] = s0; out[1] = s1; out[2] = s2; out[3] = s3; out[4] = s4; out[5] = s5;
+  out[6] = s6;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, out, 7, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(out, 7, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::FrameControlStep(Real t_new)
+//! \brief once per step, at the last RK stage after AssembleADM (state at t_new =
+//! t + dt): advance xi with the step's xidot, measure the tracked gas, set the next
+//! step's xidot (cfc.hpp) and shift adm.beta_u (all cells, ghosts included) to it.
+
+void CFC::FrameControlStep(Real t_new) {
+  const Real dt = t_new - fc_t_;
+  for (int a = 0; a < 3; ++a) { fc_xi_[a] += fc_xd_[a]*dt; }
+  fc_t_ = t_new;
+  Real s[7];
+  MeasureTracked(s);
+  if (!(s[0] > 0.0)) {                 // nothing tracked: keep xidot
+    fc_meas_[3] = 0.0;
+    return;
+  }
+  Real xd_new[3];
+  Real off2 = 0.0;
+  for (int a = 0; a < 3; ++a) {
+    const Real xc = s[1 + a]/s[0], vg = s[4 + a]/s[0];
+    const Real vbh = vg + fc_xd_[a];
+    if (dt > 0.0) {
+      const Real arate = (vbh - fc_vprev_[a])/dt;
+      fc_acc_[a] += (arate - fc_acc_[a])*fmin(1.0, dt/fc_tau_a_);
+    }
+    fc_vprev_[a] = vbh;
+    xd_new[a] = vbh + fc_acc_[a]*dt + (xc - fc_tgt_[a])/fc_tau_x_;
+    fc_meas_[a] = vg;
+    off2 += (xc - fc_tgt_[a])*(xc - fc_tgt_[a]);
+  }
+  fc_meas_[3] = s[0];
+  fc_meas_[4] = sqrt(off2);
+  for (int a = 0; a < 3; ++a) { fc_xd_[a] = xd_new[a]; }
+  ApplyFrameShiftUpdate(t_new);        // adm.beta_u += xidot_new - padm->frame_vel_u
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::InitFrameControl(Driver *pdriver)
+//! \brief fresh start only (end of InitializeMetric, adm.beta_u carrying xidot = 0):
+//! x'_tgt = <cfc> frame_target_x1/2/3 if given, else the centroid of the gas tracked
+//! around the origin;
+//! xidot(0) = V_BH of the tracked gas = alpha v - beta; then optionally the comoving
+//! initial atmosphere (<cfc> frame_atm_rho > 0: cells with rho <= frame_atm_rho beyond
+//! frame_atm_gate of x_BH get u^i = W xidot), so the floor does not start at rest.
+
+void CFC::InitFrameControl(Driver *pdriver) {
+  for (int a = 0; a < 3; ++a) { fc_xi_[a] = 0.0; fc_xd_[a] = 0.0; fc_acc_[a] = 0.0; }
+  fc_t_ = pmy_pack->pmesh->time;
+  Real s[7];
+  MeasureTracked(s);
+  if (!(s[0] > 0.0)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<cfc> frame_controller: no gas above frame_track_rho within "
+              << "frame_track_radius of the target at t = 0" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  for (int a = 0; a < 3; ++a) {
+    if (!fc_tgt_given_) { fc_tgt_[a] = s[1 + a]/s[0]; }
+    fc_xd_[a] = s[4 + a]/s[0];         // padm->frame_vel_u = 0 here
+    fc_vprev_[a] = fc_xd_[a];
+    fc_meas_[a] = fc_xd_[a];
+  }
+  fc_meas_[3] = s[0];
+  fc_init_ = true;
+  if (global_variable::my_rank == 0) {
+    std::cout << std::setprecision(10) << "CFC frame controller: x'_tgt = (" << fc_tgt_[0]
+              << ", " << fc_tgt_[1] << ", " << fc_tgt_[2] << "), xidot(0) = (" << fc_xd_[0]
+              << ", " << fc_xd_[1] << ", " << fc_xd_[2] << "), tracked mass " << s[0]
+              << std::setprecision(6) << std::endl;
+  }
+  ApplyFrameShiftUpdate(fc_t_);
+  if (fc_atm_rho_ > 0.0) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &w0 = pmy_pack->pmhd->w0;
+    auto &adm = pmy_pack->padm->adm;
+    const Real thr = fc_atm_rho_, g2 = fc_atm_gate_*fc_atm_gate_;
+    const Real bx = pmy_pack->padm->bc_center[0], by = pmy_pack->padm->bc_center[1];
+    const Real bz = pmy_pack->padm->bc_center[2];
+    const Real v0 = fc_xd_[0], v1 = fc_xd_[1], v2 = fc_xd_[2];
+    par_for("cfc_comoving_atm", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1,
+            ks, ks + nx3 - 1, js, js + nx2 - 1, is, is + nx1 - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      if (w0(m, IDN, k, j, i) > thr) return;
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      if ((x - bx)*(x - bx) + (y - by)*(y - by) + (z - bz)*(z - bz) <= g2) return;
+      // Eulerian v = xidot (the C2P's comoving floor state): u^i = W v^i
+      const Real vsq = adm.g_dd(m,0,0,k,j,i)*v0*v0 + adm.g_dd(m,1,1,k,j,i)*v1*v1
+                     + adm.g_dd(m,2,2,k,j,i)*v2*v2
+                     + 2.0*(adm.g_dd(m,0,1,k,j,i)*v0*v1 + adm.g_dd(m,0,2,k,j,i)*v0*v2
+                            + adm.g_dd(m,1,2,k,j,i)*v1*v2);
+      const Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.99));
+      w0(m, IVX, k, j, i) = wl*v0; w0(m, IVY, k, j, i) = wl*v1; w0(m, IVZ, k, j, i) = wl*v2;
+    });
+    pmy_pack->pdyngr->PrimToConInit(is, is + nx1 - 1, js, js + nx2 - 1, ks, ks + nx3 - 1);
+    pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SaveFrameState(ParameterInput *pin) const
+//! \brief controller state -> pin (the restart file's parameter copy), full precision
+//! (ParameterInput::SetReal writes max_digits10), so a restart restores it bitwise.
+
+void CFC::SaveFrameState(ParameterInput *pin) const {
+  if (!frame_ctrl_ || !fc_init_) { return; }
+  pin->SetReal("cfc", "frame_ctrl_t", fc_t_);
+  for (int a = 0; a < 3; ++a) {
+    std::string n = std::to_string(a + 1);
+    pin->SetReal("cfc", "frame_ctrl_xi" + n, fc_xi_[a]);
+    pin->SetReal("cfc", "frame_ctrl_xidot" + n, fc_xd_[a]);
+    pin->SetReal("cfc", "frame_ctrl_tgt" + n, fc_tgt_[a]);
+    pin->SetReal("cfc", "frame_ctrl_vprev" + n, fc_vprev_[a]);
+    pin->SetReal("cfc", "frame_ctrl_acc" + n, fc_acc_[a]);
+  }
 }
 
 }  // namespace cfc

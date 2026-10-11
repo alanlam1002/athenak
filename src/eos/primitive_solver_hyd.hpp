@@ -172,6 +172,11 @@ class PrimitiveSolverHydro {
   // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
   // instead of v = 0, so the atmosphere is at rest on a comoving grid.
   bool atm_frame_vel = false;
+  // <mhd> atmosphere_frame_gate (default 0 = everywhere): only floored cells farther than
+  // this from the puncture (padm->bc_center, x_BH(t) for a moving puncture) get the
+  // comoving velocity; near the BH, where infall dominates, the floor stays at v = 0
+  // (COMOVING_GAUGE_DESIGN.md §2.4, Phase 2 M2)
+  Real atm_frame_gate = 0.0;
 
   //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
   //! D^2 h^2 (W^2 - 1) = S^2 with rho = D/W, h = 1 + g/(g-1) K rho^(g-1) for W by
@@ -207,6 +212,7 @@ class PrimitiveSolverHydro {
         pmy_pack(pp), nerrs(0) {
     SetPolicyParams(block, pin);
     atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
+    atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
     de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
     if (de_on) {
       int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
@@ -619,6 +625,9 @@ class PrimitiveSolverHydro {
     const bool atm_fv_ = atm_frame_vel && !floors_only;
     const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
     const Real fv2 = pmy_pack->padm->frame_vel_u[2];
+    const Real fg2_ = atm_frame_gate*atm_frame_gate;
+    const Real fgx_ = pmy_pack->padm->bc_center[0], fgy_ = pmy_pack->padm->bc_center[1];
+    const Real fgz_ = pmy_pack->padm->bc_center[2];
 
     int count_errs=0;
     // Excised-mass tally totals for THIS call, reduced deterministically alongside
@@ -812,8 +821,18 @@ class PrimitiveSolverHydro {
         }
         // ---- comoving atmosphere (see atm_frame_vel): floored cells move with the frame
         bool de_write = false;
-        if (atm_fv_ && (result.prim_floor || result.cons_floor) &&
-            (fv0 != 0.0 || fv1 != 0.0 || fv2 != 0.0)) {
+        bool fv_here = atm_fv_ && (result.prim_floor || result.cons_floor) &&
+                       (fv0 != 0.0 || fv1 != 0.0 || fv2 != 0.0);
+        if (fv_here && fg2_ > 0.0) {
+          Real xg = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min,
+                                size.d_view(m).x1max) - fgx_;
+          Real yg = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min,
+                                size.d_view(m).x2max) - fgy_;
+          Real zg = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min,
+                                size.d_view(m).x3max) - fgz_;
+          fv_here = (xg*xg + yg*yg + zg*zg > fg2_);
+        }
+        if (fv_here) {
           Real vsq = g3d[S11]*fv0*fv0 + g3d[S22]*fv1*fv1 + g3d[S33]*fv2*fv2
                    + 2.0*(g3d[S12]*fv0*fv1 + g3d[S13]*fv0*fv2 + g3d[S23]*fv1*fv2);
           Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.99));

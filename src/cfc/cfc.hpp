@@ -304,11 +304,42 @@ class CFC {
   // adm.beta_u is padm->frame_vel_u.
   Real frame_vel0_[3], frame_accel_[3];
   bool puncture_moving_ = false;    // <cfc> puncture_moving (Phase 2 M1)
+  bool puncture_ahat_conf_ = false; // <cfc> puncture_ahat_conformal (item 77)
   Real xbh0_[3] = {0.0, 0.0, 0.0};  // <cfc> puncture_x1/2/3: x_BH at t = 0
   bool frame_enabled_;
   bool frame_assembled_;   // padm->frame_vel_u reflects adm.beta_u (false until the
                            // first assembly; on a restart the rst's adm.beta_u is
                            // taken to hold xidot(time), see ApplyFrameShiftUpdate)
+
+  // Phase 2 M2 (research R-039/R-040 item 4; COMOVING_GAUGE_DESIGN.md §2.3):
+  // <cfc> frame_controller = true replaces the analytic xidot(t) with a per-step
+  // controller. xidot is held fixed over each step and xi is integrated,
+  // xi(t) = fc_xi_ + fc_xd_*(t - fc_t_), so the moving puncture and every other
+  // FrameDisp/FrameVel user see a continuous xi. Once per step (last RK stage) the
+  // tracked gas -- rest mass with rho > frame_track_rho within frame_track_radius of the
+  // target point x'_tgt on the grid -- gives its grid velocity V' = alpha u^i/W - beta^i
+  // and centroid x'_c, and
+  //   xidot_new = V_BH + a*dt + (x'_c - x'_tgt)/frame_tau_x,  V_BH = V' + xidot_old,
+  // where a is V_BH's finite-difference rate low-passed over frame_tau_a (the
+  // feed-forward). Tracking within a radius of the target keeps the controller on the
+  // clump pinned there (the remnant after periapsis), not on the debris centroid.
+  // xidot(0) = V_BH of the tracked gas after InitializeMetric (= alpha v - beta). State
+  // is written to the restart's parameter copy (SaveFrameState).
+  bool frame_ctrl_ = false;
+  Real fc_t_ = 0.0;                       // time at which fc_xi_ holds
+  Real fc_xi_[3] = {0.0, 0.0, 0.0};
+  Real fc_xd_[3] = {0.0, 0.0, 0.0};       // xidot over the current step
+  Real fc_tgt_[3] = {0.0, 0.0, 0.0};      // x'_tgt
+  bool fc_tgt_given_ = false;             // <cfc> frame_target_x* set
+  Real fc_vprev_[3] = {0.0, 0.0, 0.0};    // previous V_BH (for the feed-forward)
+  Real fc_acc_[3] = {0.0, 0.0, 0.0};      // low-passed dV_BH/dt
+  bool fc_init_ = false;                  // controller state valid (set or restored)
+  Real fc_rho_thr_, fc_rtrk_, fc_tau_x_, fc_tau_a_;
+  Real fc_atm_rho_ = 0.0, fc_atm_gate_ = 0.0;  // initial comoving atmosphere
+  Real fc_meas_[5] = {0.0, 0.0, 0.0, 0.0, 0.0};  // last V'(3), tracked mass, |x'_c-tgt|
+  // tracked-gas reduction: out = {m, m x', m y', m z', m V'x, m V'y, m V'z}
+  void MeasureTracked(Real out[7]);
+  void FrameControlStep(Real t_new);
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp differentiates (mirrors z4c::Z4c::pbval_u/
@@ -546,11 +577,24 @@ class CFC {
  public:
   bool FrameShiftEnabled() const { return frame_enabled_; }
   void FrameVel(Real t, Real xd[3]) const {
+    if (frame_ctrl_) { for (int a = 0; a < 3; ++a) xd[a] = fc_xd_[a]; return; }
     for (int a = 0; a < 3; ++a) xd[a] = frame_vel0_[a] + frame_accel_[a]*t;
   }
   void FrameDisp(Real t, Real x[3]) const {
+    if (frame_ctrl_) {
+      for (int a = 0; a < 3; ++a) x[a] = fc_xi_[a] + fc_xd_[a]*(t - fc_t_);
+      return;
+    }
     for (int a = 0; a < 3; ++a) x[a] = frame_vel0_[a]*t + 0.5*frame_accel_[a]*t*t;
   }
+  bool FrameController() const { return frame_ctrl_; }
+  // last controller measurement: V'(3) of the tracked gas, its mass, |x'_c - x'_tgt|
+  const Real *FrameMeasurement() const { return fc_meas_; }
+  // write xi, xidot and the controller state into pin (restart files carry pin)
+  void SaveFrameState(ParameterInput *pin) const;
+  // after InitializeMetric (fresh start): xidot(0) from the tracked gas, target, and
+  // the comoving initial atmosphere
+  void InitFrameControl(Driver *pdriver);
   // Phase 2 M1 (design §2.1): puncture position on the grid at time t,
   // x_BH(t) = x_BH(0) - xi(t) when <cfc> puncture_moving, else x_BH(0) (origin default).
   bool PunctureMoving() const { return puncture_moving_; }

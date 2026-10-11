@@ -838,6 +838,7 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   std::vector<MGRankPackLevelState> mg_rp_cache_;
   int mg_rp_cache_seq_ = -1;     // mesh_seq the cache was built for (AMR invalidation)
   int mg_rp_active_level_ = -1;  // level whose state currently lives in the bare members
+  long mg_req_completed_ = 0;    // in-flight requests completed before a drop (item 76)
   void SaveRankPackState(MGRankPackLevelState &s);
   void LoadRankPackState(const MGRankPackLevelState &s);
 #endif

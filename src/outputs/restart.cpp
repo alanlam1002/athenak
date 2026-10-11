@@ -209,6 +209,8 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // gram accreted so far.  Same mechanism used for file_number/last_time just above.
   if (pm->pmb_pack->pcfc != nullptr) {
     pin->SetReal("cfc", "puncture_mass", pm->pmb_pack->pcfc->puncture_mass_);
+    // Phase 2 M2 xidot-controller state (xi, xidot, filter, target); no-op otherwise
+    pm->pmb_pack->pcfc->SaveFrameState(pin);
   }
 
   // create string holding input parameters (copy of input file)

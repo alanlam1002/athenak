@@ -10298,3 +10298,15 @@ run's output times:
 - restart reproducibility is within the E2 floor;
 - a 40 M comoving TDE segment ran with no NaN, core K held to 0.6% and puffing 14× below
   Q1.
+
+**Item 6 L4 (R-040; T6b_rp10_comov_bhL4, binary `23d6db67`, 16 nodes, 35.3 node-h, t = 0-200).**
+- **Measured, t < 60:** the comoving gauge works as designed. ⟨E⟩ drift −0.0012 ΔE by t = 78
+  (Q1 −0.057 by t = 98); dense-gas entropy flat.
+- **Measured, from t ≈ 60** (BH 18 M away, ~75 M before periapsis): the star heats from its
+  ±y surfaces inward with cell-scale structure.
+  - Dense mean K/K0 1.00 → 1.89 by t = 76; the core shocks at t ≈ 74 (ρ_max 1.11) and the star
+    expands.
+  - The remnant is disrupted by t = 156 (Q1 0.29 M*).
+- **Not attributed yet:** M2_t1 (old fill) and M2_t3 (corrected fill) stopped at t = 40.
+  Proposed (OUTBOX C-039): a restart pair from t = 60.7 with the old and new binaries.
+- `scripts/t6_item6.py`; figures in `plots/phase2_m1/item6_L4*.png`.

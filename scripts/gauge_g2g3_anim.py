@@ -38,7 +38,8 @@ for _lab, _d, _c in (('V2', 'de_V2_static_L4', '#1b9e77'),
                      ('G2cDE', 'de_G_G2c_DE_L4', '#e7298a'),
                      ('V3F', 'de_V3F_boost_contract_L4', '#1b9e77'),
                      ('V3FJ', 'de_V3FJ_boost_contract_L4', '#e7298a'),
-                     ('GJ', 'de_GJ_G2c_DE_L4', '#e6ab02')):
+                     ('GJ', 'de_GJ_G2c_DE_L4', '#e6ab02'),
+                     ('V3FJL5', 'Q2_V3FJ_L5', '#e7298a'), ('GJL5', 'Q2_GJ_L5', '#e6ab02')):
     G.T.RUNS[_lab] = (f'{G.RUN}/{_d}', G.ISO, None, _c, '--')
 for _lab, _d, _c in (('V4', 'de_V4_rp16_L4', '#e7298a'), ('V4F', 'de_V4F_rp16_L4', '#1b9e77'),
                      ('V4G', 'de_V4G_rp16_L4', '#e6ab02'), ('V4Gr', 'de_V4G_rst3', '#e6ab02'),
@@ -51,7 +52,7 @@ TITLE = {'G2c': 'G2c (contracted ID, ξ̇=V0)', 'E1b': 'E1b (G2c + comoving atm,
          'V2': 'V2 static, DE on', 'V3c': 'V3c boosted, contracted, DE off',
          'V3': 'V3 boosted, contracted, DE on', 'G2cDE': 'G (G2c + DE)',
          'V3F': 'V3F boosted, DE with F', 'V3FJ': 'V3FJ boosted, F + J',
-         'GJ': 'GJ comoving, F + J', 'rp16': 'ens1 rp16 (DE off, old ID)',
+         'GJ': 'GJ comoving, F + J', 'V3FJL5': 'V3FJ at L5 (Q2)', 'GJL5': 'GJ at L5 (Q2)', 'rp16': 'ens1 rp16 (DE off, old ID)',
          'V4': 'V4 rp16 (D·K)', 'V4F': 'V4F rp16 (F + J)', 'V4G': 'V4G rp16 (F + J + 2nd law)',
          'V4Gr': 'V4G rp16 (F + J + 2nd law)', 'rp10': 'ens1 rp10 L4 (DE off, old ID)',
          'V5L4': 'V5 rp10 L4', 'V5L5': 'V5 rp10 L5'}

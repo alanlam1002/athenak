@@ -48,6 +48,31 @@ def analytic(dx, dy):
     return psi**4, alpha, bmag * dx, bmag * dy
 
 
+def measure(fn, x0, v, mov, rmax=10.0):
+    """(t, x_BH, max|d alpha|, max|d psi4|/psi4, max|d beta|, alpha-min offset, min dx) of one
+    adm_xy dump, cells 1.5 <= r_BH <= rmax with alpha > 0.3"""
+    p = bc.read_binary(fn)
+    t = p['time']
+    xb = x0 - (v * t if mov else 0.0)
+    g = np.asarray(p['mb_geometry']); nx = p['nx1_out_mb']
+    md = {k: np.asarray(q)[:, 0] for k, q in p['mb_data'].items()}
+    dx = ((g[:, 1] - g[:, 0]) / nx)[:, None, None]
+    X = g[:, 0, None, None] + (np.arange(nx)[None, None, :] + .5) * dx
+    Y = g[:, 2, None, None] + (np.arange(nx)[None, :, None] + .5) * dx
+    X, Y = np.broadcast_to(X, md['adm_alpha'].shape), np.broadcast_to(Y, md['adm_alpha'].shape)
+    rx, ry = X - xb, Y
+    r = np.hypot(rx, ry)
+    sel = (r >= 1.5) & (r <= rmax) & (md['adm_alpha'] > 0.3)
+    p4a, ala, bxa, bya = analytic(rx[sel], ry[sel])
+    ea = np.abs(md['adm_alpha'][sel] - ala).max()
+    ep = (np.abs(md['adm_psi4'][sel] - p4a) / p4a).max()
+    eb = np.hypot(md['adm_betax'][sel] - bxa - (v if mov else 0.0),
+                  md['adm_betay'][sel] - bya).max()
+    i = np.unravel_index(np.argmin(md['adm_alpha']), md['adm_alpha'].shape)
+    off = np.hypot(X[i] - xb, Y[i])
+    return t, xb, ea, ep, eb, off, dx.min()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('runs', nargs='+')
@@ -60,27 +85,9 @@ def main():
         x0 = par(txt, 'cfc', 'puncture_x1'); v = par(txt, 'cfc', 'frame_vel1')
         mov = re.search(r'^puncture_moving\s*=\s*true', txt, re.M) is not None
         for fn in sorted(glob.glob(f'{d}/bin/*adm_xy*.bin'))[::a.every]:
-            p = bc.read_binary(fn)
-            t = p['time']
-            xb = x0 - (v * t if mov else 0.0)
-            g = np.asarray(p['mb_geometry']); nx = p['nx1_out_mb']
-            md = {k: np.asarray(q)[:, 0] for k, q in p['mb_data'].items()}
-            dx = ((g[:, 1] - g[:, 0]) / nx)[:, None, None]
-            X = g[:, 0, None, None] + (np.arange(nx)[None, None, :] + .5) * dx
-            Y = g[:, 2, None, None] + (np.arange(nx)[None, :, None] + .5) * dx
-            X, Y = np.broadcast_to(X, md['adm_alpha'].shape), np.broadcast_to(Y, md['adm_alpha'].shape)
-            rx, ry = X - xb, Y
-            r = np.hypot(rx, ry)
-            sel = (r >= 1.5) & (r <= a.rmax) & (md['adm_alpha'] > 0.3)
-            p4a, ala, bxa, bya = analytic(rx[sel], ry[sel])
-            ea = np.abs(md['adm_alpha'][sel] - ala).max()
-            ep = (np.abs(md['adm_psi4'][sel] - p4a) / p4a).max()
-            eb = np.hypot(md['adm_betax'][sel] - bxa - (v if mov else 0.0),
-                          md['adm_betay'][sel] - bya).max()
-            i = np.unravel_index(np.argmin(md['adm_alpha']), md['adm_alpha'].shape)
-            off = np.hypot(X[i] - xb, Y[i])
+            t, xb, ea, ep, eb, off, dxm = measure(fn, x0, v, mov, a.rmax)
             print(f'{lab:8s} t={t:6.1f} x_BH={xb:+7.2f}  max|d alpha| {ea:.3e}  max|d psi4|/psi4 {ep:.3e}'
-                  f'  max|d beta| {eb:.3e}  alpha-min offset {off:.3f} (dx {dx.min():.4f})', flush=True)
+                  f'  max|d beta| {eb:.3e}  alpha-min offset {off:.3f} (dx {dxm:.4f})', flush=True)
         # printed diagnostics
         I, M = [], []
         for line in open(f'{d}/ensemble.out'):

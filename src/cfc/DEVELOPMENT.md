@@ -10065,3 +10065,57 @@ Residual against the analytic trumpet in BH-centred coordinates, 1.5 ≤ r_BH �
 
 **Not built** (Milestone 2): the ξ̇ controller, per-stage background refill for si > 1,
 per-stage moving excision for the fixed/horizon schemes, and the star.
+
+## 76. Multigrid send-request leak across regrids (the Q4 crashes)
+
+User-approved (research R-040 item 1: code reading + debug-queue runs). athenak `4d14bb23`.
+
+**Symptom:** Q4 (2e4 Msun, L6, 16 nodes) failed twice, both times in the post-regrid metric
+re-solve (`AdaptiveMeshRefinement → ReinitializeMetricForAMR → … → MG V-cycle`):
+- first, SIGSEGV in libc `calloc` inside `MPI_Isend` from `PackAndSendMG` (t = 93.7);
+- then, after the restart, an `MPI_Allreduce` progress timeout (t = 106.9). The aborting
+  ranks reported 15-25k pending requests.
+
+**Measured with a PMPI interposer** (`scripts/reqtrack/`, LD_PRELOAD; it tracks every live
+request with the address that created it):
+- Q1 deck from t = 98 on 2 nodes, old binary `d6e0071e`: rank 0's live requests grew from
+  96 to 10,622 in 2,490 s. 98% of them were created at `0xb31ec3`, the `MPI_Isend` in
+  `MultigridBoundaryValues::PackAndSendMG`, which is the frame of Q4's first crash.
+- Every other call site stays flat.
+
+**Cause:** the per-level rank-packed metadata cache (`f9f24cfb`, `InitRecvMG`)
+- leaves sends in flight between exchanges by design, completed at that level's next
+  `PackAndSendMG` or `ClearSendMG`;
+- but drops request handles without completing them in two places:
+  1. when `mesh_seq` changes (a regrid), every cached level is reset with
+     `s = MGRankPackLevelState()`;
+  2. `BuildRankPackedMGMetadata` clears the active vectors.
+- A dropped handle is a leaked request.
+- The reset also releases the cached send buffer (a ref-counted view) while MPI may still
+  be reading it. That is an argued but direct route to the heap corruption of crash 1.
+
+**Fix (`multigrid_bvals.cpp`):**
+- `CompleteRequests()` waits on every non-null handle before it is discarded: at the regrid
+  reset (the bare members plus every cached level except the active one, whose cache slot
+  is a stale copy) and before the rebuild's `clear()`.
+- On a level switch, after `SaveRankPackState`, the bare request vectors are cleared. The
+  cache slot then owns the in-flight requests, and a rebuild cannot complete them behind
+  its back and leave the cache with freed handles.
+- `ATHENA_MG_REQ_REPORT=1` prints how many requests each reset completed.
+
+**Verification (measured):** the same deck and tracker with the fixed binary, run I2 (1 node).
+
+| binary | regrids | live `PackAndSendMG` requests, max over ranks |
+|---|---|---|
+| old `d6e0071e` (I1, 24 ranks) | 10 / 20 / 40 / 80 / 113 | 1,863 / 3,663 / 7,215 / 14,170 / 19,935 |
+| fixed `4d14bb23` (I2, 12 ranks) | 0 → 66 | 110 → 132, no trend |
+
+- Old: ~176 leaked requests per regrid on the worst rank.
+- Fixed: all live requests from every site stay at 97-987 (rank 0: 97-637) over 66 regrids.
+  That is the normal in-flight level.
+- `ATHENA_MG_REQ_REPORT`: each regrid reset completes ~21 in-flight requests per MG
+  driver per rank. Those are exactly the handles the old code dropped.
+- Figure: `plots/overnight/r040_1_reqtrack.png`.
+- **Argued:** at Q4's 16-node L6 scale (more regrids, more neighbours per rank) the leak
+  reached 15-25k in ~5,800 cycles. The crash and the hang were its consequences. A long
+  L6 run is the real confirmation.

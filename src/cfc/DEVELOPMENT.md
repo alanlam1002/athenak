@@ -10310,3 +10310,16 @@ run's output times:
 - **Not attributed yet:** M2_t1 (old fill) and M2_t3 (corrected fill) stopped at t = 40.
   Proposed (OUTBOX C-039): a restart pair from t = 60.7 with the old and new binaries.
 - `scripts/t6_item6.py`; figures in `plots/phase2_m1/item6_L4*.png`.
+
+**R-043 diagnostic D (2026-10-11), measured:**
+- Restarts from item 6 L4 at t = 60.7 to 68:
+  - the old-fill binary heats identically, so the fill is not the cause;
+  - shock flag off: no heating;
+  - BH frame with the corrected fill (Q1 deck, t ≤ 80): no heating.
+- **Mechanism, from the `<mhd> dual_energy_diag` maps:**
+  - in the comoving frame the energy solution is +8% hot in K on average (+20-35% in the
+    surface rim) every step;
+  - flicker of the vcurv flag (sensor at 0.3-1× threshold) puts 3-8% of dense cells on the
+    energy branch;
+  - their K resync ratchets the tracer up; the second-law guard blocks the way back.
+- Fix candidates and a BH-frame map run: OUTBOX C-040.

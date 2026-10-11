@@ -36,13 +36,24 @@ BRANCH = ['not dense', 'entropy', 'entropy (guard)', 'entropy (floor/fail)', 'en
           'energy, no resync']
 
 
+_TS = {}
+
+
 def load(d, plane, n):
-    w = bc.read_binary(f'{d}/bin/{B}.prim_{plane}.{n:05d}.bin')
+    # prim_xy keeps the restart's output schedule; the new blocks start at the restart time,
+    # so xy pairs with the nearest prim dump (offset <= 0.25 M, recorded); yz matches exactly
     q = bc.read_binary(f'{d}/bin/{B}.dediag_{plane}.{n:05d}.bin')
-    g = np.asarray(w['mb_geometry'])
+    fp = sorted(glob.glob(f'{d}/bin/{B}.prim_{plane}.*.bin'))
+    ts = [bc.read_binary(f)['time'] for f in fp] if (d, plane) not in _TS else _TS[(d, plane)]
+    _TS[(d, plane)] = ts
+    w = bc.read_binary(fp[int(np.argmin(np.abs(np.array(ts) - q['time'])))])
+    g = np.asarray(q['mb_geometry'])
     rho = np.asarray(w['mb_data']['dens'])[:, 0]
     P = np.asarray(w['mb_data']['press'])[:, 0]
-    out = dict(t=w['time'], g=g, nx=w['nx1_out_mb'], rho=rho, K=P / rho**GAM / K0)
+    if rho.shape != np.asarray(q['mb_data']['de_branch'])[:, 0].shape:   # a regrid in between
+        rho = np.full(np.asarray(q['mb_data']['de_branch'])[:, 0].shape, np.nan); P = rho
+        g = np.asarray(q['mb_geometry'])
+    out = dict(t=q['time'], dt_prim=w['time'] - q['time'], g=g, nx=w['nx1_out_mb'], rho=rho, K=P / rho**GAM / K0)
     for k in ('de_branch', 'de_sensor', 'de_shock', 'de_ken_ktr', 'de_dk_resync', 'de_dtau',
               'de_src_kS', 'de_src_dalpha'):
         out[k] = np.asarray(q['mb_data'][k])[:, 0]
@@ -50,8 +61,8 @@ def load(d, plane, n):
 
 
 def census(s):
-    dense = s['rho'] > 0.1 * RHOC
     br = np.rint(s['de_branch']).astype(int)
+    dense = br > 0                       # D > dual_energy_rho_switch, as the switch sees it
     row = [s['t'], dense.sum()]
     for b in range(1, 6):
         row.append(((br == b) & dense).sum())
@@ -123,14 +134,15 @@ def main():
         cm = ListedColormap(['#222222', '#4575b4', '#91bfdb', '#fee090', '#d73027', '#7f0000'])
         for r, n in enumerate(pick):
             s = load(d, plane, n)
-            m, j, i = np.unravel_index(np.argmax(s['rho']), s['rho'].shape)
+            m, j, i = np.unravel_index(np.argmax(np.where(np.isfinite(s['rho']), s['rho'], -1) if np.isfinite(s['rho']).any()
+                                                 else s['de_branch'] * 0 + (s['de_branch'] > 0.5)), s['rho'].shape)
             g = s['g']; nx = s['nx']
             xc = g[m, 0] + (i + .5) * (g[m, 1] - g[m, 0]) / nx; yc = g[m, 2] + (j + .5) * (g[m, 3] - g[m, 2]) / nx
             view = ((xc - 1.6, xc + 1.6), (yc - 1.6, yc + 1.6))
-            dense = s['rho'] > 1e-3 * RHOC
+            dense = s['de_branch'] > 0.5
             K = np.where(dense, s['K'], np.nan)
             im = draw(ax[r, 0], s, K, view, vmin=0.9, vmax=2.0, cmap='magma'); plt.colorbar(im, ax=ax[r, 0])
-            ax[r, 0].set_title(f'{plane} t={s["t"]:.1f} K/K0')
+            ax[r, 0].set_title(f'{plane} t={s["t"]:.2f} K/K0 (ρ, K at {s["dt_prim"]:+.2f})')
             br = np.where(dense, s['de_branch'], np.nan)
             im = draw(ax[r, 1], s, br, view, vmin=-0.5, vmax=5.5, cmap=cm, interpolation='nearest')
             cb = plt.colorbar(im, ax=ax[r, 1], ticks=range(6)); cb.ax.set_yticklabels(BRANCH, fontsize=6)

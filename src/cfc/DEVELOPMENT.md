@@ -10027,7 +10027,7 @@ Residual against the analytic trumpet in BH-centred coordinates, 1.5 ≤ r_BH �
 |---|---|---|---|
 | static (x_BH = 0), t = 0-200 | 1.290e-4 | 3.454e-4 | 7.19e-5 |
 | ξ̇ = 0.25, x_BH +25 → −24, t = 0-196 | 1.29-1.31e-4 | 3.47-3.52e-4 | 7.18-7.27e-5 |
-| ξ̇ = 0.45, x_BH +45 → ..., t = 0-140+ | 1.29-1.30e-4 | 3.46-3.50e-4 | 7.18-7.25e-5 |
+| ξ̇ = 0.45, x_BH +45 → −45, t = 0-200 | 1.29-1.30e-4 | 3.46-3.50e-4 | 7.18-7.25e-5 |
 
 - The lapse minimum stays at the throat ring (offset 1.41-1.50 from x_BH, as static).
 - There is no NaN, through a restart (ξ̇ = 0.25 at t ≈ 98) and through grid-centre

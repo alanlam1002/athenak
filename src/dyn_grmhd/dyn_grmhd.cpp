@@ -120,6 +120,7 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
 
 DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     temperature("temperature",1,1,1,1,1),
+    de_diag("de_diag",1,1,1,1,1),
     pmy_pack(pp) {
   std::string rsolver = pin->GetString("mhd", "rsolver");
   if (rsolver.compare("llf") == 0) {
@@ -160,6 +161,9 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(temperature, nmb, 1, ncells3, ncells2, ncells1);
+    if (pin->GetOrAddBoolean("mhd", "dual_energy_diag", false)) {
+      Kokkos::realloc(de_diag, nmb, 8, ncells3, ncells2, ncells1);
+    }
   }
 }
 
@@ -590,6 +594,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
     ndim = 3;
   }
 
+  const bool ddon_ = eos.de_diag_on;
+  auto &dd_ = de_diag;
   par_for("coord_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     // Extract the metric and coordinate quantities.
@@ -692,6 +698,17 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
         rhs(m, IEN, k, j, i) += dt*vol*(alpha*adm.vK_dd(m, a, b, k, j, i)*S_uu[a][b] -
             g3u[imap[a][b]] * S_d[a]*dalpha_d[b]);
       }
+    }
+    if (ddon_) {
+      Real src_ks = 0.0, src_da = 0.0;
+      for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) {
+          src_ks += alpha*adm.vK_dd(m, a, b, k, j, i)*S_uu[a][b];
+          src_da -= g3u[imap[a][b]] * S_d[a]*dalpha_d[b];
+        }
+      }
+      dd_(m, 6, k, j, i) = src_ks;
+      dd_(m, 7, k, j, i) = src_da;
     }
 
     // Assemble momentum RHS

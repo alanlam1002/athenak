@@ -116,6 +116,9 @@ class DynGRMHD {
 
   // Storage for temperature
   DvceArray5D<Real> temperature;
+  // <mhd> dual_energy_diag: per-cell switch maps (PrimitiveSolverHydro::de_diag; output
+  // variable mhd_de_diag). 1x1 unless on.
+  DvceArray5D<Real> de_diag;
 
  protected:
   MeshBlockPack *pmy_pack;  // ptr to MeshBlockPack containing this Hydro
@@ -139,7 +142,18 @@ template<class EOSPolicy, class ErrorPolicy>
 class DynGRMHDPS : public DynGRMHD {
  public:
   DynGRMHDPS(MeshBlockPack *ppack, ParameterInput *pin) :
-      DynGRMHD(ppack, pin), eos("mhd", ppack, pin) {}
+      DynGRMHD(ppack, pin), eos("mhd", ppack, pin) {
+    if (de_diag.extent_int(1) > 1) {
+      if (!eos.de_on) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<mhd> dual_energy_diag needs dual_energy = true"
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      eos.de_diag = de_diag;
+      eos.de_diag_on = true;
+    }
+  }
   virtual ~DynGRMHDPS() {}
 
   // Dynamical EOS

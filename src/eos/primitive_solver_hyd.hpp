@@ -168,6 +168,18 @@ class PrimitiveSolverHydro {
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
   Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
+  // <mhd> dual_energy_diag (default false; research R-041 item 1a): per-cell maps of the
+  // switch, set by DynGRMHDPS when on (a view of DynGRMHD::de_diag), from the last C2P
+  // call (and the last coord_src call for 6-7):
+  //   0 branch: 0 not dense, 1 entropy (unflagged), 2 entropy (second-law guard),
+  //     3 entropy (floor/C2P failure), 4 energy + K resync, 5 energy, no resync
+  //   1 shock sensor / its threshold (div v ignored)   2 final shock flag (0/1)
+  //   3 K_energy/K_tracer - 1 (dense B = 0 cells with a good energy solution)
+  //   4 K resync on the energy branch, K_new/K_tracer - 1   5 entropy-branch dtau/D
+  //   6 alpha K_ij S^ij   7 -S^a d_a alpha   (the tau source terms, undensitized)
+  static constexpr int kNDEDiag = 8;
+  bool de_diag_on = false;
+  DvceArray5D<Real> de_diag;
   // <mhd> atmosphere_frame_velocity (default false; research R-028 E1, a test): give
   // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
   // instead of v = 0, so the atmosphere is at rest on a comoving grid.
@@ -527,6 +539,8 @@ class PrimitiveSolverHydro {
     const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
     const bool de_2law_ = de_second_law;
     const Real de_2tol_ = de_second_law_tol;
+    const bool ddon_ = de_on_ && de_diag_on;
+    auto &dd_ = de_diag;
     if (de_on_) {
       int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
       if (de_shock.extent_int(0) != prim.extent_int(0) || de_shock.extent_int(1) != e3 ||
@@ -592,6 +606,20 @@ class PrimitiveSolverHydro {
           weak = (psiv > wk*vcsh*cs0) || (psip > wk*psijp);
         }
         shk(m, k, j, i) = (divv <= 0.0) ? (sh ? 2 : (weak ? 1 : 0)) : 0;
+        if (ddon_) {
+          Real ratio;
+          if (sensor == 0) {
+            ratio = dpmax/dpsh;
+          } else if (sensor == 1) {
+            ratio = psip/psish;
+          } else {
+            Real rho0 = prim(m, IDN, k, j, i);
+            Real h0 = 1.0 + gam_/(gam_ - 1.0)*p0/fmax(rho0, 1.0e-300);
+            Real cs0 = sqrt(fmax(gam_*p0/(fmax(rho0, 1.0e-300)*h0), 1.0e-300));
+            ratio = fmax(psiv/(vcsh*cs0), psip/psijp);
+          }
+          dd_(m, 1, k, j, i) = ratio;
+        }
       });
       // optional dilation: a shock is smeared over ~3 cells but the sensor peaks on the
       // central ones (item 72), so also put the face neighbours on the energy branch
@@ -851,6 +879,13 @@ class PrimitiveSolverHydro {
           const bool bad = result.prim_floor ||
                            (result.error != Primitive::Error::SUCCESS);
           bool use_ent = dense && bzero && (de_shock_(m,k,j,i) == 0 || bad);
+          int dbr = !dense ? 0 : (use_ent ? (bad ? 3 : 1) : 4);
+          Real dken = 0.0, ddk = 0.0, ddtau = 0.0;
+          if (ddon_ && dense && bzero && !bad) {
+            Real rho_e = prim_pt[PRH]*mb;
+            Real k_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
+            dken = prim_pt[PPR]/pow(rho_e, de_gamma_)/fmax(k_tr, 1.0e-300) - 1.0;
+          }
           if (use_ent && !bad && de_eta1_ > 0.0) {
             // optional energy-ratio gate: entropy only where eps is a small part of tau
             Real eps = prim_pt[PPR]/((de_gamma_ - 1.0)*prim_pt[PRH]*mb);
@@ -861,7 +896,7 @@ class PrimitiveSolverHydro {
             Real rho_e = prim_pt[PRH]*mb;
             Real k_en = prim_pt[PPR]/pow(rho_e, de_gamma_);
             Real k_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
-            if (k_en <= k_tr*(1.0 + de_2tol_)) use_ent = true;
+            if (k_en <= k_tr*(1.0 + de_2tol_)) { use_ent = true; dbr = 2; }
           }
           if (use_ent) {
             Real K = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
@@ -890,10 +925,12 @@ class PrimitiveSolverHydro {
                 dede_r += (tau_new - cons_pt_old[CTA])*sdetg*dvol;
                 nent_r += 1.0;
               }
+              ddtau = (tau_new - cons_pt_old[CTA])/D;
               cons_pt[CTA] = tau_new;
               de_write = true;
             } else {
               use_ent = false;
+              dbr = dense ? 4 : 0;
             }
           }
           if (!use_ent && !(dense && bad)) {
@@ -901,11 +938,25 @@ class PrimitiveSolverHydro {
             Real rho_ = prim_pt[PRH]*mb;
             Real yk = (rho_ > 0.0) ?
                       DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_) : 0.0;
+            if (dense) { dbr = 4; }   // also covers the de_eta1 gate
+            if (ddon_ && dense) {
+              Real k_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
+              ddk = DualEnergyK(yk, de_kmax_, de_ypow_)/fmax(k_tr, 1.0e-300) - 1.0;
+            }
             prim_pt[PYF + de_idx_] = yk;
             cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
             de_write = true;
+          } else if (!use_ent && dense) {
+            dbr = 5;
           }
           if (interior && dense) { nden_r += 1.0; }
+          if (ddon_) {
+            dd_(m, 0, k, j, i) = dbr;
+            dd_(m, 2, k, j, i) = de_shock_(m, k, j, i);
+            dd_(m, 3, k, j, i) = dken;
+            dd_(m, 4, k, j, i) = ddk;
+            dd_(m, 5, k, j, i) = ddtau;
+          }
         }
 
         // Regardless of failure, we need to copy the primitives.

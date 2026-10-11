@@ -97,6 +97,7 @@ def cells(fn, rcut=3.0, nscal=1):
     w = np.array([x1max - x1min, x2max - x2min, x3max - x3min])
     lo = np.array([x1min, x2min, x3min])
     Es, EBs, dMs, rhos, Ps = [], [], [], [], []
+    Xs, Ys, Zs, Vx, Vy, Vz = [], [], [], [], [], []
     s = slice(ng, ng + nx)
     ic = (np.arange(nx) + 0.5)
     for b in range(nmb):
@@ -137,9 +138,17 @@ def cells(fn, rcut=3.0, nscal=1):
         EBs.append(h * ut_neg - 1.0)
         dMs.append(cons[0][ok] * dx.prod())
         rhos.append(rho); Ps.append(P)
+        Xs.append(X[ok]); Ys.append(Y[ok]); Zs.append(Z[ok])
+        # Eulerian 3-velocity v^i = gamma^ij u_j / W, u_j = S_j/(D h)
+        uj = [Sx[ok] / (D * h), Sy[ok] / (D * h), Sz[ok] / (D * h)]
+        gi = [[ixx[ok], ixy[ok], ixz[ok]], [ixy[ok], iyy[ok], iyz[ok]], [ixz[ok], iyz[ok], izz[ok]]]
+        Vx.append(sum(gi[0][j] * uj[j] for j in range(3)) / W)
+        Vy.append(sum(gi[1][j] * uj[j] for j in range(3)) / W)
+        Vz.append(sum(gi[2][j] * uj[j] for j in range(3)) / W)
     cat = np.concatenate
     return dict(t=t['time'], E=cat(Es), EB=cat(EBs), dM=cat(dMs), rho=cat(rhos), P=cat(Ps),
-                par=t['par'])
+                par=t['par'], x=cat(Xs), y=cat(Ys), z=cat(Zs), vx=cat(Vx), vy=cat(Vy),
+                vz=cat(Vz))
 
 
 def hist(E, dM, dE, edges):

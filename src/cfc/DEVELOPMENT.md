@@ -9990,3 +9990,78 @@ restart (debug-scaling job 8919113). Measured unless marked argued.
 owner without a count change was solved with stale spacing for some cycles after
 regrids. The size of the effect is untested. The ReinitializeMetricForAMR deltas stayed
 small (max|δψ − guess| ~1e-6). A rerun with the fix is needed to quantify it.
+
+## 75. Phase 2 Milestone 1: the moving puncture (comoving gauge with a BH), no star
+
+User-approved (research R-034/R-038 M1: development + ≤ 2-node debug). athenak `2a540573` +
+`66a783df`; design in `code/COMOVING_GAUGE_DESIGN.md` §2.1.
+
+**What is built:**
+- `<cfc> puncture_moving` (default false), `puncture_x1/2/3` = x_BH(0).
+  - The puncture sits at x_BH(t) = x_BH(0) − ξ(t), with ξ(t) analytic from
+    `frame_vel/frame_accel`. So x_BH is restored exactly on restart (test 1c's bitwise
+    part holds by construction).
+  - The old guard (item 73 addendum) now refuses frame_vel + puncture only without
+    `puncture_moving`.
+- **Background:** `FillPunctureBackground(..., xbh)` evaluates the static trumpet at
+  x − x_BH. That is exact in the comoving gauge: γ, α and K_ij are translated, and β gains
+  the uniform ξ̇ that AssembleLapseShiftK already adds.
+  - It is refilled once per solve (`RefillMovingPuncture` at the top of SolveVecXTask), at
+    the solve's stage time. With si = 1 that is once per cycle: the same lag as every CFC
+    field (|ξ̇|·dt ≤ 0.02 M).
+- **The multigrid per-level puncture coefficients** (`FillPunctureCoefficients` in
+  mg_cfc_conformal_factor/mg_cfc_lapse) take the centre via `SetPunctureCenter`.
+  - **Without this the first attempt diverged at initialisation** (max|δψ| = 1.8e308):
+    the coarse levels kept the BH at the origin.
+- **Also follow x_BH:**
+  - the ADM outer-BC falloff centre (`padm->bc_center`);
+  - TDERefineTracker's BH box.
+  - The lapse-based excision mask follows α automatically.
+- `<problem> star_enabled = false` (dyngr_tov) gives a floor atmosphere at rest, for the
+  vacuum tests.
+
+**Test 1a** (vacuum trumpet, BH box L4, dt_skip_excised; `scripts/m1_vacuum.py`).
+Residual against the analytic trumpet in BH-centred coordinates, 1.5 ≤ r_BH ≤ 8, α > 0.3:
+
+| run | max\|Δα\| | max\|Δψ⁴\|/ψ⁴ | max\|Δβ\| (β − β_P − ξ̇) |
+|---|---|---|---|
+| static (x_BH = 0), t = 0-200 | 1.290e-4 | 3.454e-4 | 7.19e-5 |
+| ξ̇ = 0.25, x_BH +25 → −24, t = 0-196 | 1.29-1.31e-4 | 3.47-3.52e-4 | 7.18-7.27e-5 |
+| ξ̇ = 0.45, x_BH +45 → ..., t = 0-140+ | 1.29-1.30e-4 | 3.46-3.50e-4 | 7.18-7.25e-5 |
+
+- The lapse minimum stays at the throat ring (offset 1.41-1.50 from x_BH, as static).
+- There is no NaN, through a restart (ξ̇ = 0.25 at t ≈ 98) and through grid-centre
+  crossing.
+- **Constraint proxies are not decisive:**
+  - the CFC residual-volume I_A (Â² − Â0²)/ψ⁷ jumps to ~−1e-3 and fluctuates, against
+    −3e-7 static. Argued: Â² from the previous solve against Â0² refilled at the new
+    x_BH, i.e. a one-step offset near the steep throat;
+  - the ADM-mass surface integral is centred on the origin.
+  - BH-centred, time-consistent versions are needed. The Hamiltonian and momentum
+    constraints are not output.
+
+**Test 1b** (ξ̇ = 0.45, t ≤ 20; dt mean over 5 < t ≤ 20; the BH frame with the star gives
+0.044 without skip and 0.062 with it):
+
+| BH-box level | dt, no skip | dt, skip | max\|Δψ⁴\|/ψ⁴ |
+|---|---|---|---|
+| L4 | 0.0246 | 0.0343 | 3.5e-4 |
+| L3 | 0.0499 | 0.0670 | 8.2e-4 (2.4×) |
+| L2 | 0.1025 | 0.1279 | 3.2e-3 (9×) |
+
+- These match R-033's argued estimates (0.024-0.030 / 0.05-0.06 / 0.10-0.12).
+- At each level the moving residual equals its own t = 0 value, so moving adds no error;
+  accuracy is set by the box resolution.
+- **Go criterion (dt ≥ ~0.05 with 1a intact): met at L3** (0.050-0.067, 2.4× the L4
+  background error) **and at L2** (0.10-0.13, 9×).
+- Not measured: whether L3/L2 background accuracy suffices with a star (accretion,
+  excision flux).
+
+**Test 1c:**
+- x_BH and ξ are analytic in t, so bitwise on restart by construction.
+- Evolution across a restart: the ξ̇ = 0.25 residuals are continuous through t ≈ 98.
+- An overlapping un-restarted run was not done, so agreement within the E2 floor is not
+  measured.
+
+**Not built** (Milestone 2): the ξ̇ controller, per-stage background refill for si > 1,
+per-stage moving excision for the fixed/horizon schemes, and the star.

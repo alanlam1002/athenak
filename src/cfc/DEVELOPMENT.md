@@ -10170,6 +10170,13 @@ with the flag on, against Q1 and the N5 noise floor).
   without the BSSN → xCFC conversion.
 - So the Fortran is right and this is a porting convention mismatch;
   `puncture_ahat_conformal = true` is the correct physics.
+- **Made unconditional (user decision, 2026-10-11):** `TrumpetBackground` now always applies
+  ψ⁶ and ψ¹²; the `puncture_ahat_conformal` flag and its plumbing are removed (binary
+  `704e08d0`).
+  - A deck that still sets the key is harmless; the key is simply unused.
+  - Runs built before this commit (Q1-Q6, N5, V-series; item 6's `7db49263`) have the old
+    fill.
+  - The star-test result is recorded below when it is measured.
 
 ## 78. Phase 2 Milestone 2: the ξ̇ controller and a star in the comoving gauge
 
@@ -10262,11 +10269,3 @@ run's output times:
 - restart reproducibility is within the E2 floor;
 - a 40 M comoving TDE segment ran with no NaN, core K held to 0.6% and puffing 14× below
   Q1.
-- **Made unconditional (user decision, 2026-10-11):** `TrumpetBackground` now always applies
-  ψ⁶ and ψ¹²; the `puncture_ahat_conformal` flag and its plumbing are removed (binary
-  `704e08d0`).
-  - A deck that still sets the key is harmless; the key is simply unused.
-  - Runs built before this commit (Q1-Q6, N5, V-series; item 6's `7db49263`) have the old
-    fill.
-  - The star-test result is recorded below when it is measured.
-

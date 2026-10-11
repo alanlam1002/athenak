@@ -192,6 +192,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   zla_face_eq = pin->GetOrAddBoolean("mhd", "zla_face_eq", false);
   zla_relax_all_stages = pin->GetOrAddBoolean("mhd", "zla_relax_all_stages", false);
   zla_face_dev = pin->GetOrAddBoolean("mhd", "zla_face_dev", false);
+  scalar_flux_hll = pin->GetOrAddBoolean("mhd", "scalar_flux_hll", false);
   fofc_count_diag = pin->GetOrAddBoolean("mhd", "fofc_count_diag", false);
   fofc_count_rho_lo = pin->GetOrAddReal("mhd", "fofc_count_rho_lo", 0.0);
   fofc_count_rho_hi = pin->GetOrAddReal("mhd", "fofc_count_rho_hi",

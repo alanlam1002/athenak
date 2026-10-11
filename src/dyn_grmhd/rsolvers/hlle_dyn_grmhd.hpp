@@ -131,7 +131,7 @@ void HLLE_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eos,
      const int nhyd, const int nscal,
      const adm::ADM::ADM_vars& adm,
      const DvceArray5D<Real> &flx, const DvceArray4D<Real> &ey,
-     const DvceArray4D<Real> &ez) {
+     const DvceArray4D<Real> &ez, const bool hll_scal = false) {
     constexpr int ibx = ivx - IVX;
     constexpr int iby = ((ivx - IVX) + 1)%3;
     constexpr int ibz = ((ivx - IVX) + 2)%3;
@@ -266,6 +266,25 @@ void HLLE_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eos,
     // function, ensuring that the result is entirely consistent.
     ey(m, k, j, i) = -vol * bf_interface[iby];
     ez(m, k, j, i) = vol * bf_interface[ibz];
+
+    // <mhd>/scalar_flux_hll: HLL flux of D*Y with the same wave speeds and branch as D,
+    // instead of the caller's upwind F_D*Y (which is inconsistent with HLLE's D flux at
+    // contacts; RESULTS 20). A uniform Y still gives exactly F_D*Y.
+    if (hll_scal) {
+      for (int n = 0; n < nscal; n++) {
+        const Real yl = wl(m, nhyd + n, k, j, i), yr = wr(m, nhyd + n, k, j, i);
+        Real fs;
+        if (lambda_l >= 0.) {
+          fs = fl[CDN]*yl;
+        } else if (lambda_r <= 0.) {
+          fs = fr[CDN]*yr;
+        } else {
+          fs = ((lambda_r*fl[CDN]*yl - lambda_l*fr[CDN]*yr) +
+                qa*(cons_r[CDN]*yr - cons_l[CDN]*yl)) * qb;
+        }
+        flx(m, nhyd + n, k, j, i) = vol * fs;
+      }
+    }
 }
 
 } // namespace dyngr

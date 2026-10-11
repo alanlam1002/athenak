@@ -187,6 +187,10 @@ class DynGRMHD {
   // reconstruction input (w0 with the scalars replaced by dY); allocated on first use.
   bool zla_face_dev;
   DvceArray5D<Real> wdev;
+  // <mhd>/scalar_flux_hll (default false = upwind F_D*Y_upwind): with rsolver = hlle, take
+  // each scalar flux as the HLL flux of D*Y (same wave speeds as D). FOFC first-order
+  // fallback faces keep the upwind form.
+  bool scalar_flux_hll;
   Real zla_relax_heat = 0.0;
   // <mhd>/fofc_count_diag (default false): read-only FOFC activation counters, cumulative
   // cell-stage counts on this rank: [0] hydro cells flagged by the D/tau maximum principle,

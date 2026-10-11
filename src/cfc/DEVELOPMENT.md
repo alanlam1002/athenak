@@ -10120,6 +10120,46 @@ request with the address that created it):
   reached 15-25k in ~5,800 cycles. The crash and the hang were its consequences. A long
   L6 run is the real confirmation.
 
+## 77. The trumpet background's Ahat0 lacks psi^6 (stored K_ij low by psi^6)
+
+Found by research R-040 item 2a (`scripts/m1_constraints.py`); athenak `4d14bb23`.
+
+**Measured**, with three independent checks agreeing to 0.1-0.3% at r = 4, 8, 15: in every
+puncture run the stored `adm.vK_dd` = ψ⁻⁶ × the true K_ij.
+- vs the analytic trumpet's K^r_r;
+- vs K_ij = (1/2α) L_β γ_ij from the code's own α, β, ψ;
+- vs the momentum constraint, which closes only for K_ij = ψ⁶ vK_dd.
+
+**Cause:**
+- `TrumpetBackground` fills `Aij0` = (3√3/4)(M²/R³)(δ_ij − 3n_in_j) and
+  `a2` = 10.125 M⁴/R⁶: the maximal trumpet's mixed K^i_j and K_ijK^ij.
+- The xCFC variables are Â^ij = ψ¹⁰K^ij = ψ⁶K^i_j and Â² = ψ¹²K_ijK^ij, which
+  `AssembleLapseShiftK` (K_ij = ψ⁻²Â_ij) and the ψ/α equations (Â²ψ⁻⁷, Â²ψ⁻⁸) assume.
+- **Invisible in vacuum:** the background enters the δψ/δ(αψ) equations only as
+  Â0²(ψ⁻⁷ − ψ0⁻⁷), which is zero at δψ = 0.
+
+**Affects** (from the code; size not measured):
+- the hydro energy source α vK_dd S^ij (`dyn_grmhd.cpp`), low by ψ⁻⁶ ≈ 0.5/0.7/0.8 at
+  r = 4/8/15;
+- the BH–matter cross terms in the ψ, α and β solves.
+
+**Fix:** `<cfc> puncture_ahat_conformal = true` multiplies `Aij0` by ψ⁶ and `a2` by ψ¹² in
+`TrumpetBackground`. That covers all six call sites: the mesh fill and both multigrid
+drivers' per-level coefficients (`SetPunctureAhatConformal`).
+- **Default false,** so existing decks are bit-for-bit unchanged. ψ0¹² diverges at the
+  puncture, which needed a test.
+
+**Validation in vacuum** (K77_vac_static: the M1 static trumpet with the flag, t ≤ 20,
+1 node). Measured with `m1_constraints.py`:
+- the stored K now satisfies the momentum constraint as stored (relative 1.6-1.9e-3;
+  0.03-0.12 with the old fill);
+- H/|R| equals the old run's ψ⁶-corrected values in every shell (0.10 / 0.48 / 0.98);
+- ψ is unchanged (ADM mass minus analytic at r = 6: −7.83e-4 vs −7.92e-4);
+- the multigrid converged normally near the puncture; no NaN.
+
+**Not yet measured:** the effect on a star (proposed: Q1 from t = 121.5 through periapsis
+with the flag on, against Q1 and the N5 noise floor).
+
 ## 78. Phase 2 Milestone 2: the ξ̇ controller and a star in the comoving gauge
 
 User-approved (research R-040 item 4: development + ≤ 2-node debug tests). athenak
@@ -10193,4 +10233,21 @@ x = −30; track ρ > 0.1 ρ_c within 3 M; τ_x = 20, τ_a = 2; comoving atmosph
     Argued: the BH-frame "drag" (periapsis 6.8 achieved for 10 designed) is grid-advection
     error.
 
-**Test 6** (restart reproducibility) and the K_ij flag (item 77): below, when measured.
+**Test 6, restart reproducibility** (M2_t1r: M2_t1 restarted from cycle 400, t = 23.17, to
+t = 40; 1 node). Measured against the uninterrupted run, interpolated to the restarted
+run's output times:
+- first output after the restart: ρ_max differs by 1.6e-10; ξ by 6.6e-6;
+- over t = 23-40: ρ_max ≤ 4e-8 (relative 1.3e-4), ξ̇ ≤ 1.9e-5, ξ ≤ 8.8e-6, centroid offset
+  ≤ 6e-5 M. All far inside the E2 floor (ρ_max ~5e-4 after a few cycles).
+- **Not bitwise** in that run: the restart carried the controller state at 6 digits.
+  `4d14bb23`'s precision edit had landed in `SetInteger`; fixed in `dc3ee7f2`, with
+  SetReal writing max_digits10.
+  - The first-row ξ difference equals that truncation.
+  - Argued: with 17 digits, a double round-trips exactly, so the restored state is now
+    bitwise by construction.
+
+**Item 4 debug tests: pass.**
+- the controller holds the star (|V'| ≤ 3e-5, offset ≤ 7e-4 M over 40 M);
+- restart reproducibility is within the E2 floor;
+- a 40 M comoving TDE segment ran with no NaN, core K held to 0.6% and puffing 14× below
+  Q1.

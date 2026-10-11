@@ -154,7 +154,12 @@ void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
   // Ahat^ij = psi^10 K^ij = psi^6 K^i_j (flat-lowered Ahat_ij = Ahat^ij) and
   // Ahat^2 = psi^12 K_ij K^ij, as AssembleLapseShiftK's K_ij = psi^-2 Ahat_ij and the psi/alpha
   // equations' Ahat^2 psi^-7 / psi^-8 terms assume (DEVELOPMENT.md item 77).
-  const Real p6 = psi*psi*psi*psi*psi*psi;
+  // psi^6 diverges as (1.5 M/r)^3 at the puncture; a multigrid coarse-cell centre can sit on
+  // it (r = 1e-15 after the guard above), where psi^12 ~ 1e92 overflowed the psi solve. Cap
+  // the factor at its value at r_iso = 0.3 M (alpha ~ 0.12, about half the alpha < 0.25
+  // excision radius): exact wherever matter evolves, bounded inside the excised throat.
+  constexpr Real kPsi6Max = 163.0407655498103;   // (R/r)^3 at r_iso = 0.3 M
+  const Real p6 = fmin(psi*psi*psi*psi*psi*psi, kPsi6Max);
   for (int a = 0; a < 6; ++a) { Aij0[a] *= p6; }
   *a2 *= p6*p6;
 }

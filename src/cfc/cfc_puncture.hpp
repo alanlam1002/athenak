@@ -102,8 +102,7 @@ Real TrumpetIsoToAreal(Real chi_cell) {
 KOKKOS_INLINE_FUNCTION
 void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
                        Real *psi0, Real *alpha0, Real beta0[3], Real Aij0[6], Real *a2,
-                       Real *dpsi0 = nullptr, Real *dalpha0 = nullptr,
-                       bool ahat_conformal = false) {
+                       Real *dpsi0 = nullptr, Real *dalpha0 = nullptr) {
   // Epsilon-guarded (matches the +1.0e-30 convention used elsewhere, e.g.
   // multigrid_driver.cpp's mg_robin branches): r feeds every division below
   // (psi0, dpsi0, dalpha0, and r2 for beta0/Aij0), and while a fine-grid cell
@@ -149,17 +148,15 @@ void TrumpetBackground(Real m_bh, Real x1, Real x2, Real x3, Real r_sch,
   Aij0[5] = aij_amp*(-3.0*x2*x3/r2);
 
   *a2 = 10.125*m_bh*m_bh*m_bh*m_bh / (r_sch*r_sch*r_sch*r_sch*r_sch*r_sch);
-  // Aij0 and a2 above are the trumpet's mixed K^i_j and K_ij K^ij. The xCFC variables are
+  // Aij0 and a2 above are the trumpet's mixed K^i_j and K_ij K^ij, which is what SACRA's
+  // mod_bh.f90 returns: there they are stored as the BSSN conformal Atilde_ij = psi^-4 K_ij
+  // (= K^i_j for this conformally flat slice). The xCFC variables here are
   // Ahat^ij = psi^10 K^ij = psi^6 K^i_j (flat-lowered Ahat_ij = Ahat^ij) and
-  // Ahat^2 = psi^12 K_ij K^ij: AssembleLapseShiftK's K_ij = psi^-2 Ahat_ij and the
-  // psi/alpha equations' Ahat^2 psi^-7 / psi^-8 terms assume that. <cfc>
-  // puncture_ahat_conformal (default false = the historical fill, K_ij low by psi^6;
-  // DEVELOPMENT.md item 77) applies the factors.
-  if (ahat_conformal) {
-    const Real p6 = psi*psi*psi*psi*psi*psi;
-    for (int a = 0; a < 6; ++a) { Aij0[a] *= p6; }
-    *a2 *= p6*p6;
-  }
+  // Ahat^2 = psi^12 K_ij K^ij, as AssembleLapseShiftK's K_ij = psi^-2 Ahat_ij and the psi/alpha
+  // equations' Ahat^2 psi^-7 / psi^-8 terms assume (DEVELOPMENT.md item 77).
+  const Real p6 = psi*psi*psi*psi*psi*psi;
+  for (int a = 0; a < 6; ++a) { Aij0[a] *= p6; }
+  *a2 *= p6*p6;
 }
 
 //----------------------------------------------------------------------------------------
@@ -206,8 +203,7 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                             DvceArray5D<Real> &a0_sq,
-                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0,
-                            bool ahat_conformal = false);
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0);
 
 }  // namespace cfc
 

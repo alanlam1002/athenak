@@ -304,7 +304,6 @@ class CFC {
   // adm.beta_u is padm->frame_vel_u.
   Real frame_vel0_[3], frame_accel_[3];
   bool puncture_moving_ = false;    // <cfc> puncture_moving (Phase 2 M1)
-  bool puncture_ahat_conf_ = false; // <cfc> puncture_ahat_conformal (item 77)
   Real xbh0_[3] = {0.0, 0.0, 0.0};  // <cfc> puncture_x1/2/3: x_BH at t = 0
   bool frame_enabled_;
   bool frame_assembled_;   // padm->frame_vel_u reflects adm.beta_u (false until the

@@ -287,9 +287,7 @@ void MGCFCLapse::CalculateFASRHSPack() {
 //! version also keeps alpha0 (which the psi-side version discards) to build
 //! channel 5.
 
-void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3],
-                                     bool ahat_conformal) {
-  const bool ac = ahat_conformal;
+void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3]) {
   const Real xb0 = xbh[0], xb1 = xbh[1], xb2 = xbh[2];
   int is = ngh_, js = ngh_, ks = ngh_;
   int nmmb = nmmb_;
@@ -328,7 +326,7 @@ void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3],
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
         cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
-                               beta0, aij0, &a2, nullptr, nullptr, ac);
+                               beta0, aij0, &a2);
         cm_h(m,3,k,j,i) = psi0;
         cm_h(m,4,k,j,i) = a2;
         cm_h(m,5,k,j,i) = alpha0*psi0;
@@ -349,7 +347,7 @@ void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3],
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
         cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
-                               beta0, aij0, &a2, nullptr, nullptr, ac);
+                               beta0, aij0, &a2);
         cm_d(m,3,k,j,i) = psi0;
         cm_d(m,4,k,j,i) = a2;
         cm_d(m,5,k,j,i) = alpha0*psi0;
@@ -376,8 +374,7 @@ void MGCFCLapse::FillPunctureCoefficients(Real m_bh, const Real xbh[3],
     Real r = std::sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
     Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
     Real psi0, alpha0, beta0[3], aij0[6], a2;
-    cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0, beta0, aij0, &a2,
-                           nullptr, nullptr, ahat_conformal);
+    cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0, beta0, aij0, &a2);
     printf("CFC debug lapse: coarsest-level (x1,x2,x3)=(%.6e,%.6e,%.6e) "
            "coeff psi0=%.17e a0_sq=%.17e v0=%.17e | hand psi0=%.17e a0_sq=%.17e "
            "v0=%.17e\n", x1v, x2v, x3v,
@@ -508,10 +505,8 @@ void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // psi0=1/Ahat0^2=0/alpha0*psi0=1 there (restriction of a uniform field is a
   // no-op).
   if (puncture_enabled_) {
-    static_cast<MGCFCLapse*>(mglevels_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_,
-                                                       puncture_ahat_conf_);
-    static_cast<MGCFCLapse*>(mgroot_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_,
-                                                       puncture_ahat_conf_);
+    static_cast<MGCFCLapse*>(mglevels_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_);
+    static_cast<MGCFCLapse*>(mgroot_)->FillPunctureCoefficients(puncture_mass_, puncture_xbh_);
   }
 
   SetupMultigrid(dt, false);

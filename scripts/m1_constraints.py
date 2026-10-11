@@ -18,7 +18,9 @@ constraint, which vanishes only for K^j_i = psi^2 vK_dd). The puncture backgroun
 (cfc_puncture.hpp TrumpetBackground) fills Ahat0_ij with the mixed K^i_j, not
 Ahat_ij = psi^6 K^i_j, and AssembleLapseShiftK writes vK_dd = psi^-2 Ahat_ij. So the
 constraints are reported both with vK_dd as K_ij ("as stored", what the hydro source uses)
-and with K_ij = psi^6 vK_dd ("fixed", which measures the moving-puncture solve). Relative norms:
+and with K_ij = psi^6 vK_dd ("fixed", which measures the moving-puncture solve).
+FIXED in athenak 2026-10-11 (DEVELOPMENT.md item 77): TrumpetBackground now applies psi^6/psi^12,
+so for runs from that build on, "as stored" is the true K_ij and the "fixed" columns double-count. Relative norms:
 H / |R| and |M| / sum |d_j K^j_i|.
 
 Norms in BH-centred shells r_BH in [3,6], [6,12], [12,24] (x_BH = puncture_x1 - frame_vel1 t

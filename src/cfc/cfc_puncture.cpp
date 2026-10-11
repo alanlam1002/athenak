@@ -19,8 +19,7 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
                             AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                             AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
                             DvceArray5D<Real> &a0_sq,
-                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0,
-                            bool ahat_conformal) {
+                            AthenaTensor<Real, TensorSymm::NONE, 3, 1> &grad_ap6_0) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;
@@ -35,7 +34,6 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
   // A translated static trumpet is exact in the comoving gauge (design §2.1).
   const Real xb0 = xbh[0], xb1 = xbh[1], xb2 = xbh[2];
 
-  const bool ac = ahat_conformal;
   par_for("cfc_fill_puncture_background", DevExeSpace(), 0, nmb-1, ksg, keg, jsg, jeg,
   isg, ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -49,7 +47,7 @@ void FillPunctureBackground(MeshBlockPack *pmbp, Real m_bh, const Real xbh[3],
 
     Real psi0, alpha0, beta0[3], Aij0[6], a2, dpsi0, dalpha0;
     TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0, beta0, Aij0, &a2,
-                      &dpsi0, &dalpha0, ac);
+                      &dpsi0, &dalpha0);
 
     u_psi0(m,0,k,j,i) = psi0;
     u_alpha0_psi0(m,0,k,j,i) = alpha0*psi0;

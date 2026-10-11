@@ -76,7 +76,7 @@ class MGCFCLapse : public Multigrid {
   // except this version also keeps alpha0 (which the psi-side version discards) to
   // build channel 5. Octet-refined patches are NOT touched here (still restricted
   // the old way), same Phase C deferral as the psi-side version.
-  void FillPunctureCoefficients(Real m_bh, const Real xbh[3], bool ahat_conformal);
+  void FillPunctureCoefficients(Real m_bh, const Real xbh[3]);
 };
 
 
@@ -87,8 +87,6 @@ class MGCFCLapse : public Multigrid {
 class MGCFCLapseDriver : public MultigridDriver {
   public:
   void SetPunctureCenter(const Real x[3]) { for (int a = 0; a < 3; ++a) puncture_xbh_[a] = x[a]; }
-  // <cfc> puncture_ahat_conformal (see cfc_puncture.hpp TrumpetBackground)
-  void SetPunctureAhatConformal(bool b) { puncture_ahat_conf_ = b; }
     MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin);
     ~MGCFCLapseDriver();
 
@@ -145,7 +143,6 @@ class MGCFCLapseDriver : public MultigridDriver {
     bool puncture_enabled_;
     Real puncture_mass_;
     Real puncture_xbh_[3] = {0.0, 0.0, 0.0};  // moving puncture centre (Phase 2 M1)
-    bool puncture_ahat_conf_ = false;
 
  public:
   //! \brief Update the puncture mass mid-run (CFC accretes swallowed matter into the

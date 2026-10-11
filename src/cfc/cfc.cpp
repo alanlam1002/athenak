@@ -307,11 +307,6 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     xbh0_[a] = pin->GetOrAddReal("cfc", "puncture_x" + std::to_string(a + 1), 0.0);
   }
   puncture_mass_ = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
-  // <cfc> puncture_ahat_conformal (default false): the trumpet's Ahat0_ij/Ahat0^2 with
-  // the psi^6/psi^12 factors (cfc_puncture.hpp TrumpetBackground; DEVELOPMENT.md item 77)
-  puncture_ahat_conf_ = pin->GetOrAddBoolean("cfc", "puncture_ahat_conformal", false);
-  pmgd_psi->SetPunctureAhatConformal(puncture_ahat_conf_);
-  pmgd_alpha->SetPunctureAhatConformal(puncture_ahat_conf_);
   // Phase 2 M2 xidot controller (see cfc.hpp). Parsed here, before the puncture fill
   // below, because a restart's x_BH comes from the restored xi.
   frame_ctrl_ = pin->GetOrAddBoolean("cfc", "frame_controller", false);
@@ -411,7 +406,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       }
     }
     FillPunctureBackground(pmbp, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
+                           a0_dd, a0_sq, grad_ap6_0);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
@@ -1155,7 +1150,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     Real xbh[3];
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
+                           a0_dd, a0_sq, grad_ap6_0);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   }
 
@@ -1934,7 +1929,7 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     Real xbh[3];
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                           a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
+                           a0_dd, a0_sq, grad_ap6_0);
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 
     // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
@@ -2591,7 +2586,7 @@ void CFC::RefillMovingPuncture(Real t) {
   BHPosition(t, xbh);
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
   FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
-                         a0_dd, a0_sq, grad_ap6_0, puncture_ahat_conf_);
+                         a0_dd, a0_sq, grad_ap6_0);
   pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 }
 

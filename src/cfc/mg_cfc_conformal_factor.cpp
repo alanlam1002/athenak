@@ -339,9 +339,7 @@ void MGCFCConformalFactor::CalculateFASRHSPackImpl() {
 //! is cheap relative to the V-cycle itself. alpha0/beta0/Aij0 (TrumpetBackground's
 //! other outputs) are discarded -- this solver only needs psi0/Ahat0^2.
 
-void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh, const Real xbh[3],
-                                     bool ahat_conformal) {
-  const bool ac = ahat_conformal;
+void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh, const Real xbh[3]) {
   const Real xb0 = xbh[0], xb1 = xbh[1], xb2 = xbh[2];
   int is = ngh_, js = ngh_, ks = ngh_;
   int nmmb = nmmb_;
@@ -382,7 +380,7 @@ void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh, const Real xbh[3]
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
         cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
-                               beta0, aij0, &a2, nullptr, nullptr, ac);
+                               beta0, aij0, &a2);
         cm_h(m,2,k,j,i) = psi0;
         cm_h(m,3,k,j,i) = a2;
       });
@@ -402,7 +400,7 @@ void MGCFCConformalFactor::FillPunctureCoefficients(Real m_bh, const Real xbh[3]
         Real r_sch = m_bh * cfc::TrumpetIsoToAreal(r/m_bh);
         Real psi0, alpha0, beta0[3], aij0[6], a2;
         cfc::TrumpetBackground(m_bh, x1v, x2v, x3v, r_sch, &psi0, &alpha0,
-                               beta0, aij0, &a2, nullptr, nullptr, ac);
+                               beta0, aij0, &a2);
         cm_d(m,2,k,j,i) = psi0;
         cm_d(m,3,k,j,i) = a2;
       });
@@ -565,9 +563,9 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // exactly psi0=1/Ahat0^2=0 there (restriction of a uniform field is a no-op).
   if (puncture_enabled_) {
     static_cast<MGCFCConformalFactor*>(mglevels_)->FillPunctureCoefficients(
-        puncture_mass_, puncture_xbh_, puncture_ahat_conf_);
+        puncture_mass_, puncture_xbh_);
     static_cast<MGCFCConformalFactor*>(mgroot_)->FillPunctureCoefficients(
-        puncture_mass_, puncture_xbh_, puncture_ahat_conf_);
+        puncture_mass_, puncture_xbh_);
   }
 
   if (mg_debug_analytic_residual_test_) {

@@ -10160,6 +10160,17 @@ drivers' per-level coefficients (`SetPunctureAhatConformal`).
 **Not yet measured:** the effect on a star (proposed: Q1 from t = 121.5 through periapsis
 with the flag on, against Q1 and the N5 noise floor).
 
+**Origin, checked against the Fortran** (`sacra-aei` `stable_v1` `fe51e88`, `mod_bh.f90`,
+`background.f90:124`, `input.f90:195`, `hydro_source.f90:465`):
+- `tbh_get_var` returns the same Aij and A2 as the C++ port.
+- SACRA is BSSN: its callers store Aij unchanged as `AKXX…`, i.e. as the BSSN conformal
+  Ã_ij = W²K_ij = ψ⁻⁴K_ij (W = 1/ψ², γ̃ flat). For the trumpet that is exactly K^i_j.
+  `hydro_source.f90` rebuilds K^ij = W²γ̃γ̃Ã consistently.
+- The C++ port loaded the same numbers as xCFC's Â_ij = ψ⁶K^i_j and Â² = ψ¹²K_ijK^ij,
+  without the BSSN → xCFC conversion.
+- So the Fortran is right and this is a porting convention mismatch;
+  `puncture_ahat_conformal = true` is the correct physics.
+
 ## 78. Phase 2 Milestone 2: the ξ̇ controller and a star in the comoving gauge
 
 User-approved (research R-040 item 4: development + ≤ 2-node debug tests). athenak

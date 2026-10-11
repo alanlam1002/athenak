@@ -22,6 +22,7 @@ G = c = M_BH = 1).
 """
 import argparse
 import os
+import re
 import struct
 import sys
 
@@ -78,9 +79,35 @@ def energies(fn, rcut=3.0, nscal=1):
     return c['t'], c['E'], c['EB'], c['dM']
 
 
+def frame_state(par, time):
+    """(x_BH(t), xidot) from a restart's parameter copy. BH frame: zeros. Comoving gauge
+    with <cfc> puncture_moving: x_BH = puncture_x - xi(t), with xi from the frame-controller
+    state (frame_ctrl_*) or the analytic frame_vel/frame_accel."""
+    def get(key, default=0.0):
+        m = re.search(rf'^{key}\s*=\s*([-+.\deE]+)', par, re.M)
+        return float(m.group(1)) if m else default
+    moving = re.search(r'^puncture_moving\s*=\s*true', par, re.M) is not None
+    ctrl = re.search(r'^frame_controller\s*=\s*true', par, re.M) is not None
+    xb, xd = np.zeros(3), np.zeros(3)
+    for a in range(3):
+        n = str(a + 1)
+        if ctrl:
+            xd[a] = get('frame_ctrl_xidot' + n)
+            xi = get('frame_ctrl_xi' + n) + xd[a] * (time - get('frame_ctrl_t', time))
+        else:
+            v0, a0 = get('frame_vel' + n), get('frame_accel' + n)
+            xd[a] = v0 + a0 * time
+            xi = v0 * time + 0.5 * a0 * time * time
+        xb[a] = (get('puncture_x' + n) - xi) if moving else 0.0
+    return xb, xd
+
+
 def cells(fn, rcut=3.0, nscal=1):
-    """per-cell E, E_B, dM, rho, P outside r_BH < rcut (rcut=0: all cells); also position,
-    Eulerian v^i, covariant u_i and the MeshBlock level above the root (lev)"""
+    """per-cell E, E_B, dM, rho, P outside r_BH < rcut (rcut=0: all cells); also position
+    (grid coordinates), Eulerian v^i, covariant u_i and the MeshBlock level above the root
+    (lev). Comoving-gauge restarts: r_BH is measured from x_BH(t) (returned as xbh), and E is
+    the BH-frame Killing energy, -u_t = alpha W - (beta'^i - xidot^i) u_i, since the stored
+    shift beta' carries xidot (the slicing is unchanged by the frame)."""
     t = header(fn)
     nmb, root = t['nmb'], t['root']
     x1min, x2min, x3min, x1max, x2max, x3max = t['size'][:6]
@@ -102,6 +129,7 @@ def cells(fn, rcut=3.0, nscal=1):
     Ls, Ux, Uy, Uz = [], [], [], []
     s = slice(ng, ng + nx)
     ic = (np.arange(nx) + 0.5)
+    xbh, xdot = frame_state(t['par'], t['time'])
     for b in range(nmb):
         rec = mm[b]
         cons = rec[:nmhd * ncc].reshape(nmhd, no, no, no)[:, s, s, s]
@@ -112,7 +140,7 @@ def cells(fn, rcut=3.0, nscal=1):
         y = lo[1] + ll[b, 1] * ext[1] + ic * dx[1]
         z = lo[2] + ll[b, 2] * ext[2] + ic * dx[2]
         Z, Y, X = np.meshgrid(z, y, x, indexing='ij')
-        keep = np.sqrt(X**2 + Y**2 + Z**2) >= rcut
+        keep = np.sqrt((X - xbh[0])**2 + (Y - xbh[1])**2 + (Z - xbh[2])**2) >= rcut
         if rcut <= 0:
             keep = np.ones_like(X, dtype=bool)
         if not keep.any():
@@ -134,7 +162,7 @@ def cells(fn, rcut=3.0, nscal=1):
         D, Ssq, tau = D[ok], Ssq[ok], np.maximum(tau[ok], 0.0)
         rho, P, W, h = c2p(D, Ssq, tau)
         alpha = adm[13][ok]
-        bx, by, bz = adm[14][ok], adm[15][ok], adm[16][ok]
+        bx, by, bz = adm[14][ok] - xdot[0], adm[15][ok] - xdot[1], adm[16][ok] - xdot[2]
         ut_neg = alpha * W - (bx * Sx[ok] + by * Sy[ok] + bz * Sz[ok]) / (D * h)
         Es.append(ut_neg - 1.0)
         EBs.append(h * ut_neg - 1.0)
@@ -152,7 +180,7 @@ def cells(fn, rcut=3.0, nscal=1):
     cat = np.concatenate
     return dict(t=t['time'], E=cat(Es), EB=cat(EBs), dM=cat(dMs), rho=cat(rhos), P=cat(Ps),
                 par=t['par'], x=cat(Xs), y=cat(Ys), z=cat(Zs), vx=cat(Vx), vy=cat(Vy),
-                vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls))
+                vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls), xbh=xbh)
 
 
 def hist(E, dM, dE, edges):

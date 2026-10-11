@@ -10119,3 +10119,78 @@ request with the address that created it):
 - **Argued:** at Q4's 16-node L6 scale (more regrids, more neighbours per rank) the leak
   reached 15-25k in ~5,800 cycles. The crash and the hang were its consequences. A long
   L6 run is the real confirmation.
+
+## 78. Phase 2 Milestone 2: the ξ̇ controller and a star in the comoving gauge
+
+User-approved (research R-040 item 4: development + ≤ 2-node debug tests). athenak
+`4d14bb23`; design `code/COMOVING_GAUGE_DESIGN.md` §2.2-2.4, with R-039's change of
+controller target.
+
+**What is built:**
+- **`<cfc> frame_controller = true`** replaces the analytic ξ̇(t) of item 68 (the two
+  modes are exclusive).
+  - ξ̇ is held fixed over each step and ξ is integrated: ξ(t) = ξ_n + ξ̇_n (t − t_n). The
+    moving puncture (item 75) and every `FrameDisp`/`FrameVel` user see a continuous ξ.
+- **Once per step** (`FrameControlStep`, last RK stage, inside `AssembleFinalTask` so that
+  it precedes the ADM ghost exchange):
+  - **Reduction:** the tracked gas is ρ > `frame_track_rho` (absolute) within
+    `frame_track_radius` of the grid target x'_tgt. It gives the rest-mass-weighted
+    centroid x'_c and grid velocity V' = αu^i/W − β'^i. One 7-value reduction, then a
+    broadcast so that every rank holds identical values.
+  - **Update:** ξ̇_new = V_BH + a·dt + (x'_c − x'_tgt)/`frame_tau_x`, where V_BH = V' + ξ̇_old
+    and a is V_BH's per-step rate low-passed over `frame_tau_a` (the feed-forward).
+  - `adm.beta_u` then shifts by ξ̇_new − ξ̇_old (pointwise, ghosts included).
+  - **Deviation from the design (argued):** the feed-forward is this measured,
+    low-passed acceleration, not a ported geodesic integrator. It is second order in dt
+    for the one-step lag, and the position term absorbs the rest.
+  - **R-039's target change:** tracking only within a radius of the target keeps the
+    controller on the clump pinned there (the remnant after periapsis), not on the
+    debris centroid.
+  - **Caveat:** velocities come from w0, which at the last stage may lag u0 by one stage
+    (C2P is not ordered against `CFC_AssembleFinal`); the lag is O(dt).
+- **Initialisation** (`InitFrameControl`, end of `InitializeMetric`, fresh starts only):
+  - x'_tgt = `frame_target_x*`, or by default the centroid of the tracked gas;
+  - ξ̇(0) = V_BH = αv − β of the tracked gas;
+  - optionally (`frame_atm_rho` > 0) the initial floor atmosphere beyond `frame_atm_gate`
+    of x_BH is set comoving.
+- **Restarts:** ξ, ξ̇, t_n, the target and the filter state are written into the restart's
+  parameter copy (`SaveFrameState`, from `restart.cpp`). `ParameterInput::SetReal` now
+  writes max_digits10, so the state round-trips exactly.
+  - **Side fix:** `puncture_mass` and `last_time` used to be truncated to 6 digits.
+  - **Still open:** a restart with `-i deck` re-reads the deck's own `puncture_mass`. That
+    discards the accreted ~1e-11 (argued negligible).
+- **`<mhd> atmosphere_frame_gate`:** the comoving floor state of item 68/E1 applies only
+  beyond this distance from the puncture (`padm->bc_center`), in both the C2P and the
+  timestep. Near the BH the floor stays at v = 0.
+- **dyngr_tov:** the background rescale ψ_bg of the star placement (item 69) is evaluated
+  at |x0 − x_BH(0)|. It was at |x0|, which is wrong once the BH is not at the origin.
+- **hst columns** `fc_vg_x1..3` (V'), `fc_mass`, `fc_offset` (|x'_c − x'_tgt|).
+- **Diagnostics:** `scripts/tde_dmde.cells()` reads x_BH(t) and ξ̇ from a comoving restart.
+  It cuts r_BH < rcut around x_BH (previously the origin, which held the star in this
+  deck) and returns the BH-frame Killing energy, −u_t = αW − (β'^i − ξ̇^i) u_i.
+
+**Test 1** (M2_t1: the Q1 deck rp10/L4 in the comoving gauge; star at the origin, BH from
+x = −30; track ρ > 0.1 ρ_c within 3 M; τ_x = 20, τ_a = 2; comoving atmosphere gated at
+6 M; 1 node, t = 0-40). Measured:
+- **Initialisation:** ψ_bg = 1.01667 (as in Q1); ξ̇(0) = (−0.18771, +0.14606); tracked mass
+  6.708e-5 = 0.898 M*, which is Q1's dense-gas mass at t = 0.
+- **Pinning:** |V'| ≤ 3e-5 throughout (BH frame: |v| ≈ 0.24); the centroid offset grows
+  to 2.9e-4 M (t = 20) and 7e-4 M (t = 40). ξ̇ evolves smoothly to (−0.2325, +0.1329) at
+  t = 40.
+- **dt:** 0.060 → 0.047 by t = 30-40 as |ξ̇| and the moving BH box (L4) set it (Q1:
+  0.059).
+- **Star, against Q1 (slices):**
+  - puffed mass 4.6e-4 vs 6.4e-3 at t = 40 (14× less);
+  - dense-gas mean K/K0 0.9972 vs 1.0028;
+  - core K/K0 0.9944, a slow monotone cooling;
+  - ρ_max declines 0.7% to t ≈ 25 and recovers (argued: initial-data relaxation; Q1's
+    advection jitter hides it).
+- **Orbit (3D, mass-weighted, BH-frame Killing E and L_z):**
+  - E: −1.4741e-4 → −1.4847e-4 at t = 40. Q1: −1.4765e-4 → −2.0168e-4 at t = 45; N5
+    −2.1039e-4 at t = 49.
+  - L_z: 5.00196 → 5.00225 (Q1 4.99805 at t = 45).
+  - So the pre-periapsis orbital drift of the BH frame is ~45× smaller in E and ~13× in L.
+    Argued: the BH-frame "drag" (periapsis 6.8 achieved for 10 designed) is grid-advection
+    error.
+
+**Test 6** (restart reproducibility) and the K_ij flag (item 77): below, when measured.

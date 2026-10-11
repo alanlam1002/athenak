@@ -702,9 +702,7 @@ int ParameterInput::SetInteger(std::string block, std::string name, int value) {
 
   Lock();
   pb = FindOrAddBlock(block);
-  // full precision: restart files carry these (puncture_mass, last_time, the CFC
-  // frame-controller state), and the default 6 digits silently truncated them
-  ss_value << std::setprecision(std::numeric_limits<Real>::max_digits10) << value;
+  ss_value << value;
   AddParameter(pb, name, ss_value.str(), "# Updated during run time");
   Unlock();
   return value;
@@ -720,7 +718,9 @@ Real ParameterInput::SetReal(std::string block, std::string name, Real value) {
 
   Lock();
   pb = FindOrAddBlock(block);
-  ss_value << value;
+  // full precision: restart files carry these (puncture_mass, last_time, the CFC
+  // frame-controller state), and the default 6 digits silently truncated them
+  ss_value << std::setprecision(std::numeric_limits<Real>::max_digits10) << value;
   AddParameter(pb, name, ss_value.str(), "# Updated during run time");
   Unlock();
   return value;

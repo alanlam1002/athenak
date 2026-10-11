@@ -10178,6 +10178,35 @@ with the flag on, against Q1 and the N5 noise floor).
     fill.
   - The star-test result is recorded below when it is measured.
 
+**Star test** (user-approved; K77_q1_rst5: Q1 restarted at t = 121.5 with the corrected fill,
+to t = 160, 2 nodes, BH at the origin). Measured against Q1 and the N5 run-to-run floor:
+- **Unchanged within the floor:**
+  - ρ_max (mean 2.4% vs floor 6.0%), core K (3.1% vs 2.9%), puffed mass;
+  - bound fraction (≤ 0.010 vs 0.011); orbit E (≤ 0.0023 ΔE vs 0.0067) and L_z (≤ 3e-4 vs 2e-4).
+- **Far outside the floor: the dense gas heats.**
+  - Mass-weighted K/K0 over ρ > 0.1 ρ0: +1% at t = 122, rising steadily to +21% at periapsis
+    (t = 136), then relaxing (+12% at t = 160). Q1 stays at +11%. Floor: 0.2%.
+  - M3 warm > 5% is 0.95 vs 0.66 (floor 0.02).
+  - Not a restart jump: it builds at ~1.6%/M through periapsis.
+- **Argued:** a larger, correct αK_ijS^ij in the τ source changes the internal energy of the
+  BH-frame star near the BH. Whether that is real tidal/shock heating or the BH-frame
+  advection error that the old fill partly offset is not decided. The comoving run through
+  periapsis (R-040 item 6) separates the two.
+
+**Overflow and cap.** With the BH off the origin, a multigrid coarse-cell centre can sit
+exactly on the puncture (r = 1e-15 after the guard).
+- There ψ0¹² ≈ 1e92, and the initial ψ solve overflowed (max|δψ| = 1.8e308) in M2_t2 and in
+  item 6's first L4 job, which died at t = 0.
+- **Fix (`a55466a0`):** the ψ⁶ factor is capped at its r_iso = 0.3 M value (163.04: α ≈ 0.12,
+  about half the α < 0.25 excision radius, r_iso ≈ 0.58 M). It is exact wherever matter
+  evolves.
+- **Comoving check** (M2_t3: M2_t1's deck with the corrected, capped fill, 2 nodes):
+  - initialises normally (ξ̇(0) equal to 4e-8);
+  - through t = 30, the star's entropy matches the old fill (dense mean K/K0 0.9989 vs
+    0.9981, core 0.9971 vs 0.9962). So the slow comoving cooling is not from the K bug.
+  - dt is lower near t ≈ 28 (0.032 vs 0.047). Argued: the larger K near the moving BH
+    changes the throat-region wave speeds; not yet diagnosed.
+
 ## 78. Phase 2 Milestone 2: the ξ̇ controller and a star in the comoving gauge
 
 User-approved (research R-040 item 4: development + ≤ 2-node debug tests). athenak

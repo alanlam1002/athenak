@@ -188,7 +188,10 @@ class PrimitiveSolverHydro {
   //   3 K_energy/K_tracer - 1 (dense B = 0 cells with a good energy solution)
   //   4 K resync on the energy branch, K_new/K_tracer - 1   5 entropy-branch dtau/D
   //   6 alpha K_ij S^ij   7 -S^a d_a alpha   (the tau source terms, undensitized)
-  static constexpr int kNDEDiag = 8;
+  //   8, 9 internal-energy budget of the last RK stage (C-041), as fractional rates
+  //     d(W rho eps)/dt / (W rho eps) carried by the flux divergence (8) and by the source
+  //     terms (9), from the exact combination W (dE - v^a dS_a) - dD, E = tau + D
+  static constexpr int kNDEDiag = 10;
   bool de_diag_on = false;
   DvceArray5D<Real> de_diag;
   // <mhd> atmosphere_frame_velocity (default false; research R-028 E1, a test): give

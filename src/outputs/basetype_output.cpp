@@ -486,15 +486,16 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
     // DynGRMHD dual-energy switch maps (PrimitiveSolverHydro::de_diag)
     if (variable.compare("mhd_de_diag") == 0) {
       if (pm->pmb_pack->pdyngr == nullptr ||
-          pm->pmb_pack->pdyngr->de_diag.extent_int(1) < 8) {
+          pm->pmb_pack->pdyngr->de_diag.extent_int(1) < 10) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "mhd_de_diag output needs <mhd> dual_energy_diag = true"
                   << std::endl;
         exit(EXIT_FAILURE);
       }
-      const char *nm[8] = {"de_branch", "de_sensor", "de_shock", "de_ken_ktr",
-                           "de_dk_resync", "de_dtau", "de_src_kS", "de_src_dalpha"};
-      for (int v = 0; v < 8; ++v) {
+      const char *nm[10] = {"de_branch", "de_sensor", "de_shock", "de_ken_ktr",
+                            "de_dk_resync", "de_dtau", "de_src_kS", "de_src_dalpha",
+                            "de_eint_flux", "de_eint_src"};
+      for (int v = 0; v < 10; ++v) {
         outvars.emplace_back(nm[v], v, &(pm->pmb_pack->pdyngr->de_diag));
       }
     }

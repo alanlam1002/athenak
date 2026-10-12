@@ -162,7 +162,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(temperature, nmb, 1, ncells3, ncells2, ncells1);
     if (pin->GetOrAddBoolean("mhd", "dual_energy_diag", false)) {
-      Kokkos::realloc(de_diag, nmb, 8, ncells3, ncells2, ncells1);
+      Kokkos::realloc(de_diag, nmb, 10, ncells3, ncells2, ncells1);
     }
   }
 }
@@ -596,6 +596,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
 
   const bool ddon_ = eos.de_diag_on;
   auto &dd_ = de_diag;
+  // stage fluxes (densitized; already applied to rhs by MHD::Update before this task)
+  auto &fx1_ = pmy_pack->pmhd->uflx.x1f;
+  auto &fx2_ = pmy_pack->pmhd->uflx.x2f;
+  auto &fx3_ = pmy_pack->pmhd->uflx.x3f;
+  const bool md_ = pmy_pack->pmesh->multi_d, d3_ = pmy_pack->pmesh->three_d;
   par_for("coord_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     // Extract the metric and coordinate quantities.
@@ -709,6 +714,35 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
       }
       dd_(m, 6, k, j, i) = src_ks;
       dd_(m, 7, k, j, i) = src_da;
+      // internal-energy budget: W (dE - v^a dS_a) - dD (E = tau + D) for the flux
+      // divergence and for the sources (D has none); E - v.S = rho (1 + eps) exactly
+      Real srcS[3];
+      for (int a = 0; a < 3; a++) {
+        srcS[a] = -E*dalpha_d[a];
+        for (int b = 0; b < 3; b++) {
+          srcS[a] += S_d[b]*dbeta_du[a][b];
+          for (int c = 0; c < 3; c++) {
+            srcS[a] += 0.5*alpha*S_uu[b][c]*dg_ddd[a][b][c];
+          }
+        }
+      }
+      auto divf = [&](int n) {
+        Real d = (fx1_(m, n, k, j, i+1) - fx1_(m, n, k, j, i))/size.d_view(m).dx1;
+        if (md_) d += (fx2_(m, n, k, j+1, i) - fx2_(m, n, k, j, i))/size.d_view(m).dx2;
+        if (d3_) d += (fx3_(m, n, k+1, j, i) - fx3_(m, n, k, j, i))/size.d_view(m).dx3;
+        return d/vol;
+      };
+      Real dD = -divf(IDN), dE = -divf(IEN) + dD;
+      Real vdS_f = 0.0, vdS_s = 0.0;
+      for (int a = 0; a < 3; a++) {
+        Real va = prim_pt[PVX + a]/W;
+        vdS_f -= va*divf(IM1 + a);
+        vdS_s += va*srcS[a];
+      }
+      Real rho_ = prim(m, IDN, k, j, i);
+      Real e_int = W*fmax(H - rho_ - prim_pt[PPR], 1.0e-300);
+      dd_(m, 8, k, j, i) = (W*(dE - vdS_f) - dD)/e_int;
+      dd_(m, 9, k, j, i) = W*(src_ks + src_da - vdS_s)/e_int;
     }
 
     // Assemble momentum RHS

@@ -427,6 +427,7 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   // reached -- see src/cfc/DEVELOPMENT.md) or, better, paired with mg_rtol
   // below, which is invariant to this choice.
   std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  norm_ref_vol_ = pin->GetOrAddReal("cfc", "mg_norm_ref_volume", 0.0);  // C-040 P3
   if (norm_str == "legacy") {
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {

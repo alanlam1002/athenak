@@ -1024,6 +1024,7 @@ Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
     Real vol = (mgroot_->size_.x1max - mgroot_->size_.x1min)
              * (mgroot_->size_.x2max - mgroot_->size_.x2min)
              * (mgroot_->size_.x3max - mgroot_->size_.x3min);
+    if (norm_ref_vol_ > 0.0) vol = norm_ref_vol_;
     norm /= vol;
   }
   if (nrm == MGNormType::l2) {

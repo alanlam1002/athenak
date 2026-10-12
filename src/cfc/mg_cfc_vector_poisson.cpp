@@ -238,6 +238,7 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
   // where the legacy sum gives an effectively 4x tighter bar than the nvar_=1
   // psi/alpha_psi solvers face at the same eps_.
   std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  norm_ref_vol_ = pin->GetOrAddReal("cfc", "mg_norm_ref_volume", 0.0);  // C-040 P3
   if (norm_str == "legacy") {
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {

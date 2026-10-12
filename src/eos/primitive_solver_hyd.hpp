@@ -159,6 +159,17 @@ class PrimitiveSolverHydro {
   DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
   int de_dilate = 1;               // also flag the face neighbours of flagged cells
   Real de_dilate_weak = 0.5;       // ... if their own sensor exceeds this x the threshold
+  // flag filters against near-threshold flicker (R-043 / C-040 P2; both off by default).
+  // In a comoving star the vcurv sensor sits at 0.3-1x threshold over much of the star, so
+  // isolated cells flag at random; each takes the energy solution, whose K runs hot there,
+  // and the resync ratchets the tracer up (the second-law guard blocks the way back).
+  //   de_isolated = true: before the dilation, a flagged cell with no flagged face
+  //     neighbour is demoted to a weak candidate (a resolved shock is >= 2-3 cells wide).
+  //   de_persist = N > 1: a cell takes the energy branch only once its final flag has
+  //     been set in N consecutive C2P calls (de_streak counts them; reset on realloc).
+  bool de_isolated = false;
+  int de_persist = 1;
+  DvceArray4D<int> de_streak;
   // second-law guard (item 73, default on): a dense flagged cell whose energy solution has
   // K < K_tracer takes the entropy solution instead -- a shock can only raise K, so a drop
   // there is the energy equation's numerical loss (V4F's tidal caps, RESULTS §11.5)
@@ -257,6 +268,8 @@ class PrimitiveSolverHydro {
       de_psi_jump = pin->GetOrAddReal(block, "dual_energy_psi_jump", 1.0e30);  // off
       de_dilate = pin->GetOrAddInteger(block, "dual_energy_shock_dilate", 1);
       de_dilate_weak = pin->GetOrAddReal(block, "dual_energy_shock_dilate_weak", 0.5);
+      de_isolated = pin->GetOrAddBoolean(block, "dual_energy_shock_isolated_off", false);
+      de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
@@ -621,6 +634,28 @@ class PrimitiveSolverHydro {
           dd_(m, 1, k, j, i) = ratio;
         }
       });
+      // optional isolation filter (de_isolated): demote a flagged cell (2) with no flagged
+      // face neighbour to a weak candidate (1), so the dilation cannot re-flag it either
+      if (de_isolated) {
+        if (de_shock2.extent_int(0) != de_shock.extent_int(0) ||
+            de_shock2.extent_int(1) != e3 || de_shock2.extent_int(2) != e2 ||
+            de_shock2.extent_int(3) != e1) {
+          Kokkos::realloc(de_shock2, de_shock.extent_int(0), e3, e2, e1);
+        }
+        auto &sh2 = de_shock2;
+        par_for("de_shock_isolated", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          int s0 = shk(m, k, j, i), nb = 0;
+          if (i > il) nb = (shk(m, k, j, i-1) == 2) ? 1 : nb;
+          if (i < iu) nb = (shk(m, k, j, i+1) == 2) ? 1 : nb;
+          if (j > jl) nb = (shk(m, k, j-1, i) == 2) ? 1 : nb;
+          if (j < ju) nb = (shk(m, k, j+1, i) == 2) ? 1 : nb;
+          if (k > kl) nb = (shk(m, k-1, j, i) == 2) ? 1 : nb;
+          if (k < ku) nb = (shk(m, k+1, j, i) == 2) ? 1 : nb;
+          sh2(m, k, j, i) = (s0 == 2 && !nb) ? 1 : s0;
+        });
+        Kokkos::deep_copy(DevExeSpace(), de_shock, de_shock2);
+      }
       // optional dilation: a shock is smeared over ~3 cells but the sensor peaks on the
       // central ones (item 72), so also put the face neighbours on the energy branch
       for (int pass = 0; pass < de_dilate; ++pass) {
@@ -643,10 +678,24 @@ class PrimitiveSolverHydro {
         });
         Kokkos::deep_copy(DevExeSpace(), de_shock, de_shock2);
       }
-      // final flag: 1 for shocked (2), else 0
+      // final flag: 1 for shocked (2), else 0; with de_persist > 1 only once the cell has
+      // been flagged in de_persist consecutive calls
+      const int npers = de_persist;
+      if (npers > 1 && (de_streak.extent_int(0) != de_shock.extent_int(0) ||
+                        de_streak.extent_int(1) != e3 || de_streak.extent_int(2) != e2 ||
+                        de_streak.extent_int(3) != e1)) {
+        Kokkos::realloc(de_streak, de_shock.extent_int(0), e3, e2, e1);
+      }
+      auto &stk = de_streak;
       par_for("de_shock_final", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-        shk(m, k, j, i) = (shk(m, k, j, i) == 2) ? 1 : 0;
+        int f = (shk(m, k, j, i) == 2) ? 1 : 0;
+        if (npers > 1) {
+          int n = f ? stk(m, k, j, i) + 1 : 0;
+          stk(m, k, j, i) = (n < npers) ? n : npers;
+          f = (n >= npers) ? 1 : 0;
+        }
+        shk(m, k, j, i) = f;
       });
     }
     auto &de_shock_ = de_shock;

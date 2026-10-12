@@ -399,6 +399,7 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   // (multigrid.hpp) -- shares mg_norm/mg_rtol with the psi driver, mirroring
   // how mg_threshold/mg_verbose/mg_outer_bc are already shared.
   std::string norm_str = pin->GetOrAddString("cfc", "mg_norm", "legacy");
+  norm_ref_vol_ = pin->GetOrAddReal("cfc", "mg_norm_ref_volume", 0.0);  // C-040 P3
   if (norm_str == "legacy") {
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {

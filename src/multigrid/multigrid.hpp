@@ -624,6 +624,11 @@ class MultigridDriver {
   Real last_ave_;
   Real eps_;
   MGNormScaling norm_mode_;   // legacy = today's unweighted, summed norm
+  // <cfc> mg_norm_ref_volume (CFC drivers only; <= 0 = the default, the root-grid volume):
+  // the volume the l1/l2 defect integral is divided by. With the root volume, the rms
+  // defect of the same local error falls as 1/sqrt(V_root), so a bigger box converges
+  // less (Q6 vs Q1, C-040); a fixed reference volume makes the threshold box-independent.
+  Real norm_ref_vol_ = 0.0;
   Real rtol_;                 // <= 0 disables the relative criterion
   int niter_, npresmooth_, npostsmooth_;
   int os_, oe_;

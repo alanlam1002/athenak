@@ -191,8 +191,11 @@ class PrimitiveSolverHydro {
   //   8, 9 internal-energy budget of the last RK stage (C-041), as fractional rates
   //     d(W rho eps)/dt / (W rho eps) carried by the flux divergence (8) and by the source
   //     terms (9), from the exact combination W (dE - v^a dS_a) - dD, E = tau + D
-  static constexpr int kNDEDiag = 10;
+  //   10-12 K_energy/K_tracer - 1 (as 3) at C2P stage 1, 2, 3 (R-045 per-stage check;
+  //     de_stage is set by DynGRMHDPS::ConToPrim before each call)
+  static constexpr int kNDEDiag = 13;
   bool de_diag_on = false;
+  int de_stage = 0;
   DvceArray5D<Real> de_diag;
   // <mhd> atmosphere_frame_velocity (default false; research R-028 E1, a test): give
   // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
@@ -556,6 +559,7 @@ class PrimitiveSolverHydro {
     const bool de_2law_ = de_second_law;
     const Real de_2tol_ = de_second_law_tol;
     const bool ddon_ = de_on_ && de_diag_on;
+    const int dstg_ = de_stage;
     auto &dd_ = de_diag;
     if (de_on_) {
       int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
@@ -1008,6 +1012,7 @@ class PrimitiveSolverHydro {
             dd_(m, 3, k, j, i) = dken;
             dd_(m, 4, k, j, i) = ddk;
             dd_(m, 5, k, j, i) = ddtau;
+            if (dstg_ >= 1 && dstg_ <= 3) dd_(m, 9 + dstg_, k, j, i) = dken;
           }
         }
 

@@ -10323,3 +10323,71 @@ run's output times:
     energy branch;
   - their K resync ratchets the tracer up; the second-law guard blocks the way back.
 - Fix candidates and a BH-frame map run: OUTBOX C-040.
+
+## 79. The comoving heating is a metric time lag: solve the metric every RK stage (C-041)
+
+Debug-queue restarts, 2 nodes each (jobs 8922400, 8922439, 8922449). Measured unless
+marked argued.
+
+**P1, BH-frame switch maps** (D_e restarted at t = 47 to 68). The energy solution on
+entropy-branch dense cells is +0.3% hot on average (comoving: +7.6%). The flag fires as
+often or more: 15% of dense cells flagged, 6.4% on the energy branch (comoving 4.8%).
+The resync adds +0.7% (comoving +4.1%). **The flicker is frame-independent; the hot
+energy solution is comoving-only.**
+
+**P2 (i)/(ii), flag filters** (`<mhd> dual_energy_shock_persist`,
+`dual_energy_shock_isolated_off`, athenak f2c06966). Restarts from item 6 L4, t = 60.7 to
+72. Dense mean K/K0 at t = 68 / 72:
+
+| arm | t = 68 | t = 72 |
+|---|---|---|
+| none (a) | 1.183 | – |
+| persist 3 / 6 | 1.187 / 1.185 | 1.58 / 1.53 |
+| isolated off | 1.072 | 1.18 |
+| both | 1.070 | 1.22 |
+
+- None passes. Isolation slows the ratchet ~3×.
+- CPU regression (`dual_energy_tests_P2`): persistence keeps shock capture (Mach 1.2-3:
+  0.76/0.91/0.96/0.97). Isolation loses weak shocks in 1D (Mach 1.2: 0.35), but in 3D planar
+  shocks it is unchanged (0.78/0.92/0.96), because the transverse neighbours count. Both
+  options stay off by default.
+
+**Budget** (`de_eint_flux`/`de_eint_src`, athenak bb7f2914): per-step change of the internal
+energy, W(dE − v·dS) − dD, as a fraction of W ρ ε, on entropy-branch dense cells at
+t = 61-64:
+
+| frame | flux | sources | sum | measured excess |
+|---|---|---|---|---|
+| BH | +0.279 | −0.278 | +0.001 | −0.002 |
+| comoving | +0.002 | −0.263 | −0.261 | +0.079 |
+
+- In the BH frame the star crosses a static metric and the fluxes cancel the large
+  geometric source.
+- In the comoving frame the star is at rest on the grid and the fluxes carry nothing. The
+  balance must come from the metric changing under the star (the BH field sweeping past),
+  which this budget does not see.
+- Argued: Eulerian τ is ~3000× the internal energy (v ≈ 0.25), so a small inconsistency in
+  how the gas sees the metric change becomes a large internal-energy error.
+
+**The test** (comoving restarts, t = 60.7 to 68):
+
+| arm | K/K0 at t = 68 | excess, mean / p99 | s/cycle |
+|---|---|---|---|
+| `solve_interval = 1` (all runs so far) | 1.183 | +7.6% / +31% | 2.53 |
+| `solve_interval = 0` (every RK stage) | 1.003 | 0.0% / +0.5% | 3.21 |
+| `solve_interval = 1`, cfl 0.2 | 1.197 | +3.8% / +15% | 2.29 (2× cycles) |
+
+- **Solving the metric every RK stage removes the excess and the heating**, with the flag on
+  (11% of dense cells on the energy branch).
+- Halving dt halves the per-step excess and leaves the heating rate unchanged: an O(1)
+  inconsistency in the stage coupling, not a truncation error.
+- `solve_interval = 1` holds the metric fixed over the stages and jumps once per step;
+  harmless where the metric is static under the gas (the BH frame), wrong where it moves.
+- Cost: +27% per cycle; multigrid warm starts make stage solves cheap.
+- **Production rule for comoving runs: `<cfc> solve_interval = 0`.** BH-frame runs keep 1:
+  P1's excess is 0.3%.
+
+**P3** (`<cfc> mg_norm_ref_volume`, athenak f2c06966): divide the l1/l2 defect integral by a
+fixed volume instead of the root volume. With 128³ (Q1's box) the threshold is
+box-independent and Q1-class decks are bitwise unchanged. The box ladder ±64/±128/±256 (t = 0,
+corrected-fill binary, same reference volume) is in OUTBOX C-041.

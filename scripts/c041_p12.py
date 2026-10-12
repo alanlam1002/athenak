@@ -5,7 +5,8 @@ fix candidates on the item 6 L4 restart (t = 60.7 -> 72).
   P1   D_e (BH frame, corrected fill) restarted at t = 47.0 -> 68 with <mhd> dual_energy_diag:
        the switch census (d_r043_maps.census) next to arm (a)'s comoving census.
   P2   iso (isolated flagged cells demoted), p3 / p6 (flag persistence 3 / 6 C2P calls),
-       isop3: dense mean K/K0 (rho > 0.1 rho0, z = 0) and K at rho_max against L4, (a), (c).
+       isop3; (iii) si0 (metric solved every RK stage), cfl02 (half dt): dense mean K/K0
+       (rho > 0.1 rho0, z = 0) and K at rho_max against L4, (a), (c).
 
     c041_p12.py [--out DIR]
 """
@@ -27,9 +28,10 @@ import d_r043_maps as R                           # noqa: E402
 RUN = T.RUN
 B = R.B
 P2 = {'L4': 'T6b_rp10_comov_bhL4', 'a': 'D_a_dediag', 'c': 'D_c_noshock', 'iso': 'P2_iso',
-      'p3': 'P2_p3', 'p6': 'P2_p6', 'isop3': 'P2_isop3'}
+      'p3': 'P2_p3', 'p6': 'P2_p6', 'isop3': 'P2_isop3', 'si0': 'T3_si0', 'cfl02': 'T3_cfl02'}
 P1 = {'P1 BH frame': 'P1_bh_dediag', 'a comoving': 'D_a_dediag'}
-COL = {'L4': 'k', 'a': '0.5', 'c': 'C0', 'iso': 'C1', 'p3': 'C2', 'p6': 'C3', 'isop3': 'C4'}
+COL = {'L4': 'k', 'a': '0.5', 'c': 'C0', 'iso': 'C1', 'p3': 'C2', 'p6': 'C3', 'isop3': 'C4',
+       'si0': 'C5', 'cfl02': 'C6'}
 
 
 def main():

@@ -2,11 +2,18 @@
 """Side-by-side animation of one TDE run: global view (star + BH, z = 0 density) and the
 star's local frame (±2 R* around rho_max: density and K/K0).
 
+The global panel also shows the tidal radius r_t (circle about the BH, --rt) and the
+test-particle geodesic of the release state (tde_parabolic_orbit_ic: E = 1, areal periapsis
+--periapsis, released at the deck's star-BH separation), drawn about x_BH(t) since it is
+integrated in the BH-centred trumpet coordinates (the comoving gauge is a uniform spatial
+shift, same coordinate time); the marker is the geodesic's position at the frame's t.
+
 The BH position is x_BH(t) = puncture_x - xi(t), with xi = the history's frame_disp
 columns (comoving gauge); in the BH frame xi = 0 and x_BH = puncture_x (or the origin).
 Frames render in parallel to PNGs, then join into a GIF (and an MP4 if ffmpeg exists).
 
-    anim_global_local.py RUNDIR [--label L4] [--half 40] [--every 1] [--out DIR]
+    anim_global_local.py RUNDIR [--label L4] [--half 40] [--every 1] [--rt 16.4]
+                         [--periapsis 10] [--out DIR]
 """
 import argparse
 import glob
@@ -32,11 +39,22 @@ B = 'cfc_tde_wd_imbh_parabolic_tracker'
 A = {}
 
 
+def par_get(d, k, dflt=0.0):
+    m = re.search(rf'^{k}\s*=\s*([-+.\deE]+)', open(f'{d}/parfile.par').read(), re.M)
+    return float(m.group(1)) if m else dflt
+
+
+def geodesic(d, rp, t_max, dt=0.05):
+    """test-particle geodesic (t, x, y) relative to the BH, released at the deck's separation"""
+    import tde_parabolic_orbit_ic as P
+    x0 = par_get(d, 'star_center_x1') - par_get(d, 'puncture_x1')
+    s = P.solve_ic(x0, rp)
+    o = P.integrate(x0, s['px'], s['py'], t_max, dt)
+    return o[:, 0], o[:, 1], o[:, 2]
+
+
 def bh_track(d):
-    par = open(f'{d}/parfile.par').read()
-    def get(k, dflt=0.0):
-        m = re.search(rf'^{k}\s*=\s*([-+.\deE]+)', par, re.M)
-        return float(m.group(1)) if m else dflt
+    get = lambda k, dflt=0.0: par_get(d, k, dflt)
     p0 = np.array([get('puncture_x1'), get('puncture_x2'), get('puncture_x3')])
     h = np.loadtxt(glob.glob(f'{d}/*.user.hst')[0])
     hdr = open(glob.glob(f'{d}/*.user.hst')[0]).readlines()[1]
@@ -61,6 +79,18 @@ def frame(job):
            LogNorm(vmin=1e-9, vmax=1.0), O.CR, outline=False)
     a.plot(*xb, 'o', ms=7, mfc='none', mec='c', mew=1.5)
     a.annotate('BH', xb, xytext=(6, 6), textcoords='offset points', color='c', fontsize=9)
+    if A['rt'] > 0:
+        a.add_patch(plt.Circle(xb, A['rt'], fill=False, ec='y', ls=':', lw=1.2))
+        a.annotate('r_t', (xb[0] + A['rt'] / np.sqrt(2), xb[1] + A['rt'] / np.sqrt(2)), color='y',
+                   fontsize=9)
+    if A['geo'] is not None:
+        tg, gx, gy = A['geo']
+        a.plot(xb[0] + gx, xb[1] + gy, '--', color='lime', lw=0.9,
+               label=f'geodesic (r_p = {A["rp"]:g}; × = its position at t)')
+        if s['t'] <= tg[-1]:
+            a.plot(xb[0] + np.interp(s['t'], tg, gx), xb[1] + np.interp(s['t'], tg, gy), 'x', color='lime',
+                   ms=8, mew=1.8)
+        a.legend(loc='lower left', fontsize=8, facecolor='w', framealpha=0.8)
     h2 = 2 * k['rstar']
     a.add_patch(plt.Rectangle((s['x0'] - h2, s['y0'] - h2), 2 * h2, 2 * h2, fill=False, ec='w', lw=0.8))
     a.set_aspect('equal'); a.set_xlabel('x [M]'); a.set_ylabel('y [M]')
@@ -90,13 +120,17 @@ def main():
     ap.add_argument('--fps', type=int, default=10)
     ap.add_argument('--dpi', type=int, default=60)
     ap.add_argument('--nproc', type=int, default=16)
+    ap.add_argument('--rt', type=float, default=16.4, help='tidal radius [M]; 0 = off')
+    ap.add_argument('--periapsis', type=float, default=10.0, help='geodesic areal r_p; 0 = off')
     ap.add_argument('--out', default='.')
     a = ap.parse_args()
     O.RUNS[a.label] = (a.run, 'k', '-', a.label)
     O.NK = TwoSlopeNorm(vcenter=1.0, vmin=0.8, vmax=6.0)   # K/K0 from 1 to ~6 after the heating
     t_h, xb = bh_track(a.run)
-    A.update(lab=a.label, half=a.half, t=t_h, xb=xb, dpi=a.dpi, title=a.title or a.label)
     fs = sorted(glob.glob(f'{a.run}/bin/{B}.prim_xy.*.bin'))[::a.every]
+    geo = geodesic(a.run, a.periapsis, t_h[-1] + 1.0) if a.periapsis > 0 else None
+    A.update(lab=a.label, half=a.half, t=t_h, xb=xb, dpi=a.dpi, title=a.title or a.label,
+             rt=a.rt, geo=geo, rp=a.periapsis)
     tmp = f'{a.out}/frames_{a.label}'
     os.makedirs(tmp, exist_ok=True)
     jobs = [(i, f, f'{tmp}/f{i:04d}.png') for i, f in enumerate(fs)]

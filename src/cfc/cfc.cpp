@@ -325,6 +325,26 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     for (int a = 0; a < 3; ++a) {
       fc_tgt_[a] = pin->GetOrAddReal("cfc", "frame_target_x" + std::to_string(a + 1), 0.0);
     }
+    // R-050 B2: target mode and the automatic switch (cfc.hpp)
+    auto mode_id = [](const std::string &m) -> int {
+      if (m == "remnant") return 0;
+      if (m == "bound_centroid") return 1;
+      if (m == "ramp") return 2;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> frame_target_mode/frame_switch_mode: unknown mode '"
+                << m << "' (remnant, bound_centroid, ramp)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    fc_mode_ = mode_id(pin->GetOrAddString("cfc", "frame_target_mode", "remnant"));
+    fc_switch_mode_ = mode_id(pin->GetOrAddString("cfc", "frame_switch_mode",
+                                                  "bound_centroid"));
+    fc_switch_frac_ = pin->GetOrAddReal("cfc", "frame_switch_mass_frac", 0.0);
+    fc_ramp_T_ = pin->GetOrAddReal("cfc", "frame_ramp_time", 50.0);
+    fc_bound_rho_ = pin->GetOrAddReal("cfc", "frame_bound_rho", 1.0e-4*fc_rho_thr_);
+    fc_bound_rmin_ = pin->GetOrAddReal("cfc", "frame_bound_rmin", 3.0);
+    if (pin->DoesParameterExist("cfc", "frame_switch_mref")) {
+      fc_m0_ = pin->GetReal("cfc", "frame_switch_mref");
+    }
     // restored state (written by SaveFrameState into the restart's parameter copy)
     fc_init_ = pin->DoesParameterExist("cfc", "frame_ctrl_t");
     if (fc_init_) {
@@ -337,6 +357,24 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
         fc_vprev_[a] = pin->GetReal("cfc", "frame_ctrl_vprev" + n);
         fc_acc_[a] = pin->GetReal("cfc", "frame_ctrl_acc" + n);
       }
+      // B2 state (absent in restarts written before R-050: remnant mode, m_ref unknown
+      // unless frame_switch_mref is given)
+      if (pin->DoesParameterExist("cfc", "frame_ctrl_mode")) {
+        fc_mode_ = pin->GetInteger("cfc", "frame_ctrl_mode");
+        fc_tsw_ = pin->GetReal("cfc", "frame_ctrl_tsw");
+        for (int a = 0; a < 3; ++a) {
+          fc_xdsw_[a] = pin->GetReal("cfc", "frame_ctrl_xdsw" + std::to_string(a + 1));
+        }
+        if (!pin->DoesParameterExist("cfc", "frame_switch_mref")) {
+          fc_m0_ = pin->GetReal("cfc", "frame_ctrl_m0");
+        }
+      }
+    }
+    if (fc_switch_frac_ > 0.0 && fc_init_ && !(fc_m0_ > 0.0) &&
+        global_variable::my_rank == 0) {
+      std::cout << "### WARNING <cfc> frame_switch_mass_frac > 0 but the restart carries no "
+                << "reference mass (frame_ctrl_m0) and frame_switch_mref is unset: the "
+                << "automatic switch is disabled" << std::endl;
     }
   }
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
@@ -2721,7 +2759,43 @@ void CFC::FrameControlStep(Real t_new) {
   for (int a = 0; a < 3; ++a) { fc_xi_[a] += fc_xd_[a]*dt; }
   fc_t_ = t_new;
   Real s[7];
-  MeasureTracked(s);
+  if (fc_mode_ == 0) {
+    MeasureTracked(s);
+    // R-050 B2 automatic switch (off unless frame_switch_mass_frac > 0)
+    if (fc_switch_frac_ > 0.0 && fc_m0_ > 0.0 && s[0] < fc_switch_frac_*fc_m0_) {
+      FrameSwitch(t_new, fc_switch_mode_, "tracked mass below frame_switch_mass_frac");
+    }
+  }
+  if (fc_mode_ == 2) {                 // ramp: xidot -> 0 linearly from the switch value
+    const Real f = fmax(0.0, 1.0 - (t_new - fc_tsw_)/fc_ramp_T_);
+    for (int a = 0; a < 3; ++a) { fc_xd_[a] = f*fc_xdsw_[a]; fc_meas_[a] = 0.0; }
+    fc_meas_[3] = 0.0; fc_meas_[4] = 0.0;
+    ApplyFrameShiftUpdate(t_new);
+    return;
+  }
+  if (fc_mode_ == 1) {                 // bound_centroid: same law on the bound gas,
+    MeasureBound(s);                   // commanded xidot low-passed over frame_tau_a
+    if (!(s[0] > 0.0)) { fc_meas_[3] = 0.0; return; }
+    Real off2 = 0.0;
+    const Real w = (dt > 0.0) ? fmin(1.0, dt/fc_tau_a_) : 0.0;
+    for (int a = 0; a < 3; ++a) {
+      const Real xc = s[1 + a]/s[0], vg = s[4 + a]/s[0];
+      const Real vbh = vg + fc_xd_[a];
+      if (dt > 0.0) {
+        const Real arate = (vbh - fc_vprev_[a])/dt;
+        fc_acc_[a] += (arate - fc_acc_[a])*w;
+      }
+      fc_vprev_[a] = vbh;
+      const Real cmd = vbh + fc_acc_[a]*dt + (xc - fc_tgt_[a])/fc_tau_x_;
+      fc_xd_[a] += (cmd - fc_xd_[a])*w;
+      fc_meas_[a] = vg;
+      off2 += (xc - fc_tgt_[a])*(xc - fc_tgt_[a]);
+    }
+    fc_meas_[3] = s[0];
+    fc_meas_[4] = sqrt(off2);
+    ApplyFrameShiftUpdate(t_new);
+    return;
+  }
   if (!(s[0] > 0.0)) {                 // nothing tracked: keep xidot
     fc_meas_[3] = 0.0;
     return;
@@ -2774,6 +2848,12 @@ void CFC::InitFrameControl(Driver *pdriver) {
   }
   fc_meas_[3] = s[0];
   fc_init_ = true;
+  if (!(fc_m0_ > 0.0)) { fc_m0_ = s[0]; }   // B2 reference mass (unless frame_switch_mref)
+  if (fc_mode_ != 0) {                      // non-default target mode from the start
+    const int m0 = fc_mode_;
+    fc_mode_ = 0;
+    FrameSwitch(fc_t_, m0, "frame_target_mode");
+  }
   if (global_variable::my_rank == 0) {
     std::cout << std::setprecision(10) << "CFC frame controller: x'_tgt = (" << fc_tgt_[0]
               << ", " << fc_tgt_[1] << ", " << fc_tgt_[2] << "), xidot(0) = (" << fc_xd_[0]
@@ -2828,7 +2908,109 @@ void CFC::SaveFrameState(ParameterInput *pin) const {
     pin->SetReal("cfc", "frame_ctrl_tgt" + n, fc_tgt_[a]);
     pin->SetReal("cfc", "frame_ctrl_vprev" + n, fc_vprev_[a]);
     pin->SetReal("cfc", "frame_ctrl_acc" + n, fc_acc_[a]);
+    pin->SetReal("cfc", "frame_ctrl_xdsw" + n, fc_xdsw_[a]);
   }
+  pin->SetInteger("cfc", "frame_ctrl_mode", fc_mode_);
+  pin->SetReal("cfc", "frame_ctrl_tsw", fc_tsw_);
+  pin->SetReal("cfc", "frame_ctrl_m0", fc_m0_);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::FrameSwitch(Real t_new, int mode, const char *why)
+//! \brief R-050 B2: leave remnant mode for bound_centroid (target = the bound gas's
+//! current centroid, so the offset term starts at zero) or ramp (from the current
+//! xidot). Called on every rank with identical (reduced) inputs.
+
+void CFC::FrameSwitch(Real t_new, int mode, const char *why) {
+  if (mode == fc_mode_) return;
+  fc_mode_ = mode;
+  fc_tsw_ = t_new;
+  for (int a = 0; a < 3; ++a) { fc_xdsw_[a] = fc_xd_[a]; }
+  Real b[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  if (mode == 1) {
+    MeasureBound(b);
+    if (b[0] > 0.0) {
+      for (int a = 0; a < 3; ++a) {
+        fc_tgt_[a] = b[1 + a]/b[0];
+        fc_vprev_[a] = b[4 + a]/b[0] + fc_xd_[a];
+      }
+    }
+  }
+  if (global_variable::my_rank == 0) {
+    static const char *nm[3] = {"remnant", "bound_centroid", "ramp"};
+    std::cout << std::setprecision(10) << "CFC frame controller: switch to " << nm[mode]
+              << " at t = " << t_new << " (" << why << "); xidot = (" << fc_xd_[0] << ", "
+              << fc_xd_[1] << ", " << fc_xd_[2] << "), m_ref = " << fc_m0_
+              << ", bound mass = " << b[0] << std::setprecision(6) << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureBound(Real out[7])
+//! \brief R-050 B2 bound_centroid input: as MeasureTracked, over interior cells with
+//! rho > frame_bound_rho, |x' - x_BH| >= frame_bound_rmin and BH-frame Killing energy
+//! E = -u_t - 1 < 0, -u_t = alpha W - (beta' - xidot)^i u_i, u_i = gamma_ij u^j
+//! (beta' = adm.beta_u carries this step's xidot; tde_dmde.py's convention).
+
+void CFC::MeasureBound(Real out[7]) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &u0 = pmy_pack->pmhd->u0;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &adm = pmy_pack->padm->adm;
+  Real xb[3];
+  BHPosition(fc_t_, xb);
+  const Real bx = xb[0], by = xb[1], bz = xb[2];
+  const Real rho_thr = fc_bound_rho_, r2min = fc_bound_rmin_*fc_bound_rmin_;
+  const Real x0 = fc_xd_[0], x1 = fc_xd_[1], x2 = fc_xd_[2];
+  Real s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0, s4 = 0.0, s5 = 0.0, s6 = 0.0;
+  Kokkos::parallel_reduce("cfc_frame_bound", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
+                Real &a5, Real &a6) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > rho_thr)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if ((x - bx)*(x - bx) + (y - by)*(y - by) + (z - bz)*(z - bz) < r2min) return;
+    const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i), uz = w0(m, IVZ, k, j, i);
+    const Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+    const Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+    const Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+    const Real lx = gxx*ux + gxy*uy + gxz*uz;
+    const Real ly = gxy*ux + gyy*uy + gyz*uz;
+    const Real lz = gxz*ux + gyz*uy + gzz*uz;
+    const Real W = sqrt(1.0 + ux*lx + uy*ly + uz*lz);
+    const Real al = adm.alpha(m,k,j,i);
+    const Real bpx = adm.beta_u(m,0,k,j,i), bpy = adm.beta_u(m,1,k,j,i);
+    const Real bpz = adm.beta_u(m,2,k,j,i);
+    const Real mut = al*W - ((bpx - x0)*lx + (bpy - x1)*ly + (bpz - x2)*lz);
+    if (!(mut - 1.0 < 0.0)) return;
+    const Real dm = u0(m, IDN, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*
+                    size.d_view(m).dx3;
+    const Real aw = al/W;
+    a0 += dm; a1 += dm*x; a2 += dm*y; a3 += dm*z;
+    a4 += dm*(aw*ux - bpx);
+    a5 += dm*(aw*uy - bpy);
+    a6 += dm*(aw*uz - bpz);
+  }, Kokkos::Sum<Real>(s0), Kokkos::Sum<Real>(s1), Kokkos::Sum<Real>(s2),
+     Kokkos::Sum<Real>(s3), Kokkos::Sum<Real>(s4), Kokkos::Sum<Real>(s5),
+     Kokkos::Sum<Real>(s6));
+  out[0] = s0; out[1] = s1; out[2] = s2; out[3] = s3; out[4] = s4; out[5] = s5;
+  out[6] = s6;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, out, 7, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(out, 7, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
 }
 
 }  // namespace cfc

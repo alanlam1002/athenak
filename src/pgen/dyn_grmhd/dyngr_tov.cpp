@@ -64,6 +64,11 @@ struct TDERefineParams {
 TDERefineParams tde_ref;
 } // namespace
 
+// <problem> amr_condition = tde_debris (research R-050): absolute-anchored debris
+// criterion; see the header. Shares tde_ref's BH-box parameters.
+void TDERefineDebris(MeshBlockPack *pmbp);
+#include "tde_debris_refine.hpp"
+
 namespace {
 struct TOVParams {
   tov::TOVStar my_tov;
@@ -557,7 +562,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   // Optional tracked refinement for the TDE setup (<problem> amr_condition).
   // Default "none" leaves user_ref_func null, so every existing fixture -- all of
   // which use static refinement -- is completely unaffected.
-  if (pin->GetOrAddString("problem", "amr_condition", "none") == "tde_track") {
+  const std::string amr_cond = pin->GetOrAddString("problem", "amr_condition", "none");
+  if (amr_cond == "tde_track") {
     tde_ref.rad_bh      = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
     // Default 1e-2: NANCASCADE_HANDOFF.md Sec 11.6 measured this as the largest
     // fraction that stays affordable (~566 finest-level MeshBlocks in-plane, against
@@ -570,6 +576,43 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tde_ref.lev_debris  = pin->GetOrAddInteger("problem", "amr_level_debris", 5);
     tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
     user_ref_func = &TDERefineTracker;
+  } else if (amr_cond == "tde_debris") {
+    // BH box (shared with tde_track) and, for amr_dryrun, tde_track's own debris cut
+    tde_ref.rad_bh      = pin->GetOrAddReal("problem", "amr_radius_bh", 2.0);
+    tde_ref.rho_frac    = pin->GetOrAddReal("problem", "amr_density_frac", 1.0e-2);
+    tde_ref.rad_bh_fine = pin->GetOrAddReal("problem", "amr_radius_bh_fine", 0.0);
+    tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
+    tde_ref.lev_debris  = pin->GetOrAddInteger("problem", "amr_level_debris", 5);
+    tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
+    tde_deb.rho_ref = pin->GetOrAddReal("problem", "amr_rho_ref",
+                                        pin->GetReal("problem", "rhoc"));
+    tde_deb.core_frac     = pin->GetOrAddReal("problem", "amr_core_frac", 1.0e-2);
+    tde_deb.floor_frac    = pin->GetOrAddReal("problem", "amr_rho_floor_frac", 1.0e-6);
+    tde_deb.ladder        = pin->GetOrAddBoolean("problem", "amr_ladder", true);
+    tde_deb.ladder_factor = pin->GetOrAddReal("problem", "amr_ladder_factor", 8.0);
+    tde_deb.width_cells   = pin->GetOrAddReal("problem", "amr_width_cells", 8.0);
+    tde_deb.jeans_cells   = pin->GetOrAddReal("problem", "amr_jeans_cells", 4.0);
+    tde_deb.lev_core      = pin->GetOrAddInteger("problem", "amr_level_core", 5);
+    tde_deb.lev_floor     = pin->GetOrAddInteger("problem", "amr_level_floor", 2);
+    tde_deb.lev_stream    = pin->GetOrAddInteger("problem", "amr_level_stream", 5);
+    tde_deb.deref_factor  = pin->GetOrAddReal("problem", "amr_deref_factor", 0.5);
+    tde_deb.min_residence = pin->GetOrAddInteger("problem", "amr_min_residence", 10);
+    tde_deb.dryrun        = pin->GetOrAddBoolean("problem", "amr_dryrun", false);
+    tde_deb.diag_ncycle   = pin->GetOrAddInteger("problem", "amr_diag_ncycle", 50);
+    tde_deb.gamma         = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
+    if (!(tde_deb.ladder_factor > 1.0) || !(tde_deb.deref_factor > 0.0) ||
+        tde_deb.deref_factor > 1.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "tde_debris: need amr_ladder_factor > 1 and 0 < "
+                << "amr_deref_factor <= 1" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (tde_deb.lev_stream > tde_deb.lev_core && global_variable::my_rank == 0) {
+      std::cout << "### WARNING tde_debris: amr_level_stream > amr_level_core (the design's "
+                << "level caps assume L_core >= L_stream; the Jeans cap stays L_core)"
+                << std::endl;
+    }
+    user_ref_func = &TDERefineDebris;
   }
 
   // initialize primitive variables for restart
@@ -622,6 +665,38 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w0v(m,IDN,k,j,i) = rho_v;
       w0v(m,IPR,k,j,i) = p_v;
       w0v(m,IVX,k,j,i) = 0.0; w0v(m,IVY,k,j,i) = 0.0; w0v(m,IVZ,k,j,i) = 0.0;
+    });
+  }
+
+  // <problem> amr_test_stream_rho0 > 0 (unit tests of tde_debris, research R-050 U3/U4;
+  // default 0 = off): replace the matter by a Gaussian cylinder along x on the floor,
+  // rho = rho0 exp(-r_perp^2/2H^2) exp(-max(|x| - L/2, 0)^2/2H^2), P = kappa rho^Gamma,
+  // moving along x with Eulerian speed amr_test_stream_vx (u^x = W v, flat-space W).
+  const Real ts_rho0 = pin->GetOrAddReal("problem", "amr_test_stream_rho0", 0.0);
+  if (ts_rho0 > 0.0) {
+    const Real ts_h = pin->GetOrAddReal("problem", "amr_test_stream_h", 0.35);
+    const Real ts_hl = 0.5*pin->GetOrAddReal("problem", "amr_test_stream_length", 8.0);
+    const Real ts_vx = pin->GetOrAddReal("problem", "amr_test_stream_vx", 0.0);
+    const Real ts_k = pin->GetReal("problem", "kappa");
+    const Real ts_g = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
+    const Real rho_v = pin->GetReal("mhd", "dfloor");
+    const Real p_v = rho_v*pin->GetReal("mhd", "tfloor");
+    const Real ts_ux = ts_vx/sqrt(1.0 - ts_vx*ts_vx);
+    auto &w0s = pmbp->pmhd->w0;
+    auto &size = pmbp->pmb->mb_size;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    par_for("pgen_test_stream", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, n3-1, 0, n2-1,
+            0, n1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      const Real dxe = fmax(fabs(x) - ts_hl, 0.0);
+      const Real rho = ts_rho0*exp(-(y*y + z*z + dxe*dxe)/(2.0*ts_h*ts_h));
+      w0s(m,IDN,k,j,i) = fmax(rho, rho_v);
+      w0s(m,IPR,k,j,i) = fmax(ts_k*pow(rho, ts_g), p_v);
+      w0s(m,IVX,k,j,i) = (rho > rho_v) ? ts_ux : 0.0;
+      w0s(m,IVY,k,j,i) = 0.0; w0s(m,IVZ,k,j,i) = 0.0;
     });
   }
 

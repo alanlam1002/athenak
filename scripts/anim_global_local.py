@@ -17,7 +17,10 @@ continuation in another directory); their prim_xy dumps are joined in time order
 segments winning on duplicate times.
 
     anim_global_local.py RUNDIR[,RUNDIR2...] [--label L4] [--half 40] [--every 1] [--rt 16.4]
-                         [--periapsis 10] [--out DIR]
+                         [--periapsis 10] [--mesh 0.4] [--out DIR]
+
+--mesh W draws the meshblock outlines on the global panel (line width W) and writes
+LABEL_global_local_mesh.gif, so the plain animation is kept alongside.
 """
 import argparse
 import glob
@@ -32,6 +35,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt   # noqa: E402
+from matplotlib.collections import LineCollection   # noqa: E402
 from matplotlib.colors import LogNorm, TwoSlopeNorm   # noqa: E402
 from PIL import Image   # noqa: E402
 
@@ -80,8 +84,12 @@ def frame(job):
     fig, ax = plt.subplots(1, 3, figsize=(16.5, 5.4), gridspec_kw=dict(width_ratios=[1.25, 1, 1]),
                            constrained_layout=True)
     a = ax[0]
-    O.draw(a, O.blocks(s, s['d'] / k['rhoc']), ((-half, half), (-half, half)),
-           LogNorm(vmin=1e-9, vmax=1.0), O.CR, outline=False)
+    bl = O.blocks(s, s['d'] / k['rhoc'])
+    O.draw(a, bl, ((-half, half), (-half, half)), LogNorm(vmin=1e-9, vmax=1.0), O.CR, outline=False)
+    if A['mesh']:                                   # meshblock outlines (--mesh)
+        segs = [[(xa, ya), (xb_, ya), (xb_, yb), (xa, yb), (xa, ya)] for (xa, xb_, ya, yb, _) in bl
+                if not (xb_ < -half or xa > half or yb < -half or ya > half)]
+        a.add_collection(LineCollection(segs, colors='w', linewidths=A['mesh'], alpha=0.45))
     a.plot(*xb, 'o', ms=7, mfc='none', mec='c', mew=1.5)
     a.annotate('BH', xb, xytext=(6, 6), textcoords='offset points', color='c', fontsize=9)
     if A['rt'] > 0:
@@ -127,6 +135,8 @@ def main():
     ap.add_argument('--nproc', type=int, default=16)
     ap.add_argument('--rt', type=float, default=16.4, help='tidal radius [M]; 0 = off')
     ap.add_argument('--periapsis', type=float, default=10.0, help='geodesic areal r_p; 0 = off')
+    ap.add_argument('--mesh', type=float, default=0.0,
+                    help='meshblock outlines on the global panel, line width (e.g. 0.4); 0 = off')
     ap.add_argument('--out', default='.')
     a = ap.parse_args()
     runs = a.run.split(',')
@@ -142,18 +152,19 @@ def main():
     fs = [byt[t] for t in sorted(byt)][::a.every]
     geo = geodesic(runs[0], a.periapsis, t_h[-1] + 1.0) if a.periapsis > 0 else None
     A.update(lab=a.label, half=a.half, t=t_h, xb=xb, dpi=a.dpi, title=a.title or a.label,
-             rt=a.rt, geo=geo, rp=a.periapsis)
-    tmp = f'{a.out}/frames_{a.label}'
+             rt=a.rt, geo=geo, rp=a.periapsis, mesh=a.mesh)
+    sfx = '_mesh' if a.mesh > 0 else ''
+    tmp = f'{a.out}/frames_{a.label}{sfx}'
     os.makedirs(tmp, exist_ok=True)
     jobs = [(i, f, f'{tmp}/f{i:04d}.png') for i, f in enumerate(fs)]
     with Pool(a.nproc) as p:
         pngs = p.map(frame, jobs)
     ims = [Image.open(f).convert('P', palette=Image.ADAPTIVE) for f in pngs]
-    gif = f'{a.out}/{a.label}_global_local.gif'
+    gif = f'{a.out}/{a.label}_global_local{sfx}.gif'
     ims[0].save(gif, save_all=True, append_images=ims[1:], duration=int(1000 / a.fps), loop=0)
     print(gif, os.path.getsize(gif) // 1024, 'kB,', len(ims), 'frames')
     if shutil.which('ffmpeg'):
-        mp4 = f'{a.out}/{a.label}_global_local.mp4'
+        mp4 = f'{a.out}/{a.label}_global_local{sfx}.mp4'
         subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(a.fps), '-i', f'{tmp}/f%04d.png',
                         '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-pix_fmt', 'yuv420p', mp4], check=True)
         print(mp4, os.path.getsize(mp4) // 1024, 'kB')

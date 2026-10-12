@@ -12,7 +12,11 @@ The BH position is x_BH(t) = puncture_x - xi(t), with xi = the history's frame_d
 columns (comoving gauge); in the BH frame xi = 0 and x_BH = puncture_x (or the origin).
 Frames render in parallel to PNGs, then join into a GIF (and an MP4 if ffmpeg exists).
 
-    anim_global_local.py RUNDIR [--label L4] [--half 40] [--every 1] [--rt 16.4]
+RUNDIR may be a comma-separated list of segments of one run (e.g. a run and its restart
+continuation in another directory); their prim_xy dumps are joined in time order, later
+segments winning on duplicate times.
+
+    anim_global_local.py RUNDIR[,RUNDIR2...] [--label L4] [--half 40] [--every 1] [--rt 16.4]
                          [--periapsis 10] [--out DIR]
 """
 import argparse
@@ -34,6 +38,7 @@ from PIL import Image   # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import tde_ovn_plots as O                         # noqa: E402
+from tde_ensemble_plots import bc                 # noqa: E402
 
 B = 'cfc_tde_wd_imbh_parabolic_tracker'
 A = {}
@@ -124,11 +129,18 @@ def main():
     ap.add_argument('--periapsis', type=float, default=10.0, help='geodesic areal r_p; 0 = off')
     ap.add_argument('--out', default='.')
     a = ap.parse_args()
-    O.RUNS[a.label] = (a.run, 'k', '-', a.label)
+    runs = a.run.split(',')
+    O.RUNS[a.label] = (runs[0], 'k', '-', a.label)
     O.NK = TwoSlopeNorm(vcenter=1.0, vmin=0.8, vmax=6.0)   # K/K0 from 1 to ~6 after the heating
-    t_h, xb = bh_track(a.run)
-    fs = sorted(glob.glob(f'{a.run}/bin/{B}.prim_xy.*.bin'))[::a.every]
-    geo = geodesic(a.run, a.periapsis, t_h[-1] + 1.0) if a.periapsis > 0 else None
+    tr = [bh_track(d) for d in runs]
+    t_h = np.concatenate([t for t, _ in tr]); xb = np.concatenate([x for _, x in tr])
+    o = np.argsort(t_h, kind='stable'); t_h, xb = t_h[o], xb[o]
+    byt = {}
+    for d in runs:                                  # later segments win on duplicate times
+        for f in sorted(glob.glob(f'{d}/bin/{B}.prim_xy.*.bin')):
+            byt[round(float(bc.read_binary(f)['time']), 6)] = f
+    fs = [byt[t] for t in sorted(byt)][::a.every]
+    geo = geodesic(runs[0], a.periapsis, t_h[-1] + 1.0) if a.periapsis > 0 else None
     A.update(lab=a.label, half=a.half, t=t_h, xb=xb, dpi=a.dpi, title=a.title or a.label,
              rt=a.rt, geo=geo, rp=a.periapsis)
     tmp = f'{a.out}/frames_{a.label}'

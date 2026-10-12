@@ -10391,3 +10391,18 @@ t = 61-64:
 fixed volume instead of the root volume. With 128³ (Q1's box) the threshold is
 box-independent and Q1-class decks are bitwise unchanged. The box ladder ±64/±128/±256 (t = 0,
 corrected-fill binary, same reference volume) is in OUTBOX C-041.
+
+**Follow-up (R-047, 2026-10-12; job 8922511), measured:**
+- **Per-stage residuals with `solve_interval = 1`** (S2_stage_si1, diag slots `de_ken_s1..s3`;
+  slope of K_en/K_tr − 1 against the step's metric term at fixed U): stage 1 −1.000,
+  stage 2 −0.249, stage 3 +0.325 (|r| ≥ 0.996). This is exactly the solve-at-last-stage
+  model: stages 1-2 invert against the old metric, each entropy resync resets ε to the
+  tracer, and SSP-RK3's weights give −1, ¼·(−1), ⅔·(−1) + 1. The guard blocks only the
+  warm (stage-3) residual from the tracer. The once-per-step diag samples stage 3 (the C2P
+  waits for `CFC_SolvePsi`).
+- **BH frame, flag off** (arm (e) restart t = 47 → 80, `dual_energy_vcurv_shock = 1e9`, guard
+  on): dense K/K0 stays at 1.003-1.004 (flag on: 1.004 → 1.036); M3 warm > 5% goes
+  0.056 → 0.070 (flag on: 0.056 → 0.274). The energy solution is still +0.6% hot (p99
+  +24%), but nothing transfers it. **The resync + guard ratchet drives the BH-frame warm
+  layers too** (the "one-way valve"). With si = 0 in the comoving frame the energy solution
+  is accurate, so the valve has nothing to rectify there.

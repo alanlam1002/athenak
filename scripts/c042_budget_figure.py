@@ -96,18 +96,24 @@ def main():
     # (c) per stage
     if glob.glob(f'{RUN}/S2_stage_si1/bin/{B}.dediag_xy.*.bin'):
         c = cells('S2_stage_si1', extra=('de_ken_s1', 'de_ken_s2', 'de_ken_s3'))
+        # R-045's toy (metric jump at stage 1) vs the code's order (solve at the LAST stage,
+        # stages 1-2 on the old metric, entropy resync at every stage): -1, -1/4, +1/3
         pred = {1: 0.0, 2: -0.5, 3: 1.0 / 3.0}
+        code = {1: -1.0, 2: -0.25, 3: 1.0 / 3.0}
         for s, col in zip((1, 2, 3), ('C2', 'C1', 'C3')):
             y = c[f'de_ken_s{s}']
-            sl, ic = np.polyfit(c['mt'], y, 1)
-            ax[2].plot(c['mt'], y, '.', ms=3, color=col, alpha=0.5,
-                       label=f'stage {s}: slope {sl:+.3f} (toy {pred[s]:+.3f})')
-            ax[2].plot(x, pred[s] * x, '--', color=col, lw=1)
+            ok = y != 0.0                     # slot not written at this stage (not dense / bad)
+            sl, ic = np.polyfit(c['mt'][ok], y[ok], 1)
+            ax[2].plot(c['mt'][ok], y[ok], '.', ms=3, color=col, alpha=0.5,
+                       label=f'stage {s}: slope {sl:+.3f} (solve-last {code[s]:+.3f}; R-045 {pred[s]:+.3f})')
+            ax[2].plot(x, code[s] * x, '-', color=col, lw=0.8)
+            ax[2].plot(x, pred[s] * x, ':', color=col, lw=1)
             rows.append(f'per-stage (S2, si = 1) stage {s}: slope {sl:+.4f} intercept {ic:+.5f} '
-                        f'r {np.corrcoef(c["mt"], y)[0, 1]:.3f}; toy {pred[s]:+.4f}')
+                        f'r {np.corrcoef(c["mt"][ok], y[ok])[0, 1]:.3f} ({ok.sum()}/{ok.size} cells written); '
+                        f'solve-last model {code[s]:+.4f}, R-045 toy {pred[s]:+.4f}')
         ax[2].legend(fontsize=8)
     ax[2].set_xlabel('metric term per step (U fixed)'); ax[2].set_ylabel('K_en/K_tr − 1 at the stage C2P')
-    ax[2].set_title('(c) per C2P stage, solve_interval = 1')
+    ax[2].set_title('(c) per C2P stage, si = 1 (solid: solve at last stage; dotted: R-045)')
     for x_ in ax:
         x_.grid(alpha=0.3)
     fig.suptitle('Comoving frame: once-per-step metric solves and the dual-energy excess (item 6 L4, t ≈ 61-68)')

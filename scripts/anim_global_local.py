@@ -45,6 +45,8 @@ import tde_ovn_plots as O                         # noqa: E402
 from tde_ensemble_plots import bc                 # noqa: E402
 
 B = 'cfc_tde_wd_imbh_parabolic_tracker'
+# not on PATH on Aurora login nodes (the ffmpeg/7.1 module does not expose it)
+FFMPEG_SPACK = '/opt/aurora/*/spack/unified/*/install/linux-x86_64/ffmpeg-*/bin/ffmpeg'
 A = {}
 
 
@@ -163,10 +165,12 @@ def main():
     gif = f'{a.out}/{a.label}_global_local{sfx}.gif'
     ims[0].save(gif, save_all=True, append_images=ims[1:], duration=int(1000 / a.fps), loop=0)
     print(gif, os.path.getsize(gif) // 1024, 'kB,', len(ims), 'frames')
-    if shutil.which('ffmpeg'):
+    ff = shutil.which('ffmpeg') or next(iter(glob.glob(FFMPEG_SPACK)), None)
+    if ff:
         mp4 = f'{a.out}/{a.label}_global_local{sfx}.mp4'
-        subprocess.run(['ffmpeg', '-y', '-loglevel', 'error', '-framerate', str(a.fps), '-i', f'{tmp}/f%04d.png',
-                        '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-pix_fmt', 'yuv420p', mp4], check=True)
+        subprocess.run([ff, '-y', '-loglevel', 'error', '-framerate', str(a.fps), '-i', f'{tmp}/f%04d.png',
+                        '-vf', 'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+                        '-crf', '20', mp4], check=True)
         print(mp4, os.path.getsize(mp4) // 1024, 'kB')
 
 

@@ -157,6 +157,16 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
+  // <mhd>/fofc_scalar_dmp (default true): flag a cell for scalar-only FOFC when its trial
+  // D*Y leaves the local maximum-principle band [min/dmp_M, dmp_M*max] of its neighbours.
+  // false keeps only the hard EOS-bound test (and the PP limiter); diagnostic A/B switch.
+  bool fofc_scalar_dmp;
+  // <mhd>/fofc_scalar_consistent (default false): on faces whose mass flux FOFC replaces
+  // with the first-order flux (hydro-flagged or excised cell), take each scalar flux as the
+  // same first-order Riemann flux of D*Y (same wave speeds and branch as D) instead of the
+  // first-order mass flux times the upwind cell Y. Scalar-only faces keep the upwind form,
+  // which is the one consistent with their unchanged high-order mass flux.
+  bool fofc_scalar_consistent;
   // Gate for EnforceScalarBoundsAfterRefinement (<mhd>/amr_scalar_repair). Default
   // false: the pass is under investigation as the cause of a conserved-scalar
   // corruption and mass-loss regression, so it must be opted into explicitly.

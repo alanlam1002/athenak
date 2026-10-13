@@ -182,6 +182,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   enforce_maximum = pin->GetOrAddBoolean("mhd", "enforce_maximum", true);
   dmp_M = pin->GetOrAddReal("mhd", "dmp_M", 1.2);
   scalar_pplimiter = pin->GetOrAddBoolean("mhd", "scalar_pplimiter", true);
+  fofc_scalar_dmp = pin->GetOrAddBoolean("mhd", "fofc_scalar_dmp", true);
+  fofc_scalar_consistent = pin->GetOrAddBoolean("mhd", "fofc_scalar_consistent", false);
   amr_scalar_repair = pin->GetOrAddBoolean("mhd", "amr_scalar_repair", false);
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);

@@ -27,7 +27,7 @@ void SingleStateHLLE_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& e
     Real prim_l[NPRIM], Real prim_r[NPRIM], Real Bu_l[NPRIM], Real Bu_r[NPRIM],
     const int nmhd, const int nscal,
     Real g3d[NSPMETRIC], Real beta_u[3], Real alpha,
-    Real flux[NCONS], Real bflux[NMAG]) {
+    Real flux[NCONS], Real bflux[NMAG], Real *fscal = nullptr) {
   constexpr int ibx = ivx - IVX;
   constexpr int iby = ((ivx - IVX) + 1)%3;
   constexpr int ibz = ((ivx - IVX) + 2)%3;
@@ -113,6 +113,24 @@ void SingleStateHLLE_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& e
 
   bflux[IBY] = - vol * bf_interface[iby];
   bflux[IBZ] = vol * bf_interface[ibz];
+
+  // Optional (<mhd>/fofc_scalar_consistent): the same HLL flux for each D*Y, with the
+  // wave speeds and branch of D, so a uniform Y gives F_D*Y.
+  if (fscal != nullptr) {
+    for (int n = 0; n < nscal; n++) {
+      const Real yl = prim_l[PYF + n], yr = prim_r[PYF + n];
+      Real fs;
+      if (lambda_l >= 0.) {
+        fs = fl[CDN]*yl;
+      } else if (lambda_r <= 0.) {
+        fs = fr[CDN]*yr;
+      } else {
+        fs = (lambda_r*fl[CDN]*yl - lambda_l*fr[CDN]*yr +
+              qa*(cons_r[CDN]*yr - cons_l[CDN]*yl)) * qb;
+      }
+      fscal[n] = vol*fs;
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------

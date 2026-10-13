@@ -151,6 +151,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     if (multi_d) { jl = js-1, ju = je+1, jadd = 1; }
     if (three_d) { kl = ks-1, ku = ke+1, kadd = 1; }
 
+    const bool scal_dmp_ = fofc_scalar_dmp;
+
     // Estimate updated conserved variables and cell-centered fields
     par_for("FOFC-newu", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -190,8 +192,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             fofc_(m,k,j,i) = true;
           }
         }
-        // Enforce maximum principle for scalar
-        if (nscal_ > 0) {
+        // Enforce maximum principle for scalar (<mhd>/fofc_scalar_dmp)
+        if (nscal_ > 0 && scal_dmp_) {
           for (int n = 0; n < nscal_; ++n) {
             Real varmax = eos_min_Y(n);
             Real varmin = eos_max_Y(n);
@@ -334,6 +336,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
   if (multi_d) { jl = js-1, ju = je+1; }
   if (three_d) { kl = ks-1, ku = ke+1; }
 
+  const bool scons_ = fofc_scalar_consistent;
+
   // Replace fluxes with first-order LLF fluxes at i,j,k faces for any cell where FOFC
   // and/or excision is used (if GR+excising)
   par_for("FOFC-flx", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
@@ -363,6 +367,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       ExtractPrimitives(wri, w0_, eos_, nmhd_, nscal_, m, k, j, i);
       Real g3d[NSPMETRIC], beta_u[3], alpha;
       Real flux[NCONS], bflux[NMAG];
+      Real fsc[MAX_SPECIES];   // consistent first-order D*Y fluxes (scons_)
       if (fofc_flag || fofc_excision) {
         ExtractBField(bli, bcc0_, IBX, IBY, IBZ, m, k, j, i-1);
         ExtractBField(bri, bcc0_, IBX, IBY, IBZ, m, k, j, i);
@@ -374,10 +379,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         // compute new 1st-order LLF flux at i-face
         if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
           SingleStateLLF_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
-                                    g3d, beta_u, alpha, flux, bflux);
+                                    g3d, beta_u, alpha, flux, bflux,
+                                    scons_ ? fsc : nullptr);
         } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
           SingleStateHLLE_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
-                                    g3d, beta_u, alpha, flux, bflux);
+                                    g3d, beta_u, alpha, flux, bflux,
+                                    scons_ ? fsc : nullptr);
         }
 
         // Store 1st-order fluxes at i-1/2
@@ -388,7 +395,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       // Calculate fluxes of scalars
       for (int n = 0; n < nscal_; n++) {
-        if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+        if (scons_ && (fofc_flag || fofc_excision)) {
+          flx1(m, nmhd_ + n, k, j, i) = fsc[n];
+        } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
           if (flx1(m, IDN, k, j, i) >= 0.0) {
             flx1(m, nmhd_ + n, k, j, i) = flx1(m,IDN,k,j,i)*wli[PYF + n];
           } else {
@@ -415,10 +424,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           // Compute new 1st-order LLF flux at j-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
             SingleStateLLF_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
             SingleStateHLLE_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           }
 
           // Store 1st-order fluxes at j-1/2
@@ -429,7 +440,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
         // Calculate fluxes of scalars
         for (int n = 0; n < nscal_; n++) {
-          if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+          if (scons_ && (fofc_flag || fofc_excision)) {
+            flx2(m, nmhd_ + n, k, j, i) = fsc[n];
+          } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
             if (flx2(m, IDN, k, j, i) >= 0.0) {
               flx2(m, nmhd_ + n, k, j, i) = flx2(m,IDN,k,j,i)*wlj[PYF + n];
             } else {
@@ -457,10 +470,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           // Compute new 1st-order LLF flux at k-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
             SingleStateLLF_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
             SingleStateHLLE_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           }
 
           // Store 1st-order fluxes at k-1/2
@@ -471,7 +486,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
         // Calculate fluxes of scalars
         for (int n = 0; n < nscal_; n++) {
-          if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+          if (scons_ && (fofc_flag || fofc_excision)) {
+            flx3(m, nmhd_ + n, k, j, i) = fsc[n];
+          } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
             if (flx3(m, IDN, k, j, i) >= 0.0) {
               flx3(m, nmhd_ + n, k, j, i) = flx3(m,IDN,k,j,i)*wmk[PYF + n];
             } else {
@@ -513,6 +530,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       ExtractPrimitives(wri, w0_, eos_, nmhd_, nscal_, m, k, j, i+1);
       Real g3d[NSPMETRIC], beta_u[3], alpha;
       Real flux[NCONS], bflux[NMAG];
+      Real fsc[MAX_SPECIES];   // consistent first-order D*Y fluxes (scons_)
       if (fofc_flag || fofc_excision) {
         ExtractBField(bli, bcc0_, IBX, IBY, IBZ, m, k, j, i);
         ExtractBField(bri, bcc0_, IBX, IBY, IBZ, m, k, j, i+1);
@@ -525,10 +543,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         // compute new 1st-order LLF flux at (i+1)-face
         if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
           SingleStateLLF_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
-                               g3d, beta_u, alpha, flux, bflux);
+                               g3d, beta_u, alpha, flux, bflux,
+                               scons_ ? fsc : nullptr);
         } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
           SingleStateHLLE_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
-                               g3d, beta_u, alpha, flux, bflux);
+                               g3d, beta_u, alpha, flux, bflux,
+                               scons_ ? fsc : nullptr);
         }
 
         // Store 1st-order fluxes at i+1/2
@@ -538,8 +558,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       }
 
       // Calculate fluxes of scalars
+      // A hydro-flagged neighbour already wrote the consistent D*Y flux on this
+      // face (first kernel); a scalar-only cell must not overwrite it.
+      const bool nbh = scons_ && (i+1 <= iu) &&
+                       ((use_fofc_ && fofc_(m,k,j,i+1)) ||
+                        (use_excise_ && excision_flux_(m,k,j,i+1)));
       for (int n = 0; n < nscal_; n++) {
-        if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+        if (scons_ && (fofc_flag || fofc_excision)) {
+          flx1(m, nmhd_ + n, k, j, i+1) = fsc[n];
+        } else if ((fofc_flag || fofc_scal_(m,n,k,j,i)) && !nbh) {
           if (flx1(m, IDN, k, j, i+1) >= 0.0) {
             flx1(m, nmhd_ + n, k, j, i+1) = flx1(m,IDN,k,j,i+1)*wli[PYF + n];
           } else {
@@ -566,10 +593,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           // Compute new 1st-order LLF flux at j-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
             SingleStateLLF_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
             SingleStateHLLE_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           }
 
           // Store 1st-order fluxes at j+1/2
@@ -579,8 +608,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
 
         // Calculate fluxes of scalars
+        // A hydro-flagged neighbour already wrote the consistent D*Y flux on this
+        // face (first kernel); a scalar-only cell must not overwrite it.
+        const bool nbh = scons_ && (j+1 <= ju) &&
+                         ((use_fofc_ && fofc_(m,k,j+1,i)) ||
+                          (use_excise_ && excision_flux_(m,k,j+1,i)));
         for (int n = 0; n < nscal_; n++) {
-          if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+          if (scons_ && (fofc_flag || fofc_excision)) {
+            flx2(m, nmhd_ + n, k, j+1, i) = fsc[n];
+          } else if ((fofc_flag || fofc_scal_(m,n,k,j,i)) && !nbh) {
             if (flx2(m, IDN, k, j+1, i) >= 0.0) {
               flx2(m, nmhd_ + n, k, j+1, i) = flx2(m,IDN,k,j+1,i)*wlj[PYF + n];
             } else {
@@ -608,10 +644,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           // Compute new 1st-order LLF flux at k-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
             SingleStateLLF_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           } else if (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
             SingleStateHLLE_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
-                                      g3d, beta_u, alpha, flux, bflux);
+                                      g3d, beta_u, alpha, flux, bflux,
+                                      scons_ ? fsc : nullptr);
           }
 
           // Store 1st-order fluxes at k+1/2
@@ -621,8 +659,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
 
         // Calculate fluxes of scalars
+        // A hydro-flagged neighbour already wrote the consistent D*Y flux on this
+        // face (first kernel); a scalar-only cell must not overwrite it.
+        const bool nbh = scons_ && (k+1 <= ku) &&
+                         ((use_fofc_ && fofc_(m,k+1,j,i)) ||
+                          (use_excise_ && excision_flux_(m,k+1,j,i)));
         for (int n = 0; n < nscal_; n++) {
-          if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
+          if (scons_ && (fofc_flag || fofc_excision)) {
+            flx3(m, nmhd_ + n, k+1, j, i) = fsc[n];
+          } else if ((fofc_flag || fofc_scal_(m,n,k,j,i)) && !nbh) {
             if (flx3(m, IDN, k+1, j, i) >= 0.0) {
               flx3(m, nmhd_ + n, k+1, j, i) = flx3(m,IDN,k+1,j,i)*wmk[PYF + n];
             } else {

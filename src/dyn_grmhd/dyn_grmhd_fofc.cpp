@@ -661,7 +661,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     if (three_d) { alp_pp = 6.0, kl = ks, ku = ke+1; }
 
     // Read-only activation counter (fofc_count_diag): an interior face counts once per
-    // stage if any scalar's theta < 1. Touched only on limited faces, so cheap.
+    // stage if the limiter changes some scalar's flux, i.e. theta < 1 where the high-order
+    // and LLF fluxes differ beyond round-off. (A scalar sitting exactly at its bound, e.g.
+    // f = 1 in the mantle, gets theta < 1 from the DBL_EPSILON margin although both fluxes
+    // agree there; those faces are not counted.) Touched only on limited faces, so cheap.
     const bool ppcount = fofc_count_diag;
     auto ppc = pp_cnt_d;
 
@@ -744,7 +747,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       }
       if (ppcount && j <= je && k <= ke) {
         bool lim = false;
-        for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+        for (int n=0; n < nscal_; ++n) {
+          const Real fh = flx1(m,nmhd_+n,k,j,i), fl = flx_llf[n];
+          lim = lim || (wraw[n] < 1.0 && fabs(fh - fl) > 1.0e-10*(fabs(fh) + fabs(fl)));
+        }
         if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
       }
       for (int n=0; n < nscal_; ++n) {
@@ -816,7 +822,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
         if (ppcount && i <= ie && k <= ke) {
           bool lim = false;
-          for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+          for (int n=0; n < nscal_; ++n) {
+            const Real fh = flx2(m,nmhd_+n,k,j,i), fl = flx_llf[n];
+            lim = lim || (wraw[n] < 1.0 && fabs(fh - fl) > 1.0e-10*(fabs(fh) + fabs(fl)));
+          }
           if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
         }
         for (int n=0; n < nscal_; ++n) {
@@ -889,7 +898,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
         if (ppcount && i <= ie && j <= je) {
           bool lim = false;
-          for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+          for (int n=0; n < nscal_; ++n) {
+            const Real fh = flx3(m,nmhd_+n,k,j,i), fl = flx_llf[n];
+            lim = lim || (wraw[n] < 1.0 && fabs(fh - fl) > 1.0e-10*(fabs(fh) + fabs(fl)));
+          }
           if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
         }
         for (int n=0; n < nscal_; ++n) {

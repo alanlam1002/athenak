@@ -85,7 +85,8 @@ class DynGRMHD {
   // FOFC activation counters (see fofc_count_diag); for history output.
   Real GetFofcCount(int n) const { return fofc_cnt[n]; }
   // Scalar PP-limiter activations (also fofc_count_diag): n = 0 interior face-stages where
-  // some scalar's theta < 1 (reads the device counter), n = 1 interior face-stages tested.
+  // the limiter changed some scalar's flux (theta < 1 and high-order != LLF flux; reads the
+  // device counter), n = 1 interior face-stages tested.
   Real GetPPCount(int n);
 
   // container to hold names of TaskIDs

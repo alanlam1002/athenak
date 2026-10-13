@@ -757,7 +757,7 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[16] = "fofc-scal";
   pdata->label[17] = "n-cells";
   // Scalar positivity-limiter activations (same flag), cumulative face-stages: interior
-  // faces where some scalar's theta < 1, and interior faces tested.
+  // faces where the limiter changed some scalar's flux, and interior faces tested.
   pdata->label[18] = "pp-lim";
   pdata->label[19] = "n-faces";
 

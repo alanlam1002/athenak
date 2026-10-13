@@ -341,7 +341,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     fc_switch_frac_ = pin->GetOrAddReal("cfc", "frame_switch_mass_frac", 0.0);
     fc_ramp_T_ = pin->GetOrAddReal("cfc", "frame_ramp_time", 50.0);
     fc_bound_rho_ = pin->GetOrAddReal("cfc", "frame_bound_rho", 1.0e-4*fc_rho_thr_);
-    fc_bound_rmin_ = pin->GetOrAddReal("cfc", "frame_bound_rmin", 3.0);
+    // R-054 (R-053 §4): bound_centroid must ignore the near-BH atmosphere zone, so both
+    // gates must cover it: frame_bound_rho >= the zone's rho_thr (the default 1e-4 x
+    // frame_track_rho = 1e-5 rho_c already exceeds every rho_thr in R-054's sweep, <= 1e-8
+    // rho_c) and frame_bound_rmin >= its r_s (6 M: C-046 S0 shows r_s = 3 leaves the limit at
+    // r_BH ~ 3). A future zone must enforce both (max of the two) when it is switched on.
+    fc_bound_rmin_ = pin->GetOrAddReal("cfc", "frame_bound_rmin", 6.0);
     if (pin->DoesParameterExist("cfc", "frame_switch_mref")) {
       fc_m0_ = pin->GetReal("cfc", "frame_switch_mref");
     }

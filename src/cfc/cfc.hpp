@@ -341,7 +341,8 @@ class CFC {
   // Research R-050 B2 (DEBRIS_REFINEMENT_DESIGN §4): what the controller follows.
   // <cfc> frame_target_mode = remnant (default: the tracked clump, as above) |
   // bound_centroid (mass-weighted centroid and grid velocity of gas with BH-frame
-  // E = -u_t - 1 < 0, rho > frame_bound_rho, |x' - x_BH| >= frame_bound_rmin; the
+  // E = -u_t - 1 < 0, rho > frame_bound_rho, |x' - x_BH| >= frame_bound_rmin (default 6 M,
+  // R-054: both gates must cover the near-BH atmosphere zone's rho_thr and r_s); the
   // commanded xidot is low-passed over frame_tau_a) | ramp (xidot -> 0 linearly over
   // frame_ramp_time from its value at the switch). Automatic switch: in remnant mode,
   // when the tracked mass falls below frame_switch_mass_frac * m_ref (m_ref = the t = 0
@@ -355,7 +356,7 @@ class CFC {
   Real fc_tsw_ = 0.0;                     // switch time
   Real fc_xdsw_[3] = {0.0, 0.0, 0.0};     // xidot at the switch (ramp start)
   Real fc_ramp_T_ = 50.0;
-  Real fc_bound_rho_ = 0.0, fc_bound_rmin_ = 3.0;
+  Real fc_bound_rho_ = 0.0, fc_bound_rmin_ = 6.0;
   // bound-gas reduction, same layout as MeasureTracked
   void MeasureBound(Real out[7]);
   void FrameSwitch(Real t_new, int mode, const char *why);

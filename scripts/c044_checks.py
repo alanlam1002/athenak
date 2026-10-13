@@ -32,13 +32,14 @@ B = 'cfc_tde_wd_imbh_parabolic_tracker'
 MSTAR = 7.47e-5
 K0 = 1.2346626297e-2
 DE = 0.677 / 16.4**2
-PAIRS = (('R6', 'R6_rp10_comov_L4_fix', 'RQ1', 'RQ1_bh_L4_t300_from_De', (195.2, 200.0)),
+PAIRS = (('R6', 'R6_rp10_comov_L4_fix,R6x_rp10_comov_L4_t300', 'RQ1', 'RQ1_bh_L4_t300_from_De', (195.2, 300.0)),
          ('R7', 'R7_rp18_comov_L4_fix', 'Q3', 'Q3_P2_rp18_L4', (300.0,)))
-KSEG = {'RQ1': ('D_e_Q1deck_kfix_t80', 'RQ1_bh_L4_t300_from_De')}   # BH-frame Q1 = D_e + RQ1
+KSEG = {'RQ1': ('D_e_Q1deck_kfix_t80', 'RQ1_bh_L4_t300_from_De'),
+        'R6': ('R6_rp10_comov_L4_fix', 'R6x_rp10_comov_L4_t300')}   # BH-frame Q1 = D_e + RQ1
 
 
 def rst_at(d, t):
-    fs = sorted(glob.glob(f'{C}/{d}/rst/*.rst'))
+    fs = sorted(f for s in d.split(',') for f in glob.glob(f'{C}/{s}/rst/*.rst'))   # d: segment[,segment]
     ts = np.array([RT.read_tree(f)['time'] for f in fs])
     i = int(np.argmin(np.abs(ts - t)))
     return fs[i] if abs(ts[i] - t) < 0.5 else None

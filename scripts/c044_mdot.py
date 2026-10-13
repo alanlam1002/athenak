@@ -41,7 +41,7 @@ MSTAR = 7.47e-5
 TSEC = 4.925e-2                                   # s per M for M_BH = 1e4 M_sun
 MSUN_STAR = 0.747
 DE = 0.677 / 16.4**2
-RUNS = {'R6 (comoving rp10, si = 0)': ('R6_rp10_comov_L4_fix', 10.0, (171.1, 182.9, 195.2, 200.0), 'C0'),
+RUNS = {'R6 (comoving rp10, si = 0)': ('R6_rp10_comov_L4_fix,R6x_rp10_comov_L4_t300', 10.0, (171.1, 200.0, 233.8, 272.4, 300.0), 'C0'),
         'RQ1 (BH frame rp10, corrected fill)': ('RQ1_bh_L4_t300_from_De', 10.0, (176.2, 195.2, 236.5, 300.0), 'C3'),
         'R7 (comoving rp18, si = 0)': ('R7_rp18_comov_L4_fix', 18.0, (253.7, 300.0), 'C2'),
         'Q3 (BH frame rp18, si = 1)': ('Q3_P2_rp18_L4', 18.0, (256.6, 300.0), 'C1')}
@@ -51,6 +51,7 @@ TB = np.logspace(2.5, 6.5, 81)                    # return-time bins [M]
 def t_peri(d, rp):
     import tde_parabolic_orbit_ic as P
     from anim_global_local import par_get
+    d = d.split(',')[0]
     x0 = par_get(f'{C}/{d}', 'star_center_x1') - par_get(f'{C}/{d}', 'puncture_x1')
     s = P.solve_ic(x0, rp)
     o = P.integrate(x0, s['px'], s['py'], 400.0, 0.01)
@@ -58,7 +59,7 @@ def t_peri(d, rp):
 
 
 def rst_at(d, t):
-    fs = sorted(glob.glob(f'{C}/{d}/rst/*.rst'))
+    fs = sorted(f for s in d.split(',') for f in glob.glob(f'{C}/{s}/rst/*.rst'))   # d: segment[,segment]
     ts = np.array([RT.read_tree(f)['time'] for f in fs])
     i = int(np.argmin(np.abs(ts - t)))
     return fs[i] if abs(ts[i] - t) < 0.5 else None
@@ -66,7 +67,7 @@ def rst_at(d, t):
 
 def one(job):
     d, tt = job
-    cache = f'{C}/plots/phase2_m1/c044_mdot_cache/{d}_{tt:.1f}.npz'
+    cache = f'{C}/plots/phase2_m1/c044_mdot_cache/{d.split(",")[-1] if tt > 200.5 else d.split(",")[0]}_{tt:.1f}.npz'
     if os.path.exists(cache):
         z = np.load(cache)
         return d, tt, z['t'], z['E'], z['dM'], z['rem']

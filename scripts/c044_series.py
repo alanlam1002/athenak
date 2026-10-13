@@ -31,7 +31,7 @@ from anim_global_local import bh_track            # noqa: E402
 C = '/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc'
 B = 'cfc_tde_wd_imbh_parabolic_tracker'
 RHOC, K0, MSTAR, GAM = 3.24e-4, 1.2346626297e-2, 7.47e-5, 5.0 / 3.0
-RUNS = {'R6': ('R6_rp10_comov_L4_fix',), 'Q1c': ('D_e_Q1deck_kfix_t80', 'RQ1_bh_L4_t300_from_De'),
+RUNS = {'R6': ('R6_rp10_comov_L4_fix', 'R6x_rp10_comov_L4_t300'), 'Q1c': ('D_e_Q1deck_kfix_t80', 'RQ1_bh_L4_t300_from_De'),
         'R7': ('R7_rp18_comov_L4_fix',), 'Q3': ('Q3_P2_rp18_L4',)}
 
 

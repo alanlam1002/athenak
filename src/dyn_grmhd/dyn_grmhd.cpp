@@ -366,6 +366,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   eos.de_stage = stage;   // dual_energy_diag per-stage slots only
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
+  eos.DrainZone(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
+                pmy_pack->pmesh->ncycle);
   return TaskStatus::complete;
 }
 

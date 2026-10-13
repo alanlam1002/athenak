@@ -347,6 +347,19 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     // rho_c) and frame_bound_rmin >= its r_s (6 M: C-046 S0 shows r_s = 3 leaves the limit at
     // r_BH ~ 3). A future zone must enforce both (max of the two) when it is switched on.
     fc_bound_rmin_ = pin->GetOrAddReal("cfc", "frame_bound_rmin", 6.0);
+    if (pin->GetOrAddBoolean("mhd", "atmosphere_zone", false)) {   // R-059 S1: enforce it
+      Real zr = pin->GetReal("mhd", "atmosphere_zone_radius");
+      Real zrho = pin->GetReal("mhd", "atmosphere_zone_rho");
+      if (fc_bound_rmin_ < zr || fc_bound_rho_ < zrho) {
+        if (global_variable::my_rank == 0) {
+          std::cout << "<cfc> atmosphere_zone: frame_bound_rmin " << fc_bound_rmin_
+                    << " -> " << std::max(fc_bound_rmin_, zr) << ", frame_bound_rho "
+                    << fc_bound_rho_ << " -> " << std::max(fc_bound_rho_, zrho) << std::endl;
+        }
+        fc_bound_rmin_ = std::max(fc_bound_rmin_, zr);
+        fc_bound_rho_ = std::max(fc_bound_rho_, zrho);
+      }
+    }
     if (pin->DoesParameterExist("cfc", "frame_switch_mref")) {
       fc_m0_ = pin->GetReal("cfc", "frame_switch_mref");
     }

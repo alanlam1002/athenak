@@ -25,10 +25,24 @@ case "$1" in
             -DCMAKE_CXX_FLAGS=-gline-tables-only ) ;;
   cpu_tests) NAME=build_cpu_pe2626_tests
     EXTRA=( -DAthena_ENABLE_MPI=OFF -DKokkos_ARCH_SPR=ON ) ;;
-  *) echo "usage: $0 gpu_gauge|gpu_gauge_dbg|cpu_tests"; exit 1 ;;
+  gpu_debris) NAME=build_gpu_pe2626_debris     # as gpu_gauge, separate tree (R-050 tests)
+    EXTRA=( -DAthena_ENABLE_MPI=ON -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ENABLE_SYCL=ON
+            -DKokkos_ENABLE_SYCL_RELOCATABLE_DEVICE_CODE=OFF -DKokkos_ARCH_INTEL_PVC=ON ) ;;
+  cpu_tov) NAME=build_cpu_pe2626_tov          # dyngr_tov, Serial, no MPI (R-050 unit tests)
+    EXTRA=( -DAthena_ENABLE_MPI=OFF -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ARCH_SPR=ON ) ;;
+  cpu_tov_icx) NAME=build_cpu_pe2626_tov_icx  # as cpu_tov for the Ice Lake login nodes (no AVX512-FP16)
+    EXTRA=( -DAthena_ENABLE_MPI=OFF -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ARCH_ICX=ON ) ;;
+  cpu_tov_ref) NAME=build_cpu_pe2626_tov_ref  # same, from the src_headref worktree (U1 ref)
+    SRC=${SCRATCH}/src_headref
+    EXTRA=( -DAthena_ENABLE_MPI=OFF -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ARCH_SPR=ON ) ;;
+  gpu_zone) NAME=build_gpu_pe2626_zone         # as gpu_gauge, separate tree (R-059 S1 / R-060)
+    EXTRA=( -DAthena_ENABLE_MPI=ON -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ENABLE_SYCL=ON
+            -DKokkos_ENABLE_SYCL_RELOCATABLE_DEVICE_CODE=OFF -DKokkos_ARCH_INTEL_PVC=ON ) ;;
+  *) echo "usage: $0 gpu_gauge|gpu_gauge_dbg|cpu_tests|cpu_tov|cpu_tov_ref"; exit 1 ;;
 esac
 mkdir -p "${SCRATCH}/${NAME}"
-[ -e "${SRC}/${NAME}" ] || ln -s "${SCRATCH}/${NAME}" "${SRC}/${NAME}"
+LINKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -e "${LINKDIR}/${NAME}" ] || ln -s "${SCRATCH}/${NAME}" "${LINKDIR}/${NAME}"
 cmake -S "$SRC" -B "${SCRATCH}/${NAME}" "${COMMON[@]}" "${EXTRA[@]}"
 make -C "${SCRATCH}/${NAME}" -j${NJOBS:-16}
 ls -lh "${SCRATCH}/${NAME}/src/athena"

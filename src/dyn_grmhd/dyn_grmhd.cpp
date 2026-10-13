@@ -197,6 +197,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   fofc_count_rho_lo = pin->GetOrAddReal("mhd", "fofc_count_rho_lo", 0.0);
   fofc_count_rho_hi = pin->GetOrAddReal("mhd", "fofc_count_rho_hi",
                                         std::numeric_limits<Real>::max());
+  if (fofc_count_diag) { Kokkos::realloc(pp_cnt_d, 1); }
 
   // allocate memory for temperature
   {
@@ -207,6 +208,13 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(temperature, nmb, 1, ncells3, ncells2, ncells1);
   }
+}
+
+Real DynGRMHD::GetPPCount(int n) {
+  if (!fofc_count_diag) { return 0.0; }
+  if (n == 1) { return pp_faces; }
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), pp_cnt_d);
+  return h(0);
 }
 
 DynGRMHD::~DynGRMHD() {

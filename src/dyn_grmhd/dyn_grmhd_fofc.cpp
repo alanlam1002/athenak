@@ -660,6 +660,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     if (multi_d) { alp_pp = 4.0, jl = js, ju = je+1; }
     if (three_d) { alp_pp = 6.0, kl = ks, ku = ke+1; }
 
+    // Read-only activation counter (fofc_count_diag): an interior face counts once per
+    // stage if any scalar's theta < 1. Touched only on limited faces, so cheap.
+    const bool ppcount = fofc_count_diag;
+    auto ppc = pp_cnt_d;
+
     // Positivity Presserving Limiter for scalar
     par_for("FOFC-flx", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -737,6 +742,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
       for (int n=0; n < nscal_; ++n) {
         wthe[n] = wraw[n];
       }
+      if (ppcount && j <= je && k <= ke) {
+        bool lim = false;
+        for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+        if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
+      }
       for (int n=0; n < nscal_; ++n) {
         flx1(m,nmhd_+n,k,j,i) = flx_llf[n]
           + wthe[n] * (flx1(m,nmhd_+n,k,j,i) - flx_llf[n]);
@@ -803,6 +813,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         }
         for (int n=0; n < nscal_; ++n) {
           wthe[n] = wraw[n];
+        }
+        if (ppcount && i <= ie && k <= ke) {
+          bool lim = false;
+          for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+          if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
         }
         for (int n=0; n < nscal_; ++n) {
           flx2(m,nmhd_+n,k,j,i) = flx_llf[n]
@@ -872,12 +887,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         for (int n=0; n < nscal_; ++n) {
           wthe[n] = wraw[n];
         }
+        if (ppcount && i <= ie && j <= je) {
+          bool lim = false;
+          for (int n=0; n < nscal_; ++n) { lim = lim || (wraw[n] < 1.0); }
+          if (lim) { Kokkos::atomic_add(&ppc(0), 1.0); }
+        }
         for (int n=0; n < nscal_; ++n) {
           flx3(m,nmhd_+n,k,j,i) = flx_llf[n]
             + wthe[n] * (flx3(m,nmhd_+n,k,j,i) - flx_llf[n]);
         }
       }
     });
+    if (ppcount) {
+      const Real n1 = indcs.nx1, n2 = indcs.nx2, n3 = indcs.nx3;
+      pp_faces += nmb*((n1 + 1.0)*n2*n3 + (multi_d ? n1*(n2 + 1.0)*n3 : 0.0)
+                       + (three_d ? n1*n2*(n3 + 1.0) : 0.0));
+    }
   }
 
   // reset FOFC flag (do not reset excision flag)

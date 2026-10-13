@@ -731,7 +731,7 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   // (f) mixed-phase shell -- for the g=0 Gibbs construction the transition is gradual (no
   // sharp interface), so these bracket where f crosses 0.01, 0.5 (from below and above),
   // and 0.99, letting the shell width and any drift/smearing be monitored over time.
-  pdata->nhist = 18;
+  pdata->nhist = 20;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "press-max";
@@ -756,6 +756,10 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[15] = "n-band";
   pdata->label[16] = "fofc-scal";
   pdata->label[17] = "n-cells";
+  // Scalar positivity-limiter activations (same flag), cumulative face-stages: interior
+  // faces where some scalar's theta < 1, and interior faces tested.
+  pdata->label[18] = "pp-lim";
+  pdata->label[19] = "n-faces";
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
@@ -895,6 +899,10 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
   for (int n = 0; n < 6; ++n) {
     pdata->hdata[12 + n] = (pm->pmb_pack->pdyngr != nullptr)
                            ? pm->pmb_pack->pdyngr->GetFofcCount(n) : 0.0;
+  }
+  for (int n = 0; n < 2; ++n) {
+    pdata->hdata[18 + n] = (pm->pmb_pack->pdyngr != nullptr)
+                           ? pm->pmb_pack->pdyngr->GetPPCount(n) : 0.0;
   }
 }
 

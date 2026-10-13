@@ -84,6 +84,9 @@ class DynGRMHD {
   Real GetZlaRelaxHeat() const { return zla_relax_heat; }
   // FOFC activation counters (see fofc_count_diag); for history output.
   Real GetFofcCount(int n) const { return fofc_cnt[n]; }
+  // Scalar PP-limiter activations (also fofc_count_diag): n = 0 interior face-stages where
+  // some scalar's theta < 1 (reads the device counter), n = 1 interior face-stages tested.
+  Real GetPPCount(int n);
 
   // container to hold names of TaskIDs
   DynGRMHDTaskIDs id;
@@ -200,6 +203,8 @@ class DynGRMHD {
   bool fofc_count_diag;
   Real fofc_count_rho_lo, fofc_count_rho_hi;
   Real fofc_cnt[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  DvceArray1D<Real> pp_cnt_d;   // [0] limited face-stages (device, atomic; diag only)
+  Real pp_faces = 0.0;          // face-stages tested (host)
 };
 
 template<class EOSPolicy, class ErrorPolicy>

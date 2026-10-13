@@ -10406,3 +10406,50 @@ corrected-fill binary, same reference volume) is in OUTBOX C-041.
   +24%), but nothing transfers it. **The resync + guard ratchet drives the BH-frame warm
   layers too** (the "one-way valve"). With si = 0 in the comoving frame the energy solution
   is accurate, so the valve has nothing to rectify there.
+
+## 80. `tde_debris` refinement criterion and controller fallback modes (R-050)
+
+Research R-050 (`NEXT_TASKS_R050.md`, `DEBRIS_REFINEMENT_DESIGN.md`), user-approved build and
+unit tests only. Code: athenak 1d65bd15.
+
+**B1, `<problem> amr_condition = tde_debris`** (`src/pgen/dyn_grmhd/tde_debris_refine.hpp`,
+enrolled in dyngr_tov.cpp; `tde_track` untouched). Every threshold is absolute, a fraction
+of `amr_rho_ref` (default `<problem> rhoc`). Per MeshBlock, want = max of:
+- core: block max ρ > `amr_core_frac`·ρ_ref (1e-2) → `amr_level_core` (5);
+- ladder (`amr_ladder`, true): ρ_F < ρ ≤ ρ_A → L_core − ceil(ln(ρ_A/ρ)/ln `amr_ladder_factor` (8)),
+  floored at `amr_level_floor` (2); ρ_F = `amr_rho_floor_frac`·ρ_ref (1e-6);
+- width (`amr_width_cells` N_H, 8): cells with ρ > ρ_F whose six face neighbours are all
+  > ρ_F, ℓ = ρ/|∇ρ| (centred, ghosts used), smallest L with dx_L ≤ ℓ/N_H, capped at
+  `amr_level_stream` (5);
+- Jeans (`amr_jeans_cells` N_J, 4): λ_J = c_s√(π/ρ), c_s² = ΓP/(ρh), capped at L_core;
+- the BH box, exactly tde_track's (`amr_radius_bh`, `amr_level_bh`, fine box).
+
+Hysteresis: want_deref uses the density thresholds and N_H, N_J × `amr_deref_factor` (0.5),
+so want_deref ≥ want_ref. Flag +1 if level < want_ref; −1 if level > want_deref and the
+block has sat at its level ≥ `amr_min_residence` (10) cycles (tracked per rank by logical
+location; a migrated block restarts its count, which only delays a de-refinement); else
+0. Cells at/below ρ_F never request refinement (replaces tde_track's ρ_max guard);
+non-finite cells are skipped with a one-time warning. Diagnostics every `amr_diag_ncycle`
+(50) cycles on rank 0: blocks per level, flags −1/0/+1, a projected block count per level
+(each block's want, 8^Δlevel, no 2:1 buffers), and the want_ref attribution per criterion
+and level. `amr_dryrun = true`: the mesh follows tde_track and tde_debris only logs, with its
+wants not clipped to the current max level (sizing on runs with fewer levels).
+`amr_level_stream > amr_level_core` is allowed with a warning: the design's convergence trio
+(stream L6 at core L5) contradicts its own L_core ≥ L_stream rule.
+Test-only initial data: `<problem> amr_test_stream_rho0 > 0` replaces the matter by a
+Gaussian cylinder along x (`amr_test_stream_h`, `_length`, `_vx`).
+
+**B2, `<cfc> frame_target_mode`** = `remnant` (default) | `bound_centroid` | `ramp`
+(cfc.cpp FrameControlStep, MeasureBound, FrameSwitch). bound_centroid: the same control law
+on the mass-weighted centroid and grid velocity of gas with BH-frame E = −u_t − 1 < 0
+(−u_t = αW − (β′ − ξ̇)^i u_i, tde_dmde.py's convention), ρ > `frame_bound_rho` (1e-4 ×
+frame_track_rho), |x′ − x_BH| ≥ `frame_bound_rmin` (3); the commanded ξ̇ is low-passed over
+frame_tau_a; at the switch the target is reset to the bound centroid. ramp: ξ̇ → 0 linearly
+over `frame_ramp_time` (50) from its value at the switch. Automatic switch from remnant to
+`frame_switch_mode` (bound_centroid) when the tracked mass falls below
+`frame_switch_mass_frac` × m_ref, m_ref = the t = 0 tracked mass (or `frame_switch_mref`).
+**Deviation from the spec: frame_switch_mass_frac defaults to 0 (off), not 0.05**, so that
+existing comoving decks are unchanged; set it explicitly. Mode, switch time, switch ξ̇ and
+m_ref are written to restarts (frame_ctrl_mode, _tsw, _xdsw*, _m0); restarts written before
+this lack them and come back in remnant mode with the switch disabled unless
+frame_switch_mref is given.

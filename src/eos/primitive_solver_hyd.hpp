@@ -241,7 +241,13 @@ class PrimitiveSolverHydro {
   static constexpr int kZoneSx = kZoneNB, kZoneEn = kZoneNB + 3, kZoneM = kZoneNB + 4;
   static constexpr int kZoneN = kZoneNB + 5, kZoneNcap = kZoneNB + 6;
   static constexpr int kZoneRmod = kZoneNB + 7, kZoneRreg = kZoneNB + 8;
-  static constexpr int kZoneViol = kZoneNB + 9, kZoneLen = kZoneNB + 10;
+  static constexpr int kZoneViol = kZoneNB + 9;
+  // rest mass removed by the excision reset (interior cells; zone block only), so that
+  // grid + excision + zone closes in rest mass (the CFC excision tally books E/psi)
+  static constexpr int kZoneExcM = kZoneNB + 10, kZoneLen = kZoneNB + 11;
+  // <mhd> atmosphere_zone_book (default false): the booking (ATMZONE lines, incl. the
+  // excised rest mass) without the zone itself, for zone-off controls
+  bool zone_book = false;
   DvceArray1D<Real> zone_acc;
   // <mhd> atmosphere_zone_tier3 (default false; R-058 §3, R-063 §3): velocity-only grid
   // rest (as the zone, but no rho reset) for r_s <= r < 2 r_s and rho < atmosphere_zone_
@@ -267,7 +273,7 @@ class PrimitiveSolverHydro {
   //! every zone_bins_every cycles, the cumulative E/L/r bins (ATMZONE_BINS); likewise
   //! ATMZONE_T3 / ATMZONE_T3_BINS for tier 3 when it is enabled.
   void DrainZone(int stage, int ns, const Real *gam0, Real time, int cycle) {
-    if (!zone_on) return;
+    if (!zone_book) return;
     if (stage < 1 || stage > ns || ns > 4) {        // not an RK stage: discard
       Kokkos::deep_copy(zone_acc, 0.0);
       return;
@@ -285,6 +291,7 @@ class PrimitiveSolverHydro {
       const int o = bl*kZoneLen;
       for (int q = 0; q < ns; ++q) {
         for (int n = 0; n <= kZoneM; ++n) sum[o + n] += w[q]*zone_stage[q][o + n];
+        sum[o + kZoneExcM] += w[q]*zone_stage[q][o + kZoneExcM];
         sum[o + kZoneViol] += zone_stage[q][o + kZoneViol];
         mx[2*bl] = fmax(mx[2*bl], zone_stage[q][o + kZoneRmod]);
         mx[2*bl + 1] = fmax(mx[2*bl + 1], zone_stage[q][o + kZoneRreg]);
@@ -311,7 +318,9 @@ class PrimitiveSolverHydro {
                 << sum[kZoneNcap] << " max_rho_mod=" << mx[0] << " max_rho_zone=" << mx[1]
                 << " n_viol=" << sum[kZoneViol] << " cum_dM=" << zone_cum[kZoneM]
                 << " cum_dS=(" << zone_cum[kZoneSx] << "," << zone_cum[kZoneSx+1] << ","
-                << zone_cum[kZoneSx+2] << ") cum_dE=" << zone_cum[kZoneEn] << std::endl;
+                << zone_cum[kZoneSx+2] << ") cum_dE=" << zone_cum[kZoneEn]
+                << " dM_exc=" << sum[kZoneExcM] << " cum_dM_exc=" << zone_cum[kZoneExcM]
+                << std::endl;
       if (bins) {
         std::cout << "ATMZONE_BINS cycle=" << cycle << " time=" << time
                   << " [r][E][L] cumulative dM:";
@@ -470,6 +479,11 @@ class PrimitiveSolverHydro {
     atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
     atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
     zone_on = pin->GetOrAddBoolean(block, "atmosphere_zone", false);
+    zone_book = zone_on || pin->GetOrAddBoolean(block, "atmosphere_zone_book", false);
+    if (zone_book && !zone_on) {
+      Kokkos::realloc(zone_acc, 2*kZoneLen);
+      Kokkos::deep_copy(zone_acc, 0.0);
+    }
     if (zone_on) {
       zone_r = pin->GetReal(block, "atmosphere_zone_radius");
       zone_rho = pin->GetReal(block, "atmosphere_zone_rho");
@@ -990,6 +1004,7 @@ class PrimitiveSolverHydro {
     const Real zr2_ = zone_r*zone_r, zthr_ = zone_rho, zrst_ = zone_rho_reset;
     const Real zvmax_ = zone_vmax, zde_ = zone_de;
     auto &zacc_ = zone_acc;
+    const bool zbook_ = zone_book && !floors_only;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
@@ -1116,6 +1131,9 @@ class PrimitiveSolverHydro {
               dPy_r  += (cons_pt_old[CSY] - cons_pt[CSY])*sdetg*dvol;
               dPz_r  += (cons_pt_old[CSZ] - cons_pt[CSZ])*sdetg*dvol;
               dEraw_r += dE;   // raw psi^6 E, validation only
+              if (zbook_) {    // rest mass, for the zone booking's closure
+                Kokkos::atomic_add(&zacc_(kZoneExcM), (cons_pt_old[CDN] - cons_pt[CDN])*sdetg*dvol);
+              }
             }
           } else {
             result = ps_.ConToPrim(prim_pt, cons_pt, b3u, g3d, g3u);

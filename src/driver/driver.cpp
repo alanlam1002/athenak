@@ -381,6 +381,12 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // Same zero point for the MG phase timers, so their percentages are fractions
   // of the evolution wall time and exclude initial-data setup.
   MultigridDriver::ResetAllTimers();
+  pt_on_ = pin->GetOrAddBoolean("time", "phase_timers", true);
+  pt_every_ = pin->GetOrAddInteger("time", "phase_timers_every", 100);
+  for (double &x : pt_) x = 0.0;
+  pt_cyc0_ = pmesh->ncycle;
+  MultigridDriver::phase_on = pt_on_;
+  MultigridDriver::phase_solve_sec = 0.0;
   nmb_updated_ = 0;
 
   // allocate memory for stiff source terms with ImEx integrators
@@ -442,12 +448,21 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       // is (see the save/restore above), so a per-cycle solve's own soft
       // failure can't affect nlim's value seen by this loop's own check.
       int saved_nlim = nlim;
+      // fenced phase timing (pt_on_): run f, charge its wall time to pt_[slot]
+      auto timed = [&](int slot, auto f) {
+        if (!pt_on_) { f(); return; }
+        Kokkos::fence();
+        Kokkos::Timer tt;
+        f();
+        Kokkos::fence();
+        pt_[slot] += tt.seconds();
+      };
       // Execute TaskLists
       // Work before time integrator indicated by "0" in stage
-      ExecuteTaskList(pmesh, "before_timeintegrator", 0);
+      timed(0, [&]() { ExecuteTaskList(pmesh, "before_timeintegrator", 0); });
       // time-integrator tasks for each stage of integrator
       for (int stage=1; stage<=(nexp_stages); ++stage) {
-        ExecuteTaskList(pmesh, "before_stagen", stage);
+        timed(1, [&]() { ExecuteTaskList(pmesh, "before_stagen", stage); });
         // solve gravity at each RK stage so the potential is consistent
         // with the current density (required for 2nd-order accuracy)
         if (pmesh->pmb_pack->pgrav != nullptr)
@@ -457,12 +472,12 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         // shared between them), which is only possible via the NumericalRelativity
         // task graph (see cfc::CFC::QueueCFCTasks(), tasklist/numerical_relativity.
         // hpp's CFC_* tasks, and dyn_grmhd.cpp's MHD_C2P/MHD_Newdt optional deps).
-        ExecuteTaskList(pmesh, "stagen", stage);
-        ExecuteTaskList(pmesh, "after_stagen", stage);
+        timed(2, [&]() { ExecuteTaskList(pmesh, "stagen", stage); });
+        timed(3, [&]() { ExecuteTaskList(pmesh, "after_stagen", stage); });
       }
 
       // Work after time integrator indicated by "1" in stage
-      ExecuteTaskList(pmesh, "after_timeintegrator", 1);
+      timed(4, [&]() { ExecuteTaskList(pmesh, "after_timeintegrator", 1); });
       nlim = saved_nlim;
       // Work outside of TaskLists:
       // increment time, ncycle, etc.
@@ -491,8 +506,10 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 
         if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
-          out->LoadOutputData(pmesh);
-          out->WriteOutputFile(pmesh, pin);
+          timed(5, [&]() {
+            out->LoadOutputData(pmesh);
+            out->WriteOutputFile(pmesh, pin);
+          });
         }
       }
 
@@ -509,11 +526,14 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       // lists did not already cover it.
       if (pmesh->adaptive) {
         int saved_nlim_amr = nlim;
-        pmesh->pmr->AdaptiveMeshRefinement(this, pin);
+        timed(6, [&]() { pmesh->pmr->AdaptiveMeshRefinement(this, pin); });
         nlim = saved_nlim_amr;
       }
       // compute new timestep AFTER all Meshblocks refined/derefined
-      pmesh->NewTimeStep(tlim);
+      timed(7, [&]() { pmesh->NewTimeStep(tlim); });
+      if (pt_on_ && pt_every_ > 0 && pmesh->ncycle % pt_every_ == 0) {
+        PrintPhaseTimers(pmesh, "PHASE_TIMERS");
+      }
 
       // Update wall clock time if needed.
       if (wall_time > 0.) {
@@ -542,6 +562,7 @@ void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
     (pmesh->pgen->pgen_final_func)(pin, pmesh);
   }
 
+  if (pt_on_) PrintPhaseTimers(pmesh, "PHASE_TIMERS_FINAL");
   float exe_time = run_time_.seconds();
 
   if (time_evolution != TimeEvolution::tstatic) {
@@ -727,4 +748,22 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
   }
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Driver::PrintPhaseTimers()
+//! \brief Rank 0's cumulative fenced phase timers since Initialize (see pt_on_).
+
+void Driver::PrintPhaseTimers(Mesh *pm, const char *tag) {
+  if (global_variable::my_rank != 0) return;
+  const double mg = MultigridDriver::phase_solve_sec;
+  double sum = 0.0;
+  for (double x : pt_) sum += x;
+  std::cout << std::setprecision(6) << tag << " cycle=" << pm->ncycle << " time=" << pm->time
+            << " cycles=" << pm->ncycle - pt_cyc0_ << " wall=" << run_time_.seconds()
+            << " timed=" << sum << " before_ti=" << pt_[0] << " before_stagen=" << pt_[1]
+            << " stagen=" << pt_[2] << " mg=" << mg << " hydro_etc=" << pt_[2] - mg
+            << " after_stagen=" << pt_[3] << " after_ti=" << pt_[4] << " io=" << pt_[5]
+            << " regrid=" << pt_[6] << " newdt=" << pt_[7] << " nmb=" << pm->nmb_total
+            << std::endl;
 }

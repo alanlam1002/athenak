@@ -34,6 +34,8 @@
 // Registry of every constructed driver, so Driver::Finalize() can dump all
 // solvers' MGTimers in one place. Populated by the constructor below.
 std::vector<MultigridDriver*> MultigridDriver::mg_all_drivers_;
+bool MultigridDriver::phase_on = false;
+double MultigridDriver::phase_solve_sec = 0.0;
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::PrintAllTimers(double wall_sec)

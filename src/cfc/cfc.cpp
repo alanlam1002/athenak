@@ -2312,7 +2312,10 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/false);
 
   pmgd_pietax->LoadPoissonSource(u_p_src);
-  pmgd_pietax->Solve(pdriver, stage);
+  {
+    MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+    pmgd_pietax->Solve(pdriver, stage);
+  }
   pmgd_pietax->RetrieveSolution(u_p_x);
   return;
 }
@@ -2477,7 +2480,10 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
     ComputeMassCentroid();
     pmgd_psi->SetRobinCenter(r_com_mass_[0], r_com_mass_[1], r_com_mass_[2]);
   }
-  pmgd_psi->Solve(pdriver, stage);
+  {
+    MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+    pmgd_psi->Solve(pdriver, stage);
+  }
   pmgd_psi->RetrieveSolution(delta_psi);
 
   // Clamp psi BEFORE AssembleConformalMetric, so psi4/g_dd -- which the shared
@@ -2607,7 +2613,10 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
     // comment) -- no need to recompute.
     pmgd_alpha->SetRobinCenter(r_com_mass_[0], r_com_mass_[1], r_com_mass_[2]);
   }
-  pmgd_alpha->Solve(pdriver, stage);
+  {
+    MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+    pmgd_alpha->Solve(pdriver, stage);
+  }
   pmgd_alpha->RetrieveSolution(delta_alpha_psi);
 
   // Clamp alpha before the alpha*psi ghost exchange (CFC_RestAlphaPsi onward) and
@@ -2626,7 +2635,10 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
     pmgd_pietabeta->SetMultipoleOrigin(r_com_beta_[0], r_com_beta_[1], r_com_beta_[2]);
   }
   pmgd_pietabeta->LoadPoissonSource(u_p_src);
-  pmgd_pietabeta->Solve(pdriver, stage);
+  {
+    MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+    pmgd_pietabeta->Solve(pdriver, stage);
+  }
   pmgd_pietabeta->RetrieveSolution(u_p_beta);
   return;
 }

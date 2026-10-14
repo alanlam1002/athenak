@@ -243,14 +243,29 @@ class PrimitiveSolverHydro {
   static constexpr int kZoneRmod = kZoneNB + 7, kZoneRreg = kZoneNB + 8;
   static constexpr int kZoneViol = kZoneNB + 9, kZoneLen = kZoneNB + 10;
   DvceArray1D<Real> zone_acc;
-  Real zone_stage[4][kZoneLen];    // per-RK-stage drains (host)
-  Real zone_cum[kZoneLen] = {};    // cumulative over the run since (re)start, all ranks
-  int zone_bins_every = 50;        // <mhd> atmosphere_zone_bins_every: cycles per bins line
+  // <mhd> atmosphere_zone_tier3 (default false; R-058 §3, R-063 §3): velocity-only grid
+  // rest (as the zone, but no rho reset) for r_s <= r < 2 r_s and rho < atmosphere_zone_
+  // tier3_rho, excluding cells within 3 R_90 of the dense-gas centroid, and only while the
+  // dense gas (rho > 1e-3 rho_max; mass-weighted centroid x_c, R_90 = its 90%-mass radius
+  // about x_c) is farther than 2 r_s + 3 R_90 from x_BH AND receding, d.ddot > 0 with
+  // d = x_c - x_BH and ddot = <alpha v - beta'> + xidot (x_BH = puncture_x - xi). The state
+  // is measured once per cycle at the end of the last stage (UpdateTier3) and used during
+  // the next cycle. Its tally is a second block of zone_acc with the same layout (the bins
+  // hold the modified mass, nothing is removed); printed as ATMZONE_T3 / ATMZONE_T3_BINS.
+  bool t3_on = false, t3_active = false;
+  Real t3_rho = 0.0, t3_c[3] = {0.0, 0.0, 0.0}, t3_r90 = 0.0, t3_d = 0.0, t3_ddot = 0.0;
+  static constexpr int kT3NR = 2048;            // R_90 histogram bins of t3_dr
+  Real t3_dr = 1.0/32.0;
+  DvceArray1D<Real> t3_hist;
+  Real zone_stage[4][2*kZoneLen];   // per-RK-stage drains (host); [zone | tier 3]
+  Real zone_cum[2*kZoneLen] = {};   // cumulative since (re)start, all ranks
+  int zone_bins_every = 50;         // <mhd> atmosphere_zone_bins_every: cycles per bins line
 
-  //! Drain this C2P call's zone tally into its stage slot; on the last stage combine the
+  //! Drain this C2P call's zone tallies into the stage slot; on the last stage combine the
   //! stages with their propagation weights w_s = prod_{j>s} gam0_j (as
-  //! CFC::AccreteExcisedMass), reduce over ranks and print one ATMZONE line (rank 0),
-  //! and every zone_bins_every cycles the cumulative E/L/r bins (ATMZONE_BINS).
+  //! CFC::AccreteExcisedMass), reduce over ranks and print one ATMZONE line (rank 0) and,
+  //! every zone_bins_every cycles, the cumulative E/L/r bins (ATMZONE_BINS); likewise
+  //! ATMZONE_T3 / ATMZONE_T3_BINS for tier 3 when it is enabled.
   void DrainZone(int stage, int ns, const Real *gam0, Real time, int cycle) {
     if (!zone_on) return;
     if (stage < 1 || stage > ns || ns > 4) {        // not an RK stage: discard
@@ -258,44 +273,165 @@ class PrimitiveSolverHydro {
       return;
     }
     auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), zone_acc);
-    for (int n = 0; n < kZoneLen; ++n) zone_stage[stage-1][n] = h(n);
+    for (int n = 0; n < 2*kZoneLen; ++n) zone_stage[stage-1][n] = h(n);
     Kokkos::deep_copy(zone_acc, 0.0);
     if (stage != ns) return;
     Real w[4];
     w[ns-1] = 1.0;
     for (int q = ns-2; q >= 0; --q) w[q] = gam0[q+1]*w[q+1];
-    Real sum[kZoneLen], mx[3] = {0.0, 0.0, 0.0};
-    for (int n = 0; n < kZoneLen; ++n) sum[n] = 0.0;
-    for (int q = 0; q < ns; ++q) {
-      for (int n = 0; n <= kZoneM; ++n) sum[n] += w[q]*zone_stage[q][n];
-      sum[kZoneViol] += zone_stage[q][kZoneViol];
-      mx[0] = fmax(mx[0], zone_stage[q][kZoneRmod]);
-      mx[1] = fmax(mx[1], zone_stage[q][kZoneRreg]);
+    Real sum[2*kZoneLen], mx[4] = {0.0, 0.0, 0.0, 0.0};
+    for (int n = 0; n < 2*kZoneLen; ++n) sum[n] = 0.0;
+    for (int bl = 0; bl < 2; ++bl) {
+      const int o = bl*kZoneLen;
+      for (int q = 0; q < ns; ++q) {
+        for (int n = 0; n <= kZoneM; ++n) sum[o + n] += w[q]*zone_stage[q][o + n];
+        sum[o + kZoneViol] += zone_stage[q][o + kZoneViol];
+        mx[2*bl] = fmax(mx[2*bl], zone_stage[q][o + kZoneRmod]);
+        mx[2*bl + 1] = fmax(mx[2*bl + 1], zone_stage[q][o + kZoneRreg]);
+      }
+      sum[o + kZoneN] = zone_stage[ns-1][o + kZoneN];   // cells modified in the last stage
+      sum[o + kZoneNcap] = zone_stage[ns-1][o + kZoneNcap];
     }
-    sum[kZoneN] = zone_stage[ns-1][kZoneN];         // cells modified in the last stage
-    sum[kZoneNcap] = zone_stage[ns-1][kZoneNcap];
 #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, sum, kZoneLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, mx, 3, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, sum, 2*kZoneLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, mx, 4, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
-    for (int n = 0; n < kZoneLen; ++n) {
-      if (n != kZoneN && n != kZoneNcap && n != kZoneRmod && n != kZoneRreg) {
-        zone_cum[n] += sum[n];
+    for (int bl = 0; bl < 2; ++bl) {
+      const int o = bl*kZoneLen;
+      for (int n = 0; n < kZoneLen; ++n) {
+        if (n != kZoneN && n != kZoneNcap && n != kZoneRmod && n != kZoneRreg) {
+          zone_cum[o + n] += sum[o + n];
+        }
       }
     }
-    if (global_variable::my_rank != 0) return;
-    std::cout << std::setprecision(6) << "ATMZONE cycle=" << cycle << " time=" << time
-              << " dM=" << sum[kZoneM] << " n_mod=" << sum[kZoneN] << " n_cap="
-              << sum[kZoneNcap] << " max_rho_mod=" << mx[0] << " max_rho_zone=" << mx[1]
-              << " n_viol=" << sum[kZoneViol] << " cum_dM=" << zone_cum[kZoneM]
-              << " cum_dS=(" << zone_cum[kZoneSx] << "," << zone_cum[kZoneSx+1] << ","
-              << zone_cum[kZoneSx+2] << ") cum_dE=" << zone_cum[kZoneEn] << std::endl;
-    if (zone_bins_every > 0 && cycle % zone_bins_every == 0) {
-      std::cout << "ATMZONE_BINS cycle=" << cycle << " time=" << time
-                << " [r][E][L] cumulative dM:";
-      for (int n = 0; n < kZoneNB; ++n) std::cout << " " << zone_cum[n];
-      std::cout << std::endl;
+    if (global_variable::my_rank == 0) {
+      const bool bins = zone_bins_every > 0 && cycle % zone_bins_every == 0;
+      std::cout << std::setprecision(6) << "ATMZONE cycle=" << cycle << " time=" << time
+                << " dM=" << sum[kZoneM] << " n_mod=" << sum[kZoneN] << " n_cap="
+                << sum[kZoneNcap] << " max_rho_mod=" << mx[0] << " max_rho_zone=" << mx[1]
+                << " n_viol=" << sum[kZoneViol] << " cum_dM=" << zone_cum[kZoneM]
+                << " cum_dS=(" << zone_cum[kZoneSx] << "," << zone_cum[kZoneSx+1] << ","
+                << zone_cum[kZoneSx+2] << ") cum_dE=" << zone_cum[kZoneEn] << std::endl;
+      if (bins) {
+        std::cout << "ATMZONE_BINS cycle=" << cycle << " time=" << time
+                  << " [r][E][L] cumulative dM:";
+        for (int n = 0; n < kZoneNB; ++n) std::cout << " " << zone_cum[n];
+        std::cout << std::endl;
+      }
+      if (t3_on) {
+        const int o = kZoneLen;
+        std::cout << "ATMZONE_T3 cycle=" << cycle << " time=" << time << " active="
+                  << t3_active << " d=" << t3_d << " R90=" << t3_r90 << " d.ddot="
+                  << t3_ddot << " M_mod=" << sum[o + kZoneM] << " n_mod=" << sum[o + kZoneN]
+                  << " n_cap=" << sum[o + kZoneNcap] << " max_rho_mod=" << mx[2]
+                  << " n_viol=" << sum[o + kZoneViol] << " cum_dS=(" << zone_cum[o + kZoneSx]
+                  << "," << zone_cum[o + kZoneSx+1] << "," << zone_cum[o + kZoneSx+2]
+                  << ") cum_dE=" << zone_cum[o + kZoneEn] << std::endl;
+        if (bins) {
+          std::cout << "ATMZONE_T3_BINS cycle=" << cycle << " time=" << time
+                    << " [r][E][L] cumulative modified mass:";
+          for (int n = 0; n < kZoneNB; ++n) std::cout << " " << zone_cum[o + n];
+          std::cout << std::endl;
+        }
+      }
     }
+    UpdateTier3();
+  }
+
+  //! Tier-3 activation state from the current primitives (end of a cycle): rho_max, the
+  //! dense-gas centroid and coordinate velocity, R_90 (histogram of t3_dr bins about x_c).
+  void UpdateTier3() {
+    if (!t3_on) return;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack;
+    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &w0 = pmy_pack->pmhd->w0;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &adm = pmy_pack->padm->adm;
+    Real rmax = 0.0;
+    Kokkos::parallel_reduce("zone_t3_rhomax", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                            nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, Real &mxr) {
+      const int m = idx/nkji, k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      mxr = fmax(mxr, w0(m, IDN, k, j, i));
+    }, Kokkos::Max<Real>(rmax));
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &rmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    const Real thr = 1.0e-3*rmax;
+    Real s[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    Kokkos::parallel_reduce("zone_t3_centroid", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                            nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
+                  Real &a5, Real &a6) {
+      const int m = idx/nkji, k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      if (!(w0(m, IDN, k, j, i) > thr)) return;
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i), uz = w0(m, IVZ, k, j, i);
+      const Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+      const Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+      const Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+      const Real W = sqrt(1.0 + ux*(gxx*ux + gxy*uy + gxz*uz) + uy*(gxy*ux + gyy*uy + gyz*uz)
+                          + uz*(gxz*ux + gyz*uy + gzz*uz));
+      const Real aw = adm.alpha(m,k,j,i)/W;
+      const Real dm = u0(m, IDN, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*
+                      size.d_view(m).dx3;
+      a0 += dm; a1 += dm*x; a2 += dm*y; a3 += dm*z;
+      a4 += dm*(aw*ux - adm.beta_u(m,0,k,j,i));
+      a5 += dm*(aw*uy - adm.beta_u(m,1,k,j,i));
+      a6 += dm*(aw*uz - adm.beta_u(m,2,k,j,i));
+    }, Kokkos::Sum<Real>(s[0]), Kokkos::Sum<Real>(s[1]), Kokkos::Sum<Real>(s[2]),
+       Kokkos::Sum<Real>(s[3]), Kokkos::Sum<Real>(s[4]), Kokkos::Sum<Real>(s[5]),
+       Kokkos::Sum<Real>(s[6]));
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, s, 7, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    if (!(s[0] > 0.0)) { t3_active = false; return; }
+    const Real cx = s[1]/s[0], cy = s[2]/s[0], cz = s[3]/s[0];
+    Kokkos::deep_copy(t3_hist, 0.0);
+    auto &hist = t3_hist;
+    const Real idr = 1.0/t3_dr;
+    par_for("zone_t3_r90", DevExeSpace(), 0, nmb-1, ks, ks+nx3-1, js, js+nx2-1, is, is+nx1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      if (!(w0(m, IDN, k, j, i) > thr)) return;
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      const Real r = sqrt((x - cx)*(x - cx) + (y - cy)*(y - cy) + (z - cz)*(z - cz));
+      const int b = static_cast<int>(fmin(r*idr, kT3NR - 1.0));
+      Kokkos::atomic_add(&hist(b), u0(m, IDN, k, j, i)*size.d_view(m).dx1*
+                         size.d_view(m).dx2*size.d_view(m).dx3);
+    });
+    auto hh = Kokkos::create_mirror_view_and_copy(HostMemSpace(), t3_hist);
+    Real hv[kT3NR];
+    for (int b = 0; b < kT3NR; ++b) hv[b] = hh(b);
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, hv, kT3NR, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    Real cum = 0.0, tot = 0.0;
+    for (int b = 0; b < kT3NR; ++b) tot += hv[b];
+    int b90 = kT3NR - 1;
+    for (int b = 0; b < kT3NR; ++b) {
+      cum += hv[b];
+      if (cum >= 0.9*tot) { b90 = b; break; }
+    }
+    t3_r90 = (b90 + 1)*t3_dr;
+    const Real *xb = pmy_pack->padm->bc_center, *xd = pmy_pack->padm->frame_vel_u;
+    const Real d[3] = {cx - xb[0], cy - xb[1], cz - xb[2]};
+    const Real dd[3] = {s[4]/s[0] + xd[0], s[5]/s[0] + xd[1], s[6]/s[0] + xd[2]};
+    t3_d = sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+    t3_ddot = d[0]*dd[0] + d[1]*dd[1] + d[2]*dd[2];
+    t3_c[0] = cx; t3_c[1] = cy; t3_c[2] = cz;
+    t3_active = (t3_d > 2.0*zone_r + 3.0*t3_r90) && (t3_ddot > 0.0);
   }
 
   //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
@@ -356,7 +492,13 @@ class PrimitiveSolverHydro {
         atm_frame_gate = zone_r;
       }
       zone_bins_every = pin->GetOrAddInteger(block, "atmosphere_zone_bins_every", 50);
-      Kokkos::realloc(zone_acc, kZoneLen);
+      t3_on = pin->GetOrAddBoolean(block, "atmosphere_zone_tier3", false);
+      t3_rho = pin->GetOrAddReal(block, "atmosphere_zone_tier3_rho", 1.0e-6*zone_rho);
+      t3_dr = pin->GetOrAddReal(block, "atmosphere_zone_tier3_dr", 1.0/32.0);
+      if (t3_on) {
+        Kokkos::realloc(t3_hist, kT3NR);
+      }
+      Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);
     }
     de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
@@ -848,6 +990,9 @@ class PrimitiveSolverHydro {
     const Real zr2_ = zone_r*zone_r, zthr_ = zone_rho, zrst_ = zone_rho_reset;
     const Real zvmax_ = zone_vmax, zde_ = zone_de;
     auto &zacc_ = zone_acc;
+    const bool t3a_ = zon_ && t3_on && t3_active;
+    const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
+    const Real t3ex2_ = 9.0*t3_r90*t3_r90;
 
     int count_errs=0;
     // Excised-mass tally totals for THIS call, reduced deterministically alongside
@@ -1074,7 +1219,14 @@ class PrimitiveSolverHydro {
                                  k >= ks && k <= ke_);
           const Real rho0 = prim_pt[PRH]*mb;
           if (r2 < zr2_ && interior) Kokkos::atomic_max(&zacc_(kZoneRreg), rho0);
-          if (r2 < zr2_ && rho0 < zthr_) {
+          // mode 1: the zone (rho reset, mass removed); mode 2: tier 3 (velocity only)
+          int zmode = (r2 < zr2_ && rho0 < zthr_) ? 1 : 0;
+          if (!zmode && t3a_ && r2 >= zr2_ && r2 < 4.0*zr2_ && rho0 < t3rho_) {
+            const Real cx = xz + fgx_ - t3c0_, cy = yz + fgy_ - t3c1_, cz = zz + fgz_ - t3c2_;
+            if (cx*cx + cy*cy + cz*cz > t3ex2_) zmode = 2;
+          }
+          if (zmode) {
+            const int zb = (zmode == 1) ? 0 : kZoneLen;     // tally block
             const Real al = adm.alpha(m, k, j, i);
             const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
                                 adm.beta_u(m, 2, k, j, i)};
@@ -1097,7 +1249,7 @@ class PrimitiveSolverHydro {
             const Real wl = 1.0/sqrt(1.0 - vsq);
             Real cpre[NCONS];
             for (int n = 0; n < NCONS; ++n) cpre[n] = cons_pt[n];
-            prim_pt[PRH] = fmin(rho0, zrst_)/mb;
+            if (zmode == 1) prim_pt[PRH] = fmin(rho0, zrst_)/mb;
             prim_pt[PVX] = wl*f*bu[0]/fmax(al, 1.0e-300);
             prim_pt[PVY] = wl*f*bu[1]/fmax(al, 1.0e-300);
             prim_pt[PVZ] = wl*f*bu[2]/fmax(al, 1.0e-300);
@@ -1107,23 +1259,25 @@ class PrimitiveSolverHydro {
             de_write = true;
             if (interior) {
               const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3*sdetg;
-              const Real dM = (cpre[CDN] - cons_pt[CDN])*dv;
+              // zone: removed mass; tier 3: the modified cell's mass (none is removed)
+              const Real dM = (zmode == 1) ? (cpre[CDN] - cons_pt[CDN])*dv : cpre[CDN]*dv;
               const Real ee = ekill/zde_;
               int ie = (ee >= -6.0) + (ee >= -3.0) + (ee >= -2.0) + (ee >= -1.0) + (ee >= 0.0)
                        + (ee >= 1.0) + (ee >= 2.0) + (ee >= 3.0) + (ee >= 6.0);
               int il = (lmag >= 2.0) + (lmag >= 4.0) + (lmag >= 6.0) + (lmag >= 10.0);
               int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92);
-              Kokkos::atomic_add(&zacc_((ir*kZoneNE + ie)*kZoneNL + il), dM);
-              Kokkos::atomic_add(&zacc_(kZoneSx), (cpre[CSX] - cons_pt[CSX])*dv);
-              Kokkos::atomic_add(&zacc_(kZoneSx + 1), (cpre[CSY] - cons_pt[CSY])*dv);
-              Kokkos::atomic_add(&zacc_(kZoneSx + 2), (cpre[CSZ] - cons_pt[CSZ])*dv);
-              Kokkos::atomic_add(&zacc_(kZoneEn), (cpre[CTA] + cpre[CDN] - cons_pt[CTA]
+              Kokkos::atomic_add(&zacc_(zb + (ir*kZoneNE + ie)*kZoneNL + il), dM);
+              Kokkos::atomic_add(&zacc_(zb + kZoneSx), (cpre[CSX] - cons_pt[CSX])*dv);
+              Kokkos::atomic_add(&zacc_(zb + kZoneSx + 1), (cpre[CSY] - cons_pt[CSY])*dv);
+              Kokkos::atomic_add(&zacc_(zb + kZoneSx + 2), (cpre[CSZ] - cons_pt[CSZ])*dv);
+              Kokkos::atomic_add(&zacc_(zb + kZoneEn), (cpre[CTA] + cpre[CDN] - cons_pt[CTA]
                                                    - cons_pt[CDN])*dv);
-              Kokkos::atomic_add(&zacc_(kZoneM), dM);
-              Kokkos::atomic_add(&zacc_(kZoneN), 1.0);
-              if (f < 1.0) Kokkos::atomic_add(&zacc_(kZoneNcap), 1.0);
-              Kokkos::atomic_max(&zacc_(kZoneRmod), rho0);
-              if (rho0 >= zthr_) Kokkos::atomic_add(&zacc_(kZoneViol), 1.0);
+              Kokkos::atomic_add(&zacc_(zb + kZoneM), dM);
+              Kokkos::atomic_add(&zacc_(zb + kZoneN), 1.0);
+              if (f < 1.0) Kokkos::atomic_add(&zacc_(zb + kZoneNcap), 1.0);
+              Kokkos::atomic_max(&zacc_(zb + kZoneRmod), rho0);
+              if (rho0 >= ((zmode == 1) ? zthr_ : t3rho_))
+                Kokkos::atomic_add(&zacc_(zb + kZoneViol), 1.0);
             }
           }
         }

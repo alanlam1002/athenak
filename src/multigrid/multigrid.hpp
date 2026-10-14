@@ -653,6 +653,10 @@ class MultigridDriver {
   static std::vector<MultigridDriver*> mg_all_drivers_;
   static void PrintAllTimers(double wall_sec);
   static void ResetAllTimers();
+  // Driver phase timers (<time> phase_timers, R-062 item 2): wall time of the CFC
+  // multigrid Solve() calls, fenced (MGScopedTimer); also counts solves during a regrid.
+  static bool phase_on;
+  static double phase_solve_sec;
 
  protected:
   // Source masking (zero source outside mask_radius_)

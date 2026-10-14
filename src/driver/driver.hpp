@@ -63,6 +63,17 @@ class Driver {
 
  private:
   Kokkos::Timer run_time_;      // generalized timer for cpu/gpu/etc
+  // <time> phase_timers (default true; R-062 item 2): fenced wall-clock totals per phase,
+  // printed by rank 0 as a PHASE_TIMERS line every phase_timers_every cycles and at the
+  // end: task lists before_timeintegrator / before_stagen / stagen / after_stagen /
+  // after_timeintegrator, outputs, AMR regrid, NewTimeStep; mg = the CFC multigrid
+  // Solve() calls (inside stagen, and inside a regrid's metric refresh); hydro_etc =
+  // stagen - mg (hydro, C2P, CFC source/assembly tasks, boundary exchange).
+  bool pt_on_ = true;
+  int pt_every_ = 100;
+  double pt_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  int pt_cyc0_ = 0;
+  void PrintPhaseTimers(Mesh *pm, const char *tag);
   std::uint64_t nmb_updated_;   // running total of MB updated during run
   std::uint64_t npart_updated_; // running total of particles updated during run
   float lb_efficiency_;         // measure of how efficient was load balancing

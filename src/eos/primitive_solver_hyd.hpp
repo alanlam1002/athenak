@@ -1206,7 +1206,10 @@ class PrimitiveSolverHydro {
     const Real zvmax_ = zone_vmax, zde_ = zone_de;
     auto &zacc_ = zone_acc;
     const bool zbook_ = zone_book && !floors_only;
-    const bool mlon_ = ml_on && !floors_only;
+    // only once MassLedgerPre has sized ml_cls for this pack (C2P also runs outside the
+    // RK stages, e.g. at restart/regrid initialisation, before any stage)
+    const bool mlon_ = ml_on && !floors_only &&
+                       static_cast<int>(ml_cls.extent(0)) == pmy_pack->nmb_thispack;
     auto &mlcls_ = ml_cls;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];

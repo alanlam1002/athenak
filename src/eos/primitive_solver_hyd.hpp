@@ -467,7 +467,7 @@ class PrimitiveSolverHydro {
   static constexpr int kMlFexc = kMlNX + 3, kMlFout = kMlNX + 4, kMlFo6 = kMlNX + 5;
   static constexpr int kMlFo12 = kMlNX + 6, kMlNcell = kMlNX + 7, kMlLen = kMlNX + 8;
   DvceArray4D<Real> ml_d0, ml_cls;   // D sqrt(gamma) before the C2P; the cell's class
-  Real ml_stage[4][kMlLen];
+  Real ml_stage[4][kMlLen] = {};
 
   //! sum over interior cells of a(m, n, k, j, i) dV
   Real MlMass(const DvceArray5D<Real> &a, int n) {
@@ -496,9 +496,10 @@ class PrimitiveSolverHydro {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     const int n3 = indcs.nx3 + 2*indcs.ng, n2 = indcs.nx2 + 2*indcs.ng;
     const int n1 = indcs.nx1 + 2*indcs.ng;
-    if (static_cast<int>(ml_d0.extent(0)) != nmb) {   // (re)sized after a regrid
-      Kokkos::realloc(ml_d0, nmb, n3, n2, n1);
-      Kokkos::realloc(ml_cls, nmb, n3, n2, n1);
+    const int nmbu = static_cast<int>(u0.extent(0));  // u0 is sized for the rank's max
+    if (static_cast<int>(ml_d0.extent(0)) != nmbu) {  // (re)sized after a regrid
+      Kokkos::realloc(ml_d0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_cls, nmbu, n3, n2, n1);
     }
     Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
                                              Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
@@ -1209,7 +1210,7 @@ class PrimitiveSolverHydro {
     // only once MassLedgerPre has sized ml_cls for this pack (C2P also runs outside the
     // RK stages, e.g. at restart/regrid initialisation, before any stage)
     const bool mlon_ = ml_on && !floors_only &&
-                       static_cast<int>(ml_cls.extent(0)) == pmy_pack->nmb_thispack;
+                       static_cast<int>(ml_cls.extent(0)) >= pmy_pack->nmb_thispack;
     auto &mlcls_ = ml_cls;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];

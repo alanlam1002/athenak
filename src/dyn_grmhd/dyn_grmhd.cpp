@@ -375,6 +375,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
   eos.DrainZone(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
                 pmy_pack->pmesh->ncycle);
+  eos.UpdateShockFlags();   // dual_energy_flag_exchange: the owner decides (R-069)
   eos.MassLedgerPost(stage, pdrive->nexp_stages, pdrive->gam0, pdrive->gam1, pdrive->beta,
                      pmy_pack->pmesh->dt, pmy_pack->pmesh->time, pmy_pack->pmesh->ncycle);
   return TaskStatus::complete;
@@ -395,9 +396,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrimBC(int is, int ie, int js, int
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::UpdateShockFlags()
+//! \brief dual_energy_flag_exchange: the owner's flags after a C2P outside the RK stages
+//! (the regrid path, CFC::ReinitializeMetricForAMR)
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::UpdateShockFlags() {
+  eos.UpdateShockFlags();
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void DynGRMHDPS::RefreshExcisionMasks()
 //! \brief <coord> excision_mask_refresh: rebuild the lapse-scheme masks from the current
-//! lapse before every C2P (see coordinates.cpp)
+//! lapse before every C2P (see coordinates.cpp).
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RefreshExcisionMasks() {
   auto &cd = pmy_pack->pcoord->coord_data;

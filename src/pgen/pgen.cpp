@@ -359,8 +359,8 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
         myoffset += data_size;
       }
     }
-    Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb), Kokkos::ALL,
-                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
+    Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
+                      std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
     offset_myrank += nout1*nout2*nout3*nmhd*sizeof(Real);   // mhd u0
     myoffset = offset_myrank;
 

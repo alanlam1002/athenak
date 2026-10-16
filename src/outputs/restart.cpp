@@ -93,7 +93,7 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   if (pmhd != nullptr) {
     Kokkos::realloc(outarray_mhd, nmb, nmhd, nout3, nout2, nout1);
     Kokkos::deep_copy(outarray_mhd, Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
-                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+                      std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
     Kokkos::realloc(outfield.x1f, nmb, nout3, nout2, nout1+1);
     Kokkos::deep_copy(outfield.x1f, Kokkos::subview(pmhd->b0.x1f, std::make_pair(0,nmb),
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));

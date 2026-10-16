@@ -8,11 +8,16 @@ Arms (one 16-node bundle each; R6 restart 00006 t = 113.7 -> 170 on 7 nodes, R7 
   B = zone off + covariant  (atmosphere_zone_book)
 The zone effect is T - B, the divergence effect B - A.
 
-Criteria (numbers per R-058 §2): dt gain; capture check on the zone-removed mass; wings;
-Mdot (frozen-in, final restart); rest-mass booking closure (hst mass + excision + zone);
-the gate; physics within control noise; tier 3 (T_R7); B - A (switch census); cost.
+Criteria (numbers per R-058 §2, revised per R-065 §3 / R-067 Q2 / R-069 item 6): dt gain;
+capture check on the zone-removed mass; wings; Mdot (frozen-in, final restart): cumulative
+F(E) KS max|F_T - F_ref| <= 0.01 M_bound, M_fb reaching 1% / 10% of M_bound within 5%,
+peak Mdot and t_peak within 3%; rest-mass booking closure |grid dM - booked| <= 1e-9 M* per
+segment; the gate; physics within control noise, with bound (E < 0) and unbound (E > 0)
+quantile sets q10-q90 each within 0.01 dE (the global q40-q60 dropped); tier 3 (T_R7);
+B - A (switch census); cost. Every zone-effect tolerance is scaled by the control pair:
+|T - B| <= max(tol, 2 |B - A|).
 
-    c051_s2.py [--nproc 6] [--out DIR]
+    c051_s2.py [--nproc 6] [--out DIR] [--name c051_s2_rev.txt]
 """
 import argparse
 import glob
@@ -35,6 +40,8 @@ B = 'cfc_tde_wd_imbh_parabolic_tracker'
 RHOC, K0, MSTAR, GAM = 3.24e-4, 1.2346626297e-2, 7.47e-5, 5.0 / 3.0
 DE = 0.677 / 16.4**2
 THR = 1e-10 * RHOC
+CLOSE_TOL = 1e-9 * MSTAR                          # R-067 Q2: 1e-9 M* per segment, in M_BH units
+QS = np.array([0.1, 0.25, 0.5, 0.75, 0.9])
 EB = np.array([-np.inf, -6, -3, -2, -1, 0, 1, 2, 3, 6, np.inf])
 ELAB = ['<-6', '-6..-3', '-3..-2', '-2..-1', '-1..0', '0..1', '1..2', '2..3', '3..6', '>6']
 RUNS = {'R6': dict(src='R6_rp10_comov_L4_fix', rst0='00006', rp=10.0, nodes=7, tend=170.0,
@@ -110,8 +117,38 @@ def physics(z):
                 M3=md[kd > 0.05].sum() / md.sum(), M10=md[kd > 0.10].sum() / md.sum(),
                 E=(z['E'] * z['dM']).sum() / z['dM'].sum() / DE, Lz=(z['Lz'] * z['dM']).sum() / z['dM'].sum(),
                 bound=z['dM'][z['E'] < 0].sum() / z['dM'].sum(), rem=float(z['Mb']),
-                q=quant(z['E'][deb], z['dM'][deb], np.array([0.1, 0.25, 0.5, 0.75, 0.9])) / DE,
-                qx=quant(z['E'][deb], z['dM'][deb], np.array([0.05, 0.1, 0.25, 0.4, 0.6, 0.75, 0.9, 0.95])) / DE)
+                qb=quant(z['E'][deb & (z['E'] < 0)], z['dM'][deb & (z['E'] < 0)], QS) / DE,
+                qu=quant(z['E'][deb & (z['E'] > 0)], z['dM'][deb & (z['E'] > 0)], QS) / DE)
+
+
+def scaled(tol, ba):
+    """R-065 §3: a zone-effect tolerance scaled by the control pair, max(tol, 2 |B - A|)"""
+    return max(tol, 2.0 * abs(ba))
+
+
+def fallback(z, tp):
+    """bound debris (E < 0, remnant excluded): its E-sorted cumulative F(E) [M], M_bound, and
+    the return times at which M_fb(< t) reaches 1% / 10% of M_bound (Keplerian return, as
+    c044_mdot.mdot; per cell, unbinned)"""
+    deb = ~z['rem'].astype(bool)
+    b = deb & (z['E'] < 0)
+    E, m = z['E'][b], z['dM'][b]
+    o = np.argsort(E)
+    Mb = m.sum()
+    tr = tp + 2 * np.pi * (-2 * E)**-1.5
+    ot = np.argsort(tr)
+    cf = np.cumsum(m[ot]) / Mb
+    return E[o], np.cumsum(m[o]), Mb, np.interp([0.01, 0.10], cf, tr[ot])
+
+
+def ks(f1, f2):
+    """max |F_1(E) - F_2(E)| on the union of both E sets, in units of M_bound(2)"""
+    E1, F1, _, _ = f1
+    E2, F2, Mb2, _ = f2
+    g = np.union1d(E1, E2)
+    a = np.interp(g, E1, F1, left=0.0, right=F1[-1])
+    b = np.interp(g, E2, F2, left=0.0, right=F2[-1])
+    return np.max(np.abs(a - b)) / Mb2
 
 
 # ---------------------------------------------------------------- slices (matched times)
@@ -138,8 +175,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--nproc', type=int, default=6)
     ap.add_argument('--out', default=P)
+    ap.add_argument('--name', default='c051_s2_rev.txt')
     a = ap.parse_args()
-    rows = ['C-051: S2 evaluation (c051_s2.py). T = zone on + covariant (+ tier 3), A = zone off + coord, '
+    rows = ['C-051 / R-069 item 6: S2 evaluation with the revised criteria (c051_s2.py). T = zone on + covariant (+ tier 3), A = zone off + coord, '
             'B = zone off + covariant. Measured unless marked argued. Masses in M_BH units unless "M*".']
     L = {(r, x): parse(f'{C}/S2{x}_{r}') for r in RUNS for x in ARMS}
     # 3D passes: start restart (shared), final restart of each arm
@@ -209,28 +247,46 @@ def main():
                         + ' '.join(f'{ELAB[i]}:{fr[i]:.1e}' for i in range(10))
                         + f'  (|E| <= 3dE <= 1e-4, 3-6dE <= 1e-3: {"PASS" if ok else "FAIL"})')
 
-    # 4. Mdot
+    # 4. Mdot (revised, R-065 §3)
     import c044_mdot as M
-    rows.append('== 4. Mdot (frozen-in from the final restart; remnant excluded, r_BH >= 3; Keplerian return '
-                'from the release geodesic periapsis)')
+    rows.append('== 4. Mdot (frozen-in from the final restart; remnant excluded, r_BH >= 3; Keplerian return from the '
+                'release geodesic periapsis). Revised: cumulative F(E) KS <= 0.01 M_bound; M_fb at 1% / 10% of M_bound '
+                'within 5%; peak Mdot and t_peak within 3%; T-B tolerances max(tol, 2|B-A|)')
     tc = np.sqrt(M.TB[1:] * M.TB[:-1])
     for r, cfg in RUNS.items():
         tp = M.t_peri(cfg['src'], cfg['rp'])
-        md = {}
+        md, fb = {}, {}
         for x in ARMS:
             z = fin[(r, x)]; deb = ~z['rem'].astype(bool)
             md[x] = M.mdot(z['E'][deb], z['dM'][deb], tp)
-        for a1, a2, lab in (('T', 'B', 'zone effect T-B'), ('B', 'A', 'divergence effect B-A')):
+            fb[x] = fallback(z, tp)
+        met = {}
+        for a1, a2 in (('T', 'B'), ('B', 'A')):
             p1, p2 = md[a1].max(), md[a2].max()
-            k = md[a2] >= 0.01 * p2
-            dev = np.max(np.abs(md[a1][k] / md[a2][k] - 1))
-            ok = abs(p1 / p2 - 1) <= 0.03 and dev <= 0.10
-            rows.append(f'  {r} {lab}: peak {p1:.4e} vs {p2:.4e} ({p1 / p2 - 1:+.4f}); max |ratio - 1| where >= 1% '
-                        f'of peak {dev:.4f} ({k.sum()} bins): {"PASS" if ok else "FAIL"}')
+            t1, t2 = tc[np.argmax(md[a1])], tc[np.argmax(md[a2])]
+            met[(a1, a2)] = dict(ks=ks(fb[a1], fb[a2]), f1=fb[a1][3][0] / fb[a2][3][0] - 1,
+                                 f10=fb[a1][3][1] / fb[a2][3][1] - 1, pk=p1 / p2 - 1, tpk=t1 / t2 - 1,
+                                 mb=fb[a1][2] / fb[a2][2] - 1)
+        tol = dict(ks=0.01, f1=0.05, f10=0.05, pk=0.03, tpk=0.03)
+        for (a1, a2), lab in ((('T', 'B'), 'zone effect T-B'), (('B', 'A'), 'divergence effect B-A')):
+            u = met[(a1, a2)]
+            ba = met[('B', 'A')]
+            res = {}
+            for k_, t_ in tol.items():
+                tt = scaled(t_, ba[k_]) if a1 == 'T' else t_
+                res[k_] = (abs(u[k_]) <= tt, tt)
+            rows.append(f'  {r} {lab}: KS max|dF|/M_bound {u["ks"]:.4f}; t(M_fb = 1%) {u["f1"]:+.4f}, t(10%) {u["f10"]:+.4f}; '
+                        f'peak {u["pk"]:+.4f}, t_peak {u["tpk"]:+.4f}; M_bound {u["mb"]:+.4f} -> '
+                        + ' '.join(f'{k_}:{"ok" if ok else "OUT"}(tol {tt:.3g})' for k_, (ok, tt) in res.items())
+                        + f'  => {"PASS" if all(ok for ok, _ in res.values()) else "FAIL"}')
+        for x in ARMS:
+            rows.append(f'    {r} {x}: M_bound {fb[x][2] / MSTAR:.5f} M*, t(M_fb = 1%) {fb[x][3][0]:.4g} M, '
+                        f't(10%) {fb[x][3][1]:.4g} M, peak Mdot {md[x].max():.4e} M*/M at t {tc[np.argmax(md[x])]:.4g} M')
 
     # 5. closure
     rows.append('== 5. rest-mass booking closure: Delta(hst mass) + cum_dM_exc + zone cum_dM (cumulative since the '
-                'restart; the final 1-<50 cycles after the last bins line are in cum_dM, which is per cycle)')
+                'restart; the final 1-<50 cycles after the last bins line are in cum_dM, which is per cycle). '
+                'Revised (R-067 Q2): |residual| <= 1e-9 M* per segment (one segment = the S2 window)')
     for r in RUNS:
         for x in ARMS:
             h = np.loadtxt(glob.glob(f'{C}/S2{x}_{r}/*.mhd.hst')[0])
@@ -240,7 +296,8 @@ def main():
             res = dm + ex + zn
             rows.append(f'  {r} {x}: hst mass {h[0, 2]:.6e} -> {h[-1, 2]:.6e} (t {h[0, 0]:.2f}-{h[-1, 0]:.2f}), '
                         f'Delta {dm:+.3e}; excised {ex:+.3e}; zone {zn:+.3e}; residual {res:+.3e} '
-                        f'({abs(res) / max(abs(dm), 1e-300):.2e} of |Delta|)')
+                        f'= {res / MSTAR:+.2e} M* (tol 1e-9 M* = {CLOSE_TOL:.2e} per segment): '
+                        f'{"PASS" if abs(res) <= CLOSE_TOL else "FAIL"}')
     rows.append('  argued: the hst mass starts at the first history row after the restart (one hst dt later), and the '
                 'excision/zone tallies at the first cycle; outflow through the outer boundary is not booked.')
 
@@ -262,20 +319,30 @@ def main():
             p_ = ph[x]
             rows.append(f'  {r} {"start" if x == "0" else x} t {p_["t"]:.1f}: dense K/K0 {p_["K"]:.5f} M3 {p_["M3"]:.4f} '
                         f'(>10% {p_["M10"]:.4f}) <E> {p_["E"]:+.4f} dE <Lz> {p_["Lz"]:.6f} bound {p_["bound"]:.5f} '
-                        f'remnant {p_["rem"]:.4f} M* q10/25/50/75/90 ' + '/'.join(f'{v:+.3f}' for v in p_['q']) + ' dE'
+                        f'remnant {p_["rem"]:.4f} M*'
                         f'; C2P errors {L[(r, x)]["c2p"] if x != "0" else "-"}')
-        for a1, a2, lab in (('T', 'B', 'T-B'), ('B', 'A', 'B-A')):
+        dif = {}
+        for a1, a2 in (('T', 'B'), ('B', 'A')):
             u, v = ph[a1], ph[a2]
-            dq = np.max(np.abs(u['q'] - v['q']))
-            dqx = np.max(np.abs(u['qx'] - v['qx']))      # q50 excluded: it sits in the E ~ 0 gap
-            dl = abs(u['Lz'] - v['Lz']) / abs(v['Lz'])
-            res = dict(K=abs(u['K'] / v['K'] - 1) <= lim['K'], M3=abs(u['M3'] - v['M3']) <= lim['M3'],
-                       q=dq <= 0.01, q_no50=dqx <= 0.01, bound=abs(u['bound'] - v['bound']) <= lim['bound'],
-                       rem=abs(u['rem'] / v['rem'] - 1) <= 0.005, Lz=dl <= 1e-5)
-            rows.append(f'  {r} {lab}: dK/K {u["K"] / v["K"] - 1:+.2e} dM3 {u["M3"] - v["M3"]:+.4f} d<E> '
-                        f'{u["E"] - v["E"]:+.4f} dE dLz/Lz {dl:.1e} dq max {dq:.4f} (q5-q40,q60-q95 {dqx:.4f}) dE dbound {u["bound"] - v["bound"]:+.5f} '
-                        f'drem/rem {u["rem"] / v["rem"] - 1:+.4f} -> ' + ' '.join(f'{k}:{"ok" if ok else "OUT"}'
-                                                                                   for k, ok in res.items()))
+            dif[(a1, a2)] = dict(K=u['K'] / v['K'] - 1, M3=u['M3'] - v['M3'], bound=u['bound'] - v['bound'],
+                                 rem=u['rem'] / v['rem'] - 1, Lz=abs(u['Lz'] - v['Lz']) / abs(v['Lz']),
+                                 qb=np.max(np.abs(u['qb'] - v['qb'])), qu=np.max(np.abs(u['qu'] - v['qu'])),
+                                 E=u['E'] - v['E'])
+        tol = dict(K=lim['K'], M3=lim['M3'], bound=lim['bound'], rem=0.005, Lz=1e-5, qb=0.01, qu=0.01)
+        for (a1, a2), lab in ((('T', 'B'), 'T-B'), (('B', 'A'), 'B-A')):
+            u, ba = dif[(a1, a2)], dif[('B', 'A')]
+            res = {}
+            for k_, t_ in tol.items():
+                tt = scaled(t_, ba[k_]) if a1 == 'T' else t_
+                res[k_] = (abs(u[k_]) <= tt, tt)
+            rows.append(f'  {r} {lab}: dK/K {u["K"]:+.2e} dM3 {u["M3"]:+.4f} d<E> {u["E"]:+.4f} dE dLz/Lz {u["Lz"]:.1e} '
+                        f'dq bound max {u["qb"]:.4f} unbound max {u["qu"]:.4f} dE dbound {u["bound"]:+.5f} '
+                        f'drem/rem {u["rem"]:+.4f} -> ' + ' '.join(f'{k_}:{"ok" if ok else "OUT"}(tol {tt:.3g})'
+                                                                   for k_, (ok, tt) in res.items())
+                        + (f'  => {"PASS" if all(ok for ok, _ in res.values()) else "FAIL"}' if a1 == 'T' else ''))
+        for x in ARMS:
+            rows.append(f'    {r} {x} bound q10/25/50/75/90 ' + '/'.join(f'{v:+.3f}' for v in ph[x]['qb'])
+                        + ' unbound ' + '/'.join(f'{v:+.3f}' for v in ph[x]['qu']) + ' dE')
     rows.append('  slice series (prim_xy z = 0, matched integer times): dense K/K0 and warm area-mass fractions')
     for r, cfg in RUNS.items():
         ser = {}
@@ -350,7 +417,7 @@ def main():
             rows.append(f'  {r} {x}: wall {w:.0f} s, node-h {L[(r, x)]["elapsed"] * cfg["nodes"] / 3600:.1f}, cycles '
                         f'{tm["cycles"]:.0f}; mg {tm["mg"] / w:.1%} hydro_etc {tm["hydro_etc"] / w:.1%} io {tm["io"] / w:.1%} '
                         f'regrid {tm["regrid"] / w:.1%} newdt {tm["newdt"] / w:.2%} untimed {(w - tm["timed"]) / w:.1%}')
-    open(f'{a.out}/c051_s2.txt', 'w').write('\n'.join(rows) + '\n')
+    open(f'{a.out}/{a.name}', 'w').write('\n'.join(rows) + '\n')
     print('\n'.join(rows))
 
 

@@ -176,6 +176,14 @@ class PrimitiveSolverHydro {
   //   de_persist = N > 1: a cell takes the energy branch only once its final flag has
   //     been set in N consecutive C2P calls (de_streak counts them; reset on realloc).
   bool de_isolated = false;
+  // <mhd> dual_energy_probe_box1/2 = "x0 x1 y0 y1 z0 z1", dual_energy_probe_cycles = N
+  // (debug, R-069 item 1): for the first N cycles after (re)start, every cell copy (owner
+  // interior or ghost, any MeshBlock) whose centre lies in a box prints one DEPROBE line per
+  // RK-stage C2P: cycle stage gid i j k ghost x y z shk0 (pre-dilation sensor 0/1/2) flag
+  // (final) dbr D tau DY (undensitized cons) | previous prims rho P vx vy vz | new rho P vx
+  Real de_pb[12] = {0.0, -1.0, 0.0, -1.0, 0.0, -1.0, 0.0, -1.0, 0.0, -1.0, 0.0, -1.0};
+  int de_pcyc = 0, de_pcyc0 = -1;
+  DvceArray4D<int> de_probe0;
   int de_persist = 1;
   DvceArray4D<int> de_streak;
   // second-law guard (item 73, default on): a dense flagged cell whose energy solution has
@@ -839,6 +847,15 @@ class PrimitiveSolverHydro {
       de_dilate = pin->GetOrAddInteger(block, "dual_energy_shock_dilate", 1);
       de_dilate_weak = pin->GetOrAddReal(block, "dual_energy_shock_dilate_weak", 0.5);
       de_isolated = pin->GetOrAddBoolean(block, "dual_energy_shock_isolated_off", false);
+      for (int b = 0; b < 2; ++b) {
+        std::string bx = pin->GetOrAddString(block, "dual_energy_probe_box" + std::to_string(b+1), "");
+        std::istringstream is(bx);
+        Real v[6];
+        if (is >> v[0] >> v[1] >> v[2] >> v[3] >> v[4] >> v[5]) {
+          for (int q = 0; q < 6; ++q) de_pb[6*b + q] = v[q];
+        }
+      }
+      de_pcyc = pin->GetOrAddInteger(block, "dual_energy_probe_cycles", 0);
       de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
@@ -1124,6 +1141,14 @@ class PrimitiveSolverHydro {
     const Real de_2tol_ = de_second_law_tol;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
+    const int pcyc_ = pmy_pack->pmesh->ncycle;
+    if (de_pcyc > 0 && de_pcyc0 < 0 && !floors_only) de_pcyc0 = pcyc_;
+    const bool probe_ = de_on_ && de_pcyc > 0 && pcyc_ < de_pcyc0 + de_pcyc &&
+                        dstg_ >= 1 && dstg_ <= 4;
+    Kokkos::Array<Real, 12> pb_;
+    for (int q = 0; q < 12; ++q) pb_[q] = de_pb[q];
+    auto &dp0_ = de_probe0;
+    const int pgid0_ = pmy_pack->gids;
     auto &dd_ = de_diag;
     if (de_on_) {
       int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
@@ -1212,6 +1237,14 @@ class PrimitiveSolverHydro {
           dd_(m, 1, k, j, i) = ratio;
         }
       });
+      if (probe_) {
+        if (de_probe0.extent_int(0) != de_shock.extent_int(0) ||
+            de_probe0.extent_int(1) != e3 || de_probe0.extent_int(2) != e2 ||
+            de_probe0.extent_int(3) != e1) {
+          Kokkos::realloc(de_probe0, de_shock.extent_int(0), e3, e2, e1);
+        }
+        Kokkos::deep_copy(DevExeSpace(), de_probe0, de_shock);
+      }
       // optional isolation filter (de_isolated): demote a flagged cell (2) with no flagged
       // face neighbour to a weak candidate (1), so the dilation cannot re-flag it either
       if (de_isolated) {
@@ -1671,6 +1704,30 @@ class PrimitiveSolverHydro {
             dbr = 5;
           }
           if (interior && dense) { nden_r += 1.0; }
+          if (probe_) {
+            const Real xp = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min,
+                                        size.d_view(m).x1max);
+            const Real yp = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min,
+                                        size.d_view(m).x2max);
+            const Real zp = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min,
+                                        size.d_view(m).x3max);
+            bool inb = false;
+            for (int b = 0; b < 2; ++b) {
+              inb = inb || (xp > pb_[6*b] && xp < pb_[6*b+1] && yp > pb_[6*b+2] &&
+                            yp < pb_[6*b+3] && zp > pb_[6*b+4] && zp < pb_[6*b+5]);
+            }
+            if (inb) {
+              Kokkos::printf("DEPROBE %d %d %d %d %d %d %d %.9g %.9g %.9g %d %d %d %.17g %.17g "
+                             "%.17g | %.17g %.17g %.17g %.17g %.17g | %.17g %.17g %.17g\n",
+                             pcyc_, dstg_, pgid0_ + m, i, j, k, interior ? 0 : 1, xp, yp, zp,
+                             dp0_(m,k,j,i), de_shock_(m,k,j,i), dbr, cons_pt_old[CDN],
+                             cons_pt_old[CTA], cons_pt_old[CYD + de_idx_],
+                             prim(m, IDN, k, j, i), prim(m, IPR, k, j, i),
+                             prim(m, IVX, k, j, i), prim(m, IVY, k, j, i),
+                             prim(m, IVZ, k, j, i), prim_pt[PRH]*mb, prim_pt[PPR],
+                             prim_pt[PVX]);
+            }
+          }
           if (ddon_) {
             dd_(m, 0, k, j, i) = dbr;
             dd_(m, 2, k, j, i) = de_shock_(m, k, j, i);

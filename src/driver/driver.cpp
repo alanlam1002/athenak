@@ -749,6 +749,7 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
       // own interior/ghost con2prim split internally (see cfc.hpp's comment
       // on ReinitializeMetricForAMR).
       pcfc->ReinitializeMetricForAMR(this);
+      pdyngr->UpdateShockFlags();   // dual_energy_flag_exchange: owner flags (R-069)
     } else {
       (void) pdyngr->ConToPrim(this, 0);
     }

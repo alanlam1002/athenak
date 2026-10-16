@@ -148,6 +148,8 @@ class PrimitiveSolverHydro {
   // takes the entropy branch. Ideal gas, B = 0 cells only.
   bool de_on = false;
   int de_idx = -1;                 // scalar index of the K tracer (nscalars - 1)
+  bool de_xchg = false;            // <mhd> dual_energy_flag_exchange (owner decides)
+  int de_iflag = -1;               // its cons slot (pmhd->nmhd + nscalars)
   Real de_kmax = 1.0, de_rho_sw = 0.0, de_dp_shock = 0.3, de_eta1 = 0.0, de_gamma = 5./3.;
   Real de_ypow = 1.0;              // Y = (K/kmax)^de_ypow
   // shock sensor (item 72; default vcurv + one hysteresis dilation pass): 0 = jump
@@ -474,7 +476,9 @@ class PrimitiveSolverHydro {
   // also writes, per stage, every MeshBlock's mass flux beta_s dt sum F(IDN) dA through each
   // of its six faces (MLFACE lines in mlface.txt: cycle stage gid level x1min x1max x2min
   // x2max x3min x3max f1- f1+ f2- f2+ f3- f3+, fluxes in +x_d direction), so the update's
-  // non-conservation can be located offline by matching neighbouring faces.
+  // non-conservation can be located offline by matching neighbouring faces. Since R-069
+  // item 4 the line continues with the same six face sums for tau and then DY (zeros
+  // without dual energy).
   int ml_faces = 0, ml_faces_done = 0, ml_faces_cyc = -1;
   static constexpr int kMlNC = 5, kMlNR = 5, kMlNX = kMlNC*kMlNR*2;
   // per-stage slots: [0, kMlNX) X bins, then M_pre, M_end, M(u1), F_exc, F_out,
@@ -484,6 +488,45 @@ class PrimitiveSolverHydro {
   static constexpr int kMlFo12 = kMlNX + 6, kMlNcell = kMlNX + 7, kMlLen = kMlNX + 8;
   DvceArray4D<Real> ml_d0, ml_cls;   // D sqrt(gamma) before the C2P; the cell's class
   Real ml_stage[4][kMlLen] = {};
+  // tau and the dual-energy tracer DY (R-069 item 4): per stage and variable,
+  // {M_pre, M_end, M(u1), F_out}; printed as MLEDGER2 lines (no class bins)
+  Real ml_xs[4][2][4] = {};
+  int MlIdx(int v) const {
+    return (v == 0) ? static_cast<int>(IEN) : pmy_pack->pmhd->nmhd + de_idx;
+  }
+  int MlNx() const { return (de_on && de_idx >= 0) ? 2 : 1; }
+
+  //! net outflow sum F(n) dA through the mesh's outer faces (this stage's uflx)
+  Real MlFout(int n) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &flx = pmy_pack->pmhd->uflx;
+    auto &ms = pmy_pack->pmesh->mesh_size;
+    const Real mx1 = ms.x1min, Mx1 = ms.x1max, mx2 = ms.x2min, Mx2 = ms.x2max;
+    const Real mx3 = ms.x3min, Mx3 = ms.x3max;
+    Real fo = 0.0;
+    Kokkos::parallel_reduce("ml_fout", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, Real &a1) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      auto &sz = size.d_view(m);
+      const Real a1f = sz.dx2*sz.dx3, a2f = sz.dx1*sz.dx3, a3f = sz.dx1*sz.dx2;
+      const Real tol = 1.0e-6*sz.dx1;
+      if (i == is && sz.x1min <= mx1 + tol) a1 -= flx.x1f(m, n, k, j, i)*a1f;
+      if (i == ie && sz.x1max >= Mx1 - tol) a1 += flx.x1f(m, n, k, j, i+1)*a1f;
+      if (j == js && sz.x2min <= mx2 + tol) a1 -= flx.x2f(m, n, k, j, i)*a2f;
+      if (j == je && sz.x2max >= Mx2 - tol) a1 += flx.x2f(m, n, k, j+1, i)*a2f;
+      if (k == ks && sz.x3min <= mx3 + tol) a1 -= flx.x3f(m, n, k, j, i)*a3f;
+      if (k == ke && sz.x3max >= Mx3 - tol) a1 += flx.x3f(m, n, k+1, j, i)*a3f;
+    }, Kokkos::Sum<Real>(fo));
+    return fo;
+  }
 
   //! sum over interior cells of a(m, n, k, j, i) dV
   Real MlMass(const DvceArray5D<Real> &a, int n) {
@@ -523,6 +566,10 @@ class PrimitiveSolverHydro {
     for (int n = 0; n < kMlLen; ++n) ml_stage[stage-1][n] = 0.0;
     ml_stage[stage-1][kMlPre] = MlMass(u0, IDN);
     ml_stage[stage-1][kMlU1] = MlMass(pmy_pack->pmhd->u1, IDN);
+    for (int v = 0; v < MlNx(); ++v) {
+      ml_xs[stage-1][v][0] = MlMass(u0, MlIdx(v));
+      ml_xs[stage-1][v][2] = MlMass(pmy_pack->pmhd->u1, MlIdx(v));
+    }
   }
 
   //! per-MeshBlock face mass fluxes of this stage (see ml_faces), gathered to rank 0
@@ -534,26 +581,30 @@ class PrimitiveSolverHydro {
     const int nmb = pmy_pack->nmb_thispack;
     auto &size = pmy_pack->pmb->mb_size;
     auto &flx = pmy_pack->pmhd->uflx;
-    DvceArray2D<Real> fs("ml_faces", nmb, 6);
+    const int nvf = 1 + MlNx();               // D, tau (, DY)
+    const int iv1 = MlIdx(0), iv2 = (nvf > 2) ? MlIdx(1) : static_cast<int>(IDN);
+    DvceArray2D<Real> fs("ml_faces", nmb, 18);
     const int n = (nx1 > nx2 ? nx1 : nx2) > nx3 ? (nx1 > nx2 ? nx1 : nx2) : nx3;
-    par_for("ml_faces", DevExeSpace(), 0, nmb-1, 0, 5, 0, n-1, 0, n-1,
-    KOKKOS_LAMBDA(const int m, const int f, const int b, const int a) {
+    par_for("ml_faces", DevExeSpace(), 0, nmb-1, 0, 6*nvf-1, 0, n-1, 0, n-1,
+    KOKKOS_LAMBDA(const int m, const int fv, const int b, const int a) {
       auto &sz = size.d_view(m);
+      const int f = fv % 6, vv = fv/6;
+      const int nn = (vv == 0) ? static_cast<int>(IDN) : ((vv == 1) ? iv1 : iv2);
       Real v = 0.0;
       if (f < 2) {
         if (a >= nx2 || b >= nx3) return;
-        v = flx.x1f(m, IDN, ks + b, js + a, (f == 0) ? is : ie + 1)*sz.dx2*sz.dx3;
+        v = flx.x1f(m, nn, ks + b, js + a, (f == 0) ? is : ie + 1)*sz.dx2*sz.dx3;
       } else if (f < 4) {
         if (a >= nx1 || b >= nx3) return;
-        v = flx.x2f(m, IDN, ks + b, (f == 2) ? js : je + 1, is + a)*sz.dx1*sz.dx3;
+        v = flx.x2f(m, nn, ks + b, (f == 2) ? js : je + 1, is + a)*sz.dx1*sz.dx3;
       } else {
         if (a >= nx1 || b >= nx2) return;
-        v = flx.x3f(m, IDN, (f == 4) ? ks : ke + 1, js + b, is + a)*sz.dx1*sz.dx2;
+        v = flx.x3f(m, nn, (f == 4) ? ks : ke + 1, js + b, is + a)*sz.dx1*sz.dx2;
       }
-      Kokkos::atomic_add(&fs(m, f), v);
+      Kokkos::atomic_add(&fs(m, fv), v);
     });
     auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), fs);
-    const int nv = 16;
+    const int nv = 26;
     std::vector<Real> loc(nmb*nv);
     for (int m = 0; m < nmb; ++m) {
       auto &sz = size.h_view(m);
@@ -561,8 +612,7 @@ class PrimitiveSolverHydro {
       r[0] = pmy_pack->gids + m; r[1] = pmy_pack->pmb->mb_lev.h_view(m);
       r[2] = sz.x1min; r[3] = sz.x1max; r[4] = sz.x2min; r[5] = sz.x2max;
       r[6] = sz.x3min; r[7] = sz.x3max;
-      for (int f = 0; f < 6; ++f) r[8 + f] = bdt*h(m, f);
-      r[14] = 0.0; r[15] = 0.0;
+      for (int f = 0; f < 18; ++f) r[8 + f] = bdt*h(m, f);
     }
     int nloc = nmb*nv;
     std::vector<Real> all;
@@ -586,7 +636,7 @@ class PrimitiveSolverHydro {
     for (size_t q = 0; q + nv <= all.size(); q += nv) {
       fprintf(fp, "MLFACE %d %d %d %d", cycle, stage, static_cast<int>(all[q]),
               static_cast<int>(all[q+1]));
-      for (int c = 2; c < 14; ++c) fprintf(fp, " %.17g", all[q+c]);
+      for (int c = 2; c < 26; ++c) fprintf(fp, " %.17g", all[q+c]);
       fprintf(fp, "\n");
     }
     fclose(fp);
@@ -693,14 +743,24 @@ class PrimitiveSolverHydro {
     st[kMlFexc] = beta[stage-1]*dt*fe;   // mass over the stage's update
     st[kMlFout] = beta[stage-1]*dt*fo;
     st[kMlFo6] = n6; st[kMlFo12] = n12; st[kMlNcell] = nc;
+    for (int v = 0; v < MlNx(); ++v) {
+      ml_xs[stage-1][v][1] = MlMass(u0, MlIdx(v));
+      ml_xs[stage-1][v][3] = beta[stage-1]*dt*MlFout(MlIdx(v));
+    }
     if (ml_faces > 0 && ml_faces_done < ml_faces) MlFaces(stage, beta[stage-1]*dt, cycle);
     if (stage == ns && ml_faces > 0 && cycle != ml_faces_cyc) {
       ml_faces_cyc = cycle;
       ++ml_faces_done;
     }
     if (stage != ns) return;
+    for (int q = ns; q < 4; ++q) {   // unused slots: never reset by MassLedgerPre
+      for (int n = 0; n < kMlLen; ++n) ml_stage[q][n] = 0.0;
+      for (int v = 0; v < 2; ++v) for (int n = 0; n < 4; ++n) ml_xs[q][v][n] = 0.0;
+    }
 #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, &ml_stage[0][0], 4*kMlLen, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &ml_xs[0][0][0], 4*2*4, MPI_ATHENA_REAL, MPI_SUM,
                   MPI_COMM_WORLD);
 #endif
     Real w[4];
@@ -726,6 +786,19 @@ class PrimitiveSolverHydro {
                 << " Y=" << Y << " Fout=" << Fo << " Fexc=" << Fe << " X=" << X
                 << " fofc6=" << f6 << " fofc12=" << f12 << " ncell="
                 << ml_stage[0][kMlNcell] << "," << ml_stage[ns-1][kMlNcell] << std::endl;
+      for (int v = 0; v < MlNx(); ++v) {
+        const Real u1v = ml_xs[0][v][2];
+        Real Yv = 0.0, Xv = 0.0, Fv = 0.0, mp = u1v;
+        for (int q = 0; q < ns; ++q) {
+          Yv += w[q]*(ml_xs[q][v][0] - gam0[q]*mp - gam1[q]*u1v);
+          Xv += w[q]*(ml_xs[q][v][1] - ml_xs[q][v][0]);
+          Fv += w[q]*ml_xs[q][v][3];
+          mp = ml_xs[q][v][1];
+        }
+        std::cout << "MLEDGER2 cycle=" << cycle << " var=" << ((v == 0) ? "tau" : "DY")
+                  << " Mu1=" << u1v << " Mend=" << ml_xs[ns-1][v][1] << " Y=" << Yv
+                  << " Fout=" << Fv << " X=" << Xv << std::endl;
+      }
       std::cout << "MLEDGER_X cycle=" << cycle;
       for (int n = 0; n < kMlNX; ++n) std::cout << " " << xb[n];
       std::cout << std::endl;
@@ -856,6 +929,7 @@ class PrimitiveSolverHydro {
         }
       }
       de_pcyc = pin->GetOrAddInteger(block, "dual_energy_probe_cycles", 0);
+      de_xchg = pin->GetOrAddBoolean(block, "dual_energy_flag_exchange", false);
       de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
@@ -1071,86 +1145,18 @@ class PrimitiveSolverHydro {
     return;
   }
 
-  void ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &bfc,
-                  DvceArray5D<Real> &bcc0, DvceArray5D<Real> &prim,
-                  DvceArray5D<Real> &temperature,
-                  const int il, const int iu, const int jl, const int ju,
-                  const int kl, const int ku, bool floors_only=false) {
-    int &nhyd = pmy_pack->pmhd->nmhd;
-    int &nscal = pmy_pack->pmhd->nscalars;
-    int &nmb = pmy_pack->nmb_thispack;
-    auto &fofc_ = pmy_pack->pmhd->fofc;
-
-    // Some problem-specific parameters
-    auto &excise = pmy_pack->pcoord->coord_data.bh_excise;
-    auto &smoothing = pmy_pack->pcoord->coord_data.smooth_excision;
-    auto &excision_floor_ = pmy_pack->pcoord->excision_floor;
-    auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
-    auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
-    auto &texcise_ = pmy_pack->pcoord->coord_data.texcise;
-
-    auto &adm  = pmy_pack->padm->adm;
-    auto &eos_ = ps.GetEOS();
-    auto &ps_  = ps;
-
-    auto &indcs = pmy_pack->pmesh->mb_indcs;
-    int &is = indcs.is;
-    int &js = indcs.js;
-    int &ks = indcs.ks;
+  //! the dual-energy shock flag (de_shock, final 0/1) on [il,iu]x[jl,ju]x[kl,ku] from the
+  //! primitives `prim`: sensor, optional isolation filter, dilation, persistence. Each
+  //! neighbour read is clamped to the given range, so the outermost cells are one-sided.
+  void ComputeShockFlags(const DvceArray5D<Real> &prim, const int il, const int iu,
+                         const int jl, const int ju, const int kl, const int ku,
+                         const bool probe_) {
+    auto &adm = pmy_pack->padm->adm;
     auto &size = pmy_pack->pmb->mb_size;
-
-    // Captured by value for the excised-mass tally below (interior-cell guard).
-    // ie/je/ke are copies because indcs members cannot be captured by reference into
-    // a device lambda. The tally itself is accumulated via this call's own
-    // Kokkos::parallel_reduce below (see the reducer arguments and coordinates.hpp's
-    // excised_tally comment for why -- deterministic, unlike the atomic-add scatter
-    // this replaced).
-    const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
-    const bool floors_only_ = floors_only;
-
-    const int ni = (iu - il + 1);
-    const int nji = (ju - jl + 1)*ni;
-    const int nkji = (ku - kl + 1)*nji;
-    const int nmkji = nmb*nkji;
-
-    const int rank = global_variable::my_rank;
-    const int nerrs_ = nerrs;
-    const int errcap_ = errcap;
-
-    Real mb = eos_.GetBaryonMass();
-
-    // FIXME: This only works for a flooring policy that has these functions!
-    bool prim_failure=false, cons_failure=false;
-    if (floors_only) {
-      prim_failure = ps.GetEOSMutable().IsPrimitiveFlooringFailure();
-      cons_failure = ps.GetEOSMutable().IsConservedFlooringFailure();
-      ps.GetEOSMutable().SetPrimitiveFloorFailure(true);
-      ps.GetEOSMutable().SetConservedFloorFailure(true);
-    }
-
-    // FIXME(JMF): We can short-circuit the primitive solve if FOFC is already enabled
-    // due to a maximum principle violation.
-    // ---- dual energy: shock flag from the previous primitives (before they are
-    // overwritten below): compressive (div v <= 0) and a pressure jump > de_dp_shock
-    // to any face neighbour (neighbours clamped to this call's index range).
-    const bool de_on_ = de_on && !floors_only;
-    const int de_idx_ = de_idx;
-    const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_eta1_ = de_eta1;
-    const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
-    const bool de_2law_ = de_second_law;
-    const Real de_2tol_ = de_second_law_tol;
-    const bool ddon_ = de_on_ && de_diag_on;
-    const int dstg_ = de_stage;
-    const int pcyc_ = pmy_pack->pmesh->ncycle;
-    if (de_pcyc > 0 && de_pcyc0 < 0 && !floors_only) de_pcyc0 = pcyc_;
-    const bool probe_ = de_on_ && de_pcyc > 0 && pcyc_ < de_pcyc0 + de_pcyc &&
-                        dstg_ >= 1 && dstg_ <= 4;
-    Kokkos::Array<Real, 12> pb_;
-    for (int q = 0; q < 12; ++q) pb_[q] = de_pb[q];
-    auto &dp0_ = de_probe0;
-    const int pgid0_ = pmy_pack->gids;
+    const int nmb = pmy_pack->nmb_thispack;
+    const bool ddon_ = de_diag_on;
     auto &dd_ = de_diag;
-    if (de_on_) {
+    {
       int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
       if (de_shock.extent_int(0) != prim.extent_int(0) || de_shock.extent_int(1) != e3 ||
           de_shock.extent_int(2) != e2 || de_shock.extent_int(3) != e1) {
@@ -1308,6 +1314,148 @@ class PrimitiveSolverHydro {
         }
         shk(m, k, j, i) = f;
       });
+    }
+  }
+
+  //! <mhd> dual_energy_flag_exchange (R-069 item 2, the owner decides): after a C2P, the
+  //! interior cells' flags from the new primitives, written into the cons slot that the next
+  //! boundary exchange carries to every block that holds the cell as a ghost. Computed on
+  //! interior +- (dilation + isolation + 1) cells, so the clamped outer layer never reaches
+  //! the interior.
+  void SetFlagSlot() {
+    de_iflag = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars;
+    if (pmy_pack->pmhd->nflag < 1 || pmy_pack->pmhd->u0.extent_int(1) <= de_iflag) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "dual_energy_flag_exchange needs the u0 flag slot (<mhd> "
+                << "dual_energy_flag_exchange = true allocates it)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  void UpdateShockFlags() {
+    if (!de_on || !de_xchg) return;
+    SetFlagSlot();
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int r = de_dilate + (de_isolated ? 1 : 0) + 1;
+    const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+    const int ks = indcs.ks, ke = indcs.ke;
+    const bool md = indcs.nx2 > 1, d3 = indcs.nx3 > 1;
+    ComputeShockFlags(pmy_pack->pmhd->w0, is - r, ie + r, md ? js - r : js, md ? je + r : je,
+                      d3 ? ks - r : ks, d3 ? ke + r : ke, false);
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &shk = de_shock;
+    const int iflag = de_iflag;
+    const int nmb = pmy_pack->nmb_thispack;
+    par_for("de_flag_store", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      u0(m, iflag, k, j, i) = static_cast<Real>(shk(m, k, j, i));
+    });
+  }
+
+  void ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &bfc,
+                  DvceArray5D<Real> &bcc0, DvceArray5D<Real> &prim,
+                  DvceArray5D<Real> &temperature,
+                  const int il, const int iu, const int jl, const int ju,
+                  const int kl, const int ku, bool floors_only=false) {
+    int &nhyd = pmy_pack->pmhd->nmhd;
+    int &nscal = pmy_pack->pmhd->nscalars;
+    int &nmb = pmy_pack->nmb_thispack;
+    auto &fofc_ = pmy_pack->pmhd->fofc;
+
+    // Some problem-specific parameters
+    auto &excise = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &smoothing = pmy_pack->pcoord->coord_data.smooth_excision;
+    auto &excision_floor_ = pmy_pack->pcoord->excision_floor;
+    auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
+    auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
+    auto &texcise_ = pmy_pack->pcoord->coord_data.texcise;
+
+    auto &adm  = pmy_pack->padm->adm;
+    auto &eos_ = ps.GetEOS();
+    auto &ps_  = ps;
+
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    int &is = indcs.is;
+    int &js = indcs.js;
+    int &ks = indcs.ks;
+    auto &size = pmy_pack->pmb->mb_size;
+
+    // Captured by value for the excised-mass tally below (interior-cell guard).
+    // ie/je/ke are copies because indcs members cannot be captured by reference into
+    // a device lambda. The tally itself is accumulated via this call's own
+    // Kokkos::parallel_reduce below (see the reducer arguments and coordinates.hpp's
+    // excised_tally comment for why -- deterministic, unlike the atomic-add scatter
+    // this replaced).
+    const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
+    const bool floors_only_ = floors_only;
+
+    const int ni = (iu - il + 1);
+    const int nji = (ju - jl + 1)*ni;
+    const int nkji = (ku - kl + 1)*nji;
+    const int nmkji = nmb*nkji;
+
+    const int rank = global_variable::my_rank;
+    const int nerrs_ = nerrs;
+    const int errcap_ = errcap;
+
+    Real mb = eos_.GetBaryonMass();
+
+    // FIXME: This only works for a flooring policy that has these functions!
+    bool prim_failure=false, cons_failure=false;
+    if (floors_only) {
+      prim_failure = ps.GetEOSMutable().IsPrimitiveFlooringFailure();
+      cons_failure = ps.GetEOSMutable().IsConservedFlooringFailure();
+      ps.GetEOSMutable().SetPrimitiveFloorFailure(true);
+      ps.GetEOSMutable().SetConservedFloorFailure(true);
+    }
+
+    // FIXME(JMF): We can short-circuit the primitive solve if FOFC is already enabled
+    // due to a maximum principle violation.
+    // ---- dual energy: shock flag from the previous primitives (before they are
+    // overwritten below): compressive (div v <= 0) and a pressure jump > de_dp_shock
+    // to any face neighbour (neighbours clamped to this call's index range).
+    const bool de_on_ = de_on && !floors_only;
+    const int de_idx_ = de_idx;
+    const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_eta1_ = de_eta1;
+    const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
+    const bool de_2law_ = de_second_law;
+    const Real de_2tol_ = de_second_law_tol;
+    const bool ddon_ = de_on_ && de_diag_on;
+    const int dstg_ = de_stage;
+    const int pcyc_ = pmy_pack->pmesh->ncycle;
+    if (de_pcyc > 0 && de_pcyc0 < 0 && !floors_only) de_pcyc0 = pcyc_;
+    const bool probe_ = de_on_ && de_pcyc > 0 && pcyc_ < de_pcyc0 + de_pcyc &&
+                        dstg_ >= 1 && dstg_ <= 4;
+    Kokkos::Array<Real, 12> pb_;
+    for (int q = 0; q < 12; ++q) pb_[q] = de_pb[q];
+    auto &dp0_ = de_probe0;
+    const int pgid0_ = pmy_pack->gids;
+    auto &dd_ = de_diag;
+    if (de_on_) {
+      if (de_xchg) {
+        // the owner's flag, carried in the cons slot (see UpdateShockFlags)
+        SetFlagSlot();
+        int e1 = prim.extent_int(4), e2 = prim.extent_int(3), e3 = prim.extent_int(2);
+        if (de_shock.extent_int(0) != prim.extent_int(0) || de_shock.extent_int(1) != e3 ||
+            de_shock.extent_int(2) != e2 || de_shock.extent_int(3) != e1) {
+          Kokkos::realloc(de_shock, prim.extent_int(0), e3, e2, e1);
+        }
+        auto &shk = de_shock;
+        const int iflag = de_iflag;
+        par_for("de_flag_load", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+          shk(m, k, j, i) = (cons(m, iflag, k, j, i) > 0.5) ? 1 : 0;
+        });
+        if (probe_) {
+          if (de_probe0.extent_int(0) != de_shock.extent_int(0) ||
+              de_probe0.extent_int(1) != e3 || de_probe0.extent_int(2) != e2 ||
+              de_probe0.extent_int(3) != e1) {
+            Kokkos::realloc(de_probe0, de_shock.extent_int(0), e3, e2, e1);
+          }
+          Kokkos::deep_copy(DevExeSpace(), de_probe0, -1);
+        }
+      } else {
+        ComputeShockFlags(prim, il, iu, jl, ju, kl, ku, probe_);
+      }
     }
     auto &de_shock_ = de_shock;
     const bool atm_fv_ = atm_frame_vel && !floors_only;

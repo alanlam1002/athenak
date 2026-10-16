@@ -105,7 +105,7 @@ TaskStatus MHD::SaveMHDState(Driver *pdrive, int stage) {
 
 TaskStatus MHD::InitRecv(Driver *pdrive, int stage) {
   // post receives for U
-  TaskStatus tstat = pbval_u->InitRecv(nmhd+nscalars);
+  TaskStatus tstat = pbval_u->InitRecv(nmhd+nscalars+nflag);
   if (tstat != TaskStatus::complete) return tstat;
   // post receives for B
   tstat = pbval_b->InitRecv(3);

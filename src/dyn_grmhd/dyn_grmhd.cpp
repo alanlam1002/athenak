@@ -363,12 +363,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   int n1m1 = indcs.nx1 + 2*ng - 1;
   int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
   int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
+  RefreshExcisionMasks();
   eos.de_stage = stage;   // dual_energy_diag per-stage slots only
   eos.MassLedgerPre(stage);
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
   eos.DrainZone(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
                 pmy_pack->pmesh->ncycle);
+  eos.UpdateShockFlags();   // dual_energy_flag_exchange: the owner decides (R-069)
   eos.MassLedgerPost(stage, pdrive->nexp_stages, pdrive->gam0, pdrive->gam1, pdrive->beta,
                      pmy_pack->pmesh->dt, pmy_pack->pmesh->time, pmy_pack->pmesh->ncycle);
   return TaskStatus::complete;
@@ -383,8 +385,31 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrimBC(int is, int ie, int js, int
   if (fixed_evolution) {
     return;
   }
+  RefreshExcisionMasks();
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, is, ie, js, je, ks, ke, false);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::UpdateShockFlags()
+//! \brief dual_energy_flag_exchange: the owner's flags after a C2P outside the RK stages
+//! (the regrid path, CFC::ReinitializeMetricForAMR)
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::UpdateShockFlags() {
+  eos.UpdateShockFlags();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::RefreshExcisionMasks()
+//! \brief <coord> excision_mask_refresh: rebuild the lapse-scheme masks from the current
+//! lapse before every C2P (see coordinates.cpp).
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RefreshExcisionMasks() {
+  auto &cd = pmy_pack->pcoord->coord_data;
+  if (cd.bh_excise && cd.excision_mask_refresh &&
+      cd.excision_scheme == ExcisionScheme::lapse) {
+    pmy_pack->pcoord->UpdateExcisionMasks();
+  }
 }
 
 //----------------------------------------------------------------------------------------

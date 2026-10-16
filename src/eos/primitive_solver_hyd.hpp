@@ -443,6 +443,206 @@ class PrimitiveSolverHydro {
     t3_active = (t3_d > 2.0*zone_r + 3.0*t3_r90) && (t3_ddot > 0.0);
   }
 
+  // <mhd> mass_ledger (default false; research R-066 item 2, a debug diagnostic): a
+  // per-RK-stage rest-mass ledger over the interior cells, to localise the unbooked
+  // grid-mass loss of C-051 §5. Per stage s, with M = sum u0(IDN) dV:
+  //   M_pre(s) before the C2P, M_end(s) after it, M(u1) (the cycle-start register);
+  //   Y_s = M_pre(s) - gam0_s M_end(s-1) - gam1_s M(u1)   (the RK update's own change;
+  //         = -beta_s dt F_out,s if the flux update conserves, F_out = net outflow
+  //         through the mesh's outer faces);
+  //   X_s = M_end(s) - M_pre(s) (the C2P's change), binned by class (0 excision floor
+  //         and flux mask, 1 floor mask only, 2 zone/tier 3, 3 C2P-floored, 4 other) x
+  //         r_BH (< 1.88, 1.88-2.92, 2.92-6, 6-12, >= 12) x (removed, added);
+  //   F_exc,s = the mass flux into excision-flux cells through faces they share with
+  //         cells outside that mask; FOFC-flagged cells (outside it) at r < 6 / 6-12.
+  // With the propagation weights w_s = prod_{j>s} gam0_j, M_end(ns) - M(u1) =
+  // sum_s w_s (Y_s + X_s) holds identically; one MLEDGER (+ MLEDGER_X bins) line per
+  // cycle on rank 0. The change between M_end of one cycle and M(u1) of the next is the
+  // regrid's (or anything else outside the stages).
+  bool ml_on = false;
+  static constexpr int kMlNC = 5, kMlNR = 5, kMlNX = kMlNC*kMlNR*2;
+  // per-stage slots: [0, kMlNX) X bins, then M_pre, M_end, M(u1), F_exc, F_out,
+  // n_fofc(r < 6), n_fofc(6-12), n_cells
+  static constexpr int kMlPre = kMlNX, kMlEnd = kMlNX + 1, kMlU1 = kMlNX + 2;
+  static constexpr int kMlFexc = kMlNX + 3, kMlFout = kMlNX + 4, kMlFo6 = kMlNX + 5;
+  static constexpr int kMlFo12 = kMlNX + 6, kMlNcell = kMlNX + 7, kMlLen = kMlNX + 8;
+  DvceArray4D<Real> ml_d0, ml_cls;   // D sqrt(gamma) before the C2P; the cell's class
+  Real ml_stage[4][kMlLen];
+
+  //! sum over interior cells of a(m, n, k, j, i) dV
+  Real MlMass(const DvceArray5D<Real> &a, int n) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    auto &size = pmy_pack->pmb->mb_size;
+    Real s = 0.0;
+    Kokkos::parallel_reduce("ml_mass", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, Real &a0) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      a0 += a(m, n, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    }, Kokkos::Sum<Real>(s));
+    return s;
+  }
+
+  //! before the stage's C2P: M_pre, M(u1), and a copy of u0(IDN)
+  void MassLedgerPre(int stage) {
+    if (!ml_on || stage < 1 || stage > 4) return;
+    auto &u0 = pmy_pack->pmhd->u0;
+    const int nmb = pmy_pack->nmb_thispack;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int n3 = indcs.nx3 + 2*indcs.ng, n2 = indcs.nx2 + 2*indcs.ng;
+    const int n1 = indcs.nx1 + 2*indcs.ng;
+    if (static_cast<int>(ml_d0.extent(0)) != nmb) {   // (re)sized after a regrid
+      Kokkos::realloc(ml_d0, nmb, n3, n2, n1);
+      Kokkos::realloc(ml_cls, nmb, n3, n2, n1);
+    }
+    Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
+                                             Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::deep_copy(ml_cls, 4.0);
+    for (int n = 0; n < kMlLen; ++n) ml_stage[stage-1][n] = 0.0;
+    ml_stage[stage-1][kMlPre] = MlMass(u0, IDN);
+    ml_stage[stage-1][kMlU1] = MlMass(pmy_pack->pmhd->u1, IDN);
+  }
+
+  //! after the stage's C2P: the X bins, M_end, the face fluxes and FOFC counts; on the
+  //! last stage combine, reduce over ranks and print (rank 0)
+  void MassLedgerPost(int stage, int ns, const Real *gam0, const Real *gam1,
+                      const Real *beta, Real dt, Real time, int cycle) {
+    if (!ml_on || stage < 1 || stage > ns || ns > 4) return;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &d0 = ml_d0;
+    auto &cls = ml_cls;
+    const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
+    const Real cz = pmy_pack->padm->bc_center[2];
+    Real *st = ml_stage[stage-1];
+    // X bins: one reduction per class (10 sums: r bin x removed/added)
+    for (int c = 0; c < kMlNC; ++c) {
+      Real v[10] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+      const Real cc = static_cast<Real>(c);
+      Kokkos::parallel_reduce("ml_x", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
+                    Real &a5, Real &a6, Real &a7, Real &a8, Real &a9) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+        if (cls(m, k, j, i) != cc) return;
+        const Real dm = (u0(m, IDN, k, j, i) - d0(m, k, j, i))*
+                        size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        if (dm == 0.0) return;
+        const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min,
+                                   size.d_view(m).x1max) - cx;
+        const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min,
+                                   size.d_view(m).x2max) - cy;
+        const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min,
+                                   size.d_view(m).x3max) - cz;
+        const Real r2 = x*x + y*y + z*z;
+        const int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
+        const Real rem = (dm < 0.0) ? -dm : 0.0, add = (dm > 0.0) ? dm : 0.0;
+        if (ir == 0) { a0 += rem; a1 += add; }
+        else if (ir == 1) { a2 += rem; a3 += add; }
+        else if (ir == 2) { a4 += rem; a5 += add; }
+        else if (ir == 3) { a6 += rem; a7 += add; }
+        else { a8 += rem; a9 += add; }
+      }, Kokkos::Sum<Real>(v[0]), Kokkos::Sum<Real>(v[1]), Kokkos::Sum<Real>(v[2]),
+         Kokkos::Sum<Real>(v[3]), Kokkos::Sum<Real>(v[4]), Kokkos::Sum<Real>(v[5]),
+         Kokkos::Sum<Real>(v[6]), Kokkos::Sum<Real>(v[7]), Kokkos::Sum<Real>(v[8]),
+         Kokkos::Sum<Real>(v[9]));
+      for (int q = 0; q < 10; ++q) st[c*10 + q] = v[q];
+    }
+    st[kMlEnd] = MlMass(u0, IDN);
+    // face fluxes (this stage's uflx, after the flux correction) and FOFC counts
+    const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &xf = pmy_pack->pcoord->excision_flux;
+    auto &flx = pmy_pack->pmhd->uflx;
+    auto &fofc = pmy_pack->pmhd->fofc;
+    const bool use_fofc = pmy_pack->pmhd->use_fofc;
+    auto &ms = pmy_pack->pmesh->mesh_size;
+    const Real mx1 = ms.x1min, Mx1 = ms.x1max, mx2 = ms.x2min, Mx2 = ms.x2max;
+    const Real mx3 = ms.x3min, Mx3 = ms.x3max;
+    Real fe = 0.0, fo = 0.0, n6 = 0.0, n12 = 0.0, nc = 0.0;
+    Kokkos::parallel_reduce("ml_flux", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      auto &sz = size.d_view(m);
+      const Real a1f = sz.dx2*sz.dx3, a2f = sz.dx1*sz.dx3, a3f = sz.dx1*sz.dx2;
+      a4 += 1.0;
+      const bool xc = exc && xf(m, k, j, i);
+      if (xc) {   // inflow through faces shared with cells outside the flux mask
+        if (!xf(m, k, j, i-1)) a0 += flx.x1f(m, IDN, k, j, i)*a1f;
+        if (!xf(m, k, j, i+1)) a0 -= flx.x1f(m, IDN, k, j, i+1)*a1f;
+        if (!xf(m, k, j-1, i)) a0 += flx.x2f(m, IDN, k, j, i)*a2f;
+        if (!xf(m, k, j+1, i)) a0 -= flx.x2f(m, IDN, k, j+1, i)*a2f;
+        if (!xf(m, k-1, j, i)) a0 += flx.x3f(m, IDN, k, j, i)*a3f;
+        if (!xf(m, k+1, j, i)) a0 -= flx.x3f(m, IDN, k+1, j, i)*a3f;
+      }
+      // outflow through the mesh's outer faces
+      const Real tol = 1.0e-6*sz.dx1;
+      if (i == is && sz.x1min <= mx1 + tol) a1 -= flx.x1f(m, IDN, k, j, i)*a1f;
+      if (i == ie && sz.x1max >= Mx1 - tol) a1 += flx.x1f(m, IDN, k, j, i+1)*a1f;
+      if (j == js && sz.x2min <= mx2 + tol) a1 -= flx.x2f(m, IDN, k, j, i)*a2f;
+      if (j == je && sz.x2max >= Mx2 - tol) a1 += flx.x2f(m, IDN, k, j+1, i)*a2f;
+      if (k == ks && sz.x3min <= mx3 + tol) a1 -= flx.x3f(m, IDN, k, j, i)*a3f;
+      if (k == ke && sz.x3max >= Mx3 - tol) a1 += flx.x3f(m, IDN, k+1, j, i)*a3f;
+      if (use_fofc && !xc && fofc(m, k, j, i)) {
+        const Real x = CellCenterX(i - is, nx1, sz.x1min, sz.x1max) - cx;
+        const Real y = CellCenterX(j - js, nx2, sz.x2min, sz.x2max) - cy;
+        const Real z = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max) - cz;
+        const Real r2 = x*x + y*y + z*z;
+        if (r2 < 36.0) a2 += 1.0; else if (r2 < 144.0) a3 += 1.0;
+      }
+    }, Kokkos::Sum<Real>(fe), Kokkos::Sum<Real>(fo), Kokkos::Sum<Real>(n6),
+       Kokkos::Sum<Real>(n12), Kokkos::Sum<Real>(nc));
+    st[kMlFexc] = beta[stage-1]*dt*fe;   // mass over the stage's update
+    st[kMlFout] = beta[stage-1]*dt*fo;
+    st[kMlFo6] = n6; st[kMlFo12] = n12; st[kMlNcell] = nc;
+    if (stage != ns) return;
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &ml_stage[0][0], 4*kMlLen, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
+#endif
+    Real w[4];
+    w[ns-1] = 1.0;
+    for (int q = ns-2; q >= 0; --q) w[q] = gam0[q+1]*w[q+1];
+    const Real mu1 = ml_stage[0][kMlU1];
+    Real Y = 0.0, X = 0.0, Fe = 0.0, Fo = 0.0, f6 = 0.0, f12 = 0.0, xb[kMlNX];
+    for (int n = 0; n < kMlNX; ++n) xb[n] = 0.0;
+    Real mprev = mu1;
+    for (int q = 0; q < ns; ++q) {
+      const Real *s = ml_stage[q];
+      Y += w[q]*(s[kMlPre] - gam0[q]*mprev - gam1[q]*mu1);
+      X += w[q]*(s[kMlEnd] - s[kMlPre]);
+      Fe += w[q]*s[kMlFexc];
+      Fo += w[q]*s[kMlFout];
+      f6 += s[kMlFo6]; f12 += s[kMlFo12];
+      for (int n = 0; n < kMlNX; ++n) xb[n] += w[q]*s[n];
+      mprev = s[kMlEnd];
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << std::setprecision(10) << "MLEDGER cycle=" << cycle << " time=" << time
+                << " dt=" << dt << " Mu1=" << mu1 << " Mend=" << ml_stage[ns-1][kMlEnd]
+                << " Y=" << Y << " Fout=" << Fo << " Fexc=" << Fe << " X=" << X
+                << " fofc6=" << f6 << " fofc12=" << f12 << " ncell="
+                << ml_stage[0][kMlNcell] << "," << ml_stage[ns-1][kMlNcell] << std::endl;
+      std::cout << "MLEDGER_X cycle=" << cycle;
+      for (int n = 0; n < kMlNX; ++n) std::cout << " " << xb[n];
+      std::cout << std::endl;
+    }
+  }
+
   //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
   //! D^2 h^2 (W^2 - 1) = S^2 with rho = D/W, h = 1 + g/(g-1) K rho^(g-1) for W by
   //! bisection on [1, sqrt(1 + S^2/D^2)] (f(1) = -S^2 <= 0, f(Whi) >= 0 since h >= 1).
@@ -480,6 +680,7 @@ class PrimitiveSolverHydro {
     atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
     zone_on = pin->GetOrAddBoolean(block, "atmosphere_zone", false);
     zone_book = zone_on || pin->GetOrAddBoolean(block, "atmosphere_zone_book", false);
+    ml_on = pin->GetOrAddBoolean(block, "mass_ledger", false);
     if (zone_book && !zone_on) {
       Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);
@@ -1005,6 +1206,8 @@ class PrimitiveSolverHydro {
     const Real zvmax_ = zone_vmax, zde_ = zone_de;
     auto &zacc_ = zone_acc;
     const bool zbook_ = zone_book && !floors_only;
+    const bool mlon_ = ml_on && !floors_only;
+    auto &mlcls_ = ml_cls;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
@@ -1224,6 +1427,7 @@ class PrimitiveSolverHydro {
           de_write = true;
         }
 
+        int zml = 0;   // mass_ledger class 2 (zone / tier 3)
         // ---- near-BH atmosphere zone (see zone_on)
         if (zon_ && !(excise && !smoothing && excision_floor_(m,k,j,i))) {
           const Real xz = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min,
@@ -1243,6 +1447,7 @@ class PrimitiveSolverHydro {
             const Real cx = xz + fgx_ - t3c0_, cy = yz + fgy_ - t3c1_, cz = zz + fgz_ - t3c2_;
             if (cx*cx + cy*cy + cz*cz > t3ex2_) zmode = 2;
           }
+          zml = zmode;
           if (zmode) {
             const int zb = (zmode == 1) ? 0 : kZoneLen;     // tally block
             const Real al = adm.alpha(m, k, j, i);
@@ -1440,6 +1645,17 @@ class PrimitiveSolverHydro {
           for (int n = 0; n < nscal; n++) {
             cons(m, nhyd + n, k, j, i) = cons_pt[CYD + n]*sdetg;
           }
+        }
+        if (mlon_ && i >= is && i <= ie_ && j >= js && j <= je_ && k >= ks && k <= ke_) {
+          Real c = 4.0;
+          if (excise && !smoothing && excision_floor_(m,k,j,i)) {
+            c = excision_flux_(m,k,j,i) ? 0.0 : 1.0;
+          } else if (zml) {
+            c = 2.0;
+          } else if (result.prim_floor || result.cons_floor) {
+            c = 3.0;
+          }
+          mlcls_(m,k,j,i) = c;
         }
       }
     }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<Real>(dE_tally), Kokkos::Sum<Real>(dPx_tally),

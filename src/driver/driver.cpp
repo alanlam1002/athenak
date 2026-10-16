@@ -383,6 +383,7 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   MultigridDriver::ResetAllTimers();
   pt_on_ = pin->GetOrAddBoolean("time", "phase_timers", true);
   pt_every_ = pin->GetOrAddInteger("time", "phase_timers_every", 100);
+  io_timers_ = pin->GetOrAddBoolean("time", "io_timers", false);
   for (double &x : pt_) x = 0.0;
   pt_cyc0_ = pmesh->ncycle;
   MultigridDriver::phase_on = pt_on_;
@@ -506,10 +507,30 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 
         if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
             ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
-          timed(5, [&]() {
+          if (io_timers_) {
+            // per-output fenced timers (R-066 item 2): one IO_TIMER line per write
+            Kokkos::fence();
+            Kokkos::Timer tt;
             out->LoadOutputData(pmesh);
+            Kokkos::fence();
+            const double tl = tt.seconds();
             out->WriteOutputFile(pmesh, pin);
-          });
+            Kokkos::fence();
+            const double tw = tt.seconds() - tl;
+            pt_[5] += tl + tw;
+            if (global_variable::my_rank == 0) {
+              std::cout << std::setprecision(6) << "IO_TIMER cycle=" << pmesh->ncycle
+                        << " time=" << pmesh->time << " block=" << out->out_params.block_name
+                        << " type=" << out->out_params.file_type << " id="
+                        << out->out_params.file_id << " load=" << tl << " write=" << tw
+                        << std::endl;
+            }
+          } else {
+            timed(5, [&]() {
+              out->LoadOutputData(pmesh);
+              out->WriteOutputFile(pmesh, pin);
+            });
+          }
         }
       }
 

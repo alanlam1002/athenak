@@ -71,6 +71,7 @@ class Driver {
   // stagen - mg (hydro, C2P, CFC source/assembly tasks, boundary exchange).
   bool pt_on_ = true;
   int pt_every_ = 100;
+  bool io_timers_ = false;   // <time> io_timers: an IO_TIMER line per output write
   double pt_[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   int pt_cyc0_ = 0;
   void PrintPhaseTimers(Mesh *pm, const char *tag);

@@ -20,6 +20,8 @@
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <cstdio>
+#include <vector>
 
 // PrimitiveSolver headers
 #include "eos/primitive-solver/eos.hpp"
@@ -460,6 +462,12 @@ class PrimitiveSolverHydro {
   // cycle on rank 0. The change between M_end of one cycle and M(u1) of the next is the
   // regrid's (or anything else outside the stages).
   bool ml_on = false;
+  // <mhd> mass_ledger_faces (default 0 = off): for the first N cycles after (re)start, rank 0
+  // also writes, per stage, every MeshBlock's mass flux beta_s dt sum F(IDN) dA through each
+  // of its six faces (MLFACE lines in mlface.txt: cycle stage gid level x1min x1max x2min
+  // x2max x3min x3max f1- f1+ f2- f2+ f3- f3+, fluxes in +x_d direction), so the update's
+  // non-conservation can be located offline by matching neighbouring faces.
+  int ml_faces = 0, ml_faces_done = 0, ml_faces_cyc = -1;
   static constexpr int kMlNC = 5, kMlNR = 5, kMlNX = kMlNC*kMlNR*2;
   // per-stage slots: [0, kMlNX) X bins, then M_pre, M_end, M(u1), F_exc, F_out,
   // n_fofc(r < 6), n_fofc(6-12), n_cells
@@ -507,6 +515,73 @@ class PrimitiveSolverHydro {
     for (int n = 0; n < kMlLen; ++n) ml_stage[stage-1][n] = 0.0;
     ml_stage[stage-1][kMlPre] = MlMass(u0, IDN);
     ml_stage[stage-1][kMlU1] = MlMass(pmy_pack->pmhd->u1, IDN);
+  }
+
+  //! per-MeshBlock face mass fluxes of this stage (see ml_faces), gathered to rank 0
+  void MlFaces(int stage, Real bdt, int cycle) {
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &flx = pmy_pack->pmhd->uflx;
+    DvceArray2D<Real> fs("ml_faces", nmb, 6);
+    const int n = (nx1 > nx2 ? nx1 : nx2) > nx3 ? (nx1 > nx2 ? nx1 : nx2) : nx3;
+    par_for("ml_faces", DevExeSpace(), 0, nmb-1, 0, 5, 0, n-1, 0, n-1,
+    KOKKOS_LAMBDA(const int m, const int f, const int b, const int a) {
+      auto &sz = size.d_view(m);
+      Real v = 0.0;
+      if (f < 2) {
+        if (a >= nx2 || b >= nx3) return;
+        v = flx.x1f(m, IDN, ks + b, js + a, (f == 0) ? is : ie + 1)*sz.dx2*sz.dx3;
+      } else if (f < 4) {
+        if (a >= nx1 || b >= nx3) return;
+        v = flx.x2f(m, IDN, ks + b, (f == 2) ? js : je + 1, is + a)*sz.dx1*sz.dx3;
+      } else {
+        if (a >= nx1 || b >= nx2) return;
+        v = flx.x3f(m, IDN, (f == 4) ? ks : ke + 1, js + b, is + a)*sz.dx1*sz.dx2;
+      }
+      Kokkos::atomic_add(&fs(m, f), v);
+    });
+    auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), fs);
+    const int nv = 16;
+    std::vector<Real> loc(nmb*nv);
+    for (int m = 0; m < nmb; ++m) {
+      auto &sz = size.h_view(m);
+      Real *r = &loc[m*nv];
+      r[0] = pmy_pack->gids + m; r[1] = pmy_pack->pmb->mb_lev.h_view(m);
+      r[2] = sz.x1min; r[3] = sz.x1max; r[4] = sz.x2min; r[5] = sz.x2max;
+      r[6] = sz.x3min; r[7] = sz.x3max;
+      for (int f = 0; f < 6; ++f) r[8 + f] = bdt*h(m, f);
+      r[14] = 0.0; r[15] = 0.0;
+    }
+    int nloc = nmb*nv;
+    std::vector<Real> all;
+#if MPI_PARALLEL_ENABLED
+    int nr = global_variable::nranks;
+    std::vector<int> cnt(nr), dsp(nr, 0);
+    MPI_Gather(&nloc, 1, MPI_INT, cnt.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    int tot = 0;
+    if (global_variable::my_rank == 0) {
+      for (int q = 0; q < nr; ++q) { dsp[q] = tot; tot += cnt[q]; }
+      all.resize(tot);
+    }
+    MPI_Gatherv(loc.data(), nloc, MPI_ATHENA_REAL, all.data(), cnt.data(), dsp.data(),
+                MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#else
+    all = loc;
+#endif
+    if (global_variable::my_rank != 0) return;
+    FILE *fp = fopen("mlface.txt", "a");
+    if (fp == nullptr) return;
+    for (size_t q = 0; q + nv <= all.size(); q += nv) {
+      fprintf(fp, "MLFACE %d %d %d %d", cycle, stage, static_cast<int>(all[q]),
+              static_cast<int>(all[q+1]));
+      for (int c = 2; c < 14; ++c) fprintf(fp, " %.17g", all[q+c]);
+      fprintf(fp, "\n");
+    }
+    fclose(fp);
   }
 
   //! after the stage's C2P: the X bins, M_end, the face fluxes and FOFC counts; on the
@@ -610,6 +685,11 @@ class PrimitiveSolverHydro {
     st[kMlFexc] = beta[stage-1]*dt*fe;   // mass over the stage's update
     st[kMlFout] = beta[stage-1]*dt*fo;
     st[kMlFo6] = n6; st[kMlFo12] = n12; st[kMlNcell] = nc;
+    if (ml_faces > 0 && ml_faces_done < ml_faces) MlFaces(stage, beta[stage-1]*dt, cycle);
+    if (stage == ns && ml_faces > 0 && cycle != ml_faces_cyc) {
+      ml_faces_cyc = cycle;
+      ++ml_faces_done;
+    }
     if (stage != ns) return;
 #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, &ml_stage[0][0], 4*kMlLen, MPI_ATHENA_REAL, MPI_SUM,
@@ -682,6 +762,7 @@ class PrimitiveSolverHydro {
     zone_on = pin->GetOrAddBoolean(block, "atmosphere_zone", false);
     zone_book = zone_on || pin->GetOrAddBoolean(block, "atmosphere_zone_book", false);
     ml_on = pin->GetOrAddBoolean(block, "mass_ledger", false);
+    ml_faces = pin->GetOrAddInteger(block, "mass_ledger_faces", 0);
     if (zone_book && !zone_on) {
       Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);

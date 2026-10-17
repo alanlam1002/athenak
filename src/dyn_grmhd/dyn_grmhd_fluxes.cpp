@@ -21,6 +21,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/adm.hpp"
 #include "dyn_grmhd.hpp"
+#include "dyn_grmhd/cfc_check_debug.hpp"   // DEBUG (R-072 item 9)
 #include "dyn_grmhd_util.hpp"
 #include "eos/eos.hpp"
 #include "mhd/mhd.hpp"
@@ -68,6 +69,7 @@ void SolveFaceDynGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eos,
 
 template<class EOSPolicy, class ErrorPolicy> template <DynGRMHD_RSolver rsolver_method_>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int stage) {
+  cfccheck::Probe(pmy_pack, 1, stage);   // DEBUG (R-072 item 9)
   RegionIndcs &indcs_ = pmy_pack->pmesh->mb_indcs;
   int is = indcs_.is, ie = indcs_.ie;
   int js = indcs_.js, je = indcs_.je;

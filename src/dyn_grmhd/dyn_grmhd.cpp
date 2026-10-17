@@ -27,6 +27,7 @@
 #include "coordinates/coordinates.hpp"
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
+#include "dyn_grmhd/cfc_check_debug.hpp"   // DEBUG (R-072 item 9)
 #include "tasklist/numerical_relativity.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
@@ -121,6 +122,7 @@ DynGRMHD* BuildDynGRMHD(MeshBlockPack *ppack, ParameterInput *pin) {
 DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     temperature("temperature",1,1,1,1,1),
     pmy_pack(pp) {
+  cfccheck::Init(pin);   // DEBUG (R-072 item 9)
   std::string rsolver = pin->GetString("mhd", "rsolver");
   if (rsolver.compare("llf") == 0) {
     rsolver_method = DynGRMHD_RSolver::llf_dyngr;
@@ -327,8 +329,11 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   int n1m1 = indcs.nx1 + 2*ng - 1;
   int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
   int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
+  cfccheck::Probe(pmy_pack, 0, stage);   // DEBUG (R-072 item 9)
+  cfccheck::Pre(pmy_pack, stage);
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
+  cfccheck::Post(pmy_pack, pdrive, stage);
   return TaskStatus::complete;
 }
 

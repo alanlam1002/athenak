@@ -67,7 +67,8 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //! run before MHD_C2P (dyn_grmhd's per-stage con2prim, queued to depend on
 //! CFC_SolvePsi): PrimitiveSolverHydro::ConsToPrim reads padm->adm.g_dd directly to
 //! invert conserved to primitive variables.
-void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi);
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                             bool with_ghosts = false);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,

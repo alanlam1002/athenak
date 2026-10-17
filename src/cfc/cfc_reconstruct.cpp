@@ -153,11 +153,17 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
   }
 }
 
-void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi) {
+void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                             bool with_ghosts) {
   auto &indcs = pmbp->pmesh->mb_indcs;
-  int &is = indcs.is; int &ie = indcs.ie;
-  int &js = indcs.js; int &je = indcs.je;
-  int &ks = indcs.ks; int &ke = indcs.ke;
+  // with_ghosts: the whole block, from the ghost-exchanged delta_psi, so a ghost cell's
+  // metric equals its owner's bitwise when MHD_C2P inverts it (see CFC_AssemblePsiG)
+  const int gi = with_ghosts ? indcs.ng : 0;
+  const int gj = (with_ghosts && indcs.nx2 > 1) ? indcs.ng : 0;
+  const int gk = (with_ghosts && indcs.nx3 > 1) ? indcs.ng : 0;
+  const int is = indcs.is - gi, ie = indcs.ie + gi;
+  const int js = indcs.js - gj, je = indcs.je + gj;
+  const int ks = indcs.ks - gk, ke = indcs.ke + gk;
   int nmb = pmbp->nmb_thispack;
   auto &adm = pmbp->padm->adm;
 

@@ -99,6 +99,7 @@ enum TaskName {
   CFC_RescaleSrc,
   CFC_SolveLapse,
   CFC_RestPsi, CFC_SendPsi, CFC_RecvPsi, CFC_ProlongPsi, CFC_BCSPsi,
+  CFC_AssemblePsiG,
   CFC_RestAlphaPsi, CFC_SendAlphaPsi, CFC_RecvAlphaPsi, CFC_ProlongAlphaPsi,
   CFC_BCSAlphaPsi,
   CFC_BuildSrcBeta,

@@ -6,7 +6,7 @@ stage gid i j k ghost x y z psi4 alpha bx by bz gxx gxy gxz gyy gyz gzz Kxx Kxy 
 Copies are grouped by (tag, cycle, stage, cell centre) and every ghost copy is compared with
 the owner's bitwise, per quantity group; also the size of the relative difference.
 
-    c057_mprobe.py OUTLOG [--nx 16 --ng 4]
+    c057_mprobe.py OUTLOG|RUNDIR [--nx 16 --ng 4]   (RUNDIR: the per-rank mprobe files)
 """
 import argparse
 import collections
@@ -14,7 +14,7 @@ import collections
 import numpy as np
 
 GROUPS = (('psi4', slice(0, 1)), ('alpha', slice(1, 2)), ('beta', slice(2, 5)), ('g_dd', slice(5, 11)),
-          ('K_dd', slice(11, 17)), ('prims', slice(17, 22)))
+          ('K_dd', slice(11, 17)), ('prims', slice(17, 22)), ('cons', slice(22, 28)))
 TAG = {0: 'C2P', 1: 'flux'}
 
 
@@ -26,16 +26,36 @@ def main():
     a = ap.parse_args()
     cells = collections.defaultdict(list)
     bad = 0
-    for ln in open(a.log, errors='replace').read().split('MPROBE ')[1:]:
-        ln = ln.split('\n')[0]
+    import glob
+    import os
+    if os.path.isdir(a.log):
+        # host-written per-rank files (no interleaving): MPROBE tag cyc stage gid i j k gh
+        # x y z psi4 alpha b(3) g(6) K(6) rho P v(3) D S(3) tau DY
+        lines = [ln for f in sorted(glob.glob(f'{a.log}/mprobe_rank*.txt')) for ln in open(f)]
+        recs = []
+        for ln in lines:
+            q = ln.split()
+            if q[0] != 'MPROBE' or len(q) != 40:
+                bad += 1
+                continue
+            recs.append(q[1:])
+    else:
+        recs = []
+        for ln in open(a.log, errors='replace').read().split('MPROBE ')[1:]:
+            ln = ln.split('\n')[0]
+            try:
+                L, P = ln.split('|')
+                q, p = L.split(), P.split()
+                assert len(q) == 28 and len(p) == 5
+                recs.append(q + p + ['nan'] * 6)
+            except (ValueError, AssertionError):
+                bad += 1
+    for q in recs:
         try:
-            L, P = ln.split('|')
-            q, p = L.split(), P.split()
-            assert len(q) == 27 and len(p) == 5
             tag, cyc, st, gid, i, j, k, gh = (int(v) for v in q[:8])
             x = tuple(round(float(v), 6) for v in q[8:11])
-            v = np.array([float(u) for u in q[11:]] + [float(u) for u in p])
-        except (ValueError, AssertionError):
+            v = np.array([float(u) for u in q[11:]])
+        except ValueError:
             bad += 1
             continue
         lo, hi = a.ng, a.ng + a.nx - 1

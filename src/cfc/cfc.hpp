@@ -455,6 +455,7 @@ class CFC {
   TaskStatus RecvPsiTask(Driver *pdriver, int stage);
   TaskStatus ProlongPsiTask(Driver *pdriver, int stage);
   TaskStatus BCSPsiTask(Driver *pdriver, int stage);
+  TaskStatus AssemblePsiGhostsTask(Driver *pdriver, int stage);   // R-072 M1
   TaskStatus RestAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus SendAlphaPsiTask(Driver *pdriver, int stage);
   TaskStatus RecvAlphaPsiTask(Driver *pdriver, int stage);

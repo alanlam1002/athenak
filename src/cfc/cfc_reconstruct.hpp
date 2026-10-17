@@ -88,7 +88,8 @@ void ReconstructVectorFromPotentials(MeshBlockPack *pmbp,
 //! PrimitiveSolverHydro::ConsToPrim reads padm->adm.g_dd directly to invert conserved
 //! to primitive variables.
 void AssembleConformalMetric(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
-                              const DvceArray5D<Real> &u_psi0);
+                              const DvceArray5D<Real> &u_psi0,
+                             bool with_ghosts = false);
 
 //----------------------------------------------------------------------------------------
 //! \fn void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,

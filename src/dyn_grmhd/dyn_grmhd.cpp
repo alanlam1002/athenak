@@ -237,19 +237,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   if (pz4c == nullptr && padm->is_dynamic == true) {
     pnr->QueueTask(&DynGRMHD::SetADMVariables, this, MHD_SetADM, "MHD_SetADM", Task_Run,
                     {MHD_ExplRK});
-    // CFC_SolvePsi is optional: when a <cfc> block is present, con2prim must wait for
+    // CFC_AssemblePsiG is optional: when a <cfc> block is present, con2prim must wait for
     // the freshly-solved psi/g_dd (see cfc::CFC::QueueCFCTasks) so it inverts against
-    // the current stage's metric rather than the previous one; a no-cfc run is
+    // the current stage's metric rather than the previous one -- in the ghost cells too
+    // (R-072 M1: psi exchanged and g_dd reassembled there first, so a ghost's metric is
+    // its owner's bitwise; waiting on CFC_SolvePsi alone left ghosts one solve stale,
+    // C-055); a no-cfc run is
     // unaffected since AddExtraDependencies() only promotes optional deps whose
     // physics module actually exists.
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
                    "MHD_C2P", Task_Run, {MHD_BCS, MHD_SetADM},
-                   {Z4c_Excise, CFC_SolvePsi});
+                   {Z4c_Excise, CFC_AssemblePsiG});
     pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
                    Task_Run, {MHD_SetADM});
   } else {
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
-                   "MHD_C2P", Task_Run, {MHD_BCS}, {Z4c_Excise, CFC_SolvePsi});
+                   "MHD_C2P", Task_Run, {MHD_BCS}, {Z4c_Excise, CFC_AssemblePsiG});
 
     // The dynamic excision schemes (lapse/horizon) rebuild excision_floor/_flux from
     // the CURRENT lapse every cycle; only "fixed" is filled once at construction

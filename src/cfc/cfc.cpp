@@ -834,8 +834,12 @@ void CFC::QueueCFCTasks() {
   pnr->QueueTask(&CFC::SolveLapseTask, this, CFC_SolveLapse, "CFC_SolveLapse",
                  Task_Run, {CFC_RescaleSrc});
 
+  // R-072 M1: psi's ghost exchange right after its solve, then the metric reassembled on
+  // the whole block from the exchanged psi, before MHD_C2P (dyn_grmhd.cpp waits on
+  // CFC_AssemblePsiG). The ghost cells then hold the owner's metric bitwise when the C2P
+  // inverts them (C-055: they were one solve stale).
   pnr->QueueTask(&CFC::RestPsiTask, this, CFC_RestPsi, "CFC_RestPsi",
-                 Task_Run, {CFC_SolveLapse});
+                 Task_Run, {CFC_SolvePsi});
   pnr->QueueTask(&CFC::SendPsiTask, this, CFC_SendPsi, "CFC_SendPsi",
                  Task_Run, {CFC_RestPsi});
   pnr->QueueTask(&CFC::RecvPsiTask, this, CFC_RecvPsi, "CFC_RecvPsi",
@@ -844,6 +848,8 @@ void CFC::QueueCFCTasks() {
                  Task_Run, {CFC_RecvPsi});
   pnr->QueueTask(&CFC::BCSPsiTask, this, CFC_BCSPsi, "CFC_BCSPsi",
                  Task_Run, {CFC_ProlongPsi});
+  pnr->QueueTask(&CFC::AssemblePsiGhostsTask, this, CFC_AssemblePsiG, "CFC_AssemblePsiG",
+                 Task_Run, {CFC_BCSPsi});
 
   pnr->QueueTask(&CFC::RestAlphaPsiTask, this, CFC_RestAlphaPsi, "CFC_RestAlphaPsi",
                  Task_Run, {CFC_SolveLapse});
@@ -1379,6 +1385,12 @@ TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::CFCBCs(pmy_pack, delta_psi, 1, 1);
   }
+  return TaskStatus::complete;
+}
+
+TaskStatus CFC::AssemblePsiGhostsTask(Driver *pdriver, int stage) {
+  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0, true);
   return TaskStatus::complete;
 }
 

@@ -171,6 +171,7 @@ class DynGRMHDPS : public DynGRMHD {
 
   virtual TaskStatus ConToPrim(Driver* pdrive, int stage);
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke);
+  void RefreshExcisionMasks();   // <coord> excision_mask_refresh
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;

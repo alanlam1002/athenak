@@ -97,6 +97,13 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
         // Smooth excision.
         coord_data.smooth_excision = pin->GetOrAddBoolean("coord","smooth_excision",
                                                               false);
+        // R-067 Q3 / R-069 item 5 (user-approved 2026-10-17): rebuild the lapse-scheme
+        // masks at the start of every DynGRMHD C2P call (each RK stage, and the restart/
+        // regrid initialisation), so they are never empty after a Coordinates rebuild
+        // (regrid, restart) and never lag the moving hole by a cycle. Default false (old
+        // behaviour: rebuilt once per cycle, at the final stage).
+        coord_data.excision_mask_refresh = pin->GetOrAddBoolean("coord",
+                                               "excision_mask_refresh", false);
         coord_data.tdamp = pin->GetOrAddReal("coord","tdamp",1.0);
       }
 

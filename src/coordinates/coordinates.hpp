@@ -42,6 +42,7 @@ struct CoordData {
   Real texcise;                    // temperature inside excised region (for smooth exc.)
   Real flux_excise_r;              // reduce to first-order inside this radius
   ExcisionScheme excision_scheme;  // excision method
+  bool excision_mask_refresh = false;  // <coord> excision_mask_refresh (lapse scheme)
   Real excise_lapse;               // if excision_scheme = lapse, excise under this lapse
   bool smooth_excision = false;    // flag to specify smooth excision (fastflow)
   Real horizon_factor;             // factor to muliply the horizon factor by (fastflow)

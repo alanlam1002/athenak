@@ -37,6 +37,7 @@ namespace dyngr {
 
 template<class EOSPolicy, class ErrorPolicy> template <DynGRMHD_RSolver rsolver_method_>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int stage) {
+  eos.MetricProbe(1, stage);   // R-072 item 1 (debug; off unless the probe is set)
   RegionIndcs indcs_ = pmy_pack->pmesh->mb_indcs;
   int is = indcs_.is, ie = indcs_.ie;
   int js = indcs_.js, je = indcs_.je;

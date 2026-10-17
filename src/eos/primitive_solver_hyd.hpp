@@ -732,6 +732,54 @@ class PrimitiveSolverHydro {
     }
   }
 
+  //! R-072 item 1 metric probe: with dual_energy_probe_box1/2 and _cycles set, every cell
+  //! copy (owner interior or ghost) inside a box prints one line per call: tag cycle stage gid
+  //! i j k ghost x y z psi4 alpha beta^x beta^y beta^z g_xx g_xy g_xz g_yy g_yz g_zz K_xx K_xy
+  //! K_xz K_yy K_yz K_zz | w0: rho P vx vy vz. Called before each stage's C2P (MPROBE_C2P)
+  //! and at the start of each stage's flux calculation (MPROBE_FLX).
+  void MetricProbe(int tag, int stage) {
+    if (de_pcyc <= 0) return;
+    const int cyc = pmy_pack->pmesh->ncycle;
+    if (de_pcyc0 < 0) de_pcyc0 = cyc;
+    if (cyc >= de_pcyc0 + de_pcyc || stage < 1 || stage > 4) return;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3, ng = indcs.ng;
+    const int nmb = pmy_pack->nmb_thispack, gid0 = pmy_pack->gids;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &adm = pmy_pack->padm->adm;
+    auto &w0 = pmy_pack->pmhd->w0;
+    Kokkos::Array<Real, 12> pb;
+    for (int q = 0; q < 12; ++q) pb[q] = de_pb[q];
+    par_for("metric_probe", DevExeSpace(), 0, nmb-1, 0, nx3+2*ng-1, 0, nx2+2*ng-1, 0,
+            nx1+2*ng-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      bool inb = false;
+      for (int b = 0; b < 2; ++b) {
+        inb = inb || (x > pb[6*b] && x < pb[6*b+1] && y > pb[6*b+2] && y < pb[6*b+3] &&
+                      z > pb[6*b+4] && z < pb[6*b+5]);
+      }
+      if (!inb) return;
+      const int gh = (i < is || i > ie || j < js || j > je || k < ks || k > ke) ? 1 : 0;
+      Kokkos::printf("MPROBE %d %d %d %d %d %d %d %d %.9g %.9g %.9g %.17g %.17g %.17g %.17g "
+                     "%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g "
+                     "%.17g | %.17g %.17g %.17g %.17g %.17g\n",
+                     tag, cyc, stage, gid0 + m, i, j, k, gh, x, y, z,
+                     adm.psi4(m,k,j,i), adm.alpha(m,k,j,i), adm.beta_u(m,0,k,j,i),
+                     adm.beta_u(m,1,k,j,i), adm.beta_u(m,2,k,j,i),
+                     adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i), adm.g_dd(m,0,2,k,j,i),
+                     adm.g_dd(m,1,1,k,j,i), adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i),
+                     adm.vK_dd(m,0,0,k,j,i), adm.vK_dd(m,0,1,k,j,i), adm.vK_dd(m,0,2,k,j,i),
+                     adm.vK_dd(m,1,1,k,j,i), adm.vK_dd(m,1,2,k,j,i), adm.vK_dd(m,2,2,k,j,i),
+                     w0(m,IDN,k,j,i), w0(m,IPR,k,j,i), w0(m,IVX,k,j,i), w0(m,IVY,k,j,i),
+                     w0(m,IVZ,k,j,i));
+    });
+  }
+
   //! Entropy inversion for B = 0: given undensitized D, S^2 = S_i S^i and K, solve
   //! D^2 h^2 (W^2 - 1) = S^2 with rho = D/W, h = 1 + g/(g-1) K rho^(g-1) for W by
   //! bisection on [1, sqrt(1 + S^2/D^2)] (f(1) = -S^2 <= 0, f(Whi) >= 0 since h >= 1).

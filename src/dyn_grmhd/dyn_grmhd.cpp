@@ -364,6 +364,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
   int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
   eos.de_stage = stage;   // dual_energy_diag per-stage slots only
+  eos.MetricProbe(0, stage);   // R-072 item 1 (debug; off unless the probe is set)
   eos.MassLedgerPre(stage);
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);

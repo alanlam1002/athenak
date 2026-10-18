@@ -24,6 +24,7 @@
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
+#include "coordinates/coordinates.hpp"
 #include "gravity/gravity.hpp"
 #include "cfc/cfc.hpp"
 #include "utils/utils.hpp"
@@ -662,6 +663,14 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
     (void) pmhd->RecvB_Shr(this, 0);
     (void) pmhd->Prolongate(this, 0); // coarse grid BCs and prolongation
     (void) pmhd->ApplyPhysicalBCs(this, 0); // fine grid BCs
+    // The lapse-scheme excision masks are reallocated all-false whenever the Coordinates
+    // are rebuilt (restart, AMR regrid) and are otherwise refilled only at the next
+    // cycle's final stage, so the C2P and NewTimeStep below would run with no excision
+    // for a cycle. Rebuild them here from the current lapse.
+    if (pm->pmb_pack->pcoord != nullptr && pm->pmb_pack->pcoord->coord_data.bh_excise &&
+        pm->pmb_pack->pcoord->coord_data.excision_scheme == ExcisionScheme::lapse) {
+      pm->pmb_pack->pcoord->UpdateExcisionMasks();
+    }
     cfc::CFC *pcfc = pm->pmb_pack->pcfc;
     if (pdyngr == nullptr) {
       (void) pmhd->ConToPrim(this, 0);

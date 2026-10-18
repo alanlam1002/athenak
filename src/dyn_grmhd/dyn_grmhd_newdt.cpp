@@ -88,6 +88,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   auto &dyn_eos_ = eos;
   bool gr_dt_ = gr_dt;
   const bool skip_exc_ = dt_skip_excised && pmy_pack->pcoord->coord_data.bh_excise;
+  const bool keepv_ = dt_floor_keep_velocity;
   auto &exc_flux_ = pmy_pack->pcoord->excision_flux;
   const bool atm_fv_ = eos.atm_frame_vel;
   const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
@@ -167,6 +168,16 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
                                                               &prim[PYF]);
         bool floored_ = dyn_eos_.ps.GetEOS().ApplyPrimitiveFloor(prim[PRH], &prim[PVX],
                                                   prim[PPR], prim[PTM], &prim[PYF]);
+        if (floored_ && keepv_) {
+          // <time> dt_floor_keep_velocity (R-076 item 3): the floor's v = 0 is not the
+          // cell's state -- the C2P already floored it and the zone / frame velocity then
+          // set it -- so the CFL keeps the stored velocity (otherwise floor-density zone
+          // cells, e.g. those just leaving the excision mask, enter with v = 0 against
+          // the shift and set dt; C-053, C-060)
+          prim[PVX] = w0_(m,IVX,k,j,i);
+          prim[PVY] = w0_(m,IVY,k,j,i);
+          prim[PVZ] = w0_(m,IVZ,k,j,i);
+        }
         bool fv_here = floored_ && atm_fv_;
         if (fv_here && fg2_ > 0.0) {      // <mhd> atmosphere_frame_gate, as in the C2P
           Real xg = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min,

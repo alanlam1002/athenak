@@ -359,8 +359,18 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
         myoffset += data_size;
       }
     }
-    Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
-                      std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
+    if (pmhd->u0.extent_int(1) == nmhd) {
+      Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb), Kokkos::ALL,
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
+    } else {
+      // u0 carries the non-evolved flag slot (nflag): host -> contiguous device copy ->
+      // strided device subview (a direct host -> strided-device copy is not supported)
+      DvceArray5D<Real> ccin_d("rst-cc-in-d", nmb, nmhd, nout3, nout2, nout1);
+      Kokkos::deep_copy(ccin_d, ccin);
+      Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
+                        std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL),
+                        ccin_d);
+    }
     offset_myrank += nout1*nout2*nout3*nmhd*sizeof(Real);   // mhd u0
     myoffset = offset_myrank;
 

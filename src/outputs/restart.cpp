@@ -92,8 +92,17 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
   }
   if (pmhd != nullptr) {
     Kokkos::realloc(outarray_mhd, nmb, nmhd, nout3, nout2, nout1);
-    Kokkos::deep_copy(outarray_mhd, Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
-                      std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    if (pmhd->u0.extent_int(1) == nmhd) {
+      Kokkos::deep_copy(outarray_mhd, Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    } else {
+      // u0 carries the non-evolved flag slot (nflag): strided device subview ->
+      // contiguous device copy -> host
+      DvceArray5D<Real> out_d("rst-cc-out-d", nmb, nmhd, nout3, nout2, nout1);
+      Kokkos::deep_copy(out_d, Kokkos::subview(pmhd->u0, std::make_pair(0,nmb),
+                        std::make_pair(0,nmhd), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+      Kokkos::deep_copy(outarray_mhd, out_d);
+    }
     Kokkos::realloc(outfield.x1f, nmb, nout3, nout2, nout1+1);
     Kokkos::deep_copy(outfield.x1f, Kokkos::subview(pmhd->b0.x1f, std::make_pair(0,nmb),
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));

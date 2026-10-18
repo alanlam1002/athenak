@@ -75,6 +75,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   int is = indcs.is, nx1 = indcs.nx1;
   int js = indcs.js, nx2 = indcs.nx2;
   int ks = indcs.ks, nx3 = indcs.nx3;
+  const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;   // dt_limiter_report
 
   Real dt1 = std::numeric_limits<float>::max();
   Real dt2 = std::numeric_limits<float>::max();
@@ -89,6 +90,15 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   bool gr_dt_ = gr_dt;
   const bool skip_exc_ = dt_skip_excised && pmy_pack->pcoord->coord_data.bh_excise;
   const bool keepv_ = dt_floor_keep_velocity;
+  // <time> dt_limiter_report = N (debug, R-076 item 3): for the first N cycles, store each
+  // cell's dt and print the cells within 1e-4 of this rank's minimum (DTLIM lines)
+  const int ncyc_ = pmy_pack->pmesh->ncycle;
+  if (dt_lim_report > 0 && dt_lim_cyc0 < 0) dt_lim_cyc0 = ncyc_;
+  const bool rep_ = dt_lim_report > 0 && ncyc_ < dt_lim_cyc0 + dt_lim_report;
+  if (rep_ && dt_lim_cell.extent_int(0) != pmy_pack->nmb_thispack) {
+    Kokkos::realloc(dt_lim_cell, pmy_pack->nmb_thispack, nx3, nx2, nx1);
+  }
+  auto &dtc_ = dt_lim_cell;
   auto &exc_flux_ = pmy_pack->pcoord->excision_flux;
   const bool atm_fv_ = eos.atm_frame_vel;
   const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
@@ -131,7 +141,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
       k += ks;
       j += js;
 
-      if (skip_exc_ && exc_flux_(m,k,j,i)) return;   // excised: not in the CFL
+      if (skip_exc_ && exc_flux_(m,k,j,i)) {   // excised: not in the CFL
+        if (rep_) dtc_(m, k-ks, j-js, i-is) = 1.0e30;
+        return;
+      }
       // Conservative fallback: the speed of light, always correct (see file doc
       // comment). Overwritten below when gr_dt_ requests the real wavespeed.
       Real max_dv1 = 1.0, max_dv2 = 1.0, max_dv3 = 1.0;
@@ -235,7 +248,37 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
       min_dt1 = fmin((mbsize.d_view(m).dx1/max_dv1), min_dt1);
       min_dt2 = fmin((mbsize.d_view(m).dx2/max_dv2), min_dt2);
       min_dt3 = fmin((mbsize.d_view(m).dx3/max_dv3), min_dt3);
+      if (rep_) {
+        dtc_(m, k-ks, j-js, i-is) = fmin(fmin(mbsize.d_view(m).dx1/max_dv1,
+                                              mbsize.d_view(m).dx2/max_dv2),
+                                         mbsize.d_view(m).dx3/max_dv3);
+      }
     }, Kokkos::Min<Real>(dt1), Kokkos::Min<Real>(dt2), Kokkos::Min<Real>(dt3));
+    if (rep_) {
+      const Real dmin = std::min(dt1, std::min(dt2, dt3));
+      const int rank = global_variable::my_rank;
+      const Real bx = fgx_, by = fgy_, bz = fgz_;
+      auto &flr = pmy_pack->pcoord->excision_floor;
+      const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
+      Kokkos::View<int*> cnt("dtlim_cnt", 1);
+      par_for("dt_lim_report", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, ks, ke, js, je,
+              is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        const Real d = dtc_(m, k-ks, j-js, i-is);
+        if (d > dmin*1.0001) return;
+        if (Kokkos::atomic_fetch_add(&cnt(0), 1) >= 5) return;
+        const Real x = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+        const Real y = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+        const Real z = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+        const Real r = sqrt((x-bx)*(x-bx) + (y-by)*(y-by) + (z-bz)*(z-bz));
+        Kokkos::printf("DTLIM rank %d cycle %d dt %.6e x %.4f %.4f %.4f rBH %.4f dx %.5f rho %.4e "
+                       "P %.4e Wv %.4e %.4e %.4e alpha %.4e beta %.4e %.4e %.4e flr %d\n",
+                       rank, ncyc_, d, x, y, z, r, mbsize.d_view(m).dx1, w0_(m,IDN,k,j,i),
+                       w0_(m,IPR,k,j,i), w0_(m,IVX,k,j,i), w0_(m,IVY,k,j,i), w0_(m,IVZ,k,j,i),
+                       adm.alpha(m,k,j,i), adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
+                       adm.beta_u(m,2,k,j,i), exc ? static_cast<int>(flr(m,k,j,i)) : -1);
+      });
+    }
   }
 
   // compute minimum of dt1/dt2/dt3 for 1D/2D/3D problems

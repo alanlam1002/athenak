@@ -137,6 +137,8 @@ class DynGRMHD {
   // first order, so their own (gauge) shift need not set dt.
   bool dt_skip_excised;
   bool dt_floor_keep_velocity = false;   // <time> dt_floor_keep_velocity (R-076 item 3)
+  int dt_lim_report = 0, dt_lim_cyc0 = -1;   // <time> dt_limiter_report (debug)
+  DvceArray4D<Real> dt_lim_cell;
 };
 
 template<class EOSPolicy, class ErrorPolicy>

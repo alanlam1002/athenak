@@ -153,6 +153,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
   dt_skip_excised = pin->GetOrAddBoolean("time", "dt_skip_excised", false);
   dt_floor_keep_velocity = pin->GetOrAddBoolean("time", "dt_floor_keep_velocity", false);
+  dt_lim_report = pin->GetOrAddInteger("time", "dt_limiter_report", 0);
 
   // allocate memory for temperature
   {

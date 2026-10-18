@@ -567,11 +567,6 @@ TaskStatus DynGRMHD::SetADMVariables(Driver *pdrive, int stage) {
 //! \brief
 
 TaskStatus DynGRMHD::UpdateExcisionMasks(Driver *pdrive, int stage) {
-  // <coord> excision_mask_refresh: the masks are rebuilt before every C2P instead, so
-  // NewTimeStep sees the mask that C2P used. Rebuilding here, after the final C2P and
-  // CFC_AssembleFinal's new lapse, left a one-cell shell of just-unmasked cells still
-  // carrying the excision reset (v = 0) that set the CFL step (C-053, C-064).
-  if (pmy_pack->pcoord->coord_data.excision_mask_refresh) return TaskStatus::complete;
   if (pmy_pack->pcoord->coord_data.bh_excise && stage == pdrive->nexp_stages) {
     pmy_pack->pcoord->UpdateExcisionMasks();
   }

@@ -829,7 +829,7 @@ class PrimitiveSolverHydro {
     for (int q = 0; q < 12; ++q) pb[q] = de_pb[q];
     // records gathered on the device, written from the host into one file per rank
     // (mprobe_rank<NNNNN>.txt; no device printf, so no interleaving between ranks)
-    const int nrec = 36;   // (not constexpr: SYCL lambda captures, see C-055)
+    const int nrec = 37;   // (not constexpr: SYCL lambda captures, see C-055)
     const int cap = 400000;
     if (static_cast<int>(mp_buf.extent(0)) < cap) {
       Kokkos::realloc(mp_buf, cap, nrec);
@@ -840,6 +840,9 @@ class PrimitiveSolverHydro {
     auto &cnt = mp_cnt;
     auto &u0 = pmy_pack->pmhd->u0;
     const int idy = (de_on && de_idx >= 0) ? pmy_pack->pmhd->nmhd + de_idx : IDN;
+    // the owner-decided flag slot (dual_energy_flag_exchange), else IDN as a placeholder
+    const int ifl = (pmy_pack->pmhd->nflag > 0) ? pmy_pack->pmhd->nmhd +
+                    pmy_pack->pmhd->nscalars : IDN;
     par_for("metric_probe", DevExeSpace(), 0, nmb-1, 0, nx3+2*ng-1, 0, nx2+2*ng-1, 0,
             nx1+2*ng-1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -855,7 +858,7 @@ class PrimitiveSolverHydro {
       const int r = Kokkos::atomic_fetch_add(&cnt(0), 1);
       if (r >= cap) return;
       const int gh = (i < is || i > ie || j < js || j > je || k < ks || k > ke) ? 1 : 0;
-      Real v[36] = {static_cast<Real>(gid0 + m), static_cast<Real>(i), static_cast<Real>(j),
+      Real v[37] = {static_cast<Real>(gid0 + m), static_cast<Real>(i), static_cast<Real>(j),
                       static_cast<Real>(k), static_cast<Real>(gh), x, y, z,
                       adm.psi4(m,k,j,i), adm.alpha(m,k,j,i), adm.beta_u(m,0,k,j,i),
                       adm.beta_u(m,1,k,j,i), adm.beta_u(m,2,k,j,i),
@@ -865,8 +868,9 @@ class PrimitiveSolverHydro {
                       adm.vK_dd(m,1,1,k,j,i), adm.vK_dd(m,1,2,k,j,i), adm.vK_dd(m,2,2,k,j,i),
                       w0(m,IDN,k,j,i), w0(m,IPR,k,j,i), w0(m,IVX,k,j,i), w0(m,IVY,k,j,i),
                       w0(m,IVZ,k,j,i), u0(m,IDN,k,j,i), u0(m,IM1,k,j,i), u0(m,IM2,k,j,i),
-                      u0(m,IM3,k,j,i), u0(m,IEN,k,j,i), u0(m,idy,k,j,i)};
-      for (int q = 0; q < 36; ++q) buf(r, q) = v[q];
+                      u0(m,IM3,k,j,i), u0(m,IEN,k,j,i), u0(m,idy,k,j,i),
+                      u0(m,ifl,k,j,i)};
+      for (int q = 0; q < 37; ++q) buf(r, q) = v[q];
     });
     auto hc = Kokkos::create_mirror_view_and_copy(HostMemSpace(), cnt);
     const int nr = (hc(0) < cap) ? hc(0) : cap;

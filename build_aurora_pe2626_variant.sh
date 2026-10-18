@@ -35,7 +35,7 @@ case "$1" in
   cpu_tov_ref) NAME=build_cpu_pe2626_tov_ref  # same, from the src_headref worktree (U1 ref)
     SRC=${SCRATCH}/src_headref
     EXTRA=( -DAthena_ENABLE_MPI=OFF -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ARCH_SPR=ON ) ;;
-  gpu_zone) NAME=build_gpu_pe2626_zone         # as gpu_gauge, separate tree (R-059 S1 / R-060)
+  gpu_zone) NAME=build_gpu_pe2626_zone${ZONE_TAG:-}         # as gpu_gauge, separate tree (R-059 S1 / R-060)
     EXTRA=( -DAthena_ENABLE_MPI=ON -DPROBLEM=dyn_grmhd/dyngr_tov -DKokkos_ENABLE_SYCL=ON
             -DKokkos_ENABLE_SYCL_RELOCATABLE_DEVICE_CODE=OFF -DKokkos_ARCH_INTEL_PVC=ON ) ;;
   *) echo "usage: $0 gpu_gauge|gpu_gauge_dbg|cpu_tests|cpu_tov|cpu_tov_ref"; exit 1 ;;

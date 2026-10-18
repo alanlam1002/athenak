@@ -14,7 +14,8 @@ import collections
 import numpy as np
 
 GROUPS = (('psi4', slice(0, 1)), ('alpha', slice(1, 2)), ('beta', slice(2, 5)), ('g_dd', slice(5, 11)),
-          ('K_dd', slice(11, 17)), ('prims', slice(17, 22)), ('cons', slice(22, 28)))
+          ('K_dd', slice(11, 17)), ('prims', slice(17, 22)), ('cons', slice(22, 28)),
+          ('flag', slice(28, 29)))
 TAG = {0: 'C2P', 1: 'flux'}
 
 
@@ -35,10 +36,10 @@ def main():
         recs = []
         for ln in lines:
             q = ln.split()
-            if q[0] != 'MPROBE' or len(q) != 40:
+            if q[0] != 'MPROBE' or len(q) not in (40, 41):
                 bad += 1
                 continue
-            recs.append(q[1:])
+            recs.append(q[1:] + (['nan'] if len(q) == 40 else []))
     else:
         recs = []
         for ln in open(a.log, errors='replace').read().split('MPROBE ')[1:]:
@@ -47,7 +48,7 @@ def main():
                 L, P = ln.split('|')
                 q, p = L.split(), P.split()
                 assert len(q) == 28 and len(p) == 5
-                recs.append(q + p + ['nan'] * 6)
+                recs.append(q + p + ['nan'] * 7)
             except (ValueError, AssertionError):
                 bad += 1
     for q in recs:

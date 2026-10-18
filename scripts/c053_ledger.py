@@ -50,6 +50,17 @@ def parse(fn):
     return led, xb, io, cyc
 
 
+def ledger2(fn):
+    """MLEDGER2 (tau, DY): per variable sum of Y, Fout, X over the run"""
+    out = {}
+    for ln in open(fn, errors='replace'):
+        if ln.startswith('MLEDGER2 '):
+            d = dict(re.findall(r'(\w+)=([^ ]+)', ln))
+            o = out.setdefault(d['var'], [0.0, 0.0, 0.0, 0])
+            o[0] += float(d['Y']); o[1] += float(d['Fout']); o[2] += float(d['X']); o[3] += 1
+    return out
+
+
 def ledger(arm, d, out):
     fn = f'{d}/{arm}/out.log'
     if not os.path.exists(fn):
@@ -99,6 +110,9 @@ def ledger(arm, d, out):
     if cyc:
         w = np.array(cyc)
         out.append(f'  wall {w[-1, 0] - w[0, 0]:.0f} s for {int(w[-1, 1] - w[0, 1])} cycles')
+    for v, (y, f, x, n) in ledger2(fn).items():
+        out.append(f'  {v}: sum Y {y:+.4e}, Fout {f:+.3e}, Y + Fout {y + f:+.4e}, X {x:+.4e} ({n} cycles;'
+                   f' Y includes the source terms for tau)')
     iot(arm, io, out)
 
 

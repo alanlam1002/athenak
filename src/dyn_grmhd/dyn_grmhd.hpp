@@ -88,6 +88,9 @@ class DynGRMHD {
   virtual TaskStatus ConToPrim(Driver* pdrive, int stage) = 0;
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke) = 0;
   virtual void UpdateShockFlags() {}   // dual_energy_flag_exchange (R-069)
+  // the stage-0 mass ledger around the regrid / init path's C2P (R-078 item 3)
+  virtual void MassLedgerRegridPre() {}
+  virtual void MassLedgerRegridPost(const char *path) {}
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
   // dual energy (item 70): {dense cells, entropy-branch cells, dE of the last full C2P,
   // cumulative dE}; false if dual energy is off.
@@ -177,6 +180,8 @@ class DynGRMHDPS : public DynGRMHD {
   virtual void ConToPrimBC(int is, int ie, int js, int je, int ks, int ke);
   void RefreshExcisionMasks();   // <coord> excision_mask_refresh
   void UpdateShockFlags() override;
+  void MassLedgerRegridPre() override { eos.MassLedgerRegridPre(); }
+  void MassLedgerRegridPost(const char *path) override { eos.MassLedgerRegridPost(path); }
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;

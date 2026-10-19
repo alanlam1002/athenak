@@ -26,6 +26,9 @@ class IOWrapper {
 #if MPI_PARALLEL_ENABLED
   IOWrapper() : fh_(nullptr), comm_(MPI_COMM_WORLD) {}
   void SetCommunicator(MPI_Comm scomm) { comm_=scomm;}
+  // per-file MPI-IO hints, "key=value,key=value" (e.g. romio_cb_write=disable), applied
+  // at the next Open on top of any ROMIO_HINTS file; empty = MPI_INFO_NULL
+  void SetHints(const std::string &hints) { hints_ = hints; }
 #else
   IOWrapper() {fh_=nullptr;}
 #endif
@@ -62,6 +65,7 @@ class IOWrapper {
   IOWrapperFile fh_;
 #if MPI_PARALLEL_ENABLED
   MPI_Comm comm_;
+  std::string hints_;
 #endif
 };
 #endif // OUTPUTS_IO_WRAPPER_HPP_

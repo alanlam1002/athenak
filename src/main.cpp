@@ -144,6 +144,11 @@ int main(int argc, char *argv[]) {
     sa.sa_flags = SA_SIGINFO | SA_RESETHAND;
     sigemptyset(&sa.sa_mask);
     for (int sg : {SIGSEGV, SIGBUS, SIGFPE, SIGABRT}) { sigaction(sg, &sa, nullptr); }
+    // ATHENA_SEGV_BACKTRACE=term also catches SIGTERM, so a rank stuck outside MPI when
+    // the launcher kills the job (e.g. after an MPICH progress timeout) prints its stack
+    if (std::string(std::getenv("ATHENA_SEGV_BACKTRACE")) == "term") {
+      sigaction(SIGTERM, &sa, nullptr);
+    }
     void *warm[2]; backtrace(warm, 2);   // pre-load libgcc so backtrace() is safe later
   }
 

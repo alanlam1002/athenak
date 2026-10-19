@@ -766,6 +766,7 @@ class PrimitiveSolverHydro {
     Real w[4];
     w[ns-1] = 1.0;
     for (int q = ns-2; q >= 0; --q) w[q] = gam0[q+1]*w[q+1];
+    ml_last_mend = ml_stage[ns-1][kMlEnd];   // the stage-0 ledger's M_old (R-078)
     const Real mu1 = ml_stage[0][kMlU1];
     Real Y = 0.0, X = 0.0, Fe = 0.0, Fo = 0.0, f6 = 0.0, f12 = 0.0, xb[kMlNX];
     for (int n = 0; n < kMlNX; ++n) xb[n] = 0.0;
@@ -803,6 +804,147 @@ class PrimitiveSolverHydro {
       for (int n = 0; n < kMlNX; ++n) std::cout << " " << xb[n];
       std::cout << std::endl;
     }
+  }
+
+  //! R-078 item 3, the stage-0 ledger: the regrid / init path's C2P (ReinitializeMetricForAMR,
+  //! InitializeMetric) changes D outside every RK stage, so the per-stage ledger never sees
+  //! it. MassLedgerRegridPre (before the path's first C2P) copies D and records M_prol, the
+  //! mass of the prolongated / restored state; MassLedgerRegridPost (after its last C2P)
+  //! prints one MLEDGER0 line: M_old (the previous cycle's M_end), M_prol, X0 = M_post -
+  //! M_prol, the X0 bins by class x r_BH (as MLEDGER_X), by level and by new / old block
+  //! (removed, added), and the largest single-cell |dD dV| with its location. Identity:
+  //! Mu1(next cycle) - M_end(this cycle) = (M_prol - M_old) + X0.
+  Real ml_last_mend = -1.0, ml0_prol = 0.0;
+  bool ml0_armed = false;
+  void MassLedgerRegridPre() {
+    if (!ml_on) return;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int n3 = indcs.nx3 + 2*indcs.ng, n2 = indcs.nx2 + 2*indcs.ng;
+    const int n1 = indcs.nx1 + 2*indcs.ng;
+    const int nmbu = static_cast<int>(u0.extent(0));
+    if (static_cast<int>(ml_d0.extent(0)) != nmbu) {
+      Kokkos::realloc(ml_d0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_cls, nmbu, n3, n2, n1);
+    }
+    Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
+                                             Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::deep_copy(ml_cls, 4.0);
+    ml0_prol = MlMass(u0, IDN);
+    ml0_armed = true;
+  }
+  void MassLedgerRegridPost(const char *path) {
+    if (!ml_on || !ml0_armed) return;
+    ml0_armed = false;
+    static constexpr int kL = 16;                 // levels 0..15
+    static constexpr int kN = kMlNX + 2*kL + 4;   // class x r, level, new/old (rem, add)
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &lev = pmy_pack->pmb->mb_lev;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &d0 = ml_d0;
+    auto &cls = ml_cls;
+    const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
+    const Real cz = pmy_pack->padm->bc_center[2];
+    DvceArray1D<int> isnew("ml0_new", nmb > 0 ? nmb : 1);
+    {
+      auto h = Kokkos::create_mirror_view(isnew);
+      auto *pmr = pmy_pack->pmesh->pmr;
+      for (int m = 0; m < nmb; ++m) {
+        h(m) = (pmr != nullptr && pmr->ncyc_since_ref(pmy_pack->gids + m) == 0) ? 1 : 0;
+      }
+      Kokkos::deep_copy(isnew, h);
+    }
+    DvceArray1D<Real> bins("ml0_bins", kN);
+    Real dmax = 0.0;
+    int imax = -1;
+    using MaxLoc = Kokkos::MaxLoc<Real, int>;
+    typename MaxLoc::value_type mx;
+    Kokkos::parallel_reduce("ml0_x", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, typename MaxLoc::value_type &lm) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      const Real dm = (u0(m, IDN, k, j, i) - d0(m, k, j, i))*
+                      size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+      if (dm == 0.0) return;
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min,
+                                 size.d_view(m).x1max) - cx;
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min,
+                                 size.d_view(m).x2max) - cy;
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min,
+                                 size.d_view(m).x3max) - cz;
+      const Real r2 = x*x + y*y + z*z;
+      const int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
+      const int c = static_cast<int>(cls(m, k, j, i));
+      const int ad = (dm > 0.0) ? 1 : 0;
+      const Real a = (dm > 0.0) ? dm : -dm;
+      Kokkos::atomic_add(&bins(c*10 + 2*ir + ad), a);
+      int l = lev.d_view(m); l = (l < 0) ? 0 : ((l >= kL) ? kL - 1 : l);
+      Kokkos::atomic_add(&bins(kMlNX + 2*l + ad), a);
+      Kokkos::atomic_add(&bins(kMlNX + 2*kL + 2*isnew(m) + ad), a);
+      if (a > lm.val) { lm.val = a; lm.loc = idx; }
+    }, MaxLoc(mx));
+    dmax = mx.val; imax = mx.loc;
+    auto hb = Kokkos::create_mirror_view_and_copy(HostMemSpace(), bins);
+    std::vector<Real> b(kN + 1);
+    for (int n = 0; n < kN; ++n) b[n] = hb(n);
+    b[kN] = MlMass(u0, IDN);
+    Real mprol = ml0_prol;
+    // the largest cell: x y z r_BH level new class D_before D_after (on its rank)
+    Real cell[10] = {dmax, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    if (imax >= 0 && dmax > 0.0) {
+      const int m = imax/nkji;
+      const int k = (imax - m*nkji)/nji + ks;
+      const int j = (imax - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = imax - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      auto sz = size.h_view(m);
+      cell[1] = CellCenterX(i - is, nx1, sz.x1min, sz.x1max);
+      cell[2] = CellCenterX(j - js, nx2, sz.x2min, sz.x2max);
+      cell[3] = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max);
+      cell[4] = std::sqrt(SQR(cell[1] - cx) + SQR(cell[2] - cy) + SQR(cell[3] - cz));
+      cell[5] = lev.h_view(m);
+      auto hn = Kokkos::create_mirror_view_and_copy(HostMemSpace(), isnew);
+      cell[6] = hn(m);
+      Real v3[3];
+      DvceArray1D<Real> t("ml0_cell", 3);
+      Kokkos::parallel_for("ml0_cell", Kokkos::RangePolicy<>(DevExeSpace(), 0, 1),
+      KOKKOS_LAMBDA(const int) {
+        t(0) = cls(m, k, j, i); t(1) = d0(m, k, j, i); t(2) = u0(m, IDN, k, j, i);
+      });
+      auto ht = Kokkos::create_mirror_view_and_copy(HostMemSpace(), t);
+      for (int q = 0; q < 3; ++q) v3[q] = ht(q);
+      cell[7] = v3[0]; cell[8] = v3[1]; cell[9] = v3[2];
+    }
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, b.data(), kN + 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &mprol, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    struct { double v; int r; } lin = {static_cast<double>(dmax), global_variable::my_rank},
+                                gout;
+    MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    MPI_Bcast(cell, 10, MPI_ATHENA_REAL, gout.r, MPI_COMM_WORLD);
+#endif
+    if (global_variable::my_rank != 0) return;
+    const Real mpost = b[kN];
+    std::cout << std::setprecision(10) << "MLEDGER0 cycle=" << pmy_pack->pmesh->ncycle
+              << " time=" << pmy_pack->pmesh->time << " path=" << path
+              << " Mold=" << ml_last_mend << " Mprol=" << mprol << " Mpost=" << mpost
+              << " dprol=" << ((ml_last_mend >= 0.0) ? mprol - ml_last_mend : 0.0)
+              << " X0=" << mpost - mprol << std::endl;
+    std::cout << "MLEDGER0_X cycle=" << pmy_pack->pmesh->ncycle;   // as MLEDGER_X
+    for (int n = 0; n < kMlNX; ++n) std::cout << " " << b[n];
+    std::cout << std::endl << "MLEDGER0_L cycle=" << pmy_pack->pmesh->ncycle;
+    for (int n = kMlNX; n < kMlNX + 2*kL; ++n) std::cout << " " << b[n];
+    std::cout << " | old " << b[kMlNX + 2*kL] << " " << b[kMlNX + 2*kL + 1] << " new "
+              << b[kMlNX + 2*kL + 2] << " " << b[kMlNX + 2*kL + 3] << std::endl;
+    std::cout << "MLEDGER0_MAX cycle=" << pmy_pack->pmesh->ncycle << " absdm=" << cell[0]
+              << " x=" << cell[1] << " y=" << cell[2] << " z=" << cell[3] << " rBH="
+              << cell[4] << " level=" << cell[5] << " new=" << cell[6] << " class="
+              << cell[7] << " Dbefore=" << cell[8] << " Dafter=" << cell[9] << std::endl;
   }
 
   //! R-072 item 1 metric probe: with dual_energy_probe_box1/2 and _cycles set, every cell

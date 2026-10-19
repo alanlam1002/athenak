@@ -56,7 +56,20 @@ int IOWrapper::Open(const char* fname, FileMode rw, bool single_file_per_rank) {
         return false;
     }
 
-    int errcode = MPI_File_open(comm_, fname, mpi_mode, MPI_INFO_NULL, &fh_);
+    MPI_Info info = MPI_INFO_NULL;
+    if (!hints_.empty()) {
+      MPI_Info_create(&info);
+      std::stringstream hs(hints_);
+      std::string kv;
+      while (std::getline(hs, kv, ',')) {
+        std::size_t eq = kv.find('=');
+        if (eq != std::string::npos) {
+          MPI_Info_set(info, kv.substr(0, eq).c_str(), kv.substr(eq+1).c_str());
+        }
+      }
+    }
+    int errcode = MPI_File_open(comm_, fname, mpi_mode, info, &fh_);
+    if (info != MPI_INFO_NULL) MPI_Info_free(&info);
     if (errcode != MPI_SUCCESS) {
       char msg[MPI_MAX_ERROR_STRING];
       int resultlen;

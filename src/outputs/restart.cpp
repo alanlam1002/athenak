@@ -197,7 +197,11 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     // where XXXXX = 5-digit file_number
     char number[7];
     std::snprintf(number, sizeof(number), ".%05d", out_params.file_number);
-    fname = std::string("rst/") + out_params.file_basename + number + ".rst";
+    // <outputN> rst_tag (debug, R-078 item 6): "rst/basename.TAG.XXXXX.rst", so two
+    // restart blocks can write the same cycle side by side
+    std::string tag = pin->GetOrAddString(out_params.block_name, "rst_tag", "");
+    fname = std::string("rst/") + out_params.file_basename + (tag.empty() ? "" : "." + tag)
+            + number + ".rst";
   }
   // increment counters now so values for *next* dump are stored in restart file
   out_params.file_number++;
@@ -233,6 +237,10 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
 
   // open file and  write the header; this part is serial
   IOWrapper resfile;
+#if MPI_PARALLEL_ENABLED
+  // <outputN> romio_hints (R-078 item 6): per-file MPI-IO hints, "key=value,..."
+  resfile.SetHints(pin->GetOrAddString(out_params.block_name, "romio_hints", ""));
+#endif
   resfile.Open(fname.c_str(), IOWrapper::FileMode::write, single_file_per_rank);
   if (global_variable::my_rank == 0 || single_file_per_rank) {
     // output the input parameters (input file)

@@ -760,10 +760,14 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
       // inline, instead of ConToPrim -- CFC's own regrid refresh handles its
       // own interior/ghost con2prim split internally (see cfc.hpp's comment
       // on ReinitializeMetricForAMR).
+      pdyngr->MassLedgerRegridPre();    // <mhd> mass_ledger: stage-0 entry (R-078)
       pcfc->ReinitializeMetricForAMR(this);
       pdyngr->UpdateShockFlags();   // dual_energy_flag_exchange: owner flags (R-069)
+      pdyngr->MassLedgerRegridPost("regrid");
     } else {
+      pdyngr->MassLedgerRegridPre();
       (void) pdyngr->ConToPrim(this, 0);
+      pdyngr->MassLedgerRegridPost(is_amr_regrid ? "regrid" : "init");
     }
   }
 

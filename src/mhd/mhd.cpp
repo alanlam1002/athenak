@@ -141,12 +141,19 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   // allocate memory for conserved and primitive variables
   // With AMR, maximum size of Views are limited by total device memory through an input
   // parameter, which in turn limits max number of MBs that can be created.
+  // R-069 item 2: the dual-energy flag decided by each cell's owner rides in one extra,
+  // non-evolved u0 slot (index nmhd+nscalars), exchanged with the conserved variables
+  // (no fluxes, sources or RK update touch it; restarts do not store it).
+  // Default on whenever <mhd> dual_energy is on (R-078 item 2: production default).
+  bool de_default = pin->DoesParameterExist("mhd", "dual_energy") &&
+                    pin->GetBoolean("mhd", "dual_energy");
+  nflag = pin->GetOrAddBoolean("mhd", "dual_energy_flag_exchange", de_default) ? 1 : 0;
   {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int ncells1 = indcs.nx1 + 2*(indcs.ng);
     int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(u0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+    Kokkos::realloc(u0,   nmb, (nmhd+nscalars+nflag), ncells3, ncells2, ncells1);
     Kokkos::realloc(w0,   nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
 
     // allocate memory for face-centered and cell-centered magnetic fields
@@ -162,7 +169,8 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     int n_ccells1 = indcs.cnx1 + 2*(indcs.ng);
     int n_ccells2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*(indcs.ng)) : 1;
     int n_ccells3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*(indcs.ng)) : 1;
-    Kokkos::realloc(coarse_u0, nmb, (nmhd+nscalars), n_ccells3, n_ccells2, n_ccells1);
+    Kokkos::realloc(coarse_u0, nmb, (nmhd+nscalars+nflag), n_ccells3, n_ccells2,
+                    n_ccells1);
     Kokkos::realloc(coarse_w0, nmb, (nmhd+nscalars), n_ccells3, n_ccells2, n_ccells1);
     Kokkos::realloc(coarse_b0.x1f, nmb, n_ccells3, n_ccells2, n_ccells1+1);
     Kokkos::realloc(coarse_b0.x2f, nmb, n_ccells3, n_ccells2+1, n_ccells1);
@@ -171,7 +179,7 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
 
   // allocate boundary buffers for conserved (cell-centered) and face-centered variables
   pbval_u = new MeshBoundaryValuesCC(ppack, pin, false);
-  pbval_u->InitializeBuffers((nmhd+nscalars));
+  pbval_u->InitializeBuffers((nmhd+nscalars+nflag));
   pbval_b = new MeshBoundaryValuesFC(ppack, pin);
   pbval_b->InitializeBuffers(3);
 
@@ -322,7 +330,7 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
       int ncells1 = indcs.nx1 + 2*(indcs.ng);
       int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
       int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
-      Kokkos::realloc(u1,     nmb, (nmhd+nscalars), ncells3, ncells2, ncells1);
+      Kokkos::realloc(u1,     nmb, (nmhd+nscalars+nflag), ncells3, ncells2, ncells1);
       Kokkos::realloc(b1.x1f, nmb, ncells3, ncells2, ncells1+1);
       Kokkos::realloc(b1.x2f, nmb, ncells3, ncells2+1, ncells1);
       Kokkos::realloc(b1.x3f, nmb, ncells3+1, ncells2, ncells1);

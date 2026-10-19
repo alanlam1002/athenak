@@ -24,6 +24,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('run')
     ap.add_argument('--par', default=None)
+    ap.add_argument('--var', default='D', choices=('D', 'tau', 'DY'),
+                    help='conserved variable (MLFACE columns: D, then tau, then DY)')
     a = ap.parse_args()
     par = open(a.par or f'{a.run}/../T.par').read()
     px = np.array([float(re.search(rf'^puncture_x{n}\s*=\s*([-+.\deE]+)', par, re.M).group(1))
@@ -39,6 +41,7 @@ def main():
         if ln.startswith('MLEDGER '):
             d = dict(re.findall(r'(\w+)=([^ ]+)', ln))
             led[int(d['cycle'])] = (float(d['time']), float(d['Y']), float(d['Fout']))
+    vo = {'D': 0, 'tau': 6, 'DY': 12}[a.var]
     tot = collections.Counter()
     big = []
     per_cyc = collections.Counter()
@@ -65,8 +68,8 @@ def main():
                     continue
                 if len(nb) == 1 and b[nb[0], 1] < b[i, 1]:
                     continue        # A fine, B coarse: counted from the coarse side's group
-                fa = b[i, 9 + 2 * ax]                      # A's + face
-                fb = sum(b[j, 8 + 2 * ax] for j in nb)     # B's - faces
+                fa = b[i, 9 + 2 * ax + vo]                 # A's + face
+                fb = sum(b[j, 8 + 2 * ax + vo] for j in nb)  # B's - faces
                 rel = 'same' if (len(nb) == 1 and b[nb[0], 1] == b[i, 1]) else 'coarse|fine'
                 dm = w * (fb - fa)
                 c = np.array([(b[i, 2 + 2 * q] + b[i, 3 + 2 * q]) / 2 for q in range(3)])

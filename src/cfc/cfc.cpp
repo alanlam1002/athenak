@@ -1244,6 +1244,15 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
   RunLapseShiftAssemblePass(pdriver);
 
+  // dual_energy_flag_exchange (R-076 item 1): the owners decide the flags on the new
+  // interiors (from the interior C2P just done) and the MHD ghost exchange carries them
+  // into the ghosts before the ghost-only C2P below, which then reads them instead of
+  // recomputing the flag inside each slab
+  if (pmy_pack->pmhd->nflag > 0) {
+    pmy_pack->pdyngr->UpdateShockFlags();
+    pdriver->ExchangeMHDGhosts(pmy_pack->pmesh);
+  }
+
   // Ghost-shell-only con2prim, now that padm->u_adm is fully final and fully
   // ghost-exchanged (RunLapseShiftAssemblePass's own tail, just completed):
   // recovers w0's ghost cells against the correct metric instead of a
@@ -1261,6 +1270,11 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     int n1 = indcs.nx1 + 2*ng;
     int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+    if (pmy_pack->pmhd->nflag > 0) {
+      // owner flags: one C2P over the whole block (interior + ghosts) with the
+      // exchanged flags, so interior and ghost primitives come from the same flags
+      pdyngr->ConToPrimBC(0, n1-1, 0, n2-1, 0, n3-1);
+    } else {
     pdyngr->ConToPrimBC(0, is-1, 0, n2-1, 0, n3-1);
     pdyngr->ConToPrimBC(ie+1, n1-1, 0, n2-1, 0, n3-1);
     if (pm->multi_d) {
@@ -1270,6 +1284,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     if (pm->three_d) {
       pdyngr->ConToPrimBC(is, ie, js, je, 0, ks-1);
       pdyngr->ConToPrimBC(is, ie, js, je, ke+1, n3-1);
+    }
     }
   }
 

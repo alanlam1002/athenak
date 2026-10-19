@@ -289,7 +289,9 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
           "single_file_per_rank", false);
         pnode = new RestartOutput(pin,pm,opar);
         pout_list.push_back(pnode);
-        num_rst++;
+        // a tagged restart block (<outputN> rst_tag, debug: R-078 item 6) writes its own
+        // file name, so it may sit beside the main restart block
+        if (pin->GetOrAddString(opar.block_name, "rst_tag", "").empty()) num_rst++;
       } else {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
             << std::endl << "Unrecognized file format = '" << opar.file_type

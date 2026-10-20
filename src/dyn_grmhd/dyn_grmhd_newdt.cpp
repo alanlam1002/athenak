@@ -278,6 +278,60 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
                        adm.alpha(m,k,j,i), adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
                        adm.beta_u(m,2,k,j,i), exc ? static_cast<int>(flr(m,k,j,i)) : -1);
       });
+      // DTRHO lines: for each density threshold, the global minimum cell dt over cells
+      // with rho >= threshold, and that cell -- the step the CFL would allow if every
+      // cell below the threshold were left out (the star's own limit, R-078 follow-up)
+      static constexpr int kNT = 11;
+      const Real thr[kNT] = {0.0, 1.0e-20, 1.0e-16, 1.0e-14, 1.0e-12, 1.0e-10, 1.0e-8,
+                             1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4};
+      for (int b = 0; b < kNT; ++b) {
+        const Real tb = thr[b];
+        using MinLocT = Kokkos::MinLoc<Real, int>;
+        MinLocT::value_type res;
+        Kokkos::parallel_reduce("dt_lim_rho", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+        KOKKOS_LAMBDA(const int &idx, MinLocT::value_type &v) {
+          int m = (idx)/nkji;
+          int k = (idx - m*nkji)/nji;
+          int j = (idx - m*nkji - k*nji)/nx1;
+          int i = (idx - m*nkji - k*nji - j*nx1);
+          if (w0_(m, IDN, k+ks, j+js, i+is) < tb) return;
+          const Real d = dtc_(m, k, j, i);
+          if (d < v.val) { v.val = d; v.loc = idx; }
+        }, MinLocT(res));
+        struct { double v; int r; } in{static_cast<double>(res.val), rank}, out = in;
+#if MPI_PARALLEL_ENABLED
+        MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+#endif
+        if (!(out.v < 1.0e29)) {
+          if (rank == 0) {
+            std::cout << "DTRHO cycle " << ncyc_ << " thr " << tb << " none" << std::endl;
+          }
+          continue;
+        }
+        if (out.r != rank) continue;
+        const int loc = res.loc;
+        par_for("dt_lim_rho_print", DevExeSpace(), loc, loc,
+        KOKKOS_LAMBDA(const int idx) {
+          int m = (idx)/nkji;
+          int k = (idx - m*nkji)/nji;
+          int j = (idx - m*nkji - k*nji)/nx1;
+          int i = (idx - m*nkji - k*nji - j*nx1) + is;
+          k += ks;
+          j += js;
+          const Real x = CellCenterX(i-is, nx1, mbsize.d_view(m).x1min, mbsize.d_view(m).x1max);
+          const Real y = CellCenterX(j-js, nx2, mbsize.d_view(m).x2min, mbsize.d_view(m).x2max);
+          const Real z = CellCenterX(k-ks, nx3, mbsize.d_view(m).x3min, mbsize.d_view(m).x3max);
+          const Real r = sqrt((x-bx)*(x-bx) + (y-by)*(y-by) + (z-bz)*(z-bz));
+          Kokkos::printf("DTRHO cycle %d thr %.1e dt %.6e x %.4f %.4f %.4f rBH %.4f dx %.5f "
+                         "rho %.4e P %.4e Wv %.4e %.4e %.4e alpha %.4e beta %.4e %.4e %.4e\n",
+                         ncyc_, tb, dtc_(m, k-ks, j-js, i-is), x, y, z, r,
+                         mbsize.d_view(m).dx1, w0_(m,IDN,k,j,i), w0_(m,IPR,k,j,i),
+                         w0_(m,IVX,k,j,i), w0_(m,IVY,k,j,i), w0_(m,IVZ,k,j,i),
+                         adm.alpha(m,k,j,i), adm.beta_u(m,0,k,j,i), adm.beta_u(m,1,k,j,i),
+                         adm.beta_u(m,2,k,j,i));
+        });
+        Kokkos::fence();
+      }
     }
   }
 

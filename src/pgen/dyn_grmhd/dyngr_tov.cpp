@@ -13,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -60,6 +61,10 @@ struct TDERefineParams {
   int  lev_bh;      // target level within rad_bh
   int  lev_debris;  // target level for cells above the rho_frac*rho_max cut
   int  lev_bh_fine; // target level within rad_bh_fine (must exceed lev_bh)
+  Real buffer;      // debris buffer: also refine blocks within this distance of a block
+                    // above the cut (0 = off, the block's own maximum only)
+  Real deref_frac;  // hysteresis: a debris-level block derefines only once nothing
+                    // within buffer exceeds deref_frac*rho_max (= rho_frac: off)
 };
 TDERefineParams tde_ref;
 } // namespace
@@ -575,6 +580,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
     tde_ref.lev_debris  = pin->GetOrAddInteger("problem", "amr_level_debris", 5);
     tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
+    // Buffer + hysteresis (C-075): refine before the star's edge reaches a block, so
+    // new fine blocks are prolongated from near-floor gas, not across the steep edge.
+    tde_ref.buffer      = pin->GetOrAddReal("problem", "amr_buffer", 0.0);
+    tde_ref.deref_frac  = pin->GetOrAddReal("problem", "amr_deref_frac", tde_ref.rho_frac);
+    if (tde_ref.deref_frac > tde_ref.rho_frac) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "amr_deref_frac must not exceed amr_density_frac" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     user_ref_func = &TDERefineTracker;
   } else if (amr_cond == "tde_debris") {
     // BH box (shared with tde_track) and, for amr_dryrun, tde_track's own debris cut
@@ -584,6 +598,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tde_ref.lev_bh      = pin->GetOrAddInteger("problem", "amr_level_bh", 5);
     tde_ref.lev_debris  = pin->GetOrAddInteger("problem", "amr_level_debris", 5);
     tde_ref.lev_bh_fine = pin->GetOrAddInteger("problem", "amr_level_bh_fine", 6);
+    tde_ref.buffer      = 0.0;
+    tde_ref.deref_frac  = tde_ref.rho_frac;
     tde_deb.rho_ref = pin->GetOrAddReal("problem", "amr_rho_ref",
                                         pin->GetReal("problem", "rhoc"));
     tde_deb.core_frac     = pin->GetOrAddReal("problem", "amr_core_frac", 1.0e-2);
@@ -979,6 +995,38 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   const Real r2_bh      = SQR(tde_ref.rad_bh);
   const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
   const Real rho_cut    = tde_ref.rho_frac*rho_max;
+  const Real rho_dcut   = tde_ref.deref_frac*rho_max;
+
+  // Buffer: the AABBs of every block (all ranks) above the derefinement cut, with a
+  // flag for whether it is also above the refinement cut. A block wants the debris
+  // level if it lies within `buffer` of a "hot" block, and keeps it (no derefine)
+  // while it lies within `buffer` of a "warm" one. With buffer = 0 only the block's
+  // own maximum counts, and with deref_frac = rho_frac there is no hysteresis.
+  const bool use_buf = (tde_ref.buffer > 0.0);
+  std::vector<Real> hot;   // 7 per block: x1min x1max x2min x2max x3min x3max is_hot
+  if (use_buf && rho_max_ok) {
+    std::vector<Real> mine;
+    for (int m = 0; m < nmb; ++m) {
+      if (block_rho_max_h(m) > rho_dcut) {
+        const auto &sz = size.h_view(m);
+        Real v[7] = {sz.x1min, sz.x1max, sz.x2min, sz.x2max, sz.x3min, sz.x3max,
+                     (block_rho_max_h(m) > rho_cut) ? 1.0 : 0.0};
+        mine.insert(mine.end(), v, v + 7);
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    int nloc = static_cast<int>(mine.size());
+    std::vector<int> counts(global_variable::nranks), displs(global_variable::nranks, 0);
+    MPI_Allgather(&nloc, 1, MPI_INT, counts.data(), 1, MPI_INT, MPI_COMM_WORLD);
+    for (int r = 1; r < global_variable::nranks; ++r) displs[r] = displs[r-1] + counts[r-1];
+    hot.resize(displs.back() + counts.back());
+    MPI_Allgatherv(mine.data(), nloc, MPI_ATHENA_REAL, hot.data(), counts.data(),
+                   displs.data(), MPI_ATHENA_REAL, MPI_COMM_WORLD);
+#else
+    hot = mine;
+#endif
+  }
+  const Real buf2 = SQR(tde_ref.buffer);
 
   for (int m = 0; m < nmb; ++m) {
     Real &x1min = size.h_view(m).x1min;
@@ -1010,15 +1058,31 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     int want = -1;
     if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }
     if (r2_bh_fine > 0.0 && d2_bh < r2_bh_fine) { want = std::max(want, tde_ref.lev_bh_fine); }
-    if (rho_max_ok && block_rho_max_h(m) > rho_cut) {
-      want = std::max(want, tde_ref.lev_debris);
+    bool deb_hot = false, deb_warm = false;
+    if (rho_max_ok && !use_buf) {
+      deb_hot  = (block_rho_max_h(m) > rho_cut);
+      deb_warm = (block_rho_max_h(m) > rho_dcut);
+    } else if (rho_max_ok) {
+      for (std::size_t h = 0; h + 7 <= hot.size() && !deb_hot; h += 7) {
+        // squared distance between this block's AABB and block h's AABB
+        Real dx = std::fmax(0.0, std::fmax(hot[h+0] - x1max, x1min - hot[h+1]));
+        Real dy = std::fmax(0.0, std::fmax(hot[h+2] - x2max, x2min - hot[h+3]));
+        Real dz = std::fmax(0.0, std::fmax(hot[h+4] - x3max, x3min - hot[h+5]));
+        if (SQR(dx) + SQR(dy) + SQR(dz) < buf2) {
+          deb_warm = true;
+          if (hot[h+6] > 0.5) deb_hot = true;
+        }
+      }
     }
+    if (deb_hot) { want = std::max(want, tde_ref.lev_debris); }
 
     int flag;
     if (want < 0)             { flag = -1; }        // outside every target
     else if (level < want)    { flag =  1; }
     else if (level == want)   { flag =  0; }
     else                      { flag = -1; }
+    // hysteresis: a block at or below the debris level near warm gas is held
+    if (flag == -1 && deb_warm && level <= tde_ref.lev_debris) { flag = 0; }
     refine_flag.h_view(m + mbs) = flag;
   }
 

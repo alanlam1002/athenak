@@ -1098,6 +1098,7 @@ class PrimitiveSolverHydro {
         atm_frame_gate = zone_r;
       }
       zone_bins_every = pin->GetOrAddInteger(block, "atmosphere_zone_bins_every", 50);
+      zone_unmask = pin->GetOrAddBoolean(block, "atmosphere_zone_unmask", false);
       t3_on = pin->GetOrAddBoolean(block, "atmosphere_zone_tier3", false);
       t3_rho = pin->GetOrAddReal(block, "atmosphere_zone_tier3_rho", 1.0e-6*zone_rho);
       t3_dr = pin->GetOrAddReal(block, "atmosphere_zone_tier3_dr", 1.0/32.0);
@@ -1957,19 +1958,10 @@ class PrimitiveSolverHydro {
             const Real lx = yz*ud[2] - zz*ud[1], ly = zz*ud[0] - xz*ud[2];
             const Real lz = xz*ud[1] - yz*ud[0];
             const Real lmag = sqrt(lx*lx + ly*ly + lz*lz);
-            // grid rest v = beta'/alpha, capped at zvmax along beta'
-            Real bd[3];
-            Primitive::LowerVector(bd, bu, g3d);
-            const Real vb = sqrt(fmax(Primitive::Contract(bu, bd), 0.0))/fmax(al, 1.0e-300);
-            const Real f = (vb > zvmax_) ? zvmax_/vb : 1.0;
-            const Real vsq = f*f*vb*vb;
-            const Real wl = 1.0/sqrt(1.0 - vsq);
             Real cpre[NCONS];
             for (int n = 0; n < NCONS; ++n) cpre[n] = cons_pt[n];
             if (zmode == 1) prim_pt[PRH] = fmin(rho0, zrst_)/mb;
-            prim_pt[PVX] = wl*f*bu[0]/fmax(al, 1.0e-300);
-            prim_pt[PVY] = wl*f*bu[1]/fmax(al, 1.0e-300);
-            prim_pt[PVZ] = wl*f*bu[2]/fmax(al, 1.0e-300);
+            const Real f = ZoneGridRest(prim_pt, bu, al, g3d, zvmax_);
             prim_pt[PTM] = eos_.GetTemperatureFloor();
             prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
             ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
@@ -2202,6 +2194,146 @@ class PrimitiveSolverHydro {
       tally[2] += dPy_tally;
       tally[3] += dPz_tally;
       tally[4] += dEraw_tally;
+    }
+  }
+
+  //! The zone's grid-rest velocity v = beta'/alpha, capped at zvmax along beta' (shared
+  //! by the zone and ZoneUnmaskPost, so both give the same state bitwise); returns the cap
+  //! factor f (1 if uncapped).
+  KOKKOS_INLINE_FUNCTION
+  static Real ZoneGridRest(Real prim_pt[NPRIM], const Real bu[3], const Real al,
+                           const Real g3d[NSPMETRIC], const Real zvmax) {
+    Real bd[3];
+    Primitive::LowerVector(bd, bu, g3d);
+    const Real vb = sqrt(fmax(Primitive::Contract(bu, bd), 0.0))/fmax(al, 1.0e-300);
+    const Real f = (vb > zvmax) ? zvmax/vb : 1.0;
+    const Real vsq = f*f*vb*vb;
+    const Real wl = 1.0/sqrt(1.0 - vsq);
+    prim_pt[PVX] = wl*f*bu[0]/fmax(al, 1.0e-300);
+    prim_pt[PVY] = wl*f*bu[1]/fmax(al, 1.0e-300);
+    prim_pt[PVZ] = wl*f*bu[2]/fmax(al, 1.0e-300);
+    return f;
+  }
+
+  // <mhd> atmosphere_zone_unmask (default false; R-078 item 4 F1, with <time>
+  // dt_floor_keep_velocity = true as F2): the post-C2P mask rebuild (DynGRMHD::
+  // UpdateExcisionMasks, last stage, after CFC_AssembleFinal) un-excises cells whose lapse
+  // moved off the one-cell CFC lapse cliff. Their stored state is still the excision reset
+  // (v = 0), which NewTimeStep then sees against |beta| ~ 0.3 (the R7 shell limiter, C-068).
+  // Such cells (1 -> 0) inside the zone (r < r_s, rho < rho_thr) get the zone's state
+  // against the new metric instead: rho -> min(rho, rho_reset), grid rest, T = tfloor,
+  // K resynced (non-dense), then PrimToCon. Ghosts too (their mask and state are the
+  // owner's). The interior change is printed per cycle (ATMZONE_UNMASK, rank 0) and added
+  // to the ledger's M_end, so MLEDGER's between-cycle term books it.
+  bool zone_unmask = false;
+  DvceArray4D<bool> zu_old;   // the floor mask before the rebuild
+  Real zu_cum[3] = {0.0, 0.0, 0.0};
+  void ZoneUnmaskPre() {
+    if (!zone_unmask) return;
+    auto &fl = pmy_pack->pcoord->excision_floor;
+    if (zu_old.extent(0) != fl.extent(0) || zu_old.extent(1) != fl.extent(1) ||
+        zu_old.extent(2) != fl.extent(2) || zu_old.extent(3) != fl.extent(3)) {
+      Kokkos::realloc(zu_old, fl.extent(0), fl.extent(1), fl.extent(2), fl.extent(3));
+    }
+    Kokkos::deep_copy(zu_old, fl);
+  }
+  void ZoneUnmaskPost(DvceArray5D<Real> &cons, const DvceArray5D<Real> &bcc0,
+                      DvceArray5D<Real> &prim, DvceArray5D<Real> &temperature,
+                      Real time, int cycle) {
+    if (!zone_unmask) return;
+    const int nhyd = pmy_pack->pmhd->nmhd, nscal = pmy_pack->pmhd->nscalars;
+    const int nmb = pmy_pack->nmb_thispack;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int n1 = nx1 + 2*indcs.ng, n2 = nx2 + 2*indcs.ng, n3 = nx3 + 2*indcs.ng;
+    const int nji = n2*n1, nkji = n3*nji;
+    auto &size = pmy_pack->pmb->mb_size;
+    auto &adm = pmy_pack->padm->adm;
+    auto &floor_ = pmy_pack->pcoord->excision_floor;
+    auto &old_ = zu_old;
+    auto &eos_ = ps.GetEOS();
+    auto &ps_ = ps;
+    const Real mb = eos_.GetBaryonMass();
+    const Real zr2_ = zone_r*zone_r, zthr_ = zone_rho, zrst_ = zone_rho_reset;
+    const Real zvmax_ = zone_vmax;
+    const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
+    const Real cz = pmy_pack->padm->bc_center[2];
+    const bool de_on_ = de_on;
+    const int de_idx_ = de_idx;
+    const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_gamma_ = de_gamma;
+    const Real de_ypow_ = de_ypow;
+    Real dm = 0.0, de = 0.0, nc = 0.0;
+    Kokkos::parallel_reduce("zone_unmask", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int &idx, Real &dm_r, Real &de_r, Real &nc_r) {
+      const int m = idx/nkji, k = (idx - m*nkji)/nji, j = (idx - m*nkji - k*nji)/n1;
+      const int i = idx - m*nkji - k*nji - j*n1;
+      if (!old_(m,k,j,i) || floor_(m,k,j,i)) return;
+      const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - cx;
+      const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - cy;
+      const Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - cz;
+      const Real rho0 = prim(m, IDN, k, j, i);
+      if (!(x*x + y*y + z*z < zr2_ && rho0 < zthr_)) return;
+      Real g3d[NSPMETRIC];
+      g3d[S11] = adm.g_dd(m, 0, 0, k, j, i);
+      g3d[S12] = adm.g_dd(m, 0, 1, k, j, i);
+      g3d[S13] = adm.g_dd(m, 0, 2, k, j, i);
+      g3d[S22] = adm.g_dd(m, 1, 1, k, j, i);
+      g3d[S23] = adm.g_dd(m, 1, 2, k, j, i);
+      g3d[S33] = adm.g_dd(m, 2, 2, k, j, i);
+      const Real sdetg = sqrt(Primitive::GetDeterminant(g3d));
+      const Real isdetg = 1.0/sdetg;
+      const Real al = adm.alpha(m, k, j, i);
+      const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
+                          adm.beta_u(m, 2, k, j, i)};
+      Real prim_pt[NPRIM], cons_pt[NCONS];
+      prim_pt[PRH] = fmin(rho0, zrst_)/mb;
+      for (int n = 0; n < nscal; ++n) prim_pt[PYF + n] = prim(m, nhyd + n, k, j, i);
+      ZoneGridRest(prim_pt, bu, al, g3d, zvmax_);
+      prim_pt[PTM] = eos_.GetTemperatureFloor();
+      prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
+      const Real D0 = cons(m, IDN, k, j, i)*isdetg;
+      if (de_on_ && !(D0 > de_rho_sw_)) {   // as the C2P's non-dense K resync
+        const Real rho_ = prim_pt[PRH]*mb;
+        prim_pt[PYF + de_idx_] = (rho_ > 0.0) ?
+            DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_) : 0.0;
+      }
+      Real b3u[NMAG] = {bcc0(m, IBX, k, j, i)*isdetg, bcc0(m, IBY, k, j, i)*isdetg,
+                              bcc0(m, IBZ, k, j, i)*isdetg};
+      ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
+      if (i >= is && i <= ie_ && j >= js && j <= je_ && k >= ks && k <= ke_) {
+        const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        dm_r += cons_pt[CDN]*sdetg*dv - cons(m, IDN, k, j, i)*dv;
+        de_r += (cons_pt[CDN] + cons_pt[CTA])*sdetg*dv
+                - (cons(m, IDN, k, j, i) + cons(m, IEN, k, j, i))*dv;
+        nc_r += 1.0;
+      }
+      prim(m, IDN, k, j, i) = prim_pt[PRH]*mb;
+      prim(m, IVX, k, j, i) = prim_pt[PVX];
+      prim(m, IVY, k, j, i) = prim_pt[PVY];
+      prim(m, IVZ, k, j, i) = prim_pt[PVZ];
+      prim(m, IPR, k, j, i) = prim_pt[PPR];
+      for (int n = 0; n < nscal; ++n) prim(m, nhyd + n, k, j, i) = prim_pt[PYF + n];
+      temperature(m, 0, k, j, i) = prim_pt[PTM];
+      cons(m, IDN, k, j, i) = cons_pt[CDN]*sdetg;
+      cons(m, IM1, k, j, i) = cons_pt[CSX]*sdetg;
+      cons(m, IM2, k, j, i) = cons_pt[CSY]*sdetg;
+      cons(m, IM3, k, j, i) = cons_pt[CSZ]*sdetg;
+      cons(m, IEN, k, j, i) = cons_pt[CTA]*sdetg;
+      for (int n = 0; n < nscal; ++n) cons(m, nhyd + n, k, j, i) = cons_pt[CYD + n]*sdetg;
+    }, Kokkos::Sum<Real>(dm), Kokkos::Sum<Real>(de), Kokkos::Sum<Real>(nc));
+    Real s[3] = {dm, de, nc};
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, s, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    for (int n = 0; n < 3; ++n) zu_cum[n] += s[n];
+    if (ml_on && ml_last_mend >= 0.0) ml_last_mend += s[0];
+    if (s[2] > 0.0 && global_variable::my_rank == 0) {
+      std::cout << std::setprecision(10) << "ATMZONE_UNMASK cycle=" << cycle << " time="
+                << time << " n=" << s[2] << " dM=" << s[0] << " dE=" << s[1]
+                << " cum_n=" << zu_cum[2] << " cum_dM=" << zu_cum[0] << " cum_dE="
+                << zu_cum[1] << std::endl;
     }
   }
 

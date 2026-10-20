@@ -91,6 +91,9 @@ class DynGRMHD {
   // the stage-0 mass ledger around the regrid / init path's C2P (R-078 item 3)
   virtual void MassLedgerRegridPre() {}
   virtual void MassLedgerRegridPost(const char *path) {}
+  // <mhd> atmosphere_zone_unmask (R-078 item 4 F1), around the post-C2P mask rebuild
+  virtual void ZoneUnmaskPre() {}
+  virtual void ZoneUnmaskPost() {}
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
   // dual energy (item 70): {dense cells, entropy-branch cells, dE of the last full C2P,
   // cumulative dE}; false if dual energy is off.
@@ -182,6 +185,8 @@ class DynGRMHDPS : public DynGRMHD {
   void UpdateShockFlags() override;
   void MassLedgerRegridPre() override { eos.MassLedgerRegridPre(); }
   void MassLedgerRegridPost(const char *path) override { eos.MassLedgerRegridPost(path); }
+  void ZoneUnmaskPre() override { eos.ZoneUnmaskPre(); }
+  void ZoneUnmaskPost() override;
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;

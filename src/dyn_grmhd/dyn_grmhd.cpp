@@ -252,6 +252,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
                    {Z4c_Excise, CFC_AssemblePsiG});
     pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
                    Task_Run, {MHD_SetADM});
+    if (eos.zone_unmask) {   // needs the rebuild after the C2P (the branch below)
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<mhd> atmosphere_zone_unmask needs <adm> dynamic = false"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
   } else {
     pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim, this, MHD_C2P,
                    "MHD_C2P", Task_Run, {MHD_BCS}, {Z4c_Excise, CFC_AssemblePsiG});
@@ -280,8 +286,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   // latter hardcodes max_dv=1 (speed of light) for any is_dynamical_relativistic_ run,
   // this module's own version can instead use the real GR fast magnetosonic speed
   // (gated on <time>/gr_dt) via this module's primitive-solver EOS.
-  pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep, this, MHD_Newdt,
-                 "MHD_Newdt", Task_Run, {MHD_C2P}, {CFC_AssembleFinal});
+  // With <mhd> atmosphere_zone_unmask the mask rebuild also sets the state of the cells
+  // it un-excises, so NewTimeStep must come after it.
+  if (eos.zone_unmask && pmy_pack->pcoord->coord_data.bh_excise &&
+      pmy_pack->pcoord->coord_data.excision_scheme != ExcisionScheme::fixed) {
+    pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep, this, MHD_Newdt,
+                   "MHD_Newdt", Task_Run, {MHD_C2P, MHD_Excise}, {CFC_AssembleFinal});
+  } else {
+    pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep, this, MHD_Newdt,
+                   "MHD_Newdt", Task_Run, {MHD_C2P}, {CFC_AssembleFinal});
+  }
 
   // End task list
   pnr->QueueTask(&MHD::ClearSend, pmhd, MHD_ClearS, "MHD_ClearS", Task_End);
@@ -403,6 +417,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrimBC(int is, int ie, int js, int
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::UpdateShockFlags() {
   eos.UpdateShockFlags();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::ZoneUnmaskPost()
+//! \brief <mhd> atmosphere_zone_unmask: zone state for cells the post-C2P mask rebuild
+//! un-excised (see PrimitiveSolverHydro::ZoneUnmaskPost)
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ZoneUnmaskPost() {
+  eos.ZoneUnmaskPost(pmy_pack->pmhd->u0, pmy_pack->pmhd->bcc0, pmy_pack->pmhd->w0,
+                     temperature, pmy_pack->pmesh->time, pmy_pack->pmesh->ncycle);
 }
 
 //----------------------------------------------------------------------------------------
@@ -578,7 +602,9 @@ TaskStatus DynGRMHD::SetADMVariables(Driver *pdrive, int stage) {
 
 TaskStatus DynGRMHD::UpdateExcisionMasks(Driver *pdrive, int stage) {
   if (pmy_pack->pcoord->coord_data.bh_excise && stage == pdrive->nexp_stages) {
+    ZoneUnmaskPre();
     pmy_pack->pcoord->UpdateExcisionMasks();
+    ZoneUnmaskPost();
   }
   return TaskStatus::complete;
 }

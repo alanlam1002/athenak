@@ -488,6 +488,10 @@ class PrimitiveSolverHydro {
   static constexpr int kMlFo12 = kMlNX + 6, kMlNcell = kMlNX + 7, kMlLen = kMlNX + 8;
   DvceArray4D<Real> ml_d0, ml_cls;   // D sqrt(gamma) before the C2P; the cell's class
   DvceArray4D<Real> ml_p0, ml_a0;    // stage-0 ledger: psi4, alpha before the regrid path
+  DvceArray4D<Real> ml_r0, ml_w0, ml_q0;   // stage-0 ledger: rho, W, P before the regrid path
+  // the C2P branch of the cell's last C2P: error + 16 prim_floor + 32 cons_floor
+  // + 64 cons_adjusted + 128 comoving-atmosphere velocity (atm_frame_vel)
+  DvceArray4D<Real> ml_c2p;
   Real ml_stage[4][kMlLen] = {};
   // tau and the dual-energy tracer DY (R-069 item 4): per stage and variable,
   // {M_pre, M_end, M(u1), F_out}; printed as MLEDGER2 lines (no class bins)
@@ -560,10 +564,12 @@ class PrimitiveSolverHydro {
     if (static_cast<int>(ml_d0.extent(0)) != nmbu) {  // (re)sized after a regrid
       Kokkos::realloc(ml_d0, nmbu, n3, n2, n1);
       Kokkos::realloc(ml_cls, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_c2p, nmbu, n3, n2, n1);
     }
     Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
                                              Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
     Kokkos::deep_copy(ml_cls, 4.0);
+    Kokkos::deep_copy(ml_c2p, 0.0);
     for (int n = 0; n < kMlLen; ++n) ml_stage[stage-1][n] = 0.0;
     ml_stage[stage-1][kMlPre] = MlMass(u0, IDN);
     ml_stage[stage-1][kMlU1] = MlMass(pmy_pack->pmhd->u1, IDN);
@@ -816,6 +822,17 @@ class PrimitiveSolverHydro {
   //! (removed, added), and the largest single-cell |dD dV| with its location. Identity:
   //! Mu1(next cycle) - M_end(this cycle) = (M_prol - M_old) + X0.
   Real ml_last_mend = -1.0, ml0_prol = 0.0;
+  //! W = sqrt(1 + g_ij u^i u^j) of the cell's primitives (u^i = W v^i)
+  template <typename ADMT>
+  KOKKOS_INLINE_FUNCTION static Real MlLorentz(const ADMT &adm, const DvceArray5D<Real> &w,
+                                               int m, int k, int j, int i) {
+    const Real u[3] = {w(m, IVX, k, j, i), w(m, IVY, k, j, i), w(m, IVZ, k, j, i)};
+    Real usq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) usq += adm.g_dd(m, a, b, k, j, i)*u[a]*u[b];
+    }
+    return sqrt(1.0 + usq);
+  }
   bool ml0_armed = false;
   void MassLedgerRegridPre() {
     if (!ml_on) return;
@@ -827,22 +844,35 @@ class PrimitiveSolverHydro {
     if (static_cast<int>(ml_d0.extent(0)) != nmbu) {
       Kokkos::realloc(ml_d0, nmbu, n3, n2, n1);
       Kokkos::realloc(ml_cls, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_c2p, nmbu, n3, n2, n1);
     }
     if (static_cast<int>(ml_p0.extent(0)) != nmbu) {
       Kokkos::realloc(ml_p0, nmbu, n3, n2, n1);
       Kokkos::realloc(ml_a0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_r0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_w0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_q0, nmbu, n3, n2, n1);
     }
     Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
                                              Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
     Kokkos::deep_copy(ml_cls, 4.0);
+    Kokkos::deep_copy(ml_c2p, 0.0);
     {  // C-077: the metric the old blocks carried into the regrid, before the CFC re-solve
       auto &adm = pmy_pack->padm->adm;
       auto &p0 = ml_p0;
       auto &a0 = ml_a0;
+      // C-078: and the primitives (rho, W, P), to split a D change into rho, W and sqrt(gamma)
+      auto &w0 = pmy_pack->pmhd->w0;
+      auto &r0 = ml_r0;
+      auto &lw0 = ml_w0;
+      auto &q0 = ml_q0;
       par_for("ml0_met0", DevExeSpace(), 0, nmbu-1, 0, n3-1, 0, n2-1, 0, n1-1,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         p0(m, k, j, i) = adm.psi4(m, k, j, i);
         a0(m, k, j, i) = adm.alpha(m, k, j, i);
+        r0(m, k, j, i) = w0(m, IDN, k, j, i);
+        lw0(m, k, j, i) = MlLorentz(adm, w0, m, k, j, i);
+        q0(m, k, j, i) = w0(m, IPR, k, j, i);
       });
     }
     ml0_prol = MlMass(u0, IDN);
@@ -928,13 +958,46 @@ class PrimitiveSolverHydro {
       }, Kokkos::Max<Real>(met[0]), Kokkos::Max<Real>(met[1]), Kokkos::Sum<Real>(met[2]),
          Kokkos::Sum<Real>(met[3]));
     }
+    // C-078: the mass removed from OLD blocks, split by the C2P branch of its last C2P
+    // (not exclusive): error != SUCCESS, prim_floor, cons_floor, comoving-atmosphere
+    // velocity, and the part where |W/W_0 - 1| > |rho/rho_0 - 1| (velocity-driven)
+    Real cb[5] = {0.0, 0.0, 0.0, 0.0, 0.0};
+    {
+      auto &w0 = pmy_pack->pmhd->w0;
+      auto &adm = pmy_pack->padm->adm;
+      auto &r0 = ml_r0;
+      auto &lw0 = ml_w0;
+      auto &code = ml_c2p;
+      Kokkos::parallel_reduce("ml0_c2p", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &se, Real &sp, Real &sc, Real &sf, Real &sw) {
+        const int m = idx/nkji;
+        if (isnew(m)) return;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+        const Real dm = (d0(m, k, j, i) - u0(m, IDN, k, j, i))*
+                        size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        if (dm <= 0.0) return;
+        const int c = static_cast<int>(code(m, k, j, i));
+        if (c & 15) se += dm;
+        if (c & 16) sp += dm;
+        if (c & 32) sc += dm;
+        if (c & 128) sf += dm;
+        const Real dw = fabs(MlLorentz(adm, w0, m, k, j, i)/lw0(m, k, j, i) - 1.0);
+        const Real dr = fabs(w0(m, IDN, k, j, i)/r0(m, k, j, i) - 1.0);
+        if (dw > dr) sw += dm;
+      }, Kokkos::Sum<Real>(cb[0]), Kokkos::Sum<Real>(cb[1]), Kokkos::Sum<Real>(cb[2]),
+         Kokkos::Sum<Real>(cb[3]), Kokkos::Sum<Real>(cb[4]));
+    }
     auto hb = Kokkos::create_mirror_view_and_copy(HostMemSpace(), bins);
     std::vector<Real> b(kN + 1);
     for (int n = 0; n < kN; ++n) b[n] = hb(n);
     b[kN] = MlMass(u0, IDN);
     Real mprol = ml0_prol;
-    // the largest cell: x y z r_BH level new class D_before D_after (on its rank)
-    Real cell[14] = {dmax, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    // the largest cell: x y z r_BH level new class D_before D_after psi4, alpha, rho, W, P
+    // (before, after) and the C2P code (on its rank)
+    static constexpr int kCell = 21;
+    Real cell[kCell] = {dmax};
     if (imax >= 0 && dmax > 0.0) {
       const int m = imax/nkji;
       const int k = (imax - m*nkji)/nji + ks;
@@ -949,30 +1012,40 @@ class PrimitiveSolverHydro {
       auto hn = Kokkos::create_mirror_view_and_copy(HostMemSpace(), isnew);
       cell[6] = hn(m);
       Real v3[3];
-      DvceArray1D<Real> t("ml0_cell", 7);
+      DvceArray1D<Real> t("ml0_cell", 14);
       auto &adm = pmy_pack->padm->adm;
+      auto &w0 = pmy_pack->pmhd->w0;
       auto &p0 = ml_p0;
       auto &a0 = ml_a0;
+      auto &r0 = ml_r0;
+      auto &lw0 = ml_w0;
+      auto &q0 = ml_q0;
+      auto &code = ml_c2p;
       Kokkos::parallel_for("ml0_cell", Kokkos::RangePolicy<>(DevExeSpace(), 0, 1),
       KOKKOS_LAMBDA(const int) {
         t(0) = cls(m, k, j, i); t(1) = d0(m, k, j, i); t(2) = u0(m, IDN, k, j, i);
         t(3) = p0(m, k, j, i); t(4) = adm.psi4(m, k, j, i);
         t(5) = a0(m, k, j, i); t(6) = adm.alpha(m, k, j, i);
+        t(7) = r0(m, k, j, i); t(8) = w0(m, IDN, k, j, i);
+        t(9) = lw0(m, k, j, i); t(10) = MlLorentz(adm, w0, m, k, j, i);
+        t(11) = q0(m, k, j, i); t(12) = w0(m, IPR, k, j, i);
+        t(13) = code(m, k, j, i);
       });
       auto ht = Kokkos::create_mirror_view_and_copy(HostMemSpace(), t);
       for (int q = 0; q < 3; ++q) v3[q] = ht(q);
       cell[7] = v3[0]; cell[8] = v3[1]; cell[9] = v3[2];
-      for (int q = 0; q < 4; ++q) cell[10 + q] = ht(3 + q);
+      for (int q = 0; q < 11; ++q) cell[10 + q] = ht(3 + q);
     }
 #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, b.data(), kN + 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &mprol, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, met, 2, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, met + 2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, cb, 5, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     struct { double v; int r; } lin = {static_cast<double>(dmax), global_variable::my_rank},
                                 gout;
     MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
-    MPI_Bcast(cell, 14, MPI_ATHENA_REAL, gout.r, MPI_COMM_WORLD);
+    MPI_Bcast(cell, kCell, MPI_ATHENA_REAL, gout.r, MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank != 0) return;
     const Real mpost = b[kN];
@@ -992,10 +1065,16 @@ class PrimitiveSolverHydro {
               << cell[4] << " level=" << cell[5] << " new=" << cell[6] << " class="
               << cell[7] << " Dbefore=" << cell[8] << " Dafter=" << cell[9]
               << " psi4before=" << cell[10] << " psi4after=" << cell[11]
-              << " alphabefore=" << cell[12] << " alphaafter=" << cell[13] << std::endl;
+              << " alphabefore=" << cell[12] << " alphaafter=" << cell[13]
+              << " rhobefore=" << cell[14] << " rhoafter=" << cell[15] << " Wbefore="
+              << cell[16] << " Wafter=" << cell[17] << " Pbefore=" << cell[18] << " Pafter="
+              << cell[19] << " c2p=" << static_cast<int>(cell[20]) << std::endl;
     std::cout << "MLEDGER0_MET cycle=" << pmy_pack->pmesh->ncycle << " old_dpsi4_max="
               << met[0] << " old_dalpha_max=" << met[1] << " old_dpsi4_removal_weighted="
               << ((met[3] > 0.0) ? met[2]/met[3] : 0.0) << std::endl;
+    std::cout << "MLEDGER0_C2P cycle=" << pmy_pack->pmesh->ncycle << " old_removed="
+              << met[3] << " error=" << cb[0] << " prim_floor=" << cb[1] << " cons_floor="
+              << cb[2] << " frame_vel=" << cb[3] << " W_driven=" << cb[4] << std::endl;
   }
 
   //! R-072 item 1 metric probe: with dual_energy_probe_box1/2 and _cycles set, every cell
@@ -1754,6 +1833,7 @@ class PrimitiveSolverHydro {
     const bool mlon_ = ml_on && !floors_only &&
                        static_cast<int>(ml_cls.extent(0)) >= pmy_pack->nmb_thispack;
     auto &mlcls_ = ml_cls;
+    auto &mlc2p_ = ml_c2p;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
@@ -2217,6 +2297,9 @@ class PrimitiveSolverHydro {
             c = 3.0;
           }
           mlcls_(m,k,j,i) = c;
+          mlc2p_(m,k,j,i) = static_cast<Real>(static_cast<int>(result.error) +
+                                              16*result.prim_floor + 32*result.cons_floor +
+                                              64*result.cons_adjusted + 128*fv_here);
         }
       }
     }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<Real>(dE_tally), Kokkos::Sum<Real>(dPx_tally),

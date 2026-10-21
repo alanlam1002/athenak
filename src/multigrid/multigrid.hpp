@@ -539,6 +539,10 @@ class MultigridDriver {
 
   void AllocateMultipoleCoefficients();
   void CalculateMultipoleCoefficients();
+  // <job> checksum_cycles (utils/chksum.hpp; R-087 item 10 follow-up): this rank's exact
+  // checksums of the MG state (block levels, root, octets, multipole moments) at one point
+  // of the solve; x (e.g. a defect norm) is written as its bit pattern
+  void MGChk(const char *where, Real x = 0.0);
   void ScaleMultipoleCoefficients();
   void CalculateCenterOfMass();
 

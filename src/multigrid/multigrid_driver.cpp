@@ -30,6 +30,8 @@
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
+#include "../globals.hpp"
+#include "../utils/chksum.hpp"
 
 // Registry of every constructed driver, so Driver::Finalize() can dump all
 // solvers' MGTimers in one place. Populated by the constructor below.
@@ -705,6 +707,7 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
       MarkRootDeviceModified();
     }
   }
+  MGChk("toF");
   return;
 }
 
@@ -770,6 +773,7 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
     MarkRootDeviceModified();
   }
   current_level_--;
+  MGChk("toC");
   return;
 }
 
@@ -883,6 +887,7 @@ void MultigridDriver::SolveFMGCoarser() {
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
   Real def = TotalDefectNorm();
+  MGChk("start", def);
   // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
   // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
   // "converged" solve may be; rtol_ <= 0.0 reproduces the original eps_-only
@@ -901,6 +906,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     Real olddef = def;
     def = TotalDefectNorm();
+    MGChk("vcycle", def);
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
@@ -971,6 +977,7 @@ void MultigridDriver::SolveCoarsestGrid() {
     mgroot_->StoreOldData();
     mgroot_->ZeroClearData();
     MarkRootDeviceModified();
+    MGChk("coarsest");
     return;
   }
   if (fsubtract_average_) {
@@ -995,6 +1002,7 @@ void MultigridDriver::SolveCoarsestGrid() {
     SubtractAverage(MGVariable::u);
     MarkRootDeviceModified();
   }
+  MGChk("coarsest");
   return;
 }
 
@@ -2969,6 +2977,7 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
 #endif
 
   ScaleMultipoleCoefficients();
+  MGChk("mpole");
 }
 
 
@@ -3104,4 +3113,60 @@ void MultigridDriver::SetRobinCenter(Real x, Real y, Real z) {
   robin_center_[0] = x;
   robin_center_[1] = y;
   robin_center_[2] = z;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::MGChk(const char *where, Real x)
+//! \brief <job> checksum_cycles: one line per array of this rank's MG state (utils/
+//! chksum.hpp, same file and key as the NR-task checksums); the name carries the point and
+//! the level, the occurrence count separates repeats within the RK stage
+
+void MultigridDriver::MGChk(const char *where, Real x) {
+  const int cycle = pmy_mesh_->ncycle;
+  if (!chksum::Active(cycle)) return;
+  if (chksum::fp == nullptr) {
+    char fn[64];
+    std::snprintf(fn, sizeof(fn), "chksum.%d.txt", global_variable::my_rank);
+    chksum::fp = std::fopen(fn, "w");
+  }
+  const int stage = chksum::last_stage;
+  const std::string name = std::string("MG_") + where + "@L" + std::to_string(current_level_);
+  const int k = chksum::occ[name]++;
+  auto host = [](const Real *p, size_t n) {
+    uint64_t a = 0;
+    for (size_t i = 0; i < n; ++i) a += chksum::Bits(p[i]);
+    return a;
+  };
+  std::fprintf(chksum::fp, "%d %d %s %d x %016llx\n", cycle, stage, name.c_str(), k,
+               (unsigned long long)chksum::Bits(x));
+  if (mglevels_ != nullptr) {
+    Multigrid *g = mglevels_;
+    for (int l = 0; l < g->nlevel_; ++l) {
+      const std::string a = "blk" + std::to_string(l);
+      chksum::Line(cycle, stage, name, k, (a + "u").c_str(), g->u_[l].d_view);
+      chksum::Line(cycle, stage, name, k, (a + "def").c_str(), g->def_[l].d_view);
+      chksum::Line(cycle, stage, name, k, (a + "src").c_str(), g->src_[l].d_view);
+    }
+  }
+  if (mgroot_ != nullptr) {
+    Multigrid *g = mgroot_;
+    for (int l = 0; l < g->nlevel_; ++l) {
+      const std::string a = "root" + std::to_string(l);
+      chksum::Line(cycle, stage, name, k, (a + "u").c_str(), g->u_[l].d_view);
+      chksum::Line(cycle, stage, name, k, (a + "src").c_str(), g->src_[l].d_view);
+      auto h = g->u_[l].h_view;
+      std::fprintf(chksum::fp, "%d %d %s %d %suh %016llx\n", cycle, stage, name.c_str(), k,
+                   a.c_str(), (unsigned long long)host(h.data(), h.span()));
+    }
+  }
+  if (oct_u_buf_ != nullptr) {
+    for (int l = 0; l < nreflevel_; ++l) {
+      std::fprintf(chksum::fp, "%d %d %s %d oct%du %016llx\n", cycle, stage, name.c_str(),
+                   k, l, (unsigned long long)host(oct_u_buf_[l].data(),
+                                                 oct_u_buf_[l].size()));
+    }
+  }
+  std::fprintf(chksum::fp, "%d %d %s %d mpole %016llx\n", cycle, stage, name.c_str(), k,
+               (unsigned long long)host(mpcoeff_, sizeof(mpcoeff_)/sizeof(Real)));
+  std::fflush(chksum::fp);
 }

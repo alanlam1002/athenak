@@ -278,27 +278,18 @@ void HLLE_DYNGR(TeamMember_t const &member,
     flx(m, IVX, k, j, i) = vol * f_interface[CSX];
     flx(m, IVY, k, j, i) = vol * f_interface[CSY];
     flx(m, IVZ, k, j, i) = vol * f_interface[CSZ];
-    if (eos.sf_hll) {
-      // <mhd> scalar_flux_hll: every scalar A = D Y gets the HLL flux of A with the wave
-      // speeds and branch of D (the tracer formula below, same operation order), not the
-      // mass flux times the upwind Y, so a uniform A stays uniform in the HLL fan
-      for (int s = 0; s < nscal; ++s) {
-        const int ny = PYF + s;
-        Real al = cons_l[CDN]*prim_l[ny], ar = cons_r[CDN]*prim_r[ny];
-        Real fal = fl[CDN]*prim_l[ny], far = fr[CDN]*prim_r[ny];
-        Real fa = (lambda_l >= 0.) ? fal : ((lambda_r <= 0.) ? far :
-                  ((lambda_r*fal - lambda_l*far) + qa*(ar - al)) * qb);
-        flx(m, nhyd + s, k, j, i) = vol * fa;
-      }
-    } else if (eos.de_on && eos.de_flux_hll) {
-      // dual-energy tracer A = D Y: its own HLLE flux (primitive_solver_hyd.hpp), not
-      // the mass flux times the upwind Y, so a uniform A stays uniform in the HLL fan
-      const int ny = PYF + eos.de_idx;
+    // Scalar fluxes as the HLL flux of A = D Y with the wave speeds and branch of D, not
+    // the mass flux times the upwind Y, so a uniform A stays uniform in the HLL fan: every
+    // scalar with <mhd> scalar_flux_hll, else the dual-energy tracer with dual_energy_flux
+    // = hll (one implementation; CalcFluxes skips the upwind kernel for these scalars)
+    for (int s = 0; s < nscal; ++s) {
+      if (!(eos.sf_hll || (eos.de_on && eos.de_flux_hll && s == eos.de_idx))) continue;
+      const int ny = PYF + s;
       Real al = cons_l[CDN]*prim_l[ny], ar = cons_r[CDN]*prim_r[ny];
       Real fal = fl[CDN]*prim_l[ny], far = fr[CDN]*prim_r[ny];
       Real fa = (lambda_l >= 0.) ? fal : ((lambda_r <= 0.) ? far :
                 ((lambda_r*fal - lambda_l*far) + qa*(ar - al)) * qb);
-      flx(m, nhyd + eos.de_idx, k, j, i) = vol * fa;
+      flx(m, nhyd + s, k, j, i) = vol * fa;
     }
     // The notation here is slightly misleading, as it suggests that Ey = -Fx(By) and
     // Ez = Fx(Bz), rather than Ez = -Fx(By) and Ey = Fx(Bz). However, the appropriate

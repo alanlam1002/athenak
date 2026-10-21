@@ -220,6 +220,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
   if (three_d) { kl = ks-1, ku = ke+1; }
 
   const bool scons_ = fofc_scalar_consistent;
+  // FOFC tally (with <mhd> cold_recovery; printed on the CRECOV line, R-087 item 11):
+  // interior cells hydro-flagged / excision-flux / scalar-only, and on the lower faces of
+  // hydro-flagged or excised cells the scalar flux written vs the upwind F_D Y it replaces
+  // (count, sum |F_written - F_upwind|, sum |F_upwind|). Atomics: diagnostic only.
+  const bool ftl_ = eos.crec_on && eos.fofc_tl.extent_int(0) >= 6;
+  auto &ftl = eos.fofc_tl;
+  const int is_ = is, ie_ = ie, js_ = js, je_ = je, ks_ = ks, ke_ = ke;
 
   // Replace fluxes with first-order LLF fluxes at i,j,k faces for any cell where FOFC
   // and/or excision is used (if GR+excising)
@@ -240,6 +247,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
     // Check for GR + excision
     bool fofc_excision = false;
     if (use_excise_) { fofc_excision = excision_flux_(m,k,j,i); }
+    if (ftl_ && i >= is_ && i <= ie_ && j >= js_ && j <= je_ && k >= ks_ && k <= ke_) {
+      if (fofc_flag) Kokkos::atomic_add(&ftl(0), 1.0);
+      if (fofc_excision) Kokkos::atomic_add(&ftl(1), 1.0);
+      if (!fofc_flag && fofc_scalar_any) Kokkos::atomic_add(&ftl(2), 1.0);
+    }
 
     // Apply FOFC
     if (fofc_flag || fofc_excision || fofc_scalar_any) {
@@ -278,6 +290,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
       // Calculate fluxes of scalars
       for (int n = 0; n < nscal_; n++) {
+        if (ftl_ && (fofc_flag || fofc_excision)) {
+          const Real fup = (flx1(m, IDN, k, j, i) >= 0.0) ? flx1(m, IDN, k, j, i)*wli[PYF + n]
+                                                          : flx1(m, IDN, k, j, i)*wri[PYF + n];
+          const Real fw = scons_ ? fsc[n] : (fofc_flag ? fup : flx1(m, nmhd_ + n, k, j, i));
+          Kokkos::atomic_add(&ftl(3), 1.0);
+          Kokkos::atomic_add(&ftl(4), fabs(fw - fup));
+          Kokkos::atomic_add(&ftl(5), fabs(fup));
+        }
         if (scons_ && (fofc_flag || fofc_excision)) {
           flx1(m, nmhd_ + n, k, j, i) = fsc[n];
         } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
@@ -323,6 +343,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
         // Calculate fluxes of scalars
         for (int n = 0; n < nscal_; n++) {
+          if (ftl_ && (fofc_flag || fofc_excision)) {
+            const Real fup = (flx2(m, IDN, k, j, i) >= 0.0) ? flx2(m, IDN, k, j, i)*wlj[PYF + n]
+                                                            : flx2(m, IDN, k, j, i)*wrj[PYF + n];
+            const Real fw = scons_ ? fsc[n] : (fofc_flag ? fup : flx2(m, nmhd_ + n, k, j, i));
+            Kokkos::atomic_add(&ftl(3), 1.0);
+            Kokkos::atomic_add(&ftl(4), fabs(fw - fup));
+            Kokkos::atomic_add(&ftl(5), fabs(fup));
+          }
           if (scons_ && (fofc_flag || fofc_excision)) {
             flx2(m, nmhd_ + n, k, j, i) = fsc[n];
           } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {
@@ -369,6 +397,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
 
         // Calculate fluxes of scalars
         for (int n = 0; n < nscal_; n++) {
+          if (ftl_ && (fofc_flag || fofc_excision)) {
+            const Real fup = (flx3(m, IDN, k, j, i) >= 0.0) ? flx3(m, IDN, k, j, i)*wmk[PYF + n]
+                                                            : flx3(m, IDN, k, j, i)*wpk[PYF + n];
+            const Real fw = scons_ ? fsc[n] : (fofc_flag ? fup : flx3(m, nmhd_ + n, k, j, i));
+            Kokkos::atomic_add(&ftl(3), 1.0);
+            Kokkos::atomic_add(&ftl(4), fabs(fw - fup));
+            Kokkos::atomic_add(&ftl(5), fabs(fup));
+          }
           if (scons_ && (fofc_flag || fofc_excision)) {
             flx3(m, nmhd_ + n, k, j, i) = fsc[n];
           } else if (fofc_flag || fofc_scal_(m,n,k,j,i)) {

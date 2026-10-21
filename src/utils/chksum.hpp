@@ -6,7 +6,7 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file chksum.hpp
-//! \brief <debug> checksum_cycles (default 0; research R-084 Q3 / R-087 item 10, a debug
+//! \brief <job> checksum_cycles (default 0; research R-084 Q3 / R-087 item 10, a debug
 //! diagnostic): for the first N cycles after (re)start, after every completed task of the
 //! numerical-relativity task lists (MHD + CFC; NumericalRelativity::Assemble...), each rank
 //! appends to chksum.<rank>.txt one line per array: cycle stage task occurrence array sum.
@@ -28,7 +28,7 @@
 
 namespace chksum {
 
-inline int ncycles = 0;      // <debug> checksum_cycles
+inline int ncycles = 0;      // <job> checksum_cycles
 inline int cycle0 = -1;      // the first cycle seen
 inline FILE *fp = nullptr;
 inline int last_cycle = -1, last_stage = -1;

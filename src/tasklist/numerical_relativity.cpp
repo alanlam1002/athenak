@@ -25,10 +25,10 @@ namespace numrel {
 
 NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *pin) {
   pmy_pack = ppack;
-  chksum::ncycles = pin->GetOrAddInteger("debug", "checksum_cycles", 0);
+  chksum::ncycles = pin->GetOrAddInteger("job", "checksum_cycles", 0);
 }
 
-//! <debug> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task
+//! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task
 static void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage) {
   const int cycle = pp->pmesh->ncycle;
   if (!chksum::Active(cycle)) return;
@@ -74,6 +74,13 @@ static void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int st
     chksum::Line(cycle, stage, task, k, "cbeta", c->u_beta);
     chksum::Line(cycle, stage, task, k, "adual", c->u_adual);
     chksum::Line(cycle, stage, task, k, "utilde", c->u_tilde);
+    chksum::Line(cycle, stage, task, k, "upx", c->u_p_x);
+    chksum::Line(cycle, stage, task, k, "upbeta", c->u_p_beta);
+    chksum::Line(cycle, stage, task, k, "upsrc", c->u_p_src);
+    chksum::Line(cycle, stage, task, k, "a0dual", c->u_a0dual);
+    chksum::Line(cycle, stage, task, k, "psi0", c->u_psi0);
+    std::fprintf(fp, "%d %d %s %d mbh %016llx\n", cycle, stage, task.c_str(), k,
+                 (unsigned long long)chksum::Bits(c->puncture_mass_));
   }
   std::fflush(fp);
 }

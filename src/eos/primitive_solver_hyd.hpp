@@ -246,12 +246,17 @@ class PrimitiveSolverHydro {
   // and cells whose D or S_i changed across the C2P anyway (must stay 0)
   Real crec_n = 0.0, crec_dtau = 0.0, crec_ds = 0.0, crec_dtau_total = 0.0;
   // and (R-087 item 5) the tracer change sum (DY_new - DY_old) sqrt(gamma) dV, the mass in
-  // recovered cells whose previous P/rho was > 1e3 tfloor (a resolved temperature erased;
+  // recovered cells whose previous P/rho was > 1e-10 (a resolved temperature erased;
   // per window), and the last full C2P call's census: recovered mass bound / unbound (the
   // BH-frame Killing energy, as the zone's), all bound mass, sum m (P/rho)_previous
   Real crec_ddy = 0.0, crec_ddy_total = 0.0, crec_hot = 0.0;
   Real crec_mb = 0.0, crec_mu = 0.0, crec_mball = 0.0, crec_tm = 0.0;
   DvceArray4D<Real> crec_cnt;   // per-cell count since the last regrid (re-triggers)
+  // FOFC tally (DynGRMHDPS::FOFC, R-087 item 11), per window: interior cells hydro-flagged,
+  // excision-flux, scalar-only; on the lower faces of hydro-flagged / excised cells the
+  // count, sum |F_scalar written - F_D Y_upwind| and sum |F_D Y_upwind|; and the interior
+  // probe cells fofc_cold_recovery counted as good (rescued from FOFC)
+  DvceArray1D<Real> fofc_tl;
   // <mhd> atmosphere_frame_gate (default 0 = everywhere): only floored cells farther than
   // this from the puncture (padm->bc_center, x_BH(t) for a moving puncture) get the
   // comoving velocity; near the BH, where infall dominates, the floor stays at v = 0
@@ -590,6 +595,7 @@ class PrimitiveSolverHydro {
   //! indices move, the per-cell counts)
   void CrecReset(bool cells) {
     crec_n = crec_dtau = crec_ds = crec_ddy = crec_hot = 0.0;
+    if (fofc_tl.extent_int(0) > 0) Kokkos::deep_copy(fofc_tl, 0.0);
     if (cells && crec_cnt.extent(0) > 0) Kokkos::deep_copy(crec_cnt, 0.0);
   }
   //! one CRECOV line (rank 0): the window's interior cold recoveries, their tau change
@@ -624,11 +630,16 @@ class PrimitiveSolverHydro {
         a0 = fmax(a0, cnt(m, k, j, i));
       }, Kokkos::Max<Real>(cmax));
     }
-    Real w[16] = {crec_n, crec_dtau, crec_ds, c[0], c[1], c[2], c[3], crec_dtau_total,
+    Real ft[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (fofc_tl.extent_int(0) >= 7) {
+      auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fofc_tl);
+      for (int q = 0; q < 7; ++q) ft[q] = h(q);
+    }
+    Real w[23] = {crec_n, crec_dtau, crec_ds, c[0], c[1], c[2], c[3], crec_dtau_total,
                   crec_ddy, crec_ddy_total, crec_hot, crec_mb, crec_mu, crec_mball, crec_tm,
-                  0.0};
+                  0.0, ft[0], ft[1], ft[2], ft[3], ft[4], ft[5], ft[6]};
 #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, w, 16, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, w, 23, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &cmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank != 0) return;
@@ -639,6 +650,9 @@ class PrimitiveSolverHydro {
               << " dDY=" << w[8] << " dDY_total=" << w[9] << " m_erased=" << w[10]
               << " m_bound=" << w[11] << " m_unbound=" << w[12] << " Mbound_all=" << w[13]
               << " Tprev_mw=" << ((w[11] + w[12] > 0.0) ? w[14]/(w[11] + w[12]) : 0.0)
+              << " fofc_hydro=" << w[16] << " fofc_exc=" << w[17] << " fofc_scal=" << w[18]
+              << " fofc_faces=" << w[19] << " fofc_dFscal=" << w[20] << " fofc_Fup=" << w[21]
+              << " fofc_rescued=" << w[22]
               << std::endl;
   }
 
@@ -1295,6 +1309,10 @@ class PrimitiveSolverHydro {
     sf_hll = pin->GetOrAddBoolean(block, "scalar_flux_hll", false);
     crec_on = pin->GetOrAddBoolean(block, "cold_recovery", false);
     crec_fofc = pin->GetOrAddBoolean(block, "fofc_cold_recovery", false);
+    if (crec_on) {
+      Kokkos::realloc(fofc_tl, 7);
+      Kokkos::deep_copy(fofc_tl, 0.0);
+    }
     if (crec_fofc && !crec_on) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "<" << block << "> fofc_cold_recovery needs cold_recovery"
@@ -1947,6 +1965,8 @@ class PrimitiveSolverHydro {
     // the FOFC probe's copy of the solver with the normal primitive floor (not a failure)
     const bool cfofc_ = crec_fofc && floors_only;
     auto psc_ = ps;
+    const bool ftl6_ = cfofc_ && fofc_tl.extent_int(0) >= 7;
+    auto &ftl6v_ = fofc_tl;
     if (cfofc_) psc_.GetEOSMutable().SetPrimitiveFloorFailure(false);
     if (crec_ && static_cast<int>(crec_cnt.extent(0)) != cons.extent_int(0)) {
       Kokkos::realloc(crec_cnt, cons.extent_int(0), cons.extent_int(2), cons.extent_int(3),
@@ -2115,7 +2135,12 @@ class PrimitiveSolverHydro {
           good = ColdRecoveryTry(eos_, r2, cons_pt_old, b3u, g3u, cnatm_, cnthr_, cwmax_,
                                  ctf_, mb, nscal, p2, tau_c);
         }
-        if (!good) fofc_(m,k,j,i) = true;
+        if (!good) {
+          fofc_(m,k,j,i) = true;
+        } else if (ftl6_ && i >= is && i <= ie_ && j >= js && j <= je_ && k >= ks &&
+                   k <= ke_) {
+          Kokkos::atomic_add(&ftl6v_(6), 1.0);   // rescued from FOFC by the rule
+        }
       } else if (!floors_only) {
         if (result.error != Primitive::Error::SUCCESS && (nerrs_ + sumerrs < errcap_)) {
           sumerrs++;
@@ -2423,7 +2448,7 @@ class PrimitiveSolverHydro {
             if (de_on_) cdy_r += (cons(m, nhyd + de_idx_, k, j, i) - raw_dy)*dvol;
             const Real mc = raw_ds[0]*dvol;
             cmt_r += mc*tprev;
-            if (tprev > 1.0e3*ctf_) cmh_r += mc;
+            if (tprev > 1.0e-10) cmh_r += mc;   // resolved (>> the ~1e-17 tau noise)
             if (cons(m, IDN, k, j, i) != raw_ds[0] || cons(m, IM1, k, j, i) != raw_ds[1] ||
                 cons(m, IM2, k, j, i) != raw_ds[2] || cons(m, IM3, k, j, i) != raw_ds[3]) {
               crx_r += 1.0;

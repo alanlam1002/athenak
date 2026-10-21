@@ -487,6 +487,7 @@ class PrimitiveSolverHydro {
   static constexpr int kMlFexc = kMlNX + 3, kMlFout = kMlNX + 4, kMlFo6 = kMlNX + 5;
   static constexpr int kMlFo12 = kMlNX + 6, kMlNcell = kMlNX + 7, kMlLen = kMlNX + 8;
   DvceArray4D<Real> ml_d0, ml_cls;   // D sqrt(gamma) before the C2P; the cell's class
+  DvceArray4D<Real> ml_p0, ml_a0;    // stage-0 ledger: psi4, alpha before the regrid path
   Real ml_stage[4][kMlLen] = {};
   // tau and the dual-energy tracer DY (R-069 item 4): per stage and variable,
   // {M_pre, M_end, M(u1), F_out}; printed as MLEDGER2 lines (no class bins)
@@ -827,9 +828,23 @@ class PrimitiveSolverHydro {
       Kokkos::realloc(ml_d0, nmbu, n3, n2, n1);
       Kokkos::realloc(ml_cls, nmbu, n3, n2, n1);
     }
+    if (static_cast<int>(ml_p0.extent(0)) != nmbu) {
+      Kokkos::realloc(ml_p0, nmbu, n3, n2, n1);
+      Kokkos::realloc(ml_a0, nmbu, n3, n2, n1);
+    }
     Kokkos::deep_copy(ml_d0, Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(IDN),
                                              Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
     Kokkos::deep_copy(ml_cls, 4.0);
+    {  // C-077: the metric the old blocks carried into the regrid, before the CFC re-solve
+      auto &adm = pmy_pack->padm->adm;
+      auto &p0 = ml_p0;
+      auto &a0 = ml_a0;
+      par_for("ml0_met0", DevExeSpace(), 0, nmbu-1, 0, n3-1, 0, n2-1, 0, n1-1,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        p0(m, k, j, i) = adm.psi4(m, k, j, i);
+        a0(m, k, j, i) = adm.alpha(m, k, j, i);
+      });
+    }
     ml0_prol = MlMass(u0, IDN);
     ml0_armed = true;
   }
@@ -890,13 +905,36 @@ class PrimitiveSolverHydro {
       if (a > lm.val) { lm.val = a; lm.loc = idx; }
     }, MaxLoc(mx));
     dmax = mx.val; imax = mx.loc;
+    // C-077: the metric change across the regrid path in OLD blocks: max |psi4/psi4_0 - 1|,
+    // max |alpha/alpha_0 - 1|, and the removal-weighted mean |psi4/psi4_0 - 1|
+    Real met[4] = {0.0, 0.0, 0.0, 0.0};
+    {
+      auto &adm = pmy_pack->padm->adm;
+      auto &p0 = ml_p0;
+      auto &a0 = ml_a0;
+      Kokkos::parallel_reduce("ml0_met", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &mp, Real &ma, Real &wsum, Real &wn) {
+        const int m = idx/nkji;
+        if (isnew(m)) return;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+        const Real dp = fabs(adm.psi4(m, k, j, i)/p0(m, k, j, i) - 1.0);
+        const Real da = fabs(adm.alpha(m, k, j, i)/a0(m, k, j, i) - 1.0);
+        mp = fmax(mp, dp); ma = fmax(ma, da);
+        const Real dm = (d0(m, k, j, i) - u0(m, IDN, k, j, i))*
+                        size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        if (dm > 0.0) { wsum += dm*dp; wn += dm; }
+      }, Kokkos::Max<Real>(met[0]), Kokkos::Max<Real>(met[1]), Kokkos::Sum<Real>(met[2]),
+         Kokkos::Sum<Real>(met[3]));
+    }
     auto hb = Kokkos::create_mirror_view_and_copy(HostMemSpace(), bins);
     std::vector<Real> b(kN + 1);
     for (int n = 0; n < kN; ++n) b[n] = hb(n);
     b[kN] = MlMass(u0, IDN);
     Real mprol = ml0_prol;
     // the largest cell: x y z r_BH level new class D_before D_after (on its rank)
-    Real cell[10] = {dmax, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    Real cell[14] = {dmax, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     if (imax >= 0 && dmax > 0.0) {
       const int m = imax/nkji;
       const int k = (imax - m*nkji)/nji + ks;
@@ -911,22 +949,30 @@ class PrimitiveSolverHydro {
       auto hn = Kokkos::create_mirror_view_and_copy(HostMemSpace(), isnew);
       cell[6] = hn(m);
       Real v3[3];
-      DvceArray1D<Real> t("ml0_cell", 3);
+      DvceArray1D<Real> t("ml0_cell", 7);
+      auto &adm = pmy_pack->padm->adm;
+      auto &p0 = ml_p0;
+      auto &a0 = ml_a0;
       Kokkos::parallel_for("ml0_cell", Kokkos::RangePolicy<>(DevExeSpace(), 0, 1),
       KOKKOS_LAMBDA(const int) {
         t(0) = cls(m, k, j, i); t(1) = d0(m, k, j, i); t(2) = u0(m, IDN, k, j, i);
+        t(3) = p0(m, k, j, i); t(4) = adm.psi4(m, k, j, i);
+        t(5) = a0(m, k, j, i); t(6) = adm.alpha(m, k, j, i);
       });
       auto ht = Kokkos::create_mirror_view_and_copy(HostMemSpace(), t);
       for (int q = 0; q < 3; ++q) v3[q] = ht(q);
       cell[7] = v3[0]; cell[8] = v3[1]; cell[9] = v3[2];
+      for (int q = 0; q < 4; ++q) cell[10 + q] = ht(3 + q);
     }
 #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, b.data(), kN + 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &mprol, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, met, 2, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, met + 2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     struct { double v; int r; } lin = {static_cast<double>(dmax), global_variable::my_rank},
                                 gout;
     MPI_Allreduce(&lin, &gout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
-    MPI_Bcast(cell, 10, MPI_ATHENA_REAL, gout.r, MPI_COMM_WORLD);
+    MPI_Bcast(cell, 14, MPI_ATHENA_REAL, gout.r, MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank != 0) return;
     const Real mpost = b[kN];
@@ -944,7 +990,12 @@ class PrimitiveSolverHydro {
     std::cout << "MLEDGER0_MAX cycle=" << pmy_pack->pmesh->ncycle << " absdm=" << cell[0]
               << " x=" << cell[1] << " y=" << cell[2] << " z=" << cell[3] << " rBH="
               << cell[4] << " level=" << cell[5] << " new=" << cell[6] << " class="
-              << cell[7] << " Dbefore=" << cell[8] << " Dafter=" << cell[9] << std::endl;
+              << cell[7] << " Dbefore=" << cell[8] << " Dafter=" << cell[9]
+              << " psi4before=" << cell[10] << " psi4after=" << cell[11]
+              << " alphabefore=" << cell[12] << " alphaafter=" << cell[13] << std::endl;
+    std::cout << "MLEDGER0_MET cycle=" << pmy_pack->pmesh->ncycle << " old_dpsi4_max="
+              << met[0] << " old_dalpha_max=" << met[1] << " old_dpsi4_removal_weighted="
+              << ((met[3] > 0.0) ? met[2]/met[3] : 0.0) << std::endl;
   }
 
   //! R-072 item 1 metric probe: with dual_energy_probe_box1/2 and _cycles set, every cell

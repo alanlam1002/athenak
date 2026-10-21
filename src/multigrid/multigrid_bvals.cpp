@@ -25,6 +25,7 @@
 #include "../mesh/nghbr_index.hpp"
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
+#include "../utils/chksum.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \fn MultigridBoundaryValues::MultigridBoundaryValues()
@@ -2707,4 +2708,24 @@ TaskStatus MultigridBoundaryValues::ClearSendMG() {
 #else
   return ClearSend();
 #endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridBoundaryValues::ChkBuffers()
+//! \brief <job> checksum_cycles: exact checksums of coarse_buf_, the rank-packed aggregate
+//! send/recv buffers and each neighbour slot's recv buffer (utils/chksum.hpp)
+
+void MultigridBoundaryValues::ChkBuffers(int cycle, int stage, const std::string &name,
+                                         int k) {
+  chksum::Line(cycle, stage, name, k, "cbuf", coarse_buf_);
+  chksum::Line(cycle, stage, name, k, "aggrecv", mg_rank_recvbuf_vars_);
+  chksum::Line(cycle, stage, name, k, "aggsend", mg_rank_sendbuf_vars_);
+  uint64_t a = 0;
+  for (int n = 0; n < pmy_pack->pmb->nnghbr; ++n) {
+    if (recvbuf[n].vars.span() > 0) {
+      a += chksum::Sum(recvbuf[n].vars.data(), recvbuf[n].vars.span());
+    }
+  }
+  std::fprintf(chksum::fp, "%d %d %s %d rbufs %016llx\n", cycle, stage, name.c_str(), k,
+               static_cast<unsigned long long>(a));
 }

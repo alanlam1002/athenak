@@ -3166,6 +3166,9 @@ void MultigridDriver::MGChk(const char *where, Real x) {
                                                  oct_u_buf_[l].size()));
     }
   }
+  if (mglevels_ != nullptr && mglevels_->pbval != nullptr) {
+    mglevels_->pbval->ChkBuffers(cycle, stage, name, k);
+  }
   std::fprintf(chksum::fp, "%d %d %s %d mpole %016llx\n", cycle, stage, name.c_str(), k,
                (unsigned long long)host(mpcoeff_, sizeof(mpcoeff_)/sizeof(Real)));
   std::fflush(chksum::fp);

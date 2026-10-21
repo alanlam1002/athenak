@@ -543,6 +543,16 @@ class MultigridDriver {
   // checksums of the MG state (block levels, root, octets, multipole moments) at one point
   // of the solve; x (e.g. a defect norm) is written as its bit pattern
   void MGChk(const char *where, Real x = 0.0);
+  // MG task-list tasks wrapped so a completed task records MGChk("<task>") (a no-op
+  // unless <job> checksum_cycles is active)
+  template <typename F>
+  auto MGT(F f, const char *name) {
+    return [this, f, name](Driver *d, int s) -> TaskStatus {
+      TaskStatus st = (this->*f)(d, s);
+      if (st == TaskStatus::complete) MGChk(name);
+      return st;
+    };
+  }
   void ScaleMultipoleCoefficients();
   void CalculateCenterOfMass();
 
@@ -793,6 +803,8 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   TaskStatus ProlongateFCMG(DvceArray5D<Real> &u);
 
   DvceArray5D<Real> coarse_buf_;
+  // <job> checksum_cycles (MultigridDriver::MGChk): this rank's boundary buffers
+  void ChkBuffers(int cycle, int stage, const std::string &name, int k);
 
   MGPerLevelIndcs send_mg_indcs_[56][kMaxMGLevels];
   MGPerLevelIndcs recv_mg_indcs_[56][kMaxMGLevels];

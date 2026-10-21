@@ -17,6 +17,9 @@ mass within 5% and 50% (t_half) within 3%; peak Mdot within 3% (t_peak dropped);
 quantile sets q10-q90 each within 0.01 dE; T-B tolerances max(tol, 2 |B - A|); rest-mass closure
 <= 1e-10 M* per segment, from the run's MLEDGER lines when present (update non-conservation
 sum(Y + Fout) + between-cycle changes), else from hst + booked tallies.
+C-081 / R-084 working tolerances (2 sigma_diff of the three R6 noise samples) replace these for t_half
+(9.7%), peak Mdot (3.6%), remnant (1.7%), quantiles (0.027 bound / 0.033 unbound) and add debris bound
+mass (8.3%); the thermal rows are unchanged.
 
     c051_s2.py [--runs 'R6:T=S2T_R6,A=S2A_R6,B=S2B_R6;R7:T=S2T_R7,A=S2A_R7,B=S2B_R7'] [--nproc 6]
                [--out DIR] [--name c051_s2_r076.txt]
@@ -293,7 +296,8 @@ def main():
     rows.append('== 4. fallback (frozen-in from the final restart; r_BH >= 3; Keplerian return from the release geodesic '
                 'periapsis). R-076 item 2: F(E) over ALL bound gas (remnant included), each arm normalised by its own '
                 'bound mass, KS <= 0.01; debris (remnant excluded) M_fb at 1% / 10% of its bound mass within 5%, t_half '
-                '(50%) within 3%; peak Mdot within 3% (t_peak dropped); T-B tolerances max(tol, 2|B-A|)')
+                '(50%) within 9.7%; peak Mdot within 3.6% (t_peak dropped); debris bound mass within 8.3% '
+                '(C-081 / R-084 working tolerances); T-B tolerances max(tol, 2|B-A|)')
     tc = np.sqrt(M.TB[1:] * M.TB[:-1])
     for r, cfg in RS.items():
         tp = M.t_peri(cfg['src'], cfg['rp'])
@@ -309,7 +313,10 @@ def main():
                                  f10=fb[a1][3][1] / fb[a2][3][1] - 1, thalf=fb[a1][3][2] / fb[a2][3][2] - 1,
                                  pk=md[a1].max() / md[a2].max() - 1, mb=fb[a1][2] / fb[a2][2] - 1,
                                  mbd=fb[a1][4] / fb[a2][4] - 1)
-        tol = dict(ks=0.01, f1=0.05, f10=0.05, thalf=0.03, pk=0.03)
+        tol = dict(ks=0.01, f1=0.05, f10=0.05,
+                   thalf=0.097,  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
+                   pk=0.036,  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
+                   mbd=0.083)  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
         for a1, a2 in pairs:
             u = met[(a1, a2)]
             ba = met.get(('B', 'A'))
@@ -390,7 +397,11 @@ def main():
                                  rem=u['rem'] / v['rem'] - 1, Lz=abs(u['Lz'] - v['Lz']) / abs(v['Lz']),
                                  qb=np.max(np.abs(u['qb'] - v['qb'])), qu=np.max(np.abs(u['qu'] - v['qu'])),
                                  E=u['E'] - v['E'])
-        tol = dict(K=lim['K'], M3=lim['M3'], bound=lim['bound'], rem=0.005, Lz=1e-5, qb=0.01, qu=0.01)
+        tol = dict(K=lim['K'], M3=lim['M3'], bound=lim['bound'],
+                   rem=0.017,  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
+                   Lz=1e-5,
+                   qb=0.027,  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
+                   qu=0.033)  # C-081 / R-084 working tolerance (2σ_diff, n = 3, ±50%)
         for a1, a2 in arm_pairs(AR[r]):
             lab = f'{a1}-{a2}'
             u, ba = dif[(a1, a2)], dif.get(('B', 'A'))

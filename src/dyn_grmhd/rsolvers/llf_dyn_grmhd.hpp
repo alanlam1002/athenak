@@ -31,7 +31,7 @@ void SingleStateLLF_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eo
     Real prim_l[NPRIM], Real prim_r[NPRIM], Real Bu_l[NPRIM], Real Bu_r[NPRIM],
     const int nmhd, const int nscal,
     Real g3d[NSPMETRIC], Real beta_u[3], Real alpha,
-    Real flux[NCONS], Real bflux[NMAG]) {
+    Real flux[NCONS], Real bflux[NMAG], Real *fscal = nullptr) {
   constexpr int iby = ((ivx - IVX) + 1)%3;
   constexpr int ibz = ((ivx - IVX) + 2)%3;
 
@@ -87,6 +87,15 @@ void SingleStateLLF_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eo
                (alpha*(bfl[iby] + bfr[iby]) - lambda * (Bu_rund[iby] - Bu_lund[iby]));
   bflux[IBZ] = 0.5 * sdetg *
                (alpha*(bfl[ibz] + bfr[ibz]) - lambda * (Bu_rund[ibz] - Bu_lund[ibz]));
+
+  // Optional (<mhd>/fofc_scalar_consistent): the same LLF flux for each D*Y.
+  if (fscal != nullptr) {
+    for (int n = 0; n < nscal; n++) {
+      const Real yl = prim_l[PYF + n], yr = prim_r[PYF + n];
+      fscal[n] = 0.5*sdetg*(alpha*(fl[CDN]*yl + fr[CDN]*yr) -
+                            lambda*(cons_r[CDN]*yr - cons_l[CDN]*yl));
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------

@@ -12,14 +12,70 @@
 #include <vector>
 
 #include "numerical_relativity.hpp"
+#include "globals.hpp"
+#include "mesh/mesh.hpp"
 #include "z4c/z4c.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cfc/cfc.hpp"
+#include "mhd/mhd.hpp"
+#include "coordinates/adm.hpp"
+#include "utils/chksum.hpp"
 
 namespace numrel {
 
 NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *pin) {
   pmy_pack = ppack;
+  chksum::ncycles = pin->GetOrAddInteger("debug", "checksum_cycles", 0);
+}
+
+//! <debug> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task
+static void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage) {
+  const int cycle = pp->pmesh->ncycle;
+  if (!chksum::Active(cycle)) return;
+  if (chksum::fp == nullptr) {
+    char fn[64];
+    std::snprintf(fn, sizeof(fn), "chksum.%d.txt", global_variable::my_rank);
+    chksum::fp = std::fopen(fn, "w");
+  }
+  if (cycle != chksum::last_cycle || stage != chksum::last_stage) {
+    chksum::occ.clear();
+    chksum::last_cycle = cycle; chksum::last_stage = stage;
+  }
+  const int k = chksum::occ[task]++;
+  auto *fp = chksum::fp;
+  std::fprintf(fp, "%d %d %s %d host %016llx %016llx %016llx %016llx %016llx %016llx "
+               "%016llx %016llx\n", cycle, stage, task.c_str(), k,
+               (unsigned long long)chksum::Bits(pp->pmesh->dt),
+               (unsigned long long)chksum::Bits(pp->pmesh->time),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->frame_vel_u[0] : 0.0),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->frame_vel_u[1] : 0.0),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->frame_vel_u[2] : 0.0),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->bc_center[0] : 0.0),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->bc_center[1] : 0.0),
+               (unsigned long long)chksum::Bits(pp->padm ? pp->padm->bc_center[2] : 0.0));
+  if (pp->pmhd != nullptr) {
+    auto *m = pp->pmhd;
+    chksum::Line(cycle, stage, task, k, "u0", m->u0);
+    chksum::Line(cycle, stage, task, k, "u1", m->u1);
+    chksum::Line(cycle, stage, task, k, "w0", m->w0);
+    chksum::Line(cycle, stage, task, k, "flx1", m->uflx.x1f);
+    chksum::Line(cycle, stage, task, k, "flx2", m->uflx.x2f);
+    chksum::Line(cycle, stage, task, k, "flx3", m->uflx.x3f);
+    chksum::Line(cycle, stage, task, k, "fofc", m->fofc);
+  }
+  if (pp->pdyngr != nullptr) {
+    chksum::Line(cycle, stage, task, k, "temp", pp->pdyngr->temperature);
+  }
+  if (pp->padm != nullptr) chksum::Line(cycle, stage, task, k, "adm", pp->padm->u_adm);
+  if (pp->pcfc != nullptr) {
+    auto *c = pp->pcfc;
+    chksum::Line(cycle, stage, task, k, "dpsi", c->delta_psi);
+    chksum::Line(cycle, stage, task, k, "dapsi", c->delta_alpha_psi);
+    chksum::Line(cycle, stage, task, k, "cbeta", c->u_beta);
+    chksum::Line(cycle, stage, task, k, "adual", c->u_adual);
+    chksum::Line(cycle, stage, task, k, "utilde", c->u_tilde);
+  }
+  std::fflush(fp);
 }
 
 std::vector<QueuedTask>& NumericalRelativity::SelectQueue(TaskLocation loc) {
@@ -124,7 +180,18 @@ bool NumericalRelativity::AssembleNumericalRelativityTasks(
       TaskID dep(0);
       if (DependenciesMet(task, queue, dep) && !task.added) {
         task.added = true;
-        task.id = list->AddTask(task.func_, dep);
+        if (chksum::ncycles > 0) {
+          auto f = task.func_;
+          const std::string nm = task.name_string;
+          MeshBlockPack *pp = pmy_pack;
+          task.id = list->AddTask([f, nm, pp](Driver *d, int s) mutable -> TaskStatus {
+            TaskStatus st = f(d, s);
+            if (st == TaskStatus::complete) ChecksumAfterTask(pp, nm, s);
+            return st;
+          }, dep);
+        } else {
+          task.id = list->AddTask(task.func_, dep);
+        }
         cycle_added++;
         added++;
         /*std::cout << "Successfully added " << task.name_string << " to task list!\n"

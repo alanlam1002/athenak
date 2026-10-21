@@ -166,6 +166,11 @@ class PrimitiveSolverHydro {
   bool de_div_cov = false;
   Real de_psi_shock = 0.25, de_vcurv_shock = 0.05, de_psi_jump = 1.0e30;
   bool de_recon_rhoy = false, de_flux_hll = false;
+  // <mhd> scalar_flux_hll (default false; ported from proj/g-mode, R-087 item 3): with
+  // rsolver = hlle, HLLE_DYNGR writes EVERY scalar's flux as the HLL flux of D*Y with the
+  // wave speeds and branch of D (the formula of the de_flux_hll tracer code, generalised),
+  // and CalcFluxes skips the upwind F_D*Y_upwind for them.
+  bool sf_hll = false;
   DvceArray4D<int> de_shock;       // per-cell shock flag from the previous primitives
   DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
   int de_dilate = 1;               // also flag the face neighbours of flagged cells
@@ -231,10 +236,21 @@ class PrimitiveSolverHydro {
   // rho = D/W is below the density-floor threshold. The same kernel runs every C2P path
   // (RK stage, regrid / init, ghosts, ConToPrimBC); the FOFC probe (floors_only) is unchanged.
   bool crec_on = false;
+  // <mhd> fofc_cold_recovery (default false; R-084 Q2 / R-087 item 1, needs cold_recovery):
+  // the FOFC probe (ConsToPrim floors_only) counts a cell as good iff the C2P would
+  // cold-recover it (ColdRecoveryTry on a re-inversion with the normal primitive floor);
+  // every other floor or failure stays a failure.
+  bool crec_fofc = false;
   // per C2P-call window (reset by MassLedgerPre(1) / MassLedgerRegridPre, printed with the
   // mass ledger): interior cold recoveries, their sum (tau_new - tau_old) sqrt(gamma) dV,
   // and cells whose D or S_i changed across the C2P anyway (must stay 0)
   Real crec_n = 0.0, crec_dtau = 0.0, crec_ds = 0.0, crec_dtau_total = 0.0;
+  // and (R-087 item 5) the tracer change sum (DY_new - DY_old) sqrt(gamma) dV, the mass in
+  // recovered cells whose previous P/rho was > 1e3 tfloor (a resolved temperature erased;
+  // per window), and the last full C2P call's census: recovered mass bound / unbound (the
+  // BH-frame Killing energy, as the zone's), all bound mass, sum m (P/rho)_previous
+  Real crec_ddy = 0.0, crec_ddy_total = 0.0, crec_hot = 0.0;
+  Real crec_mb = 0.0, crec_mu = 0.0, crec_mball = 0.0, crec_tm = 0.0;
   DvceArray4D<Real> crec_cnt;   // per-cell count since the last regrid (re-triggers)
   // <mhd> atmosphere_frame_gate (default 0 = everywhere): only floored cells farther than
   // this from the puncture (padm->bc_center, x_BH(t) for a moving puncture) get the
@@ -573,7 +589,7 @@ class PrimitiveSolverHydro {
   //! cold recovery (crec_on): reset the per-window tallies (and, at a regrid, where block
   //! indices move, the per-cell counts)
   void CrecReset(bool cells) {
-    crec_n = crec_dtau = crec_ds = 0.0;
+    crec_n = crec_dtau = crec_ds = crec_ddy = crec_hot = 0.0;
     if (cells && crec_cnt.extent(0) > 0) Kokkos::deep_copy(crec_cnt, 0.0);
   }
   //! one CRECOV line (rank 0): the window's interior cold recoveries, their tau change
@@ -608,16 +624,22 @@ class PrimitiveSolverHydro {
         a0 = fmax(a0, cnt(m, k, j, i));
       }, Kokkos::Max<Real>(cmax));
     }
-    Real w[8] = {crec_n, crec_dtau, crec_ds, c[0], c[1], c[2], c[3], crec_dtau_total};
+    Real w[16] = {crec_n, crec_dtau, crec_ds, c[0], c[1], c[2], c[3], crec_dtau_total,
+                  crec_ddy, crec_ddy_total, crec_hot, crec_mb, crec_mu, crec_mball, crec_tm,
+                  0.0};
 #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, w, 8, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, w, 16, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &cmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank != 0) return;
     std::cout << std::setprecision(10) << "CRECOV cycle=" << pmy_pack->pmesh->ncycle
               << " path=" << path << " n=" << w[0] << " dtau=" << w[1] << " DSchanged="
               << w[2] << " dtau_total=" << w[7] << " cells_ge1=" << w[3] << " ge2=" << w[4]
-              << " ge5=" << w[5] << " ge17=" << w[6] << " maxcount=" << cmax << std::endl;
+              << " ge5=" << w[5] << " ge17=" << w[6] << " maxcount=" << cmax
+              << " dDY=" << w[8] << " dDY_total=" << w[9] << " m_erased=" << w[10]
+              << " m_bound=" << w[11] << " m_unbound=" << w[12] << " Mbound_all=" << w[13]
+              << " Tprev_mw=" << ((w[11] + w[12] > 0.0) ? w[14]/(w[11] + w[12]) : 0.0)
+              << std::endl;
   }
 
   //! before the stage's C2P: M_pre, M(u1), and a copy of u0(IDN)
@@ -1270,7 +1292,15 @@ class PrimitiveSolverHydro {
     SetPolicyParams(block, pin);
     atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
     atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
+    sf_hll = pin->GetOrAddBoolean(block, "scalar_flux_hll", false);
     crec_on = pin->GetOrAddBoolean(block, "cold_recovery", false);
+    crec_fofc = pin->GetOrAddBoolean(block, "fofc_cold_recovery", false);
+    if (crec_fofc && !crec_on) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<" << block << "> fofc_cold_recovery needs cold_recovery"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     if (crec_on && !std::is_same_v<Primitive::IdealGas, EOSPolicy>) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << "<" << block << "> cold_recovery needs the ideal-gas EOS"
@@ -1914,6 +1944,10 @@ class PrimitiveSolverHydro {
     auto &mlcls_ = ml_cls;
     auto &mlc2p_ = ml_c2p;
     const bool crec_ = crec_on && !floors_only;
+    // the FOFC probe's copy of the solver with the normal primitive floor (not a failure)
+    const bool cfofc_ = crec_fofc && floors_only;
+    auto psc_ = ps;
+    if (cfofc_) psc_.GetEOSMutable().SetPrimitiveFloorFailure(false);
     if (crec_ && static_cast<int>(crec_cnt.extent(0)) != cons.extent_int(0)) {
       Kokkos::realloc(crec_cnt, cons.extent_int(0), cons.extent_int(2), cons.extent_int(3),
                       cons.extent_int(4));
@@ -1933,11 +1967,13 @@ class PrimitiveSolverHydro {
     Real dE_tally = 0.0, dPx_tally = 0.0, dPy_tally = 0.0, dPz_tally = 0.0;
     Real dEraw_tally = 0.0;
     Real de_nden = 0.0, de_nent_c = 0.0, de_dE_c = 0.0;
-    Real crn_c = 0.0, crt_c = 0.0, crx_c = 0.0;
+    Real crn_c = 0.0, crt_c = 0.0, crx_c = 0.0, cdy_c = 0.0, cmb_c = 0.0, cmu_c = 0.0;
+    Real mba_c = 0.0, cmt_c = 0.0, cmh_c = 0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, int &sumerrs, Real &dE_r, Real &dPx_r, Real &dPy_r,
                   Real &dPz_r, Real &dEraw_r, Real &nden_r, Real &nent_r, Real &dede_r,
-                  Real &crn_r, Real &crt_r, Real &crx_r) {
+                  Real &crn_r, Real &crt_r, Real &crx_r, Real &cdy_r, Real &cmb_r,
+                  Real &cmu_r, Real &mba_r, Real &cmt_r, Real &cmh_r) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -1974,6 +2010,10 @@ class PrimitiveSolverHydro {
       Real cons_pt[NCONS], cons_pt_old[NCONS], prim_pt[NPRIM];
       const Real raw_ds[4] = {cons(m, IDN, k, j, i), cons(m, IM1, k, j, i),
                               cons(m, IM2, k, j, i), cons(m, IM3, k, j, i)};
+      // cold recovery census: the tracer and the previous primitives' P/rho (the
+      // temperature before this C2P; meaningless where a regrid moved the block)
+      const Real raw_dy = de_on_ ? cons(m, nhyd + de_idx_, k, j, i) : 0.0;
+      const Real tprev = crec_ ? prim(m, IPR, k, j, i)/prim(m, IDN, k, j, i) : 0.0;
       cons_pt[CDN] = cons_pt_old[CDN] = cons(m, IDN, k, j, i)*isdetg;
       cons_pt[CSX] = cons_pt_old[CSX] = cons(m, IM1, k, j, i)*isdetg;
       cons_pt[CSY] = cons_pt_old[CSY] = cons(m, IM2, k, j, i)*isdetg;
@@ -2065,7 +2105,17 @@ class PrimitiveSolverHydro {
       }
 
       if (result.error != Primitive::Error::SUCCESS && floors_only) {
-        fofc_(m,k,j,i) = true;
+        // fofc_cold_recovery: a prim-floor failure that the C2P would cold-recover is good
+        bool good = false;
+        if (cfofc_ && result.error == Primitive::Error::PRIM_FLOOR &&
+            !(excise && !smoothing && excision_floor_(m,k,j,i))) {
+          Real c2[NCONS], p2[NPRIM], tau_c;
+          for (int n = 0; n < NCONS; ++n) c2[n] = cons_pt_old[n];
+          auto r2 = psc_.ConToPrim(p2, c2, b3u, g3d, g3u);
+          good = ColdRecoveryTry(eos_, r2, cons_pt_old, b3u, g3u, cnatm_, cnthr_, cwmax_,
+                                 ctf_, mb, nscal, p2, tau_c);
+        }
+        if (!good) fofc_(m,k,j,i) = true;
       } else if (!floors_only) {
         if (result.error != Primitive::Error::SUCCESS && (nerrs_ + sumerrs < errcap_)) {
           sumerrs++;
@@ -2126,31 +2176,13 @@ class PrimitiveSolverHydro {
         bool de_write = false;
         // ---- cold recovery (see crec_on): a good inversion with T < tfloor, rho not floored
         bool crec = false;
-        if (crec_ && result.error == Primitive::Error::SUCCESS && result.prim_floor &&
-            !result.cons_floor && !(excise && !smoothing && excision_floor_(m,k,j,i)) &&
-            b3u[IBX] == 0.0 && b3u[IBY] == 0.0 && b3u[IBZ] == 0.0 &&
-            !(prim_pt[PRH] == cnatm_ && prim_pt[PVX] == 0.0 && prim_pt[PVY] == 0.0 &&
-              prim_pt[PVZ] == 0.0)) {
-          const Real D = cons_pt_old[CDN];
-          const Real S_d[3] = {cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ]};
-          Real S_u[3];
-          Primitive::RaiseForm(S_u, S_d, g3u);
-          const Real ssq = Primitive::Contract(S_u, S_d);
-          Real yc[MAX_SPECIES] = {0.0};
-          for (int n = 0; n < nscal; n++) yc[n] = cons_pt_old[CYD + n]/D;
-          const Real hf = eos_.GetEnthalpy(1.0, ctf_, yc);   // ideal gas: n-independent
-          Real uc[3];
-          const Real Wc = ColdRecoveryW(D, S_u, ssq, hf, uc);
-          const Real nc = D/(Wc*mb);
-          if (Wc <= cwmax_ && nc >= cnatm_*cnthr_) {
-            crec = true;
+        if (crec_ && !(excise && !smoothing && excision_floor_(m,k,j,i))) {
+          Real tau_c;
+          crec = ColdRecoveryTry(eos_, result, cons_pt_old, b3u, g3u, cnatm_, cnthr_, cwmax_,
+                                 ctf_, mb, nscal, prim_pt, tau_c);
+          if (crec) {
             for (int n = 0; n < NCONS; ++n) cons_pt[n] = cons_pt_old[n];
-            prim_pt[PRH] = nc;
-            prim_pt[PVX] = uc[0]; prim_pt[PVY] = uc[1]; prim_pt[PVZ] = uc[2];
-            for (int n = 0; n < nscal; n++) prim_pt[PYF + n] = yc[n];
-            prim_pt[PTM] = ctf_;
-            prim_pt[PPR] = eos_.GetPressure(nc, ctf_, yc);
-            cons_pt[CTA] = D*hf*Wc - prim_pt[PPR] - D;
+            cons_pt[CTA] = tau_c;
             de_write = true;
           }
         }
@@ -2388,6 +2420,10 @@ class PrimitiveSolverHydro {
             crn_r += 1.0;
             crt_r += (cons(m, IEN, k, j, i) - e0)*dvol;
             crc_(m,k,j,i) += 1.0;
+            if (de_on_) cdy_r += (cons(m, nhyd + de_idx_, k, j, i) - raw_dy)*dvol;
+            const Real mc = raw_ds[0]*dvol;
+            cmt_r += mc*tprev;
+            if (tprev > 1.0e3*ctf_) cmh_r += mc;
             if (cons(m, IDN, k, j, i) != raw_ds[0] || cons(m, IM1, k, j, i) != raw_ds[1] ||
                 cons(m, IM2, k, j, i) != raw_ds[2] || cons(m, IM3, k, j, i) != raw_ds[3]) {
               crx_r += 1.0;
@@ -2429,6 +2465,21 @@ class PrimitiveSolverHydro {
             cons(m, nhyd + n, k, j, i) = cons_pt[CYD + n]*sdetg;
           }
         }
+        if (crec_ && cint) {
+          // BH-frame Killing energy of the final state (as the zone's ekill): bound if < 0
+          const Real uu[3] = {prim_pt[PVX], prim_pt[PVY], prim_pt[PVZ]};
+          Real ud[3];
+          Primitive::LowerVector(ud, uu, g3d);
+          const Real Wf = sqrt(1.0 + Primitive::Contract(uu, ud));
+          const Real ek = adm.alpha(m, k, j, i)*Wf
+                        - ((adm.beta_u(m, 0, k, j, i) - fv0)*ud[0]
+                           + (adm.beta_u(m, 1, k, j, i) - fv1)*ud[1]
+                           + (adm.beta_u(m, 2, k, j, i) - fv2)*ud[2]) - 1.0;
+          const Real mc = cons(m, IDN, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*
+                          size.d_view(m).dx3;
+          if (ek < 0.0) mba_r += mc;
+          if (crec) { if (ek < 0.0) cmb_r += mc; else cmu_r += mc; }
+        }
         if (mlon_ && i >= is && i <= ie_ && j >= js && j <= je_ && k >= ks && k <= ke_) {
           Real c = 4.0;
           if (excise && !smoothing && excision_floor_(m,k,j,i)) {
@@ -2449,9 +2500,16 @@ class PrimitiveSolverHydro {
        Kokkos::Sum<Real>(dPy_tally), Kokkos::Sum<Real>(dPz_tally),
        Kokkos::Sum<Real>(dEraw_tally), Kokkos::Sum<Real>(de_nden),
        Kokkos::Sum<Real>(de_nent_c), Kokkos::Sum<Real>(de_dE_c), Kokkos::Sum<Real>(crn_c),
-       Kokkos::Sum<Real>(crt_c), Kokkos::Sum<Real>(crx_c));
+       Kokkos::Sum<Real>(crt_c), Kokkos::Sum<Real>(crx_c), Kokkos::Sum<Real>(cdy_c),
+       Kokkos::Sum<Real>(cmb_c), Kokkos::Sum<Real>(cmu_c), Kokkos::Sum<Real>(mba_c),
+       Kokkos::Sum<Real>(cmt_c), Kokkos::Sum<Real>(cmh_c));
     if (crec_) {
       crec_n += crn_c; crec_dtau += crt_c; crec_ds += crx_c; crec_dtau_total += crt_c;
+      crec_ddy += cdy_c; crec_ddy_total += cdy_c; crec_hot += cmh_c;
+      if (il == 0 && jl == 0 && kl == 0) {   // the full-array call: this C2P's census
+        crec_mb = cmb_c; crec_mu = cmu_c; crec_mball = mba_c;
+        crec_tm = (cmb_c + cmu_c > 0.0) ? cmt_c : 0.0;
+      }
     }
     if (de_on_) {
       de_dE_total += de_dE_c;
@@ -2476,6 +2534,46 @@ class PrimitiveSolverHydro {
       tally[3] += dPz_tally;
       tally[4] += dEraw_tally;
     }
+  }
+
+  //! The cold-recovery predicate and state (crec_on; shared by the C2P and, with
+  //! fofc_cold_recovery, by the FOFC probe, so both decide identically): r is the result
+  //! of an inversion with the normal floors and prim its output. True iff the inversion
+  //! succeeded, only the temperature was floored (prim_floor, no cons_floor, density not
+  //! reset to n_atm with v = 0), B = 0, and the D,S_i-only state at tf has W <= wmax and
+  //! n >= natm*nthr; then prim holds that state and tau its rebuilt tau. Else prim is
+  //! untouched.
+  template <typename EOST>
+  KOKKOS_INLINE_FUNCTION
+  static bool ColdRecoveryTry(const EOST &eos, const Primitive::SolverResult &r,
+                              const Real cons_old[NCONS], const Real b3u[NMAG],
+                              const Real g3u[NSPMETRIC], const Real natm, const Real nthr,
+                              const Real wmax, const Real tf, const Real mb, const int nscal,
+                              Real prim[NPRIM], Real &tau) {
+    if (r.error != Primitive::Error::SUCCESS || !r.prim_floor || r.cons_floor) return false;
+    if (b3u[IBX] != 0.0 || b3u[IBY] != 0.0 || b3u[IBZ] != 0.0) return false;
+    if (prim[PRH] == natm && prim[PVX] == 0.0 && prim[PVY] == 0.0 && prim[PVZ] == 0.0) {
+      return false;   // density floored: the atmosphere treatment
+    }
+    const Real D = cons_old[CDN];
+    const Real S_d[3] = {cons_old[CSX], cons_old[CSY], cons_old[CSZ]};
+    Real S_u[3];
+    Primitive::RaiseForm(S_u, S_d, g3u);
+    const Real ssq = Primitive::Contract(S_u, S_d);
+    Real yc[MAX_SPECIES] = {0.0};
+    for (int n = 0; n < nscal; n++) yc[n] = cons_old[CYD + n]/D;
+    const Real hf = eos.GetEnthalpy(1.0, tf, yc);   // ideal gas: n-independent
+    Real uc[3];
+    const Real Wc = ColdRecoveryW(D, S_u, ssq, hf, uc);
+    const Real nc = D/(Wc*mb);
+    if (!(Wc <= wmax && nc >= natm*nthr)) return false;
+    prim[PRH] = nc;
+    prim[PVX] = uc[0]; prim[PVY] = uc[1]; prim[PVZ] = uc[2];
+    for (int n = 0; n < nscal; n++) prim[PYF + n] = yc[n];
+    prim[PTM] = tf;
+    prim[PPR] = eos.GetPressure(nc, tf, yc);
+    tau = D*hf*Wc - prim[PPR] - D;
+    return true;
   }
 
   //! The zone's grid-rest velocity v = beta'/alpha, capped at zvmax along beta' (shared

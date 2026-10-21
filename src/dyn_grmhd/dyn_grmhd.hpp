@@ -134,6 +134,13 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
+  // <mhd>/fofc_scalar_consistent (default false; ported from proj/g-mode 3c39565, R-087
+  // item 2): on faces whose mass flux FOFC replaces with the first-order flux (hydro-flagged
+  // or excised cell), take each scalar flux as the same first-order Riemann flux of D*Y
+  // (same wave speeds and branch as D) instead of the first-order mass flux times the
+  // upwind cell Y. Scalar-only faces keep the upwind form, which is the one consistent with
+  // their unchanged high-order mass flux.
+  bool fofc_scalar_consistent;
   // <time>/gr_dt (default false): opt-in to the real GR fast-magnetosonic-speed
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.

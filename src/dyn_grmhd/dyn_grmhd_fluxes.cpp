@@ -73,6 +73,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
   const bool de_hll = eos.de_on && eos.de_flux_hll &&
                       rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr;
   const int de_n = nhyd + eos.de_idx;
+  // <mhd> scalar_flux_hll: HLLE_DYNGR writes every scalar flux (no upwind kernels)
+  const bool sf_hll = eos.sf_hll && rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr;
   if (de_rhoy) {
     par_for("de_rhoy_fwd", DevExeSpace(), 0, nmb1, 0, w0_.extent_int(2) - 1,
             0, w0_.extent_int(3) - 1, 0, w0_.extent_int(4) - 1,
@@ -173,7 +175,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // Calculate fluxes of scalars (if any)
     if (nvars > nhyd) {
       for (int n=nhyd; n<nvars; ++n) {
-        if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
+        if (sf_hll || (de_hll && n == de_n)) continue;  // set by HLLE_DYNGR
         par_for_inner(member, il, iu, [&](const int i) {
           if (flx1(m,IDN,k,j,i) >= 0.0) {
             flx1(m,n,k,j,i) = flx1(m,IDN,k,j,i)*wl(n,i);
@@ -293,7 +295,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         // Calculate fluxes of scalars (if any)
         if (nvars > nhyd) {
           for (int n=nhyd; n<nvars; ++n) {
-            if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
+            if (sf_hll || (de_hll && n == de_n)) continue;  // set by HLLE_DYNGR
             par_for_inner(member, is-1, ie+1, [&](const int i) {
               if (flx2(m,IDN,k,j,i) >= 0.0) {
                 flx2(m,n,k,j,i) = flx2(m,IDN,k,j,i)*wl(n,i);
@@ -409,7 +411,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         // Calculate fluxes of scalars (if any)
         if (nvars > nhyd) {
           for (int n=nhyd; n<nvars; ++n) {
-            if (de_hll && n == de_n) continue;  // set by HLLE_DYNGR
+            if (sf_hll || (de_hll && n == de_n)) continue;  // set by HLLE_DYNGR
             par_for_inner(member, is-1, ie+1, [&](const int i) {
               if (flx3(m,IDN,k,j,i) >= 0.0) {
                 flx3(m,n,k,j,i) = flx3(m,IDN,k,j,i)*wl(n,i);

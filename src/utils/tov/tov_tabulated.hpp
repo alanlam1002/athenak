@@ -27,7 +27,6 @@ class TabulatedEOS {
   DualArray1D<Real> m_log_e;
   DualArray1D<Real> m_ye;
 
-  Real dlrho;
   Real lrho_min;
   Real lrho_max;
   Real lP_min;
@@ -96,7 +95,6 @@ class TabulatedEOS {
       m_log_rho.h_view(in) = log(table_nb[in]*mb*
                                  unit_nuc.MassDensityConversion(unit_geo));
     }
-    dlrho = m_log_rho.h_view(1)-m_log_rho.h_view(0);
     lrho_min = m_log_rho.h_view(0);
     lrho_max = m_log_rho.h_view(m_nn-1);
 
@@ -153,7 +151,7 @@ class TabulatedEOS {
     if (lrho < lrho_min) {
       return 0.0;
     }
-    int lb = static_cast<int>((lrho-lrho_min)/dlrho);
+    int lb = FindRhoCell<loc>(lrho);
     int ub = lb + 1;
     auto& lrho_view = GetView<loc>(m_log_rho);
     auto& lp_view = GetView<loc>(m_log_p);
@@ -167,7 +165,7 @@ class TabulatedEOS {
     if (lrho < lrho_min) {
       return 0.0;
     }
-    int lb = static_cast<int>((lrho-lrho_min)/dlrho);
+    int lb = FindRhoCell<loc>(lrho);
     int ub = lb + 1;
     auto& lrho_view = GetView<loc>(m_log_rho);
     auto& le_view = GetView<loc>(m_log_e);
@@ -195,7 +193,7 @@ class TabulatedEOS {
     if (lrho < lrho_min || !has_ye) {
       return ye_atmosphere;
     }
-    int lb = static_cast<int>((lrho-lrho_min)/dlrho);
+    int lb = FindRhoCell<loc>(lrho);
     int ub = lb + 1;
     auto& lrho_view = GetView<loc>(m_log_rho);
     auto& ye_view = GetView<loc>(m_ye);
@@ -222,6 +220,27 @@ class TabulatedEOS {
     } else {
       return arr.d_view;
     }
+  }
+
+  // Find the table cell [lb, lb+1] containing log(rho) by bisection. The nb grid need
+  // not be uniform in log(rho) (e.g. DD2_hot_slice.athtab is refined 20x above
+  // ~1e12 g/cm^3), so the cell can't be computed from the first spacing alone. Clamped
+  // to [0, m_nn-2]: values above the table extrapolate from the last cell.
+  template<LocationTag loc>
+  KOKKOS_INLINE_FUNCTION
+  int FindRhoCell(Real lrho) const {
+    int lb = 0;
+    int ub = m_nn-1;
+    auto& lrho_view = GetView<loc>(m_log_rho);
+    while (ub - lb > 1) {
+      int idx = (lb + ub)/2;
+      if (lrho_view(idx) > lrho) {
+        ub = idx;
+      } else {
+        lb = idx;
+      }
+    }
+    return lb;
   }
 
   // Use bisection on a specified variable to find the corresponding density.

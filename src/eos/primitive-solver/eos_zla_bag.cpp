@@ -20,10 +20,21 @@
 
 #include "../../parameter_input.hpp"
 #include "athena.hpp"
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+#endif
 #include "eos_zla_bag.hpp"
 #include "utils/tr_table.hpp"
 #include "logs.hpp"
 #include "globals.hpp"
+
+namespace {
+// Table/parfile consistency guard (see ReadTableFromFile). Host-only file-scope state on
+// purpose: EOSZlaBag is captured by value into the C2P kernels and must not grow (see the
+// SIZE GUARD in eos_zla_bag.hpp), and neither value is needed on the device.
+Real zla_selftest_tol = 1.0e-4;
+bool zla_allow_table_mismatch = false;
+}  // namespace
 
 namespace Primitive {
 
@@ -101,6 +112,16 @@ bool EOSZlaBag<LogPolicy>::ReadParametersFromInput(std::string block,
   // the full dump is ~53k lines per run for the production table and is only useful
   // when a specific node is under investigation.
   selftest_verbose = pin->GetOrAddBoolean(block, "zla_selftest_verbose", false);
+
+  // Fatal threshold on the self-test's worst on-grid P/E deviation. The analytic EOS
+  // takes Bag_B, Bag_av, Bag_a4, ZL_* and the quark masses from the parfile, not the
+  // table, so a parfile pairing a table with another model's constants (e.g. a B157
+  // table with the default Bag_B = 160) evolves a star out of equilibrium from the
+  // first ConToPrim.
+  // A consistent parfile gives ~1e-6 (B160 production: P 7.7e-7, E 9.9e-8); the B157
+  // table with the default Bag_B = 160 gave P 8.6e-2.
+  zla_selftest_tol = pin->GetOrAddReal(block, "zla_selftest_tol", 1.0e-4);
+  zla_allow_table_mismatch = pin->GetOrAddBoolean(block, "zla_allow_table_mismatch", false);
 
   // Fermi-integral series/closed-form crossover. HEAD used 1.0e-2; 3.0e-2 is the
   // current default. Bisectable because the band between them is the
@@ -486,6 +507,37 @@ void EOSZlaBag<LogPolicy>::ReadTableFromFile(std::string fname) {
       if (!selftest_verbose) {
         std::cout << "###   (set <mhd>/zla_selftest_verbose = true for the per-node dump)"
                   << std::endl;
+      }
+    }
+
+    // Consistency guard: the table and the parfile's analytic constants must describe
+    // the same EOS. Rank 0 owns the scan, so it decides and broadcasts.
+    int mismatch = 0;
+    if (global_variable::my_rank == 0) {
+      mismatch = (st_on_p > zla_selftest_tol || st_on_e > zla_selftest_tol) ? 1 : 0;
+    }
+#if MPI_PARALLEL_ENABLED
+    MPI_Bcast(&mismatch, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+    if (mismatch) {
+      if (global_variable::my_rank == 0) {
+        std::cout << "### " << (zla_allow_table_mismatch ? "WARNING" : "FATAL ERROR")
+                  << " in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "EOSZlaBag analytic EOS disagrees with the table " << fname
+                  << ": worst on-grid |analytic/table - 1| is P = " << st_on_p
+                  << ", E = " << st_on_e << " (zla_selftest_tol = " << zla_selftest_tol
+                  << ")." << std::endl
+                  << "The constants come from the parfile, not the table: check Bag_B "
+                  << "(now " << Kokkos::sqrt(Kokkos::sqrt(Bag_B*h_bar*h_bar*h_bar))
+                  << " MeV), Bag_av, Bag_a4, ZL_* and the quark masses against the "
+                  << "table's model." << std::endl;
+        if (zla_allow_table_mismatch) {
+          std::cout << "###   continuing because zla_allow_table_mismatch = true"
+                    << std::endl;
+        }
+      }
+      if (!zla_allow_table_mismatch) {
+        std::exit(EXIT_FAILURE);
       }
     }
 

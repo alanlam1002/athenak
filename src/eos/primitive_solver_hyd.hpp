@@ -32,6 +32,7 @@
 #include "eos/primitive-solver/eos_hybrid.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
 #include "eos/primitive-solver/logs.hpp"
+#include "eos/cold_recovery.hpp"
 
 // AthenaK headers
 #include "athena.hpp"
@@ -219,6 +220,22 @@ class PrimitiveSolverHydro {
   // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
   // instead of v = 0, so the atmosphere is at rest on a comoving grid.
   bool atm_frame_vel = false;
+  // <mhd> cold_recovery (default false; research R-083, replaces C-082 option (iv)): when the
+  // energy inversion succeeds but its temperature falls below the floor (the code-208
+  // class: prim_floor, no cons_floor, error 0) and the density was NOT floored, the
+  // primitives are re-derived from D and S_i alone at T = tfloor (cold_recovery.hpp) instead
+  // of floor-T + PrimToCon (+ the comoving-atmosphere velocity), which rebuilt D and S. D,
+  // S_i and every scalar but the dual-energy tracer are left bitwise; tau is rebuilt
+  // (tau = D h_f W - P - D) and booked (crec_*), the tracer resyncs to the floor adiabat on
+  // the dual-energy energy branch. B = 0 only; skipped (old treatment) if W > gamma_max or
+  // rho = D/W is below the density-floor threshold. The same kernel runs every C2P path
+  // (RK stage, regrid / init, ghosts, ConToPrimBC); the FOFC probe (floors_only) is unchanged.
+  bool crec_on = false;
+  // per C2P-call window (reset by MassLedgerPre(1) / MassLedgerRegridPre, printed with the
+  // mass ledger): interior cold recoveries, their sum (tau_new - tau_old) sqrt(gamma) dV,
+  // and cells whose D or S_i changed across the C2P anyway (must stay 0)
+  Real crec_n = 0.0, crec_dtau = 0.0, crec_ds = 0.0, crec_dtau_total = 0.0;
+  DvceArray4D<Real> crec_cnt;   // per-cell count since the last regrid (re-triggers)
   // <mhd> atmosphere_frame_gate (default 0 = everywhere): only floored cells farther than
   // this from the puncture (padm->bc_center, x_BH(t) for a moving puncture) get the
   // comoving velocity; near the BH, where infall dominates, the floor stays at v = 0
@@ -491,6 +508,7 @@ class PrimitiveSolverHydro {
   DvceArray4D<Real> ml_r0, ml_w0, ml_q0;   // stage-0 ledger: rho, W, P before the regrid path
   // the C2P branch of the cell's last C2P: error + 16 prim_floor + 32 cons_floor
   // + 64 cons_adjusted + 128 comoving-atmosphere velocity (atm_frame_vel)
+  // + 256 cold recovery (crec_on)
   DvceArray4D<Real> ml_c2p;
   Real ml_stage[4][kMlLen] = {};
   // tau and the dual-energy tracer DY (R-069 item 4): per stage and variable,
@@ -552,8 +570,59 @@ class PrimitiveSolverHydro {
     return s;
   }
 
+  //! cold recovery (crec_on): reset the per-window tallies (and, at a regrid, where block
+  //! indices move, the per-cell counts)
+  void CrecReset(bool cells) {
+    crec_n = crec_dtau = crec_ds = 0.0;
+    if (cells && crec_cnt.extent(0) > 0) Kokkos::deep_copy(crec_cnt, 0.0);
+  }
+  //! one CRECOV line (rank 0): the window's interior cold recoveries, their tau change
+  //! sum (tau_new - tau_old) sqrt(gamma) dV, the cells whose D or S_i changed anyway (must
+  //! be 0), and the per-cell counts since the last regrid (cells with >= 1, 2, 5, 17
+  //! recoveries, and the largest count) -- the re-trigger check of R-083 test 3
+  void CrecPrint(const char *path) {
+    if (!crec_on) return;
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    Real c[4] = {0.0, 0.0, 0.0, 0.0}, cmax = 0.0;
+    if (static_cast<int>(crec_cnt.extent(0)) >= nmb) {
+      auto &cnt = crec_cnt;
+      Kokkos::parallel_reduce("crec_cells", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+        const Real n = cnt(m, k, j, i);
+        a0 += (n >= 1.0); a1 += (n >= 2.0); a2 += (n >= 5.0); a3 += (n >= 17.0);
+      }, Kokkos::Sum<Real>(c[0]), Kokkos::Sum<Real>(c[1]), Kokkos::Sum<Real>(c[2]),
+         Kokkos::Sum<Real>(c[3]));
+      Kokkos::parallel_reduce("crec_max", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &a0) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji + ks;
+        const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+        const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+        a0 = fmax(a0, cnt(m, k, j, i));
+      }, Kokkos::Max<Real>(cmax));
+    }
+    Real w[8] = {crec_n, crec_dtau, crec_ds, c[0], c[1], c[2], c[3], crec_dtau_total};
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, w, 8, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &cmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    if (global_variable::my_rank != 0) return;
+    std::cout << std::setprecision(10) << "CRECOV cycle=" << pmy_pack->pmesh->ncycle
+              << " path=" << path << " n=" << w[0] << " dtau=" << w[1] << " DSchanged="
+              << w[2] << " dtau_total=" << w[7] << " cells_ge1=" << w[3] << " ge2=" << w[4]
+              << " ge5=" << w[5] << " ge17=" << w[6] << " maxcount=" << cmax << std::endl;
+  }
+
   //! before the stage's C2P: M_pre, M(u1), and a copy of u0(IDN)
   void MassLedgerPre(int stage) {
+    if (stage == 1) CrecReset(false);
     if (!ml_on || stage < 1 || stage > 4) return;
     auto &u0 = pmy_pack->pmhd->u0;
     const int nmb = pmy_pack->nmb_thispack;
@@ -653,6 +722,7 @@ class PrimitiveSolverHydro {
   //! last stage combine, reduce over ranks and print (rank 0)
   void MassLedgerPost(int stage, int ns, const Real *gam0, const Real *gam1,
                       const Real *beta, Real dt, Real time, int cycle) {
+    if (stage == ns) CrecPrint("steps");   // independent of mass_ledger
     if (!ml_on || stage < 1 || stage > ns || ns > 4) return;
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     const int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -835,6 +905,7 @@ class PrimitiveSolverHydro {
   }
   bool ml0_armed = false;
   void MassLedgerRegridPre() {
+    CrecReset(true);
     if (!ml_on) return;
     auto &u0 = pmy_pack->pmhd->u0;
     auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -879,6 +950,7 @@ class PrimitiveSolverHydro {
     ml0_armed = true;
   }
   void MassLedgerRegridPost(const char *path) {
+    CrecPrint(path);   // independent of mass_ledger
     if (!ml_on || !ml0_armed) return;
     ml0_armed = false;
     static constexpr int kL = 16;                 // levels 0..15
@@ -1198,6 +1270,13 @@ class PrimitiveSolverHydro {
     SetPolicyParams(block, pin);
     atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
     atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
+    crec_on = pin->GetOrAddBoolean(block, "cold_recovery", false);
+    if (crec_on && !std::is_same_v<Primitive::IdealGas, EOSPolicy>) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<" << block << "> cold_recovery needs the ideal-gas EOS"
+                << " (a density-independent enthalpy at the floor temperature)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     zone_on = pin->GetOrAddBoolean(block, "atmosphere_zone", false);
     zone_book = zone_on || pin->GetOrAddBoolean(block, "atmosphere_zone_book", false);
     ml_on = pin->GetOrAddBoolean(block, "mass_ledger", false);
@@ -1834,6 +1913,15 @@ class PrimitiveSolverHydro {
                        static_cast<int>(ml_cls.extent(0)) >= pmy_pack->nmb_thispack;
     auto &mlcls_ = ml_cls;
     auto &mlc2p_ = ml_c2p;
+    const bool crec_ = crec_on && !floors_only;
+    if (crec_ && static_cast<int>(crec_cnt.extent(0)) != cons.extent_int(0)) {
+      Kokkos::realloc(crec_cnt, cons.extent_int(0), cons.extent_int(2), cons.extent_int(3),
+                      cons.extent_int(4));
+    }
+    auto &crc_ = crec_cnt;
+    const Real ctf_ = eos_.GetTemperatureFloor();
+    const Real cnatm_ = eos_.GetDensityFloor(), cnthr_ = eos_.GetThreshold();
+    const Real cwmax_ = eos_.GetMaxLorentzFactor();
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
@@ -1845,9 +1933,11 @@ class PrimitiveSolverHydro {
     Real dE_tally = 0.0, dPx_tally = 0.0, dPy_tally = 0.0, dPz_tally = 0.0;
     Real dEraw_tally = 0.0;
     Real de_nden = 0.0, de_nent_c = 0.0, de_dE_c = 0.0;
+    Real crn_c = 0.0, crt_c = 0.0, crx_c = 0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, int &sumerrs, Real &dE_r, Real &dPx_r, Real &dPy_r,
-                  Real &dPz_r, Real &dEraw_r, Real &nden_r, Real &nent_r, Real &dede_r) {
+                  Real &dPz_r, Real &dEraw_r, Real &nden_r, Real &nent_r, Real &dede_r,
+                  Real &crn_r, Real &crt_r, Real &crx_r) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -1882,6 +1972,8 @@ class PrimitiveSolverHydro {
 
       // Extract the conserved variables
       Real cons_pt[NCONS], cons_pt_old[NCONS], prim_pt[NPRIM];
+      const Real raw_ds[4] = {cons(m, IDN, k, j, i), cons(m, IM1, k, j, i),
+                              cons(m, IM2, k, j, i), cons(m, IM3, k, j, i)};
       cons_pt[CDN] = cons_pt_old[CDN] = cons(m, IDN, k, j, i)*isdetg;
       cons_pt[CSX] = cons_pt_old[CSX] = cons(m, IM1, k, j, i)*isdetg;
       cons_pt[CSY] = cons_pt_old[CSY] = cons(m, IM2, k, j, i)*isdetg;
@@ -2031,9 +2123,39 @@ class PrimitiveSolverHydro {
                    nerrs_ + sumerrs,rank);
           }
         }
-        // ---- comoving atmosphere (see atm_frame_vel): floored cells move with the frame
         bool de_write = false;
-        bool fv_here = atm_fv_ && (result.prim_floor || result.cons_floor) &&
+        // ---- cold recovery (see crec_on): a good inversion with T < tfloor, rho not floored
+        bool crec = false;
+        if (crec_ && result.error == Primitive::Error::SUCCESS && result.prim_floor &&
+            !result.cons_floor && !(excise && !smoothing && excision_floor_(m,k,j,i)) &&
+            b3u[IBX] == 0.0 && b3u[IBY] == 0.0 && b3u[IBZ] == 0.0 &&
+            !(prim_pt[PRH] == cnatm_ && prim_pt[PVX] == 0.0 && prim_pt[PVY] == 0.0 &&
+              prim_pt[PVZ] == 0.0)) {
+          const Real D = cons_pt_old[CDN];
+          const Real S_d[3] = {cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ]};
+          Real S_u[3];
+          Primitive::RaiseForm(S_u, S_d, g3u);
+          const Real ssq = Primitive::Contract(S_u, S_d);
+          Real yc[MAX_SPECIES] = {0.0};
+          for (int n = 0; n < nscal; n++) yc[n] = cons_pt_old[CYD + n]/D;
+          const Real hf = eos_.GetEnthalpy(1.0, ctf_, yc);   // ideal gas: n-independent
+          Real uc[3];
+          const Real Wc = ColdRecoveryW(D, S_u, ssq, hf, uc);
+          const Real nc = D/(Wc*mb);
+          if (Wc <= cwmax_ && nc >= cnatm_*cnthr_) {
+            crec = true;
+            for (int n = 0; n < NCONS; ++n) cons_pt[n] = cons_pt_old[n];
+            prim_pt[PRH] = nc;
+            prim_pt[PVX] = uc[0]; prim_pt[PVY] = uc[1]; prim_pt[PVZ] = uc[2];
+            for (int n = 0; n < nscal; n++) prim_pt[PYF + n] = yc[n];
+            prim_pt[PTM] = ctf_;
+            prim_pt[PPR] = eos_.GetPressure(nc, ctf_, yc);
+            cons_pt[CTA] = D*hf*Wc - prim_pt[PPR] - D;
+            de_write = true;
+          }
+        }
+        // ---- comoving atmosphere (see atm_frame_vel): floored cells move with the frame
+        bool fv_here = !crec && atm_fv_ && (result.prim_floor || result.cons_floor) &&
                        (fv0 != 0.0 || fv1 != 0.0 || fv2 != 0.0);
         if (fv_here && fg2_ > 0.0) {
           Real xg = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min,
@@ -2075,6 +2197,7 @@ class PrimitiveSolverHydro {
           }
           zml = zmode;
           if (zmode) {
+            crec = false;   // the zone resets the cell (and books it) instead
             const int zb = (zmode == 1) ? 0 : kZoneLen;     // tally block
             const Real al = adm.alpha(m, k, j, i);
             const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
@@ -2181,6 +2304,7 @@ class PrimitiveSolverHydro {
               ddtau = (tau_new - cons_pt_old[CTA])/D;
               cons_pt[CTA] = tau_new;
               de_write = true;
+              crec = false;   // the entropy solution (dense cells) takes precedence
             } else {
               use_ent = false;
               dbr = dense ? 4 : 0;
@@ -2251,7 +2375,25 @@ class PrimitiveSolverHydro {
 
         // If the conservative variables were floored or adjusted for consistency,
         // we need to copy the conserved variables, too.
-        if (result.cons_floor || result.cons_adjusted || de_write) {
+        const bool cint = (i >= is && i <= ie_ && j >= js && j <= je_ && k >= ks && k <= ke_);
+        if (crec) {
+          // D, S_i and the other scalars are not written back: bitwise unchanged
+          const Real e0 = cons(m, IEN, k, j, i);
+          cons(m, IEN, k, j, i) = cons_pt[CTA]*sdetg;
+          if (de_on_ && cons_pt[CYD + de_idx_] != cons_pt_old[CYD + de_idx_]) {
+            cons(m, nhyd + de_idx_, k, j, i) = cons_pt[CYD + de_idx_]*sdetg;
+          }
+          if (cint) {
+            const Real dvol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+            crn_r += 1.0;
+            crt_r += (cons(m, IEN, k, j, i) - e0)*dvol;
+            crc_(m,k,j,i) += 1.0;
+            if (cons(m, IDN, k, j, i) != raw_ds[0] || cons(m, IM1, k, j, i) != raw_ds[1] ||
+                cons(m, IM2, k, j, i) != raw_ds[2] || cons(m, IM3, k, j, i) != raw_ds[3]) {
+              crx_r += 1.0;
+            }
+          }
+        } else if (result.cons_floor || result.cons_adjusted || de_write) {
           /*if (fabs((cons_pt[CDN] - cons_pt_old[CDN])/cons_pt_old[CDN]) > 1e-12) {
             Real &x1min = size.d_view(m).x1min;
             Real &x1max = size.d_view(m).x1max;
@@ -2299,13 +2441,18 @@ class PrimitiveSolverHydro {
           mlcls_(m,k,j,i) = c;
           mlc2p_(m,k,j,i) = static_cast<Real>(static_cast<int>(result.error) +
                                               16*result.prim_floor + 32*result.cons_floor +
-                                              64*result.cons_adjusted + 128*fv_here);
+                                              64*result.cons_adjusted + 128*fv_here +
+                                              256*crec);
         }
       }
     }, Kokkos::Sum<int>(count_errs), Kokkos::Sum<Real>(dE_tally), Kokkos::Sum<Real>(dPx_tally),
        Kokkos::Sum<Real>(dPy_tally), Kokkos::Sum<Real>(dPz_tally),
        Kokkos::Sum<Real>(dEraw_tally), Kokkos::Sum<Real>(de_nden),
-       Kokkos::Sum<Real>(de_nent_c), Kokkos::Sum<Real>(de_dE_c));
+       Kokkos::Sum<Real>(de_nent_c), Kokkos::Sum<Real>(de_dE_c), Kokkos::Sum<Real>(crn_c),
+       Kokkos::Sum<Real>(crt_c), Kokkos::Sum<Real>(crx_c));
+    if (crec_) {
+      crec_n += crn_c; crec_dtau += crt_c; crec_ds += crx_c; crec_dtau_total += crt_c;
+    }
     if (de_on_) {
       de_dE_total += de_dE_c;
       if (il == 0 && jl == 0 && kl == 0) {   // the full-array call, not a BC strip

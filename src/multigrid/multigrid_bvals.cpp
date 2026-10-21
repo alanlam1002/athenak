@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "../athena.hpp"
+#include "../globals.hpp"
 #include "../coordinates/coordinates.hpp"
 #include "../coordinates/cell_locations.hpp"
 #include "../mesh/mesh.hpp"
@@ -38,6 +39,9 @@ MultigridBoundaryValues::MultigridBoundaryValues(
   : MeshBoundaryValuesCC(pmbp, pin, coarse), pmy_mg(pmg) {
   // Multigrid boundary communications always use the rank-packed scheme; there is
   // no runtime switch to select a different communication path.
+  recv_sync_ = pin->GetOrAddInteger("job", "mg_recv_sync", 1);
+  race_probe_ = pin->GetOrAddBoolean("job", "mg_race_probe", false);
+  mg_recv_alt_.resize(kMaxMGLevels);
 }
 
 //----------------------------------------------------------------------------------------
@@ -2484,6 +2488,18 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
 
   {
   int nmnv = nmb * nnghbr * nvar;
+  // C-091 race probe: each team stamps this launch's epoch into a host-pinned slot
+  const bool prb = race_probe_;
+  if (prb) {
+    if (probe_slot_.extent_int(0) < nmnv) {
+      probe_slot_ =
+          Kokkos::View<int*, Kokkos::SharedHostPinnedSpace>("mg_race_probe", nmnv);
+    }
+    ++probe_epoch_;
+    probe_nteams_ = nmnv;
+  }
+  auto pslot = probe_slot_;
+  const int pep = probe_epoch_;
   Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
   Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank() / (nnghbr * nvar);
@@ -2492,6 +2508,10 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
 
     if (nghbr.d_view(m, n).gid < 0) {
       tmember.team_barrier();
+      if (prb) {
+        Kokkos::single(Kokkos::PerTeam(tmember),
+                       [&]() { pslot(tmember.league_rank()) = pep; });
+      }
       return;
     }
 
@@ -2501,6 +2521,10 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
     bool is_fc = (nlev != mlev);
     if (is_fc && skip_fc_this_level) {
       tmember.team_barrier();
+      if (prb) {
+        Kokkos::single(Kokkos::PerTeam(tmember),
+                       [&]() { pslot(tmember.league_rank()) = pep; });
+      }
       return;
     }
 
@@ -2557,6 +2581,10 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
       });
     }
     tmember.team_barrier();
+    if (prb) {
+      Kokkos::single(Kokkos::PerTeam(tmember),
+                     [&]() { pslot(tmember.league_rank()) = pep; });
+    }
   });
   }
 
@@ -2658,6 +2686,41 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     // out-of-range level (should not happen): rebuild bare each call
     BuildRankPackedMGMetadata(nvars, lev_, skip_fc_ir);
     mg_rp_active_level_ = -1;
+  }
+
+  // C-091: the previous round's UnpackMG may still be queued or running on the device and
+  // reading mg_rank_recvbuf_vars_; MPI may write a newly matched message into the buffer
+  // as soon as the Irecv below is posted.
+  if (race_probe_ && probe_nteams_ > 0) {
+    const volatile int *ps = probe_slot_.data();
+    int pend = 0;
+    for (int t = 0; t < probe_nteams_; ++t) pend += (ps[t] != probe_epoch_);
+    const bool offr = !mg_recv_var_msgs_.empty();
+    ++probe_posts_;
+    if (offr) ++probe_posts_offrank_;
+    if (pend > 0) {
+      ++probe_pending_posts_;
+      probe_pending_teams_ += pend;
+      if (offr) ++probe_pending_offrank_;
+    }
+    const int cyc = pmy_pack->pmesh->ncycle;
+    if (cyc != probe_cycle_ || (probe_posts_ % 2000) == 0) {
+      std::cout << "MGRACE rank " << global_variable::my_rank << " cycle " << cyc
+                << " posts " << probe_posts_ << " posts_with_offrank_recvs "
+                << probe_posts_offrank_ << " pending_posts " << probe_pending_posts_
+                << " pending_offrank " << probe_pending_offrank_ << " pending_teams "
+                << probe_pending_teams_ << " sync " << recv_sync_ << std::endl;
+      probe_cycle_ = cyc;
+    }
+  }
+  if (recv_sync_ == 1) {
+    Kokkos::fence();
+  } else if (recv_sync_ == 2 && lev_ >= 0 && lev_ < kMaxMGLevels) {
+    auto &alt = mg_recv_alt_[lev_];
+    if (alt.extent(0) != mg_rank_recvbuf_vars_.extent(0)) {
+      alt = DvceArray1D<Real>("rank_recvbuf_mg_alt", mg_rank_recvbuf_vars_.extent(0));
+    }
+    std::swap(alt, mg_rank_recvbuf_vars_);
   }
 
   // Payload-only Irecv: the receiver derives the payload layout from its own

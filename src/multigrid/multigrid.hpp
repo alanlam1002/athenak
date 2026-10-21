@@ -542,14 +542,14 @@ class MultigridDriver {
   // <job> checksum_cycles (utils/chksum.hpp; R-087 item 10 follow-up): this rank's exact
   // checksums of the MG state (block levels, root, octets, multipole moments) at one point
   // of the solve; x (e.g. a defect norm) is written as its bit pattern
-  void MGChk(const char *where, Real x = 0.0);
+  void MGChk(const char *where, Real x = 0.0, bool task = false);
   // MG task-list tasks wrapped so a completed task records MGChk("<task>") (a no-op
   // unless <job> checksum_cycles is active)
   template <typename F>
   auto MGT(F f, const char *name) {
     return [this, f, name](Driver *d, int s) -> TaskStatus {
       TaskStatus st = (this->*f)(d, s);
-      if (st == TaskStatus::complete) MGChk(name);
+      if (st == TaskStatus::complete) MGChk(name, 0.0, true);
       return st;
     };
   }
@@ -811,6 +811,23 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
 
  private:
   Multigrid *pmy_mg;
+  // <job> mg_recv_sync (C-091; default 1): how InitRecvMG makes the rank-packed aggregate
+  // recv buffer safe to re-post while the previous round's UnpackMG kernel (launched
+  // asynchronously, RecvAndUnpackMG) may still be reading it:
+  //   0 nothing (the pre-C-091 behaviour: a write-after-read race on that buffer),
+  //   1 Kokkos::fence() before the Irecvs are re-posted (the fix),
+  //   2 no fence; alternate between two aggregate recv buffers per level (ping-pong), the
+  //     discriminating test that the race is the buffer reuse and nothing else a fence cures
+  int recv_sync_ = 1;
+  std::vector<DvceArray1D<Real>> mg_recv_alt_;
+  // <job> mg_race_probe (default false; C-091): every UnpackMG team stamps the launch
+  // epoch into a host-pinned slot; InitRecvMG counts, without a fence, the teams of the
+  // last launch not yet stamped when it re-posts the receives (the race window)
+  bool race_probe_ = false;
+  Kokkos::View<int*, Kokkos::SharedHostPinnedSpace> probe_slot_;
+  int probe_epoch_ = 0, probe_nteams_ = 0, probe_cycle_ = -1;
+  long probe_posts_ = 0, probe_pending_posts_ = 0, probe_pending_teams_ = 0;
+  long probe_posts_offrank_ = 0, probe_pending_offrank_ = 0;
   std::vector<RankPackedVarEntry> mg_send_var_entries_;
   std::vector<RankPackedVarEntry> mg_recv_var_entries_;
   std::vector<RankPackedVarMessage> mg_send_var_msgs_;

@@ -3121,9 +3121,9 @@ void MultigridDriver::SetRobinCenter(Real x, Real y, Real z) {
 //! chksum.hpp, same file and key as the NR-task checksums); the name carries the point and
 //! the level, the occurrence count separates repeats within the RK stage
 
-void MultigridDriver::MGChk(const char *where, Real x) {
+void MultigridDriver::MGChk(const char *where, Real x, bool task) {
   const int cycle = pmy_mesh_->ncycle;
-  if (!chksum::Active(cycle)) return;
+  if (chksum::mg_level < (task ? 2 : 1) || !chksum::Active(cycle)) return;
   if (chksum::fp == nullptr) {
     char fn[64];
     std::snprintf(fn, sizeof(fn), "chksum.%d.txt", global_variable::my_rank);

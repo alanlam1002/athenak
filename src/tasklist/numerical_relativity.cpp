@@ -26,6 +26,7 @@ namespace numrel {
 NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *pin) {
   pmy_pack = ppack;
   chksum::ncycles = pin->GetOrAddInteger("job", "checksum_cycles", 0);
+  chksum::mg_level = pin->GetOrAddInteger("job", "checksum_mg", 2);
 }
 
 //! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task

@@ -760,7 +760,9 @@ void Multigrid::Smooth(ViewType &u, const ViewType &src, const ViewType &coeff,
 
 struct MGPerLevelIndcs {
   MeshBufferIndcs isame, icoar, ifine;
-  int isame_ndat, icoar_ndat, ifine_ndat;
+  // zero for the slots compute_send/compute_recv leave unset (isame on fine sub-slots):
+  // ComputePerLevelIndices sizes the buffers from the max over all three (C-077)
+  int isame_ndat = 0, icoar_ndat = 0, ifine_ndat = 0;
 };
 
 class MultigridBoundaryValues : public MeshBoundaryValuesCC {

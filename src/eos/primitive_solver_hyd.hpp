@@ -184,6 +184,27 @@ class PrimitiveSolverHydro {
   //   de_persist = N > 1: a cell takes the energy branch only once its final flag has
   //     been set in N consecutive C2P calls (de_streak counts them; reset on realloc).
   bool de_isolated = false;
+  // <mhd> dual_energy_shock_counters = N (R-112 item 1, diagnostic; default 0 = off): per RK
+  // stage, the interior cells by the two conditions of the shock flag the stage's C2P uses,
+  //   gate = (div <= 0), kink = (sensor > threshold; sh below), weak = (sensor > wk x threshold),
+  // as (i) gate only, (ii) kink only, (iii) both (shk = 2 before isolation/dilation), (iv)
+  // neither, the weak candidates (gate, weak, not kink: a subset of (i)), the cells flagged
+  // only by the isolation/dilation/persistence passes (final flag 1, not (iii)), and all
+  // finally flagged cells; each for all interior cells, the dense ones (D > rho_sw) and the
+  // dense ones on the energy branch (branch 4/5 of that same C2P call). With
+  // dual_energy_flag_exchange the C2P of stage s uses the flags UpdateShockFlags computed after
+  // the previous C2P, so the classes are those of that computation (de_cls is kept until the
+  // next one); without it, the flags computed inside the same C2P. Summed over the ranks and
+  // printed every N cycles on rank 0, one DESHK line per stage (format at ShockCounters).
+  // Writes only de_cls/de_dbr, which nothing else reads: the evolution is unchanged.
+  int de_cnt_every = 0;
+  bool de_cls_valid = false;
+  DvceArray4D<int> de_cls, de_dbr;
+  static constexpr int kDeCnt = 21;          // 7 classes x (all, dense, dense energy)
+  Kokkos::View<long long*, DevMemSpace> de_cnt_d;
+  long long de_cnt_h[4][kDeCnt] = {};
+  int de_cnt_calls[4] = {0, 0, 0, 0};
+  int de_cnt_cyc0 = -1;
   // <mhd> dual_energy_probe_box1/2 = "x0 x1 y0 y1 z0 z1", dual_energy_probe_cycles = N
   // (debug, R-069 item 1): for the first N cycles after (re)start, every cell copy (owner
   // interior or ghost, any MeshBlock) whose centre lies in a box prints one DEPROBE line per
@@ -1425,6 +1446,7 @@ class PrimitiveSolverHydro {
       de_dilate = pin->GetOrAddInteger(block, "dual_energy_shock_dilate", 1);
       de_dilate_weak = pin->GetOrAddReal(block, "dual_energy_shock_dilate_weak", 0.5);
       de_isolated = pin->GetOrAddBoolean(block, "dual_energy_shock_isolated_off", false);
+      de_cnt_every = pin->GetOrAddInteger(block, "dual_energy_shock_counters", 0);  // R-112
       for (int b = 0; b < 2; ++b) {
         std::string bx = pin->GetOrAddString(block, "dual_energy_probe_box" + std::to_string(b+1), "");
         std::istringstream is(bx);
@@ -1674,6 +1696,12 @@ class PrimitiveSolverHydro {
       const Real gam_ = de_gamma;
       const Real wk = de_dilate_weak;
       const bool divcov = de_div_cov;
+      const bool cnt_ = de_cnt_every > 0;
+      if (cnt_ && (de_cls.extent_int(0) != prim.extent_int(0) || de_cls.extent_int(1) != e3 ||
+                   de_cls.extent_int(2) != e2 || de_cls.extent_int(3) != e1)) {
+        Kokkos::realloc(de_cls, prim.extent_int(0), e3, e2, e1);
+      }
+      auto &cls_ = de_cls;
       par_for("de_shock_flag", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         auto vel = [&](int a, int kk, int jj, int ii) {
@@ -1733,6 +1761,7 @@ class PrimitiveSolverHydro {
           weak = (psiv > wk*vcsh*cs0) || (psip > wk*psijp);
         }
         shk(m, k, j, i) = (divv <= 0.0) ? (sh ? 2 : (weak ? 1 : 0)) : 0;
+        if (cnt_) cls_(m, k, j, i) = ((divv <= 0.0) ? 1 : 0) | (sh ? 2 : 0) | (weak ? 4 : 0);
         if (ddon_) {
           Real ratio;
           if (sensor == 0) {
@@ -1819,6 +1848,7 @@ class PrimitiveSolverHydro {
         }
         shk(m, k, j, i) = f;
       });
+      de_cls_valid = (de_cnt_every > 0);
     }
   }
 
@@ -1854,6 +1884,76 @@ class PrimitiveSolverHydro {
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       u0(m, iflag, k, j, i) = static_cast<Real>(shk(m, k, j, i));
     });
+  }
+
+  //! <mhd> dual_energy_shock_counters (R-112 item 1): count this stage's interior cells by the
+  //! shock-flag classes (see de_cnt_every), called by DynGRMHDPS::ConToPrim right after the
+  //! stage's C2P and before UpdateShockFlags recomputes the flags. Every N cycles (the last
+  //! stage) the per-stage sums are reduced over the ranks and rank 0 prints, per stage s,
+  //!   DESHK cycle=C ncyc=N stage=s calls=n all=a0..a6 dense=d0..d6 energy=e0..e6
+  //! with classes 0 gate only, 1 kink only, 2 both (shk 2), 3 neither, 4 weak candidates
+  //! (subset of 0), 5 flagged only by isolation/dilation/persistence, 6 all flagged (final
+  //! flag 1); all = interior cells, dense = D > rho_sw (branch > 0), energy = dense cells on
+  //! the energy branch (4 or 5) of that C2P. 0..3 partition the cells (sum = total).
+  void ShockCounters(int stage, int ns, int cycle) {
+    if (!de_on || de_cnt_every <= 0 || stage < 1 || stage > ns || ns > 4) return;
+    if (de_cnt_cyc0 < 0) de_cnt_cyc0 = cycle;
+    const bool ok = de_cls_valid && de_cls.extent_int(0) == de_shock.extent_int(0) &&
+                    de_dbr.extent_int(0) == de_shock.extent_int(0) &&
+                    de_cls.extent_int(3) == de_shock.extent_int(3) &&
+                    de_dbr.extent_int(3) == de_shock.extent_int(3);
+    if (ok) {
+      if (de_cnt_d.extent_int(0) != kDeCnt) Kokkos::realloc(de_cnt_d, kDeCnt);
+      Kokkos::deep_copy(de_cnt_d, 0LL);
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
+      const int nmb = pmy_pack->nmb_thispack;
+      auto &cls = de_cls;
+      auto &shk = de_shock;
+      auto &dbr = de_dbr;
+      auto &cnt = de_cnt_d;
+      par_for("de_shock_counters", DevExeSpace(), 0, nmb-1, indcs.ks, indcs.ke, indcs.js,
+              indcs.je, indcs.is, indcs.ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        const int c = cls(m, k, j, i);
+        const bool gate = (c & 1) != 0, kink = (c & 2) != 0, weak = (c & 4) != 0;
+        const bool fl = shk(m, k, j, i) != 0;
+        const int b = dbr(m, k, j, i);
+        const bool dense = b > 0, en = b >= 4;
+        const bool cl[7] = {gate && !kink, kink && !gate, gate && kink, !gate && !kink,
+                            gate && !kink && weak, fl && !(gate && kink), fl};
+        for (int q = 0; q < 7; ++q) {
+          if (!cl[q]) continue;
+          Kokkos::atomic_add(&cnt(3*q), 1LL);
+          if (dense) Kokkos::atomic_add(&cnt(3*q + 1), 1LL);
+          if (en) Kokkos::atomic_add(&cnt(3*q + 2), 1LL);
+        }
+      });
+      auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), de_cnt_d);
+      for (int n = 0; n < kDeCnt; ++n) de_cnt_h[stage-1][n] += h(n);
+      de_cnt_calls[stage-1] += 1;
+    }
+    if (stage != ns || (cycle + 1 - de_cnt_cyc0) % de_cnt_every != 0) return;
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &de_cnt_h[0][0], 4*kDeCnt, MPI_LONG_LONG, MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, de_cnt_calls, 4, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    if (global_variable::my_rank == 0) {
+      for (int q = 0; q < ns; ++q) {
+        std::cout << "DESHK cycle=" << cycle << " ncyc=" << de_cnt_every << " stage=" << q+1
+                  << " calls=" << de_cnt_calls[q];
+        const char *nm[3] = {" all=", " dense=", " energy="};
+        for (int v = 0; v < 3; ++v) {
+          std::cout << nm[v];
+          for (int c = 0; c < 7; ++c) std::cout << (c ? "," : "") << de_cnt_h[q][3*c + v];
+        }
+        std::cout << std::endl;
+      }
+    }
+    for (int q = 0; q < 4; ++q) {
+      de_cnt_calls[q] = 0;
+      for (int n = 0; n < kDeCnt; ++n) de_cnt_h[q][n] = 0;
+    }
   }
 
   void ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &bfc,
@@ -1935,6 +2035,15 @@ class PrimitiveSolverHydro {
     auto &dp0_ = de_probe0;
     const int pgid0_ = pmy_pack->gids;
     auto &dd_ = de_diag;
+    const bool dcnt_ = de_on_ && de_cnt_every > 0;
+    if (dcnt_ && (de_dbr.extent_int(0) != prim.extent_int(0) ||
+                  de_dbr.extent_int(1) != prim.extent_int(2) ||
+                  de_dbr.extent_int(2) != prim.extent_int(3) ||
+                  de_dbr.extent_int(3) != prim.extent_int(4))) {
+      Kokkos::realloc(de_dbr, prim.extent_int(0), prim.extent_int(2), prim.extent_int(3),
+                      prim.extent_int(4));
+    }
+    auto &dbr_ = de_dbr;
     if (de_on_) {
       if (de_xchg) {
         // the owner's flag, carried in the cons slot (see UpdateShockFlags)
@@ -2436,6 +2545,7 @@ class PrimitiveSolverHydro {
             dd_(m, 5, k, j, i) = ddtau;
             if (dstg_ >= 1 && dstg_ <= 3) dd_(m, 9 + dstg_, k, j, i) = dken;
           }
+          if (dcnt_) dbr_(m, k, j, i) = dbr;
         }
 
         // Regardless of failure, we need to copy the primitives.

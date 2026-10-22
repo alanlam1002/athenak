@@ -277,8 +277,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
     // lapse of this step (and the optional dep is simply dropped when CFC is absent).
     if (pmy_pack->pcoord->coord_data.bh_excise &&
         pmy_pack->pcoord->coord_data.excision_scheme != ExcisionScheme::fixed) {
-      pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
-                     Task_Run, {MHD_C2P}, {CFC_AssembleFinal});
+      // CFC_BCSADM (optional, implies CFC_AssembleFinal): AssembleLapseShiftK writes alpha on
+    // the interior only, so the rebuild must wait for the ADM ghost exchange; otherwise the
+    // ghost masks (and F1's ghost decisions, atmosphere_zone_unmask) use the previous solve's
+    // lapse and differ from their owners at the next cycle's first flux call (R-093 Sec. 1;
+    // measured by the C-099 probe at the excision boundary, all ghost depths)
+    pnr->QueueTask(&DynGRMHD::UpdateExcisionMasks, this, MHD_Excise, "MHD_Excise",
+                     Task_Run, {MHD_C2P}, {CFC_BCSADM});
     }
   }
   // CFC_AssembleFinal is optional for the same reason: MHD_Newdt should see the final

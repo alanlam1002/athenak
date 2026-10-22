@@ -21,6 +21,7 @@
 //! callers rescale by m_bh on the way in/out (see TrumpetBackground's own doc comment).
 
 #include <cmath>
+#include <limits>
 
 #include "athena.hpp"
 #include "athena_tensor.hpp"
@@ -38,11 +39,20 @@ inline constexpr Real kTrumpetThroat = 1.5;
 //! \fn Real TrumpetArealToIso(Real rho)
 //! \brief Closed-form forward map areal->isotropic radius chi(rho), M_BH=1 units
 //! (mod_bh.f90:56-65). Valid for rho >= kTrumpetThroat.
+//!
+//! chi(throat) = 0 is returned explicitly, before any pow. On the PVC device (icpx's default
+//! fast fp model) numer = (4+3 sqrt 2)(2 rho - 3) evaluated to -1.78e-15 at rho = 1.5, not 0,
+//! so pow(numer/denom, 1/sqrt 2) was NaN (measured, tst/unit/test_cfc_puncture_device.cpp;
+//! the host gives exactly 0). TrumpetIsoToAreal's bracket starts AT the throat for every
+//! r_iso < 1.5 M, so its root-find failed there and the background was pinned at the throat
+//! (alpha0 = 0, psi0 = sqrt(1.5 M/r)) inside r_iso < 1.5 M (C-094).
 KOKKOS_INLINE_FUNCTION
 Real TrumpetArealToIso(Real rho) {
+  const Real t = 2.0*rho - 3.0;
+  if (t <= 0.0) { return 0.0; }
   Real s1 = std::sqrt(4.0*rho*rho + 4.0*rho + 3.0);
   Real s2 = std::sqrt(8.0*rho*rho + 8.0*rho + 6.0);
-  Real numer = (4.0 + 3.0*std::sqrt(2.0)) * (2.0*rho - 3.0);
+  Real numer = (4.0 + 3.0*std::sqrt(2.0)) * t;
   Real denom = 8.0*rho + 6.0 + 3.0*s2;
   return 0.25*(2.0*rho + 1.0 + s1) * std::pow(numer/denom, 1.0/std::sqrt(2.0));
 }
@@ -82,7 +92,11 @@ Real TrumpetIsoToAreal(Real chi_cell) {
   NumTools::Root root;
   root.iterations = 100;  // ample margin over FalsePosition's superlinear convergence
   impl::TrumpetArealResidual residual;
-  root.FalsePosition(residual, lb, ub, rho, tol, chi_cell);
+  bool ok = root.FalsePosition(residual, lb, ub, rho, tol, chi_cell);
+  // A failed root-find must be loud, not clamped: FalsePosition leaves rho at the throat
+  // (its lb) on a bad bracket, and fmax(NaN, throat) is the throat, so the old unchecked
+  // clamp silently returned the throat (C-094). NaN instead reaches CFC::CheckFinite.
+  if (!ok || !(rho == rho)) { return std::numeric_limits<Real>::quiet_NaN(); }
   // mod_bh.f90:108: clamp guards throat-adjacent roundoff undershoot.
   return std::fmax(rho, kTrumpetThroat);
 }

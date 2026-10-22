@@ -159,7 +159,7 @@ class PrimitiveSolverHydro {
   // discontinuities between states at rest); all of them also need div v <= 0.
   //   psi_P = max_a |P+ - 2P + P-|/(P+ + 2P + P-),  psi_v = max_a |v_a+ - 2v_a + v_a-|/c_s
   int de_sensor = 2;
-  // <mhd> dual_energy_div (R-060; default coord): the div v <= 0 test of the shock flag
+  // <mhd> dual_energy_div (R-060; default covariant since R-112, was coord): the div v <= 0 test of the shock flag
   // uses the coordinate divergence d_a v^a (coord) or the slice-covariant
   // D_a v^a = d_a v^a + v^a d_a ln sqrt(gamma) (covariant; = d_a v^a + 6 v^a d_a ln psi
   // for a conformally flat metric), which removes the d ln psi infall bias.
@@ -250,7 +250,7 @@ class PrimitiveSolverHydro {
   // floored cells the comoving frame's velocity (Eulerian v = xidot = padm->frame_vel_u)
   // instead of v = 0, so the atmosphere is at rest on a comoving grid.
   bool atm_frame_vel = false;
-  // <mhd> cold_recovery (default false; research R-083, replaces C-082 option (iv)): when the
+  // <mhd> cold_recovery (default true since R-112, was false; research R-083, replaces C-082 option (iv)): when the
   // energy inversion succeeds but its temperature falls below the floor (the code-208
   // class: prim_floor, no cons_floor, error 0) and the density was NOT floored, the
   // primitives are re-derived from D and S_i alone at T = tfloor (cold_recovery.hpp) instead
@@ -261,7 +261,7 @@ class PrimitiveSolverHydro {
   // rho = D/W is below the density-floor threshold. The same kernel runs every C2P path
   // (RK stage, regrid / init, ghosts, ConToPrimBC); the FOFC probe (floors_only) is unchanged.
   bool crec_on = false;
-  // <mhd> fofc_cold_recovery (default false; R-084 Q2 / R-087 item 1, needs cold_recovery):
+  // <mhd> fofc_cold_recovery (default = cold_recovery since R-112, was false; R-084 Q2 / R-087 item 1, needs cold_recovery):
   // the FOFC probe (ConsToPrim floors_only) counts a cell as good iff the C2P would
   // cold-recover it (ColdRecoveryTry on a re-inversion with the normal primitive floor);
   // every other floor or failure stays a failure.
@@ -1351,8 +1351,9 @@ class PrimitiveSolverHydro {
     atm_frame_vel = pin->GetOrAddBoolean(block, "atmosphere_frame_velocity", false);
     atm_frame_gate = pin->GetOrAddReal(block, "atmosphere_frame_gate", 0.0);
     sf_hll = pin->GetOrAddBoolean(block, "scalar_flux_hll", false);
-    crec_on = pin->GetOrAddBoolean(block, "cold_recovery", false);
-    crec_fofc = pin->GetOrAddBoolean(block, "fofc_cold_recovery", false);
+    // defaults on since R-109/R-112 (the user, 2026-10-24): exact rest-mass closure (C-096 A1)
+    crec_on = pin->GetOrAddBoolean(block, "cold_recovery", true);
+    crec_fofc = pin->GetOrAddBoolean(block, "fofc_cold_recovery", crec_on);
     if (crec_on) {
       Kokkos::realloc(fofc_tl, 7);
       Kokkos::deep_copy(fofc_tl, 0.0);
@@ -1436,7 +1437,8 @@ class PrimitiveSolverHydro {
                   << "' (use jump, jameson or vcurv)" << std::endl;
         std::exit(EXIT_FAILURE);
       }
-      std::string dv = pin->GetOrAddString(block, "dual_energy_div", "coord");
+      // default covariant since R-109/R-112 (the user, 2026-10-24; C-097 E1-E3)
+      std::string dv = pin->GetOrAddString(block, "dual_energy_div", "covariant");
       if (dv != "coord" && dv != "covariant") {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "<" << block << "> dual_energy_div = '" << dv

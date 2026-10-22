@@ -22,7 +22,11 @@
 //!  - every shell_every-th output, per radial shell j about x_k (nshell shells to rshell):
 //!    int_shell rho_* Q Y*_lm dV for Q = 1, V^r, f (scalar 0), and the horizontal
 //!    projections V.(r grad Y*_lm) (polar) and V.(rhat x r grad Y*_lm) (axial), plus the
-//!    shell mass and int rho_* Omega dV with Omega = (dx V^y - dy V^x)/(dx^2 + dy^2).
+//!    shell mass and int rho_* Omega dV with Omega = (dx V^y - dy V^x)/(dx^2 + dy^2);
+//!    then int_shell rho_* p Y*_lm dV (l <= 2) and the plain monopoles int_shell rho_* Q dV
+//!    for Q = eps, psi = gamma^(1/12), alpha, scalars 1-3 as advected (zla flat packing:
+//!    Y_N/f, y_lN, y_lQ), and the shell coordinate volume of the cells used (rho_* above the
+//!    cut). eps = h - 1 - p/rho (no EOS call).
 //!  - global: int rho_* h (x u_y - y u_x) dV about the origin.
 //! Bitant meshes (reflecting x3 = 0): the upper half is integrated and doubled for parity-even
 //! quantities; z_k, J_x, J_y and the l+m odd harmonics are set to 0.
@@ -54,7 +58,10 @@
 namespace star_diag {
 
 constexpr int NLM = 15;            // (l,m), l = 0..4, m = 0..l; index l(l+1)/2 + m
-constexpr int NSHF = 5*2*NLM + 2;  // 5 complex projections + shell mass + int rho_* Omega
+constexpr int NLP = 6;             // l <= 2 for the pressure projection
+constexpr int NPL = 7;             // plain monopoles: eps, psi, alpha, scalars 1-3, volume
+// 5 complex projections + shell mass + int rho_* Omega + p (l <= 2) + plain monopoles
+constexpr int NSHF = 5*2*NLM + 2 + 2*NLP + NPL;
 
 //! conj(Y_lm) at unit vector (nx, ny, nz) for all l <= 4, m >= 0 (re, im interleaved)
 KOKKOS_INLINE_FUNCTION
@@ -365,6 +372,20 @@ void StarDiagnostics::Pass2(Mesh *pm, const Real seed[2][3], int s, const Real c
             Real rc2 = rx*rx + ry*ry;
             Kokkos::atomic_add(&b[10*NLM], Dv);
             if (rc2 > 0.0) Kokkos::atomic_add(&b[10*NLM + 1], Dv*(rx*V[1] - ry*V[0])/rc2);
+            Real p = w0(m, IPR, k + ks, j + js, i + is);
+            Real *bp = b + 10*NLM + 2, *bq = bp + 2*NLP;
+            for (int n = 0; n < NLP; ++n) {
+              Kokkos::atomic_add(&bp[2*n], Dv*p*yr[n]);
+              Kokkos::atomic_add(&bp[2*n + 1], Dv*p*yi[n]);
+            }
+            Kokkos::atomic_add(&bq[0], Dv*(h - 1.0 - p/rho));
+            Kokkos::atomic_add(&bq[1], Dv*Kokkos::pow(detg, 1.0/12.0));
+            Kokkos::atomic_add(&bq[2], Dv*alp);
+            for (int q = 1; q < 4; ++q) {
+              Real sq = (nscal > q) ? w0(m, nmhd + q, k + ks, j + js, i + is) : 0.0;
+              Kokkos::atomic_add(&bq[2 + q], Dv*sq);
+            }
+            Kokkos::atomic_add(&bq[6], dV);
           }
         } else {
           for (int n = 6; n < NLM; ++n) {  // l = 3, 4
@@ -411,6 +432,11 @@ void StarDiagnostics::Pass2(Mesh *pm, const Real seed[2][3], int s, const Real c
         b[8*NLM + 2*n] *= wo; b[8*NLM + 2*n + 1] *= wo;   // axial: opposite parity
       }
       b[10*NLM] *= bf; b[10*NLM + 1] *= bf;
+      for (int n = 0; n < NLP; ++n) {
+        Real we = bitant ? ((lpm(n) & 1) ? 0.0 : 2.0) : 1.0;
+        b[10*NLM + 2 + 2*n] *= we; b[10*NLM + 3 + 2*n] *= we;
+      }
+      for (int q = 0; q < NPL; ++q) b[10*NLM + 2 + 2*NLP + q] *= bf;
     }
   }
 }
@@ -513,7 +539,10 @@ void StarDiagOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       std::fprintf(fp, "# shells file: %s.star%d_shells.bin, records = time + nshell(%d) x %d "
                        "doubles; per shell: [rho_* Y*, rho_* V^r Y*, rho_* f Y*, polar V.rgradY*, "
                        "axial V.(rhat x rgradY*)] x 15 complex (lm order 00,10,11,20,...,44; "
-                       "re,im), shell mass, int rho_* Omega; shells uniform in r to %g\n",
+                       "re,im), shell mass, int rho_* Omega, rho_* p Y* x 6 complex (l <= 2), "
+                       "int rho_* {eps, psi=gamma^(1/12), alpha, s1, s2, s3} "
+                       "(zla flat s1-3: Y_N/f, y_lN, y_lQ), coord volume of cells used; "
+                       "shells uniform in r to %g\n",
                    out_params.file_basename.c_str(), k, diag.nshell, NSHF, diag.rshell);
       std::string h = "# [1]time [2]M [3]x [4]y [5]z [6]ubar_x [7]ubar_y [8]ubar_z [9]Vbar_x "
                       "[10]Vbar_y [11]Vbar_z [12]J_x [13]J_y [14]J_z";

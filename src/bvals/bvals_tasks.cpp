@@ -41,6 +41,7 @@ TaskStatus MeshBoundaryValues::InitRecv(const int nvars) {
   // Payload-only Irecv: the (lid,dn,data_size) layout of each peer's payload
   // is already known from the one-shot header exchange done during
   // BuildRankPackedVarMetadata, so no per-step header receive is posted.
+  if (!recv_var_msgs_.empty()) FenceIfUnpackPending("InitRecv");
   bool no_errors = true;
   for (std::size_t i = 0; i < recv_var_msgs_.size(); ++i) {
     auto &msg = recv_var_msgs_[i];

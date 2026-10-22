@@ -7,7 +7,8 @@ From each run's out.log (rank-0 diagnostics of proj/tde, src/eos/primitive_solve
              >= 12) x (removed, added) (primitive_solver_hyd.hpp l. 495-511, 797); summed over the window;
   MLEDGER    per cycle: Fexc (mass flux into excision-flux cells), Fout; summed;
   ATMZONE    the last line's cumulative zone dM, dE, dM_exc; ATMZONE_BINS the last cumulative zone mass
-             in r_BH (< 1.88, 1.88-2.92, >= 2.92) summed over E and |L| (layout [r][E][L], 3 x 10 x 5);
+             in r_BH (< 1.88, 1.88-2.92, >= 2.92; since R-107 item 5 also split at 0.59 / 0.78) summed
+             over E and |L| (layout [r][E][L], 3 or 5 x 10 x 5);
   CFC accretion  the last M_accreted and the summed dM_raw (cfc.cpp l. 2029-2036).
 The r_BH bins are fixed in the code at 1.88 / 2.92 (areal 3 M / 4 M). With the fixed background the
 excision is r_iso < 0.59 (was < 1.50), so '< 1.88' now holds excised cells (< 0.59) AND evolved cells
@@ -21,18 +22,23 @@ import sys
 import numpy as np
 
 CLS = ('excision', 'floor-mask', 'zone/t3', 'C2P-floored', 'other')
-RB = ('<1.88', '1.88-2.92', '2.92-6', '6-12', '>=12')
+RB5 = ('<1.88', '1.88-2.92', '2.92-6', '6-12', '>=12')
+# since wip/r107-hardening (R-107 item 5) the inner bin is split at the lapse excision and horizon
+RB7 = ('<0.59', '0.59-0.78', '0.78-1.88', '1.88-2.92', '2.92-6', '6-12', '>=12')
+ZR3 = ('<1.88', '1.88-2.92', '>=2.92')
+ZR5 = ('<0.59', '0.59-0.78', '0.78-1.88', '1.88-2.92', '>=2.92')
 
 
 def parse(d):
-    X = np.zeros(50)
+    X = None
     fexc = fout = draw = 0.0
     macc = np.nan
     zone = bins = None
     ncyc = 0
     for line in open(f'{d}/out.log'):
         if line.startswith('MLEDGER_X '):
-            X += np.array([float(v) for v in line.split()[2:52]])
+            v = np.array([float(q) for q in line.split()[2:]])
+            X = v if X is None else X + v
         elif line.startswith('MLEDGER '):
             ncyc += 1
             fexc += float(re.search(r'Fexc=(\S+)', line).group(1))
@@ -44,7 +50,8 @@ def parse(d):
         elif line.startswith('### CFC accretion'):
             draw += float(re.search(r'dM_raw=(\S+)', line).group(1))
             macc = float(re.search(r'M_accreted=(\S+)', line).group(1))
-    return dict(X=X.reshape(5, 5, 2), fexc=fexc, fout=fout, draw=draw, macc=macc, zone=zone, bins=bins, n=ncyc)
+    nr = (0 if X is None else X.size) // 10
+    return dict(X=(np.zeros((5, 5, 2)) if X is None else X.reshape(5, nr, 2)), fexc=fexc, fout=fout, draw=draw, macc=macc, zone=zone, bins=bins, n=ncyc)
 
 
 def main():
@@ -54,6 +61,10 @@ def main():
     print('cycles: ' + ', '.join(f'{lab} {R[lab]["n"]}' for lab in labs))
     print('C2P rest-mass change X summed over the window, removed / added [M_sun-units of the code]:')
     print('  class        r_BH       ' + ''.join(f'{lab + " rem":>14s}{lab + " add":>14s}' for lab in labs))
+    nr = R[labs[0]]['X'].shape[1]
+    if any(R[lab]['X'].shape[1] != nr for lab in labs):
+        raise SystemExit('runs have different MLEDGER_X binnings (5 vs 7 r bins): compare like with like')
+    RB = RB7 if nr == 7 else RB5
     for c, cn in enumerate(CLS):
         for r, rn in enumerate(RB):
             vals = [R[lab]['X'][c, r] for lab in labs]
@@ -67,9 +78,11 @@ def main():
         print(f'  zone {k:23s}' + ''.join(f'{(R[lab]["zone"] or {}).get(k, np.nan):16.4e}' for lab in labs))
     for lab in labs:
         b = R[lab]['bins']
-        if b is not None and b.size >= 150:
-            rb = b[:150].reshape(3, 10, 5).sum(axis=(1, 2))
-            print(f'  zone cumulative dM by r_BH ({lab}): <1.88 {rb[0]:.3e}  1.88-2.92 {rb[1]:.3e}  >=2.92 {rb[2]:.3e}')
+        if b is not None and b.size in (150, 250):
+            nz = b.size // 50
+            rb = b.reshape(nz, 10, 5).sum(axis=(1, 2))
+            names = ZR5 if nz == 5 else ZR3
+            print(f'  zone cumulative dM by r_BH ({lab}): ' + '  '.join(f'{n} {v:.3e}' for n, v in zip(names, rb)))
 
 
 if __name__ == '__main__':

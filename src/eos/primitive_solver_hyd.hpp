@@ -273,7 +273,10 @@ class PrimitiveSolverHydro {
   // atmosphere_frame_gate is set to r_s (the zone replaces the v = 0 floor inside it).
   // Booking (zone_acc, drained per RK stage by DynGRMHDPS::ConToPrim with the stage
   // weights of CFC::AccreteExcisedMass): the removed rest mass, binned in
-  //   r_BH: < 1.88 / 1.88-2.92 / >= 2.92 M (areal 3 M / 4 M on the trumpet slice),
+  //   r_BH: < 0.59 / 0.59-0.78 / 0.78-1.88 / 1.88-2.92 / >= 2.92 M (r_iso of the M = 1
+  //   trumpet: alpha0 = 0.25 (the lapse excision) at 0.5917, the horizon (areal 2 M) at
+  //   0.7793, areal 3 M / 4 M at 1.88 / 2.92; so "< 0.78" is mass that crossed the
+  //   horizon, R-107 item 5),
   //   E/dE (BH-frame Killing E = -u_t - 1 of the state before the reset, dE =
   //   atmosphere_zone_de): edges -6 -3 -2 -1 0 1 2 3 6,
   //   |L| = |(x - x_BH) x u_i|: edges 2 4 6 10 M,
@@ -285,8 +288,8 @@ class PrimitiveSolverHydro {
   bool zone_on = false;
   Real zone_r = 0.0, zone_rho = 0.0, zone_rho_reset = 0.0, zone_vmax = 0.9;
   Real zone_de = 0.677/(16.4*16.4);
-  static constexpr int kZoneNE = 10, kZoneNL = 5, kZoneNR = 3;
-  static constexpr int kZoneNB = kZoneNE*kZoneNL*kZoneNR;     // 150 mass bins
+  static constexpr int kZoneNE = 10, kZoneNL = 5, kZoneNR = 5;
+  static constexpr int kZoneNB = kZoneNE*kZoneNL*kZoneNR;     // 250 mass bins
   // after the bins: dSx dSy dSz d(tau+D) dM  n_mod n_cap  max_rho_mod max_rho_region n_viol
   static constexpr int kZoneSx = kZoneNB, kZoneEn = kZoneNB + 3, kZoneM = kZoneNB + 4;
   static constexpr int kZoneN = kZoneNB + 5, kZoneNcap = kZoneNB + 6;
@@ -502,7 +505,8 @@ class PrimitiveSolverHydro {
   //         through the mesh's outer faces);
   //   X_s = M_end(s) - M_pre(s) (the C2P's change), binned by class (0 excision floor
   //         and flux mask, 1 floor mask only, 2 zone/tier 3, 3 C2P-floored, 4 other) x
-  //         r_BH (< 1.88, 1.88-2.92, 2.92-6, 6-12, >= 12) x (removed, added);
+  //         r_BH (< 0.59, 0.59-0.78, 0.78-1.88, 1.88-2.92, 2.92-6, 6-12, >= 12; the
+  //         first two edges as the zone's, R-107 item 5) x (removed, added);
   //   F_exc,s = the mass flux into excision-flux cells through faces they share with
   //         cells outside that mask; FOFC-flagged cells (outside it) at r < 6 / 6-12.
   // With the propagation weights w_s = prod_{j>s} gam0_j, M_end(ns) - M(u1) =
@@ -518,7 +522,9 @@ class PrimitiveSolverHydro {
   // item 4 the line continues with the same six face sums for tau and then DY (zeros
   // without dual energy).
   int ml_faces = 0, ml_faces_done = 0, ml_faces_cyc = -1;
-  static constexpr int kMlNC = 5, kMlNR = 5, kMlNX = kMlNC*kMlNR*2;
+  static constexpr int kMlNC = 5, kMlNR = 7, kMlNX = kMlNC*kMlNR*2;
+  // inner r_BH bin edges (r_iso, M = 1): the alpha0 = 0.25 lapse excision and the horizon
+  static constexpr Real kRb0 = 0.5917, kRb1 = 0.7793;
   // per-stage slots: [0, kMlNX) X bins, then M_pre, M_end, M(u1), F_exc, F_out,
   // n_fofc(r < 6), n_fofc(6-12), n_cells
   static constexpr int kMlPre = kMlNX, kMlEnd = kMlNX + 1, kMlU1 = kMlNX + 2;
@@ -772,13 +778,14 @@ class PrimitiveSolverHydro {
     const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
     const Real cz = pmy_pack->padm->bc_center[2];
     Real *st = ml_stage[stage-1];
-    // X bins: one reduction per class (10 sums: r bin x removed/added)
+    // X bins: one reduction per class (14 sums: r bin x removed/added)
     for (int c = 0; c < kMlNC; ++c) {
-      Real v[10] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+      Real v[2*kMlNR] = {};
       const Real cc = static_cast<Real>(c);
       Kokkos::parallel_reduce("ml_x", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
       KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
-                    Real &a5, Real &a6, Real &a7, Real &a8, Real &a9) {
+                    Real &a5, Real &a6, Real &a7, Real &a8, Real &a9, Real &a10,
+                    Real &a11, Real &a12, Real &a13) {
         const int m = idx/nkji;
         const int k = (idx - m*nkji)/nji + ks;
         const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
@@ -794,18 +801,22 @@ class PrimitiveSolverHydro {
         const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min,
                                    size.d_view(m).x3max) - cz;
         const Real r2 = x*x + y*y + z*z;
-        const int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
+        const int ir = (r2 >= kRb0*kRb0) + (r2 >= kRb1*kRb1) + (r2 >= 1.88*1.88)
+                       + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
         const Real rem = (dm < 0.0) ? -dm : 0.0, add = (dm > 0.0) ? dm : 0.0;
         if (ir == 0) { a0 += rem; a1 += add; }
         else if (ir == 1) { a2 += rem; a3 += add; }
         else if (ir == 2) { a4 += rem; a5 += add; }
         else if (ir == 3) { a6 += rem; a7 += add; }
-        else { a8 += rem; a9 += add; }
+        else if (ir == 4) { a8 += rem; a9 += add; }
+        else if (ir == 5) { a10 += rem; a11 += add; }
+        else { a12 += rem; a13 += add; }
       }, Kokkos::Sum<Real>(v[0]), Kokkos::Sum<Real>(v[1]), Kokkos::Sum<Real>(v[2]),
          Kokkos::Sum<Real>(v[3]), Kokkos::Sum<Real>(v[4]), Kokkos::Sum<Real>(v[5]),
          Kokkos::Sum<Real>(v[6]), Kokkos::Sum<Real>(v[7]), Kokkos::Sum<Real>(v[8]),
-         Kokkos::Sum<Real>(v[9]));
-      for (int q = 0; q < 10; ++q) st[c*10 + q] = v[q];
+         Kokkos::Sum<Real>(v[9]), Kokkos::Sum<Real>(v[10]), Kokkos::Sum<Real>(v[11]),
+         Kokkos::Sum<Real>(v[12]), Kokkos::Sum<Real>(v[13]));
+      for (int q = 0; q < 2*kMlNR; ++q) st[c*2*kMlNR + q] = v[q];
     }
     st[kMlEnd] = MlMass(u0, IDN);
     // face fluxes (this stage's uflx, after the flux correction) and FOFC counts
@@ -1032,11 +1043,12 @@ class PrimitiveSolverHydro {
       const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min,
                                  size.d_view(m).x3max) - cz;
       const Real r2 = x*x + y*y + z*z;
-      const int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
+      const int ir = (r2 >= kRb0*kRb0) + (r2 >= kRb1*kRb1) + (r2 >= 1.88*1.88)
+                     + (r2 >= 2.92*2.92) + (r2 >= 36.0) + (r2 >= 144.0);
       const int c = static_cast<int>(cls(m, k, j, i));
       const int ad = (dm > 0.0) ? 1 : 0;
       const Real a = (dm > 0.0) ? dm : -dm;
-      Kokkos::atomic_add(&bins(c*10 + 2*ir + ad), a);
+      Kokkos::atomic_add(&bins(c*2*kMlNR + 2*ir + ad), a);
       int l = lev.d_view(m); l = (l < 0) ? 0 : ((l >= kL) ? kL - 1 : l);
       Kokkos::atomic_add(&bins(kMlNX + 2*l + ad), a);
       Kokkos::atomic_add(&bins(kMlNX + 2*kL + 2*isnew(m) + ad), a);
@@ -2285,7 +2297,8 @@ class PrimitiveSolverHydro {
               int ie = (ee >= -6.0) + (ee >= -3.0) + (ee >= -2.0) + (ee >= -1.0) + (ee >= 0.0)
                        + (ee >= 1.0) + (ee >= 2.0) + (ee >= 3.0) + (ee >= 6.0);
               int il = (lmag >= 2.0) + (lmag >= 4.0) + (lmag >= 6.0) + (lmag >= 10.0);
-              int ir = (r2 >= 1.88*1.88) + (r2 >= 2.92*2.92);
+              int ir = (r2 >= kRb0*kRb0) + (r2 >= kRb1*kRb1) + (r2 >= 1.88*1.88)
+                       + (r2 >= 2.92*2.92);
               Kokkos::atomic_add(&zacc_(zb + (ir*kZoneNE + ie)*kZoneNL + il), dM);
               Kokkos::atomic_add(&zacc_(zb + kZoneSx), (cpre[CSX] - cons_pt[CSX])*dv);
               Kokkos::atomic_add(&zacc_(zb + kZoneSx + 1), (cpre[CSY] - cons_pt[CSY])*dv);

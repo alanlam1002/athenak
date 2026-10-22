@@ -599,7 +599,6 @@ class MultigridDriver {
   TaskStatus FMGProlongateTask(Driver *pdrive, int stag);
   TaskStatus ProlongateBoundary(Driver *pdrive, int stag);
   TaskStatus ProlongateBoundaryForProlongation(Driver *pdrive, int stag);
-  TaskStatus FillFCBoundary(Driver *pdrive, int stag);
   TaskStatus FillCoarseBoundary(Driver *pdrive, int stag);
   TaskStatus ProlongateFCBoundary(Driver *pdrive, int stag);
   TaskStatus CalculateFASRHS(Driver *pdrive, int stag);
@@ -799,7 +798,6 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   TaskStatus PostRecvMG();
   TaskStatus ClearSendMG();
   TaskStatus ClearRecvMG();
-  TaskStatus FillFineCoarseMGGhosts(DvceArray5D<Real> &u);
 
   // New FC communication via pack/send/recv/unpack infrastructure
   void FillCoarseMG(const DvceArray5D<Real> &u);

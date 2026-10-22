@@ -21,6 +21,25 @@
 #include "particles/particles.hpp"
 #include "bvals.hpp"
 
+bool MeshBoundaryValues::unpack_unfenced_ = false;
+long MeshBoundaryValues::fallback_fences_ = 0;
+
+//----------------------------------------------------------------------------------------
+//! \fn void MeshBoundaryValues::FenceIfUnpackPending()
+//! \brief Fences if an unpack kernel may still be reading a receive buffer that the
+//! caller is about to re-post (see unpack_unfenced_); warns once per process.
+
+void MeshBoundaryValues::FenceIfUnpackPending(const char *where) {
+  if (!unpack_unfenced_) return;
+  Kokkos::fence();
+  unpack_unfenced_ = false;
+  if (fallback_fences_++ == 0) {
+    std::cout << "### WARNING MeshBoundaryValues::" << where << ": no fence since the "
+              << "last unpack on rank " << global_variable::my_rank << "; fenced here "
+              << "(further cases not reported)" << std::endl;
+  }
+}
+
 //----------------------------------------------------------------------------------------
 // MeshBoundaryValues constructor:
 

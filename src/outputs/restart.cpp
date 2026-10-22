@@ -25,6 +25,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "cfc/cfc.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/compact_object_tracker.hpp"
 #include "z4c/z4c.hpp"
@@ -224,6 +225,12 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     pin->SetReal("cfc", "puncture_mass", pm->pmb_pack->pcfc->puncture_mass_);
     // Phase 2 M2 xidot-controller state (xi, xidot, filter, target); no-op otherwise
     pm->pmb_pack->pcfc->SaveFrameState(pin);
+  }
+  // the time-dependent excision radius and its absorbed-mass total (R-112 item 3): state,
+  // like the puncture mass, so a restart continues bitwise
+  if (pm->pmb_pack->pdyngr != nullptr && pm->pmb_pack->pdyngr->exc_dyn) {
+    pin->SetReal("coord", "excision_rf_state", pm->pmb_pack->pdyngr->exc_rf);
+    pin->SetReal("coord", "excision_absorbed_total", pm->pmb_pack->pdyngr->exc_abs_total);
   }
 
   // create string holding input parameters (copy of input file)

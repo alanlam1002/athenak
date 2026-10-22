@@ -13,6 +13,8 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <iomanip>
+#include <limits>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -25,6 +27,7 @@
 #include "z4c/z4c.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/coordinates.hpp"
+#include "coordinates/cell_locations.hpp"
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
@@ -155,6 +158,34 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   dt_skip_excised = pin->GetOrAddBoolean("time", "dt_skip_excised", false);
   dt_floor_keep_velocity = pin->GetOrAddBoolean("time", "dt_floor_keep_velocity", false);
   dt_lim_report = pin->GetOrAddInteger("time", "dt_limiter_report", 0);
+
+  // <coord> excision_radius_dynamic (R-112 item 3): only with the lapse excision scheme
+  exc_dyn = pin->GetOrAddBoolean("coord", "excision_radius_dynamic", false);
+  if (exc_dyn) {
+    if (!pin->GetOrAddBoolean("coord", "excise", false) ||
+        pin->GetOrAddString("coord", "excision_scheme", "fixed") != "lapse") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<coord> excision_radius_dynamic needs excise = true and "
+                << "excision_scheme = lapse" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    exc_rmax = pin->GetOrAddReal("coord", "excision_rmax", 2.5);
+    exc_margin = pin->GetOrAddReal("coord", "excision_margin_cells", 4.0);
+    exc_vin = pin->GetOrAddReal("coord", "excision_vin", 0.6);
+    // the guard's density: the zone's threshold unless set explicitly
+    const Real zr = pin->DoesParameterExist("mhd", "atmosphere_zone_rho") ?
+                    pin->GetReal("mhd", "atmosphere_zone_rho") : 0.0;
+    exc_rho_thr = pin->GetOrAddReal("coord", "excision_rho_thr", zr);
+    if (!(exc_rho_thr > 0.0)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<coord> excision_radius_dynamic needs excision_rho_thr (or <mhd> "
+                << "atmosphere_zone_rho) > 0" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // the state written by outputs/restart.cpp (absent on a fresh start: r_f grows from 0)
+    exc_rf = pin->GetOrAddReal("coord", "excision_rf_state", 0.0);
+    exc_abs_total = pin->GetOrAddReal("coord", "excision_absorbed_total", 0.0);
+  }
 
   // allocate memory for temperature
   {
@@ -445,6 +476,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::RefreshExcisionMasks() {
   auto &cd = pmy_pack->pcoord->coord_data;
   if (cd.bh_excise && cd.excision_mask_refresh &&
       cd.excision_scheme == ExcisionScheme::lapse) {
+    SetExcisionGeometry();
     pmy_pack->pcoord->UpdateExcisionMasks();
   }
 }
@@ -609,11 +641,112 @@ TaskStatus DynGRMHD::SetADMVariables(Driver *pdrive, int stage) {
 
 TaskStatus DynGRMHD::UpdateExcisionMasks(Driver *pdrive, int stage) {
   if (pmy_pack->pcoord->coord_data.bh_excise && stage == pdrive->nexp_stages) {
+    // the final stage's rebuild is the between-cycles point: the next cycle's r_f is set
+    // here and held through all its stages (the per-C2P refresh reuses it)
+    UpdateExcisionRadius(pdrive);
     ZoneUnmaskPre();
+    SetExcisionGeometry();
     pmy_pack->pcoord->UpdateExcisionMasks();
     ZoneUnmaskPost();
   }
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHD::SetExcisionGeometry()
+//! \brief hand the time-dependent excision radius and the hole's position (padm->bc_center,
+//! the zone's centre) to Coordinates before a lapse-mask rebuild. No-op unless
+//! <coord> excision_radius_dynamic.
+void DynGRMHD::SetExcisionGeometry() {
+  auto &cd = pmy_pack->pcoord->coord_data;
+  cd.excision_dynamic = exc_dyn;
+  cd.excision_rf = exc_dyn ? exc_rf : 0.0;
+  cd.exc_cx = pmy_pack->padm->bc_center[0];
+  cd.exc_cy = pmy_pack->padm->bc_center[1];
+  cd.exc_cz = pmy_pack->padm->bc_center[2];
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHD::UpdateExcisionRadius(Driver *pdrive)
+//! \brief the R-106 rule for the next cycle's r_f (research TIME_DEP_EXCISION_DESIGN.md
+//! sec. 2, 6): d_min = distance from the hole to the nearest interior cell with
+//! rho > exc_rho_thr (a global min, order-independent), dx = the cell size of the block
+//! holding the hole (the finest level there), r_target = min(rmax, d_min - margin dx -
+//! vin dt) (>= 0); grow by at most dx per cycle, shrink at once. Aborts if dense gas lies
+//! within r_f + 2 dx (cannot happen with margin >= 2; a safety check). Books the rest mass
+//! the C2P removed in cells excised only by r < r_f, and prints one EXCDYN line per cycle.
+void DynGRMHD::UpdateExcisionRadius(Driver *pdrive) {
+  if (!exc_dyn) return;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &w0 = pmy_pack->pmhd->w0;
+  const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
+  const Real cz = pmy_pack->padm->bc_center[2];
+  const Real thr = exc_rho_thr;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  Real d2 = std::numeric_limits<Real>::max();
+  Kokkos::parallel_reduce("exc_dmin", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &dmin2) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    if (!(w0(m, IDN, k, j, i) > thr)) return;
+    const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - cx;
+    const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - cy;
+    const Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - cz;
+    const Real r2 = x*x + y*y + z*z;
+    if (r2 < dmin2) dmin2 = r2;
+  }, Kokkos::Min<Real>(d2));
+  Real dxh = std::numeric_limits<Real>::max();
+  for (int m = 0; m < nmb; ++m) {
+    auto &b = size.h_view(m);
+    if (cx >= b.x1min && cx < b.x1max && cy >= b.x2min && cy < b.x2max &&
+        cz >= b.x3min && cz < b.x3max) {
+      dxh = std::min(dxh, b.dx1);
+    }
+  }
+  Real absorbed = DrainAbsorbedAtRf();
+#if MPI_PARALLEL_ENABLED
+  Real mn[2] = {d2, dxh}, mx[2];
+  MPI_Allreduce(mn, mx, 2, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+  d2 = mx[0]; dxh = mx[1];
+  MPI_Allreduce(MPI_IN_PLACE, &absorbed, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  exc_abs_total += absorbed;
+  const Real dmin = std::sqrt(d2);
+  if (!(dxh < std::numeric_limits<Real>::max())) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "excision_radius_dynamic: no MeshBlock contains the hole position" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  Real target = std::min(exc_rmax, dmin - exc_margin*dxh - exc_vin*pmy_pack->pmesh->dt);
+  if (!(target > 0.0)) target = 0.0;
+  const Real old = exc_rf;
+  bool shrink = false, grow = false;
+  if (target < old) {
+    exc_rf = target; shrink = true; ++exc_nshrink;
+  } else {
+    exc_rf = std::min(target, old + dxh);
+    if (exc_rf > old) { grow = true; ++exc_ngrow; }
+  }
+  if (exc_rf > 0.0 && dmin < exc_rf + 2.0*dxh) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "excision_radius_dynamic guard: gas with rho > " << thr << " at r = " << dmin
+              << " within r_f + 2 dx = " << exc_rf + 2.0*dxh << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (global_variable::my_rank == 0) {
+    std::cout << std::setprecision(10) << "EXCDYN cycle=" << pmy_pack->pmesh->ncycle
+              << " time=" << pmy_pack->pmesh->time + pmy_pack->pmesh->dt << " r_f=" << exc_rf
+              << " r_f_old=" << old << " d_min=" << dmin << " dx=" << dxh << " margin="
+              << dmin - exc_rf << " absorbed=" << absorbed << " absorbed_total="
+              << exc_abs_total << " shrink=" << shrink << " grow=" << grow << " nshrink="
+              << exc_nshrink << " ngrow=" << exc_ngrow << std::endl;
+  }
 }
 
 template<class EOSPolicy, class ErrorPolicy> template<int NGHOST>

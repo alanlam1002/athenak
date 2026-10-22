@@ -44,6 +44,13 @@ struct CoordData {
   ExcisionScheme excision_scheme;  // excision method
   bool excision_mask_refresh = false;  // <coord> excision_mask_refresh (lapse scheme)
   Real excise_lapse;               // if excision_scheme = lapse, excise under this lapse
+  // <coord> excision_radius_dynamic (R-112 item 3, TIME_DEP_EXCISION_DESIGN.md): the lapse
+  // scheme also excises r < excision_rf about (exc_cx, exc_cy, exc_cz), the moving hole.
+  // DynGRMHD owns the radius (one global value per cycle) and sets these three plus
+  // excision_rf before every mask rebuild; Coordinates only reads them.
+  bool excision_dynamic = false;
+  Real excision_rf = 0.0;
+  Real exc_cx = 0.0, exc_cy = 0.0, exc_cz = 0.0;
   bool smooth_excision = false;    // flag to specify smooth excision (fastflow)
   Real horizon_factor;             // factor to muliply the horizon factor by (fastflow)
   Real tdamp;                      // damping time (needed for smooth excision)

@@ -178,10 +178,25 @@ void Coordinates::UpdateExcisionMasks() {
     auto &flux = excision_flux;
 
     Real &excise_lapse = coord_data.excise_lapse;
+    // time-dependent excision: (r < r_f) OR (alpha < excise_lapse), r about the moving hole.
+    // A pure function of the cell's position, the hole position and the cycle's global r_f
+    // (and its lapse), so a ghost decides as its owner does.
+    const bool dyn = coord_data.excision_dynamic && coord_data.excision_rf > 0.0;
+    const Real rf2 = coord_data.excision_rf*coord_data.excision_rf;
+    const Real cx = coord_data.exc_cx, cy = coord_data.exc_cy, cz = coord_data.exc_cz;
+    auto &size = pmy_pack->pmb->mb_size;
+    int is = indcs.is; int js = indcs.js; int ks = indcs.ks;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
 
     par_for("set_excision", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       bool excise = (adm.alpha(m,k,j,i) < excise_lapse);
+      if (dyn && !excise) {
+        const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - cx;
+        const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - cy;
+        const Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - cz;
+        excise = (x*x + y*y + z*z < rf2);
+      }
       floor(m,k,j,i) = excise;
       flux(m,k,j,i) = excise;
     });

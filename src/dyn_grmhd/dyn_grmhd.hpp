@@ -81,6 +81,22 @@ class DynGRMHD {
   TaskStatus UpdateExcisionMasks(Driver *d, int stage);
   TaskStatus ApplyPhysicalBCs(Driver *d, int stage);
 
+  // <coord> excision_radius_dynamic (R-112 item 3; research TIME_DEP_EXCISION_DESIGN.md):
+  // a time-dependent excision sphere r < exc_rf about the moving hole, OR'ed with the lapse
+  // mask. exc_rf is one global value per cycle, updated between cycles (the final stage's
+  // mask rebuild) by UpdateExcisionRadius:
+  //   r_f = min(rmax, d_min - margin_cells*dx - vin*dt), grown by at most dx per cycle,
+  //   shrunk at once; d_min = distance to the nearest interior cell with rho > rho_thr.
+  // Persisted in the restart file (outputs/restart.cpp), so a restart continues bitwise.
+  bool exc_dyn = false;
+  Real exc_rmax = 2.5, exc_margin = 4.0, exc_vin = 0.6, exc_rho_thr = 0.0;
+  Real exc_rf = 0.0;          // the current radius (0: lapse mask only)
+  Real exc_abs_total = 0.0;   // rest mass absorbed at r_f (cells excised only by r < r_f)
+  long exc_nshrink = 0, exc_ngrow = 0;
+  void UpdateExcisionRadius(Driver *d);
+  void SetExcisionGeometry();   // hands exc_rf and the hole position to Coordinates
+  virtual Real DrainAbsorbedAtRf() { return 0.0; }
+
   // functions
 
   virtual void QueueDynGRMHDTasks() = 0;
@@ -194,6 +210,11 @@ class DynGRMHDPS : public DynGRMHD {
   void MassLedgerRegridPost(const char *path) override { eos.MassLedgerRegridPost(path); }
   void ZoneUnmaskPre() override { eos.ZoneUnmaskPre(); }
   void ZoneUnmaskPost() override;
+  Real DrainAbsorbedAtRf() override {
+    const Real a = eos.exc_absorbed_rf;
+    eos.exc_absorbed_rf = 0.0;
+    return a;
+  }
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;

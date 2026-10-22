@@ -39,7 +39,7 @@ MultigridBoundaryValues::MultigridBoundaryValues(
   : MeshBoundaryValuesCC(pmbp, pin, coarse), pmy_mg(pmg) {
   // Multigrid boundary communications always use the rank-packed scheme; there is
   // no runtime switch to select a different communication path.
-  recv_sync_ = pin->GetOrAddInteger("job", "mg_recv_sync", 1);
+  recv_sync_ = pin->GetOrAddInteger("job", "mg_recv_sync", 3);   // C-092
   race_probe_ = pin->GetOrAddBoolean("job", "mg_race_probe", false);
   mg_recv_alt_.resize(kMaxMGLevels);
 }

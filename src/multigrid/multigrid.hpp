@@ -815,7 +815,7 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
 
  private:
   Multigrid *pmy_mg;
-  // <job> mg_recv_sync (C-091; default 1): how InitRecvMG makes the rank-packed aggregate
+  // <job> mg_recv_sync (C-091/C-092; default 3): how InitRecvMG makes the rank-packed aggregate
   // recv buffer safe to re-post while the previous round's UnpackMG kernel (launched
   // asynchronously, RecvAndUnpackMG) may still be reading it:
   //   0 nothing (the pre-C-091 behaviour: a write-after-read race on that buffer),
@@ -826,7 +826,7 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   //     (StartReceive only switches the level state; SendBoundary posts them after
   //     PackAndSendMG), whose pre-send fence has already completed the previous unpack.
   //     A fallback fence (counted) guards the case of no fence since the last unpack.
-  int recv_sync_ = 1;
+  int recv_sync_ = 3;
   bool unpack_unfenced_ = false;   // an UnpackMG was launched with no fence since
   long fallback_fences_ = 0;
   std::vector<DvceArray1D<Real>> mg_recv_alt_;

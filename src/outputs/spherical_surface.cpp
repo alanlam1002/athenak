@@ -129,13 +129,38 @@ SphericalSurfaceOutput::SphericalSurfaceOutput(ParameterInput *pin, Mesh *pm,
   Real yc = pin->GetOrAddReal(op.block_name, "yc", 0.0);
   Real zc = pin->GetOrAddReal(op.block_name, "zc", 0.0);
   psurf = new SphericalSurface(pm->pmb_pack, ntheta, rad, xc, yc, zc);
+  // optional: follow a star's centre of mass (star_diagnostics.cpp; the region
+  // parameters nstar, rho_cut, rmax, star<k>_x/y/z are read from this block)
+  center_star = pin->GetOrAddInteger(op.block_name, "center_star", -1);
+  reflect_z = pin->GetOrAddBoolean(op.block_name, "reflect_z", false);
+  if (center_star >= 0) pdiag = new StarDiagnostics(pin, pm, op.block_name);
 }
 
-SphericalSurfaceOutput::~SphericalSurfaceOutput() { delete psurf; }
+SphericalSurfaceOutput::~SphericalSurfaceOutput() { delete psurf; delete pdiag; }
 
 void SphericalSurfaceOutput::LoadOutputData(Mesh *pm) {
-  // If AMR is enabled we need to reset the CartesianGrid
-  if (pm->adaptive) {
+  bool moved = false;
+  if (center_star >= 0 && center_star < pdiag->nstar) {
+    Real com[2][3];
+    if (pdiag->FindCentres(pm, com)) {
+      psurf->xc = com[center_star][0];
+      psurf->yc = com[center_star][1];
+      psurf->zc = com[center_star][2];
+    }
+    moved = true;
+  }
+  if (moved || reflect_z) {
+    psurf->InitializeRadius();
+    if (reflect_z) {
+      for (int p = 0; p < psurf->npoints; ++p) {
+        psurf->cart_pos.h_view(p, 2) = std::abs(psurf->cart_pos.h_view(p, 2));
+      }
+      psurf->cart_pos.template modify<HostMemSpace>();
+      psurf->cart_pos.template sync<DevExeSpace>();
+    }
+  }
+  // If AMR is enabled (or the surface moved) we need to reset the interpolation
+  if (pm->adaptive || moved || reflect_z) {
     psurf->SetInterpolationIndices();
     psurf->SetInterpolationWeights();
   }

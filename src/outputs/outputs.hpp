@@ -423,6 +423,7 @@ class SphericalSurface;
 //----------------------------------------------------------------------------------------
 //! \class SphericalGridOutput
 //  \brief derived BaseTypeOutput class for output on a Cartesian grid
+class StarDiagnostics;
 class SphericalSurfaceOutput : public BaseTypeOutput {
  public:
   SphericalSurfaceOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
@@ -433,7 +434,50 @@ class SphericalSurfaceOutput : public BaseTypeOutput {
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
  private:
   SphericalSurface *psurf;
+  int center_star = -1;              // >= 0: re-centre on that star's COM at every output
+  bool reflect_z = false;            // bitant: interpolate z < 0 points at |z|
+  StarDiagnostics *pdiag = nullptr;  // COM finder (star_diagnostics.cpp)
 };
+//----------------------------------------------------------------------------------------
+//! \class StarDiagnostics
+//  \brief star-centred COM, spin, multipoles and shell moments (see star_diagnostics.cpp)
+
+class StarDiagnostics {
+ public:
+  StarDiagnostics(ParameterInput *pin, Mesh *pm, std::string block);
+  int nstar, nshell;
+  Real rho_cut, rmax, rshell;
+  bool bitant;
+  Real seed_par[2][3];
+  void GetSeeds(Mesh *pm, Real seed[2][3]);
+  bool FindCentres(Mesh *pm, Real com[2][3]);
+  void Pass1(Mesh *pm, const Real seed[2][3], Real sums[2][20]);
+  void Pass2(Mesh *pm, const Real seed[2][3], int s, const Real com[3], const Real ubar[3],
+             Real out[40], bool do_shells, std::vector<Real> &shell);
+  Real GlobalJz(Mesh *pm);
+ private:
+  void Plane(const Real seed[2][3], int k, Real nrm[3], Real mid[3]);
+  Real MaxDens(Mesh *pm);
+};
+
+//----------------------------------------------------------------------------------------
+//! \class StarDiagOutput
+//  \brief file_type = star: writes <basename>.star<k>.txt and .star<k>_shells.bin
+
+class StarDiagOutput : public BaseTypeOutput {
+ public:
+  StarDiagOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
+  void LoadOutputData(Mesh *pm) override;
+  void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+ private:
+  StarDiagnostics diag;
+  int shell_every, ncall = 0;
+  bool do_shells_now = false;
+  Real row[2][56] = {};
+  Real global_jz = 0.0;
+  std::vector<Real> shells[2];
+};
+
 //----------------------------------------------------------------------------------------
 //! \class EventLogOutput
 //  \brief derived BaseTypeOutput class for event counter data

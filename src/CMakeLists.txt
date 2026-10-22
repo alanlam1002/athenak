@@ -110,6 +110,7 @@ add_executable(
         outputs/history.cpp
         outputs/restart.cpp
         outputs/spherical_surface.cpp
+        outputs/star_diagnostics.cpp
         outputs/coarsened_binary.cpp
         outputs/track_prtcl.cpp
         outputs/vtk_mesh.cpp

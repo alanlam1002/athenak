@@ -45,16 +45,16 @@ TaskStatus MultigridDriver::ClearSend(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
-  // <job> mg_recv_sync 3 (C-091): only switch the level state here; the receives are posted
-  // in SendBoundary after the pre-send fence (no extra synchronisation)
-  TaskStatus tstat = pmg->pbval->InitRecvMG(pmg->nvar_, pmg->pbval->RecvSync() != 3);
+  // only switches the level's state; the receives are posted in SendBoundary after the
+  // pre-send fence, so the previous round's UnpackMG no longer reads their buffer (C-092)
+  TaskStatus tstat = pmg->pbval->InitRecvMG(pmg->nvar_);
   return tstat;
 }
 
 TaskStatus MultigridDriver::SendBoundary(Driver *pdrive, int stage) {
   DvceArray5D<Real> u = pmg->GetCurrentData();
   TaskStatus tstat = pmg->pbval->PackAndSendMG(u);
-  if (tstat == TaskStatus::complete && pmg->pbval->RecvSync() == 3) {
+  if (tstat == TaskStatus::complete) {
     tstat = pmg->pbval->PostRecvMG();
   }
   return tstat;
@@ -554,7 +554,7 @@ void MultigridDriver::SetMGTaskListToFiner(int nsmooth, int ngh, int flag) {
       id.fill_coarseB = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::FillCoarseBoundary, "FillCoarseBoundary"), id.smoothB);
       id.ircvB    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::StartReceive, "StartReceive"), id.fc_ghostsR);
       id.sendB    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::SendBoundary, "SendBoundary"), id.fill_coarseB);
-      TaskID dep_recvB = id.ircvB | id.sendB;  // mg_recv_sync 3 posts in SendBoundary
+      TaskID dep_recvB = id.ircvB | id.sendB;  // receives are posted in SendBoundary
       id.recvB    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::RecvBoundary, "RecvBoundary"),
           dep_recvB);
       id.physbB   = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::PhysicalBoundary, "PhysicalBoundary"), id.recvB);
@@ -565,7 +565,7 @@ void MultigridDriver::SetMGTaskListToFiner(int nsmooth, int ngh, int flag) {
       id.fill_coarseR2 = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::FillCoarseBoundary, "FillCoarseBoundary"), id.smoothR2);
       id.ircvR2    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::StartReceive, "StartReceive"), id.fc_ghostsB);
       id.sendR2    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::SendBoundary, "SendBoundary"), id.fill_coarseR2);
-      TaskID dep_recvR2 = id.ircvR2 | id.sendR2;  // mg_recv_sync 3 posts in SendBoundary
+      TaskID dep_recvR2 = id.ircvR2 | id.sendR2;  // receives are posted in SendBoundary
       id.recvR2    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::RecvBoundary, "RecvBoundary"),
           dep_recvR2);
       id.physbR2   = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::PhysicalBoundary, "PhysicalBoundary"), id.recvR2);

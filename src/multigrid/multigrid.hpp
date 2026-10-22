@@ -793,11 +793,10 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   // pack/restrict fluxes at fine/coarse boundaries into boundary buffers and send
   TaskStatus PackAndSendMG(const DvceArray5D<Real> &u);
   TaskStatus RecvAndUnpackMG(DvceArray5D<Real> &u);
-  // post = false (mg_recv_sync 3): switch to this level's rank-packed state only; the
-  // receives are then posted by PostRecvMG after PackAndSendMG's pre-send fence
-  TaskStatus InitRecvMG(const int nvars, bool post = true);
+  // InitRecvMG switches to this level's rank-packed state (StartReceive); PostRecvMG posts
+  // the receives, called by SendBoundary right after PackAndSendMG (see unpack_unfenced_)
+  TaskStatus InitRecvMG(const int nvars);
   TaskStatus PostRecvMG();
-  int RecvSync() const { return recv_sync_; }
   TaskStatus ClearSendMG();
   TaskStatus ClearRecvMG();
   TaskStatus FillFineCoarseMGGhosts(DvceArray5D<Real> &u);
@@ -815,29 +814,15 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
 
  private:
   Multigrid *pmy_mg;
-  // <job> mg_recv_sync (C-091/C-092; default 3): how InitRecvMG makes the rank-packed aggregate
-  // recv buffer safe to re-post while the previous round's UnpackMG kernel (launched
-  // asynchronously, RecvAndUnpackMG) may still be reading it:
-  //   0 nothing (the pre-C-091 behaviour: a write-after-read race on that buffer),
-  //   1 Kokkos::fence() before the Irecvs are re-posted (the fix),
-  //   2 no fence; alternate between two aggregate recv buffers per level (ping-pong), the
-  //     discriminating test that the race is the buffer reuse and nothing else a fence cures
-  //   3 no extra fence: the receives of a round are posted right after that round's sends
-  //     (StartReceive only switches the level state; SendBoundary posts them after
-  //     PackAndSendMG), whose pre-send fence has already completed the previous unpack.
-  //     A fallback fence (counted) guards the case of no fence since the last unpack.
-  int recv_sync_ = 3;
-  bool unpack_unfenced_ = false;   // an UnpackMG was launched with no fence since
+  // The aggregate recv buffer is read by UnpackMG, which RecvAndUnpackMG only launches
+  // (asynchronous); re-posting MPI_Irecv into it while that kernel may still run lets MPI
+  // overwrite it mid-read (the C-091 write-after-read race behind the run-to-run
+  // non-determinism). The receives are therefore posted after PackAndSendMG's pre-send
+  // fence, which completes every earlier kernel (C-092). unpack_unfenced_ records an
+  // UnpackMG launch not yet followed by a fence; PostRecvMG fences itself (and counts it)
+  // if a fence is ever missing, e.g. receives without a cross-rank send.
+  bool unpack_unfenced_ = false;
   long fallback_fences_ = 0;
-  std::vector<DvceArray1D<Real>> mg_recv_alt_;
-  // <job> mg_race_probe (default false; C-091): every UnpackMG team stamps the launch
-  // epoch into a host-pinned slot; InitRecvMG counts, without a fence, the teams of the
-  // last launch not yet stamped when it re-posts the receives (the race window)
-  bool race_probe_ = false;
-  Kokkos::View<int*, Kokkos::SharedHostPinnedSpace> probe_slot_;
-  int probe_epoch_ = 0, probe_nteams_ = 0, probe_cycle_ = -1;
-  long probe_posts_ = 0, probe_pending_posts_ = 0, probe_pending_teams_ = 0;
-  long probe_posts_offrank_ = 0, probe_pending_offrank_ = 0;
   std::vector<RankPackedVarEntry> mg_send_var_entries_;
   std::vector<RankPackedVarEntry> mg_recv_var_entries_;
   std::vector<RankPackedVarMessage> mg_send_var_msgs_;

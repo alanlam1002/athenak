@@ -203,6 +203,10 @@ class PrimitiveSolverHydro {
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
   Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
+  // <coord> excision_radius_dynamic (R-112 item 3): rest mass the C2P's excision reset removed
+  // from interior cells excised only by r < r_f (alpha >= excise_lapse), this rank, since the
+  // last DynGRMHD::UpdateExcisionRadius drain (the "absorbed at r_f" tally)
+  Real exc_absorbed_rf = 0.0;
   // <mhd> dual_energy_diag (default false; research R-041 item 1a): per-cell maps of the
   // switch, set by DynGRMHDPS when on (a view of DynGRMHD::de_diag), from the last C2P
   // call (and the last coord_src call for 6-7):
@@ -1873,6 +1877,9 @@ class PrimitiveSolverHydro {
     auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
     auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
     auto &texcise_ = pmy_pack->pcoord->coord_data.texcise;
+    const bool exdyn_ = excise && pmy_pack->pcoord->coord_data.excision_dynamic &&
+                        pmy_pack->pcoord->coord_data.excision_scheme == ExcisionScheme::lapse;
+    const Real exlap_ = exdyn_ ? pmy_pack->pcoord->coord_data.excise_lapse : 0.0;
 
     auto &adm  = pmy_pack->padm->adm;
     auto &eos_ = ps.GetEOS();
@@ -2007,12 +2014,12 @@ class PrimitiveSolverHydro {
     Real dEraw_tally = 0.0;
     Real de_nden = 0.0, de_nent_c = 0.0, de_dE_c = 0.0;
     Real crn_c = 0.0, crt_c = 0.0, crx_c = 0.0, cdy_c = 0.0, cmb_c = 0.0, cmu_c = 0.0;
-    Real mba_c = 0.0, cmt_c = 0.0, cmh_c = 0.0;
+    Real mba_c = 0.0, cmt_c = 0.0, cmh_c = 0.0, mrf_c = 0.0;
     Kokkos::parallel_reduce("pshyd_c2p",Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, int &sumerrs, Real &dE_r, Real &dPx_r, Real &dPy_r,
                   Real &dPz_r, Real &dEraw_r, Real &nden_r, Real &nent_r, Real &dede_r,
                   Real &crn_r, Real &crt_r, Real &crx_r, Real &cdy_r, Real &cmb_r,
-                  Real &cmu_r, Real &mba_r, Real &cmt_r, Real &cmh_r) {
+                  Real &cmu_r, Real &mba_r, Real &cmt_r, Real &cmh_r, Real &mrf_r) {
       int m = (idx)/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/ni;
@@ -2131,6 +2138,11 @@ class PrimitiveSolverHydro {
               dPy_r  += (cons_pt_old[CSY] - cons_pt[CSY])*sdetg*dvol;
               dPz_r  += (cons_pt_old[CSZ] - cons_pt[CSZ])*sdetg*dvol;
               dEraw_r += dE;   // raw psi^6 E, validation only
+              // excised only by the time-dependent sphere: the "absorbed at r_f" tally (its
+              // energy still feeds the puncture through dE_r, like any excised gas)
+              if (exdyn_ && !(adm.alpha(m, k, j, i) < exlap_)) {
+                mrf_r += (cons_pt_old[CDN] - cons_pt[CDN])*sdetg*dvol;
+              }
               if (zbook_) {    // rest mass, for the zone booking's closure
                 Kokkos::atomic_add(&zacc_(kZoneExcM), (cons_pt_old[CDN] - cons_pt[CDN])*sdetg*dvol);
               }
@@ -2547,7 +2559,7 @@ class PrimitiveSolverHydro {
        Kokkos::Sum<Real>(de_nent_c), Kokkos::Sum<Real>(de_dE_c), Kokkos::Sum<Real>(crn_c),
        Kokkos::Sum<Real>(crt_c), Kokkos::Sum<Real>(crx_c), Kokkos::Sum<Real>(cdy_c),
        Kokkos::Sum<Real>(cmb_c), Kokkos::Sum<Real>(cmu_c), Kokkos::Sum<Real>(mba_c),
-       Kokkos::Sum<Real>(cmt_c), Kokkos::Sum<Real>(cmh_c));
+       Kokkos::Sum<Real>(cmt_c), Kokkos::Sum<Real>(cmh_c), Kokkos::Sum<Real>(mrf_c));
     if (crec_) {
       crec_n += crn_c; crec_dtau += crt_c; crec_ds += crx_c; crec_dtau_total += crt_c;
       crec_ddy += cdy_c; crec_ddy_total += cdy_c; crec_hot += cmh_c;
@@ -2578,6 +2590,7 @@ class PrimitiveSolverHydro {
       tally[2] += dPy_tally;
       tally[3] += dPz_tally;
       tally[4] += dEraw_tally;
+      exc_absorbed_rf += mrf_c;
     }
   }
 

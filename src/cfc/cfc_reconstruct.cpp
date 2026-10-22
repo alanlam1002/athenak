@@ -227,9 +227,11 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
         adm.vK_dd(m,a,b,k,j,i) = a_dd(m,a,b,k,j,i)*ipsi2;
       }
     }
-    // Clamp from below -- see alpha_floor's note in cfc_reconstruct.hpp.
+    // Clamp from below -- see alpha_floor's note in cfc_reconstruct.hpp. An explicit
+    // compare, not fmax: fmax(NaN, floor) = floor would hide a failed solve; NaN passes
+    // through to CheckFinite / NANS_IN_CONS, as in CFC::ApplyAlphaFloor (R-107).
     Real alpha_val = (delta_alpha_psi(m,0,k,j,i) + u_alpha0_psi0(m,0,k,j,i))/psi_val;
-    adm.alpha(m,k,j,i) = fmax(alpha_val, alpha_floor);
+    adm.alpha(m,k,j,i) = (alpha_val < alpha_floor) ? alpha_floor : alpha_val;
     for (int a = 0; a < 3; ++a) {
       adm.beta_u(m,a,k,j,i) = beta_u(m,a,k,j,i) + beta0_u(m,a,k,j,i);
     }

@@ -80,10 +80,11 @@ KOKKOS_INLINE_FUNCTION Real SquareVector(const Real vu[3], const Real g3d[NSPMET
 //  changes nothing except where alpha is already indistinguishable from zero.
 //
 //  \param[in] alpha The ADM lapse
-//  \return alpha, floored to a small positive value
+//  \return alpha, floored to a small positive value (a NaN alpha is returned unchanged,
+//  so it is not silently turned into the floor; R-107)
 KOKKOS_INLINE_FUNCTION Real FloorLapse(const Real alpha) {
   constexpr Real min_alpha = 1.0e-15;
-  return fmax(alpha, min_alpha);
+  return (alpha < min_alpha) ? min_alpha : alpha;
 }
 
 //! \brief Invert a 3x3 matrix

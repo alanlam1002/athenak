@@ -87,14 +87,17 @@ class ResetFloor : public ErrorPolicyInterface {
     return Error::SUCCESS;
   }
 
+  // The limits below use explicit compares, not fmax/fmin: fmin(max, NaN) = max would
+  // turn a NaN into the upper bound silently; a NaN now passes through (R-107).
+
   /// Policy for resetting density
   KOKKOS_INLINE_FUNCTION void DensityLimits(Real& n, Real n_min, Real n_max) const {
-    n = fmax(n_min, fmin(n_max, n));
+    n = (n < n_min) ? n_min : ((n > n_max) ? n_max : n);
   }
 
   /// Policy for resetting temperature
   KOKKOS_INLINE_FUNCTION void TemperatureLimits(Real& T, Real T_min, Real T_max) const {
-    T = fmax(T_min, fmin(T_max, T));
+    T = (T < T_min) ? T_min : ((T > T_max) ? T_max : T);
   }
 
   /// Policy for resetting species fractions
@@ -115,12 +118,12 @@ class ResetFloor : public ErrorPolicyInterface {
 
   /// Policy for resetting pressure
   KOKKOS_INLINE_FUNCTION void PressureLimits(Real& P, Real P_min, Real P_max) const {
-    P = fmax(P_min, fmin(P_max, P));
+    P = (P < P_min) ? P_min : ((P > P_max) ? P_max : P);
   }
 
   /// Policy for resetting energy density
   KOKKOS_INLINE_FUNCTION void EnergyLimits(Real& e, Real e_min, Real e_max) const {
-    e = fmax(e_min, fmin(e_max, e));
+    e = (e < e_min) ? e_min : ((e > e_max) ? e_max : e);
   }
 
   /// Policy for dealing with failed points

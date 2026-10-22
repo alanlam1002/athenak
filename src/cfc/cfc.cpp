@@ -571,6 +571,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
   }
 
+  // The comoving frame velocity the floor atmosphere (atmosphere_frame_velocity), the CFL
+  // and ADMBCs read (padm->frame_vel_u) at the start/restart time. AssembleADM sets it every
+  // stage, but a restart skips InitializeMetric, so its initial C2P and first dt saw xidot = 0
+  // and gave floored gas v = 0 against the shift (C-100; restarts not bit-continuous).
+  if (frame_enabled_) {
+    Real xd[3];
+    FrameVel(pmbp->pmesh->time, xd);
+    for (int a = 0; a < 3; ++a) { pmbp->padm->frame_vel_u[a] = xd[a]; }
+  }
+
   // Elliptic source/output NaN scan; see cfc.hpp. Default 0 = off.
   src_nan_check_ = pin->GetOrAddInteger("cfc", "src_nan_check", 0);
   indcs_ng_ = pmy_pack->pmesh->mb_indcs.ng;

@@ -191,6 +191,19 @@ class MeshBoundaryValues {
 
   TaskStatus InitRecv(const int nvar);
   virtual TaskStatus InitFluxRecv(const int nvar)=0;
+
+  // The unpack kernels (RecvAndUnpackCC/FC, RecvAndUnpackFluxCC/FC) read the MPI
+  // receive buffers asynchronously; re-posting MPI_Irecv into a buffer while such a
+  // kernel may still run lets MPI overwrite it mid-read (the C-091 write-after-read
+  // race, found in the multigrid). A Kokkos::fence completes every earlier kernel, so
+  // unpack_unfenced_ (one per process, shared by all objects) records an unpack launch
+  // not yet followed by a fence that called NoteFence(); InitRecv/InitFluxRecv fence
+  // (and count it) if it is still set. As run, the pack fences and the driver's
+  // phase-timer fences always intervene (C-096 A3).
+  static bool unpack_unfenced_;
+  static long fallback_fences_;
+  static void NoteFence() { unpack_unfenced_ = false; }
+  static void FenceIfUnpackPending(const char *where);
   TaskStatus ClearRecv();
   TaskStatus ClearSend();
   TaskStatus ClearFluxRecv();

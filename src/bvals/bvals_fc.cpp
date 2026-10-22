@@ -238,6 +238,7 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFC(DvceFaceFld4D<Real> &b,
   // wrote off-rank payloads directly into rank_sendbuf_vars_, so a single fence
   // is all that is needed before posting the sends.
   Kokkos::fence();
+  NoteFence();
   bool no_errors = true;
   std::fill(send_var_reqs_.begin(), send_var_reqs_.end(), MPI_REQUEST_NULL);
 
@@ -405,5 +406,6 @@ TaskStatus MeshBoundaryValuesFC::RecvAndUnpackFC(DvceFaceFld4D<Real> &b,
     }
   });  // end par_for_outer
 
+  unpack_unfenced_ = true;   // the kernels above read the receive buffers asynchronously
   return TaskStatus::complete;
 }

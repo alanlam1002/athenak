@@ -456,6 +456,7 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
         Kokkos::Timer tt;
         f();
         Kokkos::fence();
+        MeshBoundaryValues::NoteFence();   // completes every unpack (bvals.hpp)
         pt_[slot] += tt.seconds();
       };
       // Execute TaskLists

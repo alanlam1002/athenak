@@ -324,6 +324,7 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
   // Send boundary buffer to neighboring MeshBlocks using MPI
   // Sends only occur to neighbors on FACES and EDGES at COARSER or SAME level
   Kokkos::fence();
+  NoteFence();
   bool no_errors=true;
   for (int m=0; m<nmb; ++m) {
     for (int n=0; n<nnghbr; ++n) {
@@ -433,6 +434,7 @@ TaskStatus MeshBoundaryValuesFC::RecvAndUnpackFluxFC(DvceEdgeFld4D<Real> &flx) {
   // perform appropriate averaging depending on how many fluxes contributed to sums
   AverageBoundaryFluxes(flx, nflx);
 
+  unpack_unfenced_ = true;   // the kernels above read the receive buffers asynchronously
   return TaskStatus::complete;
 }
 
@@ -1044,6 +1046,7 @@ void MeshBoundaryValuesFC::AverageBoundaryFluxes(DvceEdgeFld4D<Real> &flx,
 
 TaskStatus MeshBoundaryValuesFC::InitFluxRecv(const int nvars) {
 #if MPI_PARALLEL_ENABLED
+  FenceIfUnpackPending("InitFluxRecv");
   int &nmb = pmy_pack->nmb_thispack;
   int &nnghbr = pmy_pack->pmb->nnghbr;
   auto &nghbr = pmy_pack->pmb->nghbr;

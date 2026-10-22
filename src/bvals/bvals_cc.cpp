@@ -244,6 +244,7 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
   // so this single fence (which guarantees that kernel has completed) is all that
   // is needed before posting the sends.
   Kokkos::fence();
+  NoteFence();
   bool no_errors = true;
   std::fill(send_var_reqs_.begin(), send_var_reqs_.end(), MPI_REQUEST_NULL);
 
@@ -442,5 +443,6 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
     tmember.team_barrier();
   });  // end par_for_outer
 
+  unpack_unfenced_ = true;   // the kernels above read the receive buffers asynchronously
   return TaskStatus::complete;
 }

@@ -110,13 +110,6 @@ TaskStatus MultigridDriver::ProlongateBoundaryForProlongation(Driver *pdrive, in
   return TaskStatus::complete;
 }
 
-TaskStatus MultigridDriver::FillFCBoundary(Driver *pdrive, int stage) {
-  if (nreflevel_ == 0) return TaskStatus::complete;
-  DvceArray5D<Real> u = pmg->GetCurrentData();
-  pmg->pbval->FillFineCoarseMGGhosts(u);
-  return TaskStatus::complete;
-}
-
 TaskStatus MultigridDriver::FillCoarseBoundary(Driver *pdrive, int stage) {
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();

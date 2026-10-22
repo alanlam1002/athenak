@@ -793,7 +793,11 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   // pack/restrict fluxes at fine/coarse boundaries into boundary buffers and send
   TaskStatus PackAndSendMG(const DvceArray5D<Real> &u);
   TaskStatus RecvAndUnpackMG(DvceArray5D<Real> &u);
-  TaskStatus InitRecvMG(const int nvars);
+  // post = false (mg_recv_sync 3): switch to this level's rank-packed state only; the
+  // receives are then posted by PostRecvMG after PackAndSendMG's pre-send fence
+  TaskStatus InitRecvMG(const int nvars, bool post = true);
+  TaskStatus PostRecvMG();
+  int RecvSync() const { return recv_sync_; }
   TaskStatus ClearSendMG();
   TaskStatus ClearRecvMG();
   TaskStatus FillFineCoarseMGGhosts(DvceArray5D<Real> &u);
@@ -818,7 +822,13 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   //   1 Kokkos::fence() before the Irecvs are re-posted (the fix),
   //   2 no fence; alternate between two aggregate recv buffers per level (ping-pong), the
   //     discriminating test that the race is the buffer reuse and nothing else a fence cures
+  //   3 no extra fence: the receives of a round are posted right after that round's sends
+  //     (StartReceive only switches the level state; SendBoundary posts them after
+  //     PackAndSendMG), whose pre-send fence has already completed the previous unpack.
+  //     A fallback fence (counted) guards the case of no fence since the last unpack.
   int recv_sync_ = 1;
+  bool unpack_unfenced_ = false;   // an UnpackMG was launched with no fence since
+  long fallback_fences_ = 0;
   std::vector<DvceArray1D<Real>> mg_recv_alt_;
   // <job> mg_race_probe (default false; C-091): every UnpackMG team stamps the launch
   // epoch into a host-pinned slot; InitRecvMG counts, without a fence, the teams of the

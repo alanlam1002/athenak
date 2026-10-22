@@ -2397,7 +2397,10 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
       }
     }
   }
-  if (has_cross_rank) Kokkos::fence();
+  if (has_cross_rank) {
+    Kokkos::fence();
+    unpack_unfenced_ = false;   // also completes any earlier UnpackMG (mg_recv_sync 3)
+  }
 
   bool no_errors = true;
   // PackMG already wrote every off-rank payload directly into
@@ -2500,6 +2503,7 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
   }
   auto pslot = probe_slot_;
   const int pep = probe_epoch_;
+  unpack_unfenced_ = true;
   Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
   Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank() / (nnghbr * nvar);
@@ -2625,7 +2629,7 @@ void MultigridBoundaryValues::LoadRankPackState(const MGRankPackLevelState &s) {
 //! \fn  void MeshBoundaryValues::InitRecv
 //! \brief Posts non-blocking receives (with MPI) for boundary communications of vars.
 
-TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
+TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars, bool post) {
 #if MPI_PARALLEL_ENABLED
   int lev_ = pmy_mg->GetCurrentLevel();
   int shift_ir = pmy_mg->GetNumberOfLevels() - 1 - lev_;
@@ -2688,6 +2692,19 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     mg_rp_active_level_ = -1;
   }
 
+  if (!post) return TaskStatus::complete;   // mg_recv_sync 3: posted by PostRecvMG
+#endif
+  return PostRecvMG();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus MultigridBoundaryValues::PostRecvMG()
+//! \brief Posts this level's rank-packed receives into the aggregate recv buffer, after
+//! making sure no earlier UnpackMG still reads it (mg_recv_sync, C-091)
+
+TaskStatus MultigridBoundaryValues::PostRecvMG() {
+#if MPI_PARALLEL_ENABLED
+  int lev_ = pmy_mg->GetCurrentLevel();
   // C-091: the previous round's UnpackMG may still be queued or running on the device and
   // reading mg_rank_recvbuf_vars_; MPI may write a newly matched message into the buffer
   // as soon as the Irecv below is posted.
@@ -2704,17 +2721,23 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
       if (offr) ++probe_pending_offrank_;
     }
     const int cyc = pmy_pack->pmesh->ncycle;
-    if (cyc != probe_cycle_ || (probe_posts_ % 2000) == 0) {
+    if (cyc != probe_cycle_ || (probe_posts_ % 200) == 0) {
       std::cout << "MGRACE rank " << global_variable::my_rank << " cycle " << cyc
                 << " posts " << probe_posts_ << " posts_with_offrank_recvs "
                 << probe_posts_offrank_ << " pending_posts " << probe_pending_posts_
                 << " pending_offrank " << probe_pending_offrank_ << " pending_teams "
-                << probe_pending_teams_ << " sync " << recv_sync_ << std::endl;
+                << probe_pending_teams_ << " sync " << recv_sync_ << " fallback_fences "
+                << fallback_fences_ << std::endl;
       probe_cycle_ = cyc;
     }
   }
   if (recv_sync_ == 1) {
     Kokkos::fence();
+    unpack_unfenced_ = false;
+  } else if (recv_sync_ == 3 && unpack_unfenced_ && !mg_recv_var_msgs_.empty()) {
+    Kokkos::fence();   // no pre-send fence since the last unpack: should not happen
+    unpack_unfenced_ = false;
+    ++fallback_fences_;
   } else if (recv_sync_ == 2 && lev_ >= 0 && lev_ < kMaxMGLevels) {
     auto &alt = mg_recv_alt_[lev_];
     if (alt.extent(0) != mg_rank_recvbuf_vars_.extent(0)) {

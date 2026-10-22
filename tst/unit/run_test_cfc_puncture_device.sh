@@ -4,8 +4,10 @@
 # libraries (C-094 P1). Deliberately not a CMake target: adding one would re-run cmake on
 # the production build tree.
 #
-#   run_test_cfc_puncture_device.sh BUILD_DIR [OUT_EXE] [--run]
+#   [EXTRA_CXXFLAGS=-fp-model=precise] run_test_cfc_puncture_device.sh BUILD_DIR [OUT_EXE] [--run]
 #
+# EXTRA_CXXFLAGS (optional) is appended to the compile flags, e.g. -fp-model=precise to match the
+# production build's per-file fp model for the CFC files (src/CMakeLists.txt, R-112 item 2).
 # --run executes it (needs a GPU node; run on a compute node of the debug queue).
 set -euo pipefail
 B=$(readlink -f "$1")
@@ -15,7 +17,7 @@ F=$B/CMakeFiles/test_cfc_puncture.dir/flags.make
 CXX=$(sed -n 's/^# compile CXX with //p' "$F")
 DEFS=$(sed -n 's/^CXX_DEFINES = //p' "$F")
 INCS=$(sed -n 's/^CXX_INCLUDES = //p' "$F")
-FLAGS=$(sed -n 's/^CXX_FLAGS = //p' "$F")
+FLAGS="$(sed -n 's/^CXX_FLAGS = //p' "$F") ${EXTRA_CXXFLAGS:-}"
 cd "$B"
 eval "$CXX $DEFS $INCS $FLAGS -c $SRC/tst/unit/test_cfc_puncture_device.cpp -o ${OUT}.o"
 eval "$CXX -O3 -DNDEBUG -fsycl -fno-sycl-id-queries-fit-in-int -fsycl-dead-args-optimization \

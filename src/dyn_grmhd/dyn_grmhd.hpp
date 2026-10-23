@@ -10,6 +10,7 @@
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
+#include "eos/mass_closure.hpp"
 #include "tasklist/task_list.hpp"
 #include "driver/driver.hpp"
 #include "eos/primitive_solver_hyd.hpp"
@@ -116,6 +117,8 @@ class DynGRMHD {
   virtual void SaveRestartState(DvceArray5D<Real> &dst, int ns) {}
   virtual void LoadRestartState(const DvceArray5D<Real> &src, int ns) {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
+  // <mhd> mass_closure (eos/mass_closure.hpp): the itemized MCLOSE ledger; nullptr if off
+  mclose::MassClosure *pmclose = nullptr;
   // dual energy (item 70): {dense cells, entropy-branch cells, dE of the last full C2P,
   // cumulative dE}; false if dual energy is off.
   virtual bool GetDualEnergyStats(Real out[4]) { return false; }
@@ -181,6 +184,7 @@ class DynGRMHDPS : public DynGRMHD {
  public:
   DynGRMHDPS(MeshBlockPack *ppack, ParameterInput *pin) :
       DynGRMHD(ppack, pin), eos("mhd", ppack, pin) {
+    if (pmclose != nullptr) eos.ml_track = true;   // MCLOSE reads the ledger's cell data
     if (de_diag.extent_int(1) > 1) {
       if (!eos.de_on) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__

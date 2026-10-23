@@ -53,6 +53,7 @@ add_executable(
         dyn_grmhd/dyn_grmhd_newdt.cpp
 
         eos/eos.cpp
+        eos/mass_closure.cpp
         eos/ideal_hyd.cpp
         eos/ideal_mhd.cpp
         eos/isothermal_hyd.cpp
@@ -223,10 +224,16 @@ target_include_directories(athena PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # fp model (b) (C-096 B7, R-112 item 2): -fp-model=precise on the four files that evaluate the
 # trumpet background (cfc_puncture.hpp) on the device, so that icpx's default fast model cannot
 # reassociate an expression that is exactly zero at the throat (C-095: 2 rho - 3 -> -1.78e-15).
-# R-109 verified that these are all the device evaluations. GCC/Clang do not enable fast math
+# R-109 verified that these are all the device evaluations. Also eos/mass_closure.cpp (R-114):
+# its Neumaier sums need (s - t) + x evaluated as written. GCC/Clang do not enable fast math
 # by default and do not take this flag.
 if (CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM|Intel")
   set_source_files_properties(
       cfc/cfc_puncture.cpp cfc/cfc.cpp cfc/mg_cfc_conformal_factor.cpp cfc/mg_cfc_lapse.cpp
       PROPERTIES COMPILE_OPTIONS "-fp-model=precise")
+  # MCLOSE also needs no FMA contraction: precise still allows icpx to fuse u0*dv - d0*dv,
+  # which makes unchanged cells' differences nonzero and the masses' and the cells'
+  # roundings disagree (c101_mc3)
+  set_source_files_properties(eos/mass_closure.cpp
+      PROPERTIES COMPILE_OPTIONS "-fp-model=precise;-ffp-contract=off")
 endif()

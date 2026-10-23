@@ -234,6 +234,12 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     pin->SetReal("coord", "excision_absorbed_total", pm->pmb_pack->pdyngr->exc_abs_total);
   }
 
+  // <mhd> mass_closure: M_end and the run's cumulative items, so the next segment books the
+  // restart and continues the cumulative line
+  if (pm->pmb_pack->pdyngr != nullptr && pm->pmb_pack->pdyngr->pmclose != nullptr) {
+    pm->pmb_pack->pdyngr->pmclose->Save(pin);
+  }
+
   // <job> restart_state (restart_state.hpp): the evolution state beyond u0/b0/u_adm, as
   // one more CC block after the ADM data; its variable count goes into the parameter copy
   // (<job>: CheckBlockNames rejects unknown blocks, and it checks the restart's copy too)

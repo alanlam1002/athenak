@@ -27,6 +27,8 @@ NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *p
   pmy_pack = ppack;
   chksum::ncycles = pin->GetOrAddInteger("job", "checksum_cycles", 0);
   chksum::mg_level = pin->GetOrAddInteger("job", "checksum_mg", 2);
+  // <job> checksum_start: the first cycle to checksum (default: the first cycle run)
+  chksum::cycle0 = pin->GetOrAddInteger("job", "checksum_start", -1);
 }
 
 //! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task

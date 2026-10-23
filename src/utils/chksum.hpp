@@ -32,7 +32,8 @@ inline int ncycles = 0;      // <job> checksum_cycles
 // <job> checksum_mg: 0 no MG checksums, 1 MG solve points (start, each V-cycle, level steps,
 // coarsest, multipole), 2 also after every MG task-list task (default; each is a fence)
 inline int mg_level = 2;
-inline int cycle0 = -1;      // the first cycle seen
+inline int cycle0 = -1;      // the first cycle checksummed (<job> checksum_start, else the
+                             // first cycle seen)
 inline FILE *fp = nullptr;
 inline int last_cycle = -1, last_stage = -1;
 inline std::map<std::string, int> occ;   // task occurrences within (cycle, stage)
@@ -40,7 +41,7 @@ inline std::map<std::string, int> occ;   // task occurrences within (cycle, stag
 inline bool Active(int cycle) {
   if (ncycles <= 0) return false;
   if (cycle0 < 0) cycle0 = cycle;
-  return cycle < cycle0 + ncycles;
+  return cycle >= cycle0 && cycle < cycle0 + ncycles;
 }
 
 template <typename T>

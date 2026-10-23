@@ -225,7 +225,6 @@ class PrimitiveSolverHydro {
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
   Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
-  std::string de_block;            // de_dE_total is carried across restarts (R-115)
   // <coord> excision_radius_dynamic (R-112 item 3): rest mass the C2P's excision reset removed
   // from interior cells excised only by r < r_f (alpha >= excise_lapse), this rank, since the
   // last DynGRMHD::UpdateExcisionRadius drain (the "absorbed at r_f" tally)
@@ -444,7 +443,8 @@ class PrimitiveSolverHydro {
     std::ostringstream o;
     o << std::setprecision(std::numeric_limits<Real>::max_digits10);
     for (int r = 0; r < global_variable::nranks; ++r) o << (r ? "," : "") << all[r];
-    pin->SetString(de_block, "dual_energy_dE_total_state", o.str());
+    // in <job>: a block pads every value to its longest, and <mhd> has ~300 lines
+    pin->SetString("job", "dual_energy_dE_total_state", o.str());
   }
   void SaveTier3State(ParameterInput *pin) {
     if (!t3_on) return;
@@ -1469,10 +1469,9 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
       de_idx = nsc - 1;
-      de_block = block;
-      if (pin->DoesParameterExist(block, "dual_energy_dE_total_state")) {
+      if (pin->DoesParameterExist("job", "dual_energy_dE_total_state")) {
         std::vector<Real> all;
-        std::istringstream in(pin->GetString(block, "dual_energy_dE_total_state"));
+        std::istringstream in(pin->GetString("job", "dual_energy_dE_total_state"));
         for (std::string t; std::getline(in, t, ',');) all.push_back(std::stod(t));
         Real tot = 0.0;
         for (Real v : all) tot += v;

@@ -240,9 +240,11 @@ void ParameterInput::LoadFromFile(IOWrapper &input, bool single_file_per_rank) {
       header = loc + 10; // store the header length
       break;
     }
-    if (header > kBufSize*10) {
+    // 1 MB (was 40 KB): restarts carry run-time state in the parameter copy (MCLOSE's
+    // cumulative items, with <mhd> mass_closure_full ~200 keys; R-115)
+    if (header > kBufSize*256) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "<par_end> is not found in the first 40KBytes."
+                << std::endl << "<par_end> is not found in the first 1 MByte."
                 << std::endl << "Probably the file is broken or the wrong file is "
                 << "specified" << std::endl;
       std::exit(EXIT_FAILURE);

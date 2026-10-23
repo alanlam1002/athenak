@@ -1235,6 +1235,42 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
+  // u_adm's ghosts: the regrid transfers MeshBlock interiors only, so a new (derefined or
+  // refined) or received block's ghosts held whatever memory did, and the re-solve below
+  // reads adm before its own ADM exchange (C-102 add. 2). Exchange them first.
+  pbval_adm->InitRecv(adm::ADM::nadm);
+  RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
+  while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongADMTask(pdriver, 0);
+  BCSADMTask(pdriver, 0);
+  pbval_adm->ClearSend();
+  pbval_adm->ClearRecv();
+  // CFC's own fields are not remapped by the regrid either, and the X^i solve below reads
+  // delta_psi (its source) before SolveConformalFactor re-seeds it: seed delta_psi and
+  // delta_alpha_psi from adm here, ghosts included (the seed blocks' formulas), and zero
+  // the work arrays, so the re-solve reads no other block's data (C-102 add. 2)
+  {
+    const int n1 = indcs.nx1 + 2*indcs.ng;
+    const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+    const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+    auto &adm_s = pmy_pack->padm->adm;
+    auto &psi_s = delta_psi;
+    auto &apsi_s = delta_alpha_psi;
+    auto &psi0_s = u_psi0;
+    auto &apsi0_s = u_alpha0_psi0;
+    par_for("cfc_regrid_seed", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const Real p = Kokkos::pow(adm_s.psi4(m,k,j,i), 0.25);
+      psi_s(m,0,k,j,i) = p - psi0_s(m,0,k,j,i);
+      apsi_s(m,0,k,j,i) = adm_s.alpha(m,k,j,i)*p - apsi0_s(m,0,k,j,i);
+    });
+    Kokkos::deep_copy(DevExeSpace(), u_p_x, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), u_p_beta, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), u_p_src, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), u_adual, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), u_beta, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), u_tilde, 0.0);
+  }
   // The vector-potential solvers (X^i, beta) have no seed: their warm start is the MG
   // finest level's previous solution, which a regrid does not remap (kept as it was when
   // a rank's MeshBlock count is unchanged, zeroed otherwise), so it held other blocks'

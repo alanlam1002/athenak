@@ -35,7 +35,11 @@
 // primitives, error report). A SEPARATE kernel then re-solves just the flagged cells whose quark
 // fraction 1-f is below <mhd>/zla_c2p_retry_omf, with the composition snapped FOR THE EOS ONLY to
 // pure hadronic matter (f = 1, Y_N/f = 1, y_lN' = yn*y_lN + (1-yn)*y_lQ, y_lQ' = 0), and on success
-// overwrites the atmosphere primitives. Conserved variables are never written. Keeping the retry
+// overwrites the atmosphere primitives. Conserved variables are never written.
+// Reporting: with the retry on, the main kernel neither prints nor counts the NO_SOLUTION cells it
+// flags; the retry pass prints the usual error report (and counts toward c2perrs / c2pabort) only for
+// the cells it could NOT recover, and recovered cells go to a per-rank summary line. So recovered cells
+// do not use up the per-rank print cap or the abort budget. Keeping the retry
 // out of the main kernel avoids the extra divergent ConToPrim path that triggers the PVC IGC
 // lane-coupling miscompile (an inline retry silently reset ~20 SIMD neighbours; C2P_FIX_PLAN.md).
 #ifndef ZLA_C2P_RETRY2
@@ -195,6 +199,7 @@ class PrimitiveSolverHydro {
   bool c2p_retry;            // <mhd>/zla_c2p_retry
   Real c2p_retry_omf;        // <mhd>/zla_c2p_retry_omf
   DvceArray4D<int> c2p_rflag;  // cells flagged for the hadronic retry
+  unsigned long c2p_nrec_tot = 0, c2p_nunrec_tot = 0;  // per-rank cumulative retry outcomes
 #endif
   int y3cap;                 // max scal-3 bound warnings printed per rank
   unsigned int ny3clamp;     // cumulative scal-3 clamps on this rank
@@ -580,9 +585,14 @@ class PrimitiveSolverHydro {
         fofc_(m,k,j,i) = true;
       } else if (!floors_only) {
 #if ZLA_C2P_RETRY2
-        if (retry_ && result.error == Primitive::Error::NO_SOLUTION) rflag_(m, k, j, i) = 1;
+        // Reported (if at all) by the retry pass, which knows whether the cell was recovered.
+        const bool deferred = retry_ && result.error == Primitive::Error::NO_SOLUTION;
+        if (deferred) rflag_(m, k, j, i) = 1;
+#else
+        const bool deferred = false;
 #endif
-        if (result.error != Primitive::Error::SUCCESS && (nerrs_ + sumerrs < errcap_)) {
+        if (result.error != Primitive::Error::SUCCESS && !deferred &&
+            (nerrs_ + sumerrs < errcap_)) {
           sumerrs++;
           // Find out where the point went bad and report a bunch of information about it.
           Real &x1min = size.d_view(m).x1min;
@@ -778,10 +788,13 @@ class PrimitiveSolverHydro {
 #if ZLA_C2P_RETRY2
     if (retry_) {
       const Real omf_ = c2p_retry_omf;
-      int nrec = 0, nflag = 0;
+      // Error count before this pass: errors already reported by the main kernel in this call.
+      const int nerrs_r = nerrs_ + count_errs;
+      int nrec = 0, nflag = 0, nunrec = 0;
       Kokkos::parallel_reduce("pshyd_c2p_retry2",
       Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, kl, jl, il}, {nmb, ku+1, ju+1, iu+1}),
-      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, int &srec, int &sflag) {
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, int &srec, int &sflag,
+                    int &sunrec) {
         if (rflag_(m, k, j, i) == 0) return;
         rflag_(m, k, j, i) = 0;
         sflag += 1;
@@ -799,10 +812,21 @@ class PrimitiveSolverHydro {
                     g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
                    &g3u[S11], &g3u[S12], &g3u[S13], &g3u[S22], &g3u[S23], &g3u[S33]);
         const Real D_ = cons(m, IDN, k, j, i)*isdetg;
-        if (!(D_ > 0.0)) return;
+        Real b3u[NMAG];
+        b3u[IBX] = bcc0(m, IBX, k, j, i)*isdetg;
+        b3u[IBY] = bcc0(m, IBY, k, j, i)*isdetg;
+        b3u[IBZ] = bcc0(m, IBZ, k, j, i)*isdetg;
+        // why: 0 = recovered, 1 = D <= 0, 2 = quark fraction outside the retry band, 3 = retry failed
+        int why = 0;
+        Primitive::Error err2 = Primitive::Error::SUCCESS;
+        if (!(D_ > 0.0)) {
+          why = 1;
+        } else {
         const Real Yc[4] = {cons(m, nhyd, k, j, i)*isdetg/D_, cons(m, nhyd + 1, k, j, i)*isdetg/D_,
                             cons(m, nhyd + 2, k, j, i)*isdetg/D_, cons(m, nhyd + 3, k, j, i)*isdetg/D_};
-        if (!(Yc[0] < 1.0 && 1.0 - Yc[0] < omf_)) return;
+        if (!(Yc[0] < 1.0 && 1.0 - Yc[0] < omf_)) {
+          why = 2;
+        } else {
         const Real yn_ = Yc[0]*Yc[1];
         Real cons_try[NCONS], prim_pt[NPRIM];
         cons_try[CDN] = D_;
@@ -815,12 +839,11 @@ class PrimitiveSolverHydro {
         cons_try[CYD + 2] = D_*(yn_*Yc[2] + (1.0 - yn_)*Yc[3]);         // charge per baryon kept
         cons_try[CYD + 3] = 0.0;
         for (int n = 4; n < nscal; n++) cons_try[CYD + n] = cons(m, nhyd + n, k, j, i)*isdetg;
-        Real b3u[NMAG];
-        b3u[IBX] = bcc0(m, IBX, k, j, i)*isdetg;
-        b3u[IBY] = bcc0(m, IBY, k, j, i)*isdetg;
-        b3u[IBZ] = bcc0(m, IBZ, k, j, i)*isdetg;
         Primitive::SolverResult r2 = ps_.ConToPrim(prim_pt, cons_try, b3u, g3d, g3u);
-        if (r2.error != Primitive::Error::SUCCESS) return;   // atmosphere primitives stay
+        if (r2.error != Primitive::Error::SUCCESS) {   // atmosphere primitives stay
+          why = 3;
+          err2 = r2.error;
+        } else {
         prim(m, IDN, k, j, i) = prim_pt[PRH]*mb;
         prim(m, IVX, k, j, i) = prim_pt[PVX];
         prim(m, IVY, k, j, i) = prim_pt[PVY];
@@ -831,10 +854,73 @@ class PrimitiveSolverHydro {
         }
         temperature(m, 0, k, j, i) = prim_pt[PTM];
         srec += 1;
-      }, Kokkos::Sum<int>(nrec), Kokkos::Sum<int>(nflag));
+        }  // retry solve
+        }  // retry band
+        }  // D > 0
+        if (why == 0) return;
+        // Not recovered: the cell keeps the atmosphere primitives of the main kernel's fallback.
+        // Report it exactly as the main kernel would have (same format; c2p_monitor parses it).
+        sunrec += 1;
+        if (nerrs_r + sunrec <= errcap_) {
+          Real &x1min = size.d_view(m).x1min;
+          Real &x1max = size.d_view(m).x1max;
+          Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
+          Real &x2min = size.d_view(m).x2min;
+          Real &x2max = size.d_view(m).x2max;
+          Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
+          Real &x3min = size.d_view(m).x3min;
+          Real &x3max = size.d_view(m).x3max;
+          Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+          Kokkos::printf("An error occurred during the primitive solve: %s\n"
+                 "  Location: (%d, %d, %d, %d)\n"
+                 "            (%.17g, %.17g, %.17g)\n"
+                 "  Conserved vars: \n"
+                 "    D   = %.17g\n"
+                 "    Sx  = %.17g\n"
+                 "    Sy  = %.17g\n"
+                 "    Sz  = %.17g\n"
+                 "    tau = %.17g\n"
+                 "    Dy0 = %.17g\n"
+                 "    Dy1 = %.17g\n"
+                 "    Dy2 = %.17g\n"
+                 "    Dy3 = %.17g\n"
+                 "    Bx  = %.17g\n"
+                 "    By  = %.17g\n"
+                 "    Bz  = %.17g\n"
+                 "  Metric vars: \n"
+                 "    detg = %.17g\n"
+                 "    g_dd = {%.17g, %.17g, %.17g, %.17g, %.17g, %.17g}\n"
+                 "    alp  = %.17g\n"
+                 "  Hadronic retry: not recovered (%s%s)\n",
+                 ErrorToString(Primitive::Error::NO_SOLUTION),
+                 m, k, j, i,
+                 x1v, x2v, x3v,
+                 D_, cons(m, IM1, k, j, i)*isdetg, cons(m, IM2, k, j, i)*isdetg,
+                 cons(m, IM3, k, j, i)*isdetg, cons(m, IEN, k, j, i)*isdetg,
+                 cons(m, nhyd, k, j, i)*isdetg, cons(m, nhyd + 1, k, j, i)*isdetg,
+                 cons(m, nhyd + 2, k, j, i)*isdetg, cons(m, nhyd + 3, k, j, i)*isdetg,
+                 b3u[IBX], b3u[IBY], b3u[IBZ], detg,
+                 g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
+                 adm.alpha(m, k, j, i),
+                 why == 1 ? "D <= 0" : (why == 2 ? "quark fraction outside the retry band"
+                                                  : "retry solve failed: "),
+                 why == 3 ? ErrorToString(err2) : "");
+          if (nerrs_r + sunrec == errcap_) {
+            Kokkos::printf("%d C2P errors have been detected on rank %d."
+                   "All future C2P errors\n"
+                   "on this rank will be suppressed. Fix your code!\n",
+                   nerrs_r + sunrec, rank);
+          }
+        }
+      }, Kokkos::Sum<int>(nrec), Kokkos::Sum<int>(nflag), Kokkos::Sum<int>(nunrec));
+      count_errs += nunrec;
+      c2p_nrec_tot += nrec;
+      c2p_nunrec_tot += nunrec;
       if (nflag > 0) {
         std::cout << "C2P NO_SOLUTION recovered by hadronic retry: " << nrec << " of " << nflag
-                  << " flagged cell(s) on rank " << global_variable::my_rank << std::endl;
+                  << " flagged cell(s) on rank " << global_variable::my_rank
+                  << " (cumulative on this rank: " << c2p_nrec_tot << " recovered, "
+                  << c2p_nunrec_tot << " not recovered)" << std::endl;
       }
     }
 #endif

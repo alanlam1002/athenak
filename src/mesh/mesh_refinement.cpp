@@ -23,6 +23,7 @@
 #include "parameter_input.hpp"
 #include "mesh.hpp"
 #include "mesh_refinement.hpp"
+#include "tasklist/numerical_relativity.hpp"
 #include "refinement_criteria.hpp"
 
 #include "hydro/hydro.hpp"
@@ -149,6 +150,7 @@ MeshRefinement::~MeshRefinement() {
 //! \brief Simple driver function for adaptive mesh refinement
 
 void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
+  numrel::ChecksumAfterTask(pmy_mesh->pmb_pack, "amr_enter", -1);   // debug
   // first check refinement criteria
   CheckForRefinement(pmy_mesh->pmb_pack);
 

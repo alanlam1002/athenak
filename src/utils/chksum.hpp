@@ -58,12 +58,20 @@ inline uint64_t Sum(const T *p, size_t n) {
   return s;
 }
 
+// the active MeshBlocks (C-102): arrays whose first extent is the MeshBlock index are
+// summed over their first nmb_active blocks only (allocations padded to a historical
+// maximum otherwise differ between a continuous and a restarted run); others in full
+inline int nmb_active = -1;
 template <typename V>
 inline void Line(int cycle, int stage, const std::string &task, int k, const char *name,
                  const V &v) {
   if (v.span() == 0) return;
+  size_t n = v.span();
+  if (nmb_active > 0 && V::rank >= 4 && v.extent(0) >= static_cast<size_t>(nmb_active)) {
+    n = (n/v.extent(0))*static_cast<size_t>(nmb_active);
+  }
   std::fprintf(fp, "%d %d %s %d %s %016llx\n", cycle, stage, task.c_str(), k, name,
-               static_cast<unsigned long long>(Sum(v.data(), v.span())));
+               static_cast<unsigned long long>(Sum(v.data(), n)));
 }
 
 inline uint64_t Bits(double x) { uint64_t b; std::memcpy(&b, &x, 8); return b; }

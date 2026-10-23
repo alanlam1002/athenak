@@ -29,6 +29,10 @@ class MeshBlockPack;
 
 namespace numrel {
 
+// <job> checksum_cycles (utils/chksum.hpp): this rank's state checksums under a label
+// (also called outside the task lists, e.g. on the regrid path; debug)
+void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage);
+
 enum TaskName {
   MHD_Recv,
   MHD_CopyU,

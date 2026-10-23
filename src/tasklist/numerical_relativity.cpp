@@ -34,9 +34,10 @@ NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *p
 }
 
 //! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task
-static void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage) {
+void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage) {
   const int cycle = pp->pmesh->ncycle;
   if (!chksum::Active(cycle)) return;
+  chksum::nmb_active = pp->nmb_thispack;
   if (chksum::fp == nullptr) {
     char fn[64];
     std::snprintf(fn, sizeof(fn), "chksum.%d.txt", global_variable::my_rank);

@@ -553,6 +553,10 @@ class PrimitiveSolverHydro {
   // cycle on rank 0. The change between M_end of one cycle and M(u1) of the next is the
   // regrid's (or anything else outside the stages).
   bool ml_on = false;
+  // <mhd> mass_closure (eos/mass_closure.hpp) needs the ledger's per-cell D copy and class
+  // without its MLEDGER output: the per-stage copy and the C2P's classification run if
+  // either is on, the ledger's own reductions and lines only with ml_on
+  bool ml_track = false;
   // <mhd> mass_ledger_faces (default 0 = off): for the first N cycles after (re)start, rank 0
   // also writes, per stage, every MeshBlock's mass flux beta_s dt sum F(IDN) dA through each
   // of its six faces (MLFACE lines in mlface.txt: cycle stage gid level x1min x1max x2min
@@ -704,7 +708,7 @@ class PrimitiveSolverHydro {
   //! before the stage's C2P: M_pre, M(u1), and a copy of u0(IDN)
   void MassLedgerPre(int stage) {
     if (stage == 1) CrecReset(false);
-    if (!ml_on || stage < 1 || stage > 4) return;
+    if (!(ml_on || ml_track) || stage < 1 || stage > 4) return;
     auto &u0 = pmy_pack->pmhd->u0;
     const int nmb = pmy_pack->nmb_thispack;
     auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -720,6 +724,7 @@ class PrimitiveSolverHydro {
                                              Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
     Kokkos::deep_copy(ml_cls, 4.0);
     Kokkos::deep_copy(ml_c2p, 0.0);
+    if (!ml_on) return;
     for (int n = 0; n < kMlLen; ++n) ml_stage[stage-1][n] = 0.0;
     ml_stage[stage-1][kMlPre] = MlMass(u0, IDN);
     ml_stage[stage-1][kMlU1] = MlMass(pmy_pack->pmhd->u1, IDN);
@@ -2120,7 +2125,7 @@ class PrimitiveSolverHydro {
     const bool zbook_ = zone_book && !floors_only;
     // only once MassLedgerPre has sized ml_cls for this pack (C2P also runs outside the
     // RK stages, e.g. at restart/regrid initialisation, before any stage)
-    const bool mlon_ = ml_on && !floors_only &&
+    const bool mlon_ = (ml_on || ml_track) && !floors_only &&
                        static_cast<int>(ml_cls.extent(0)) >= pmy_pack->nmb_thispack;
     auto &mlcls_ = ml_cls;
     auto &mlc2p_ = ml_c2p;

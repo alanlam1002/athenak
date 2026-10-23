@@ -200,9 +200,12 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       Kokkos::realloc(de_diag, nmb, 13, ncells3, ncells2, ncells1);
     }
   }
+  pmclose = new mclose::MassClosure(pp, pin);
+  if (!pmclose->on) { delete pmclose; pmclose = nullptr; }
 }
 
 DynGRMHD::~DynGRMHD() {
+  delete pmclose;
 }
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -424,6 +427,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   eos.de_stage = stage;   // dual_energy_diag per-stage slots only
   eos.MetricProbe(0, stage);   // R-072 item 1 (debug; off unless the probe is set)
   eos.MassLedgerPre(stage);
+  if (pmclose != nullptr) pmclose->StagePre(stage);
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
   eos.DrainZone(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
@@ -432,6 +436,11 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   eos.UpdateShockFlags();   // dual_energy_flag_exchange: the owner decides (R-069)
   eos.MassLedgerPost(stage, pdrive->nexp_stages, pdrive->gam0, pdrive->gam1, pdrive->beta,
                      pmy_pack->pmesh->dt, pmy_pack->pmesh->time, pmy_pack->pmesh->ncycle);
+  if (pmclose != nullptr) {
+    pmclose->StagePost(stage, pdrive->nexp_stages, pdrive->gam0, pdrive->gam1, pdrive->beta,
+                       pmy_pack->pmesh->dt, eos.ml_d0, eos.ml_cls, eos.ml_c2p,
+                       pmy_pack->pmesh->ncycle, pmy_pack->pmesh->time);
+  }
   return TaskStatus::complete;
 }
 
@@ -554,8 +563,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
 //! un-excised (see PrimitiveSolverHydro::ZoneUnmaskPost)
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ZoneUnmaskPost() {
+  const bool mc = (pmclose != nullptr) && eos.zone_unmask;
+  if (mc) pmclose->MarkBefore();
   eos.ZoneUnmaskPost(pmy_pack->pmhd->u0, pmy_pack->pmhd->bcc0, pmy_pack->pmhd->w0,
                      temperature, pmy_pack->pmesh->time, pmy_pack->pmesh->ncycle);
+  if (mc) pmclose->MarkAfter(mclose::iUnmask);   // MCLOSE item 4, the F1 unmask
 }
 
 //----------------------------------------------------------------------------------------

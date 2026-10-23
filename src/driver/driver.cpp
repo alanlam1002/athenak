@@ -383,6 +383,11 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     }
   }
 
+  //---- Step 3b. <mhd> mass_closure: the segment's starting mass and the restart item
+  if (pmesh->pmb_pack->pdyngr != nullptr && pmesh->pmb_pack->pdyngr->pmclose != nullptr) {
+    pmesh->pmb_pack->pdyngr->pmclose->SegmentStart(pin, pmesh->ncycle);
+  }
+
   //---- Step 4.  Initialize various counters, timers, etc.
   run_time_.reset();
   // Same zero point for the MG phase timers, so their percentages are fractions
@@ -580,6 +585,11 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
 //!  and printing diagnostic messages
 
 void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
+  // <mhd> mass_closure: the segment's MCLOSE line (before the final outputs, which only
+  // read the state)
+  if (pmesh->pmb_pack->pdyngr != nullptr && pmesh->pmb_pack->pdyngr->pmclose != nullptr) {
+    pmesh->pmb_pack->pdyngr->pmclose->SegmentEnd(pmesh->ncycle, pmesh->time);
+  }
   // cycle through output Types and load data / write files
   //  This design allows for asynchronous outputs to implemented in the future.
   for (auto &out : pout->pout_list) {
@@ -778,13 +788,19 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid,
       // own interior/ghost con2prim split internally (see cfc.hpp's comment
       // on ReinitializeMetricForAMR).
       pdyngr->MassLedgerRegridPre();    // <mhd> mass_ledger: stage-0 entry (R-078)
+      if (pdyngr->pmclose != nullptr) pdyngr->pmclose->RegridProlongated();   // MCLOSE 6
       pcfc->ReinitializeMetricForAMR(this);
       pdyngr->UpdateShockFlags();   // dual_energy_flag_exchange: owner flags (R-069)
       pdyngr->MassLedgerRegridPost("regrid");
+      if (pdyngr->pmclose != nullptr) pdyngr->pmclose->MarkAfter(mclose::iFloorInit);
     } else {
       pdyngr->MassLedgerRegridPre();
+      // MCLOSE: only the regrid path is inside a segment (the init path precedes M_start)
+      const bool mc = is_amr_regrid && pdyngr->pmclose != nullptr;
+      if (mc) pdyngr->pmclose->RegridProlongated();
       (void) pdyngr->ConToPrim(this, 0);
       pdyngr->MassLedgerRegridPost(is_amr_regrid ? "regrid" : "init");
+      if (mc) pdyngr->pmclose->MarkAfter(mclose::iFloorInit);
     }
   }
 

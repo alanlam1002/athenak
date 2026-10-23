@@ -262,6 +262,10 @@ class CFC {
   // previous stage/cycle).
   bool psi_seeded_ = false;
   bool alpha_psi_seeded_ = false;
+  // restart_state: the seed flags as the restarted run left them (AccreteExcisedMass
+  // clears them at the end of a step that accreted, so the next step's first solves
+  // re-seed from adm); read in the constructor, applied by LoadRestartState
+  bool rst_psi_seeded_ = true, rst_alpha_psi_seeded_ = true;
 
   // InitializeMetric()'s X^i/psi fixed-point-iteration controls.
   int cfc_init_iter_max_;
@@ -614,6 +618,13 @@ class CFC {
   const Real *FrameMeasurement() const { return fc_meas_; }
   // write xi, xidot and the controller state into pin (restart files carry pin)
   void SaveFrameState(ParameterInput *pin) const;
+  // restart_state (outputs/restart_state.hpp): delta_psi, delta_alpha_psi and the four
+  // MG solvers' finest-level solutions (warm starts); loading marks the one-shot seeding
+  // (SolveConformalFactor/SolveLapse) done
+  int RestartStateVars() const;
+  void SaveRestartState(DvceArray5D<Real> &dst, int ns);
+  void LoadRestartState(const DvceArray5D<Real> &src, int ns);
+  void SaveRestartScalars(ParameterInput *pin) const;   // the seed flags
   // after InitializeMetric (fresh start): xidot(0) from the tracked gas, target, and
   // the comoving initial atmosphere
   void InitFrameControl(Driver *pdriver);

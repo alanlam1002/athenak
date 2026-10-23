@@ -24,9 +24,11 @@
 #include "ion-neutral/ion-neutral.hpp"
 #include "radiation/radiation.hpp"
 #include "driver.hpp"
+#include "outputs/restart_state.hpp"
 #include "gravity/gravity.hpp"
 #include "multigrid/multigrid.hpp"
 #include "cfc/cfc.hpp"
+#include "coordinates/coordinates.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -314,7 +316,12 @@ void Driver::ExecuteTaskList(Mesh *pm, std::string tl, int stage) {
 
 void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool res_flag) {
   //---- Step 1.  Set conserved variables in ghost zones for all physics
-  InitBoundaryValuesAndPrimitives(pmesh);
+  // restart_state (outputs/restart_state.hpp): a restart that carries the evolution
+  // state (w0, flags, MG warm starts) restores it here and skips the MHD ghost exchange
+  // and init C2P (the file holds u0's and w0's ghosts as the run left them), so it
+  // continues bitwise (C-100)
+  const bool mhd_restored = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
+  InitBoundaryValuesAndPrimitives(pmesh, false, mhd_restored);
 
   //---- Step 1b. CFC only: converge the metric to the (fixed) initial primitives
   // before anything else reads padm->adm -- see cfc::CFC::InitializeMetric's doc
@@ -708,7 +715,8 @@ void Driver::ExchangeMHDGhosts(Mesh *pm) {
 //! \brief Sets boundary conditions on conserved and initializes primitives.  Used both
 //! on initialization, and when new MBs created with AMR.
 
-void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
+void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid,
+                                             bool mhd_restored) {
   // Note: with MPI, sends on ALL MBs must be complete before receives execute
 
   // Initialize Z4c
@@ -749,7 +757,14 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid) {
   // includes communications for shearing box boundaries
   mhd::MHD *pmhd = pm->pmb_pack->pmhd;
   dyngr::DynGRMHD *pdyngr = pm->pmb_pack->pdyngr;
-  if (pmhd != nullptr) {
+  if (pmhd != nullptr && mhd_restored) {
+    // only the excision masks, which the restart does not carry: rebuilt as the last
+    // stage's MHD_Excise left them (the restored lapse and r_f; DynGRMHD::UpdateExcisionMasks)
+    if (pdyngr != nullptr && pm->pmb_pack->pcoord->coord_data.bh_excise) {
+      pdyngr->SetExcisionGeometry();
+      pm->pmb_pack->pcoord->UpdateExcisionMasks();
+    }
+  } else if (pmhd != nullptr) {
     ExchangeMHDGhosts(pm);
     cfc::CFC *pcfc = pm->pmb_pack->pcfc;
     if (pdyngr == nullptr) {

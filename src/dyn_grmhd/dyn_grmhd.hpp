@@ -111,6 +111,11 @@ class DynGRMHD {
   virtual void ZoneUnmaskPre() {}
   virtual void ZoneUnmaskPost() {}
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
+  // restart_state (outputs/restart_state.hpp): per-cell state beyond u0, ghosts included
+  virtual int RestartStateVars() { return 0; }
+  virtual void SaveRestartState(DvceArray5D<Real> &dst, int ns) {}
+  virtual void LoadRestartState(const DvceArray5D<Real> &src, int ns) {}
+  virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
   // dual energy (item 70): {dense cells, entropy-branch cells, dE of the last full C2P,
   // cumulative dE}; false if dual energy is off.
   virtual bool GetDualEnergyStats(Real out[4]) { return false; }
@@ -216,6 +221,10 @@ class DynGRMHDPS : public DynGRMHD {
     return a;
   }
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
+  int RestartStateVars() override;
+  void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
+  void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
+  void SaveRestartScalars(ParameterInput *pin) override { eos.SaveTier3State(pin); }
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;
     out[0] = eos.de_ndense; out[1] = eos.de_nent; out[2] = eos.de_dE;

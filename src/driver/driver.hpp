@@ -60,7 +60,8 @@ class Driver {
   // Initialize()'s own call, where CFC::InitializeMetric's different
   // Picard-iteration algorithm is what's needed instead).
   void ExchangeMHDGhosts(Mesh *pm);   // R-076 item 1 (regrid-path owner flags)
-  void InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid = false);
+  void InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid = false,
+                                       bool mhd_restored = false);
 
  private:
   Kokkos::Timer run_time_;      // generalized timer for cpu/gpu/etc

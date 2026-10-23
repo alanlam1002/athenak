@@ -26,6 +26,7 @@
 #include "mhd/mhd.hpp"
 #include "cfc/cfc.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "outputs/restart_state.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/compact_object_tracker.hpp"
 #include "z4c/z4c.hpp"
@@ -233,6 +234,26 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     pin->SetReal("coord", "excision_absorbed_total", pm->pmb_pack->pdyngr->exc_abs_total);
   }
 
+  // <job> restart_state (restart_state.hpp): the evolution state beyond u0/b0/u_adm, as
+  // one more CC block after the ADM data; its variable count goes into the parameter copy
+  // (<job>: CheckBlockNames rejects unknown blocks, and it checks the restart's copy too)
+  int nstate = 0;
+  if (pin->GetOrAddBoolean("job", "restart_state", true)) {
+    nstate = restart_state::NumVars(pm->pmb_pack);
+  }
+  pin->SetInteger("job", "restart_state_nvar", nstate);
+  HostArray5D<Real> outarray_state("rst-state-out", 1, 1, 1, 1, 1);
+  if (nstate > 0) {
+    // the per-cycle scalars the next cycle reads (tier 3), alongside the arrays
+    if (pm->pmb_pack->pdyngr != nullptr) pm->pmb_pack->pdyngr->SaveRestartScalars(pin);
+    if (pm->pmb_pack->pcfc != nullptr) pm->pmb_pack->pcfc->SaveRestartScalars(pin);
+    const int nmb = pm->pmb_pack->nmb_thispack;
+    DvceArray5D<Real> st_d("rst-state-out-d", nmb, nstate, nout3, nout2, nout1);
+    restart_state::Pack(pm->pmb_pack, st_d);
+    Kokkos::realloc(outarray_state, nmb, nstate, nout3, nout2, nout1);
+    Kokkos::deep_copy(outarray_state, st_d);
+  }
+
   // create string holding input parameters (copy of input file)
   std::stringstream ost;
   pin->ParameterDump(ost);
@@ -328,6 +349,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   } else if (padm != nullptr) {
     data_size += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
   }
+  data_size += nout1*nout2*nout3*nstate*sizeof(Real);   // restart_state
   if (global_variable::my_rank == 0 || single_file_per_rank) {
     resfile.Write_any_type(&(data_size), sizeof(IOWrapperSizeT), "byte",
                             single_file_per_rank);
@@ -658,6 +680,30 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       }
     }
     offset_myrank += nout1*nout2*nout3*nadm*sizeof(Real); // adm u_adm
+    myoffset = offset_myrank;
+  }
+  if (nstate > 0) {
+    for (int m=0;  m<noutmbs_max; ++m) {
+      if (m < noutmbs_min || m < pm->nmb_thisrank) {
+        auto mbptr = Kokkos::subview(outarray_state, m, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL, Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        // collective while every rank has a MeshBlock to write, as above
+        size_t nw = (m < noutmbs_min)
+            ? resfile.Write_any_type_at_all(mbptr.data(), mbcnt, myoffset, "Real",
+                                            single_file_per_rank)
+            : resfile.Write_any_type_at(mbptr.data(), mbcnt, myoffset, "Real",
+                                        single_file_per_rank);
+        if (nw != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "restart_state data not written correctly"
+                    << " to rst file, restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+      }
+    }
+    offset_myrank += nout1*nout2*nout3*nstate*sizeof(Real); // restart_state
     myoffset = offset_myrank;
   }
 

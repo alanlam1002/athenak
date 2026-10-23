@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <limits>
+#include <utility>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -455,6 +456,96 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrimBC(int is, int ie, int js, int
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::UpdateShockFlags() {
   eos.UpdateShockFlags();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn int DynGRMHDPS::RestartStateVars()
+//! \brief restart_state (outputs/restart_state.hpp): w0, u0's flag slot(s), bcc0,
+//! temperature, and de_streak when dual_energy_shock_persist > 1
+template<class EOSPolicy, class ErrorPolicy>
+int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nw = pmhd->w0.extent_int(1);
+  const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
+  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0);
+}
+
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst,
+                                                          int ns) {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nw = pmhd->w0.extent_int(1), nu = pmhd->nmhd + pmhd->nscalars;
+  const int nflag = pmhd->u0.extent_int(1) - nu;
+  auto mb = std::make_pair(0, nmb);
+  auto all = Kokkos::ALL;
+  int n = ns;
+  Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + nw), all, all, all),
+                    Kokkos::subview(pmhd->w0, mb, all, all, all, all));
+  n += nw;
+  if (nflag > 0) {
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + nflag), all, all, all),
+                      Kokkos::subview(pmhd->u0, mb, std::make_pair(nu, nu + nflag), all, all,
+                                      all));
+    n += nflag;
+  }
+  Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 3), all, all, all),
+                    Kokkos::subview(pmhd->bcc0, mb, all, all, all, all));
+  n += 3;
+  Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 1), all, all, all),
+                    Kokkos::subview(temperature, mb, all, all, all, all));
+  n += 1;
+  if (eos.de_persist > 1) {
+    auto &stk = eos.de_streak;
+    const bool have = stk.extent_int(0) >= nmb && stk.extent_int(1) == dst.extent_int(2) &&
+                      stk.extent_int(2) == dst.extent_int(3) &&
+                      stk.extent_int(3) == dst.extent_int(4);
+    const int nn = n;
+    par_for("rst_save_streak", DevExeSpace(), 0, nmb-1, 0, dst.extent_int(2)-1,
+            0, dst.extent_int(3)-1, 0, dst.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      dst(m, nn, k, j, i) = have ? static_cast<Real>(stk(m, k, j, i)) : 0.0;
+    });
+  }
+}
+
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real> &src,
+                                                          int ns) {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nw = pmhd->w0.extent_int(1), nu = pmhd->nmhd + pmhd->nscalars;
+  const int nflag = pmhd->u0.extent_int(1) - nu;
+  auto mb = std::make_pair(0, nmb);
+  auto all = Kokkos::ALL;
+  int n = ns;
+  Kokkos::deep_copy(Kokkos::subview(pmhd->w0, mb, all, all, all, all),
+                    Kokkos::subview(src, all, std::make_pair(n, n + nw), all, all, all));
+  n += nw;
+  if (nflag > 0) {
+    Kokkos::deep_copy(Kokkos::subview(pmhd->u0, mb, std::make_pair(nu, nu + nflag), all, all,
+                                      all),
+                      Kokkos::subview(src, all, std::make_pair(n, n + nflag), all, all, all));
+    n += nflag;
+  }
+  Kokkos::deep_copy(Kokkos::subview(pmhd->bcc0, mb, all, all, all, all),
+                    Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
+  n += 3;
+  Kokkos::deep_copy(Kokkos::subview(temperature, mb, all, all, all, all),
+                    Kokkos::subview(src, all, std::make_pair(n, n + 1), all, all, all));
+  n += 1;
+  if (eos.de_persist > 1) {
+    // sized as ComputeShockFlags sizes it (de_shock: w0's extents), so it is kept
+    Kokkos::realloc(eos.de_streak, pmhd->w0.extent_int(0), src.extent_int(2),
+                    src.extent_int(3), src.extent_int(4));
+    auto &stk = eos.de_streak;
+    const int nn = n;
+    par_for("rst_load_streak", DevExeSpace(), 0, nmb-1, 0, src.extent_int(2)-1,
+            0, src.extent_int(3)-1, 0, src.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      stk(m, k, j, i) = static_cast<int>(src(m, nn, k, j, i));
+    });
+  }
 }
 
 //----------------------------------------------------------------------------------------

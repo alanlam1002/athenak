@@ -28,6 +28,19 @@
 #include "eos/primitive-solver/eos_compose.hpp"
 #include "eos/primitive-solver/eos_hybrid.hpp"
 #include "eos/primitive-solver/eos_zla_bag.hpp"
+
+// Two-pass hadronic retry for ZLA C2P failures (compile-time, default 0 = byte-identical).
+// With ZLA_C2P_RETRY2=1 and <mhd>/zla_c2p_retry = true, the C2P kernel only FLAGS cells whose real
+// (not FOFC trial) solve returns NO_SOLUTION; it behaves otherwise exactly as before (atmosphere
+// primitives, error report). A SEPARATE kernel then re-solves just the flagged cells whose quark
+// fraction 1-f is below <mhd>/zla_c2p_retry_omf, with the composition snapped FOR THE EOS ONLY to
+// pure hadronic matter (f = 1, Y_N/f = 1, y_lN' = yn*y_lN + (1-yn)*y_lQ, y_lQ' = 0), and on success
+// overwrites the atmosphere primitives. Conserved variables are never written. Keeping the retry
+// out of the main kernel avoids the extra divergent ConToPrim path that triggers the PVC IGC
+// lane-coupling miscompile (an inline retry silently reset ~20 SIMD neighbours; C2P_FIX_PLAN.md).
+#ifndef ZLA_C2P_RETRY2
+#define ZLA_C2P_RETRY2 0
+#endif
 #include "eos/primitive-solver/reset_floor.hpp"
 #include "eos/primitive-solver/logs.hpp"
 
@@ -178,6 +191,11 @@ class PrimitiveSolverHydro {
   // flux. scaldiag > 0 turns on accounting for how much it injects, reported every
   // scaldiag cycles; 0 (default) makes all of this dead code at zero cost.
   int scaldiag;
+#if ZLA_C2P_RETRY2
+  bool c2p_retry;            // <mhd>/zla_c2p_retry
+  Real c2p_retry_omf;        // <mhd>/zla_c2p_retry_omf
+  DvceArray4D<int> c2p_rflag;  // cells flagged for the hadronic retry
+#endif
   int y3cap;                 // max scal-3 bound warnings printed per rank
   unsigned int ny3clamp;     // cumulative scal-3 clamps on this rank
   Real wb_dY0, wb_dY3;       // cumulative volume-weighted injection, this rank
@@ -204,6 +222,10 @@ class PrimitiveSolverHydro {
 
     // Write-back accounting. Value is the report interval in cycles (0 = off).
     scaldiag = pin->GetOrAddInteger(block, "c2p_scal_diag", 0);
+#if ZLA_C2P_RETRY2
+    c2p_retry = pin->GetOrAddBoolean(block, "zla_c2p_retry", false);
+    c2p_retry_omf = pin->GetOrAddReal(block, "zla_c2p_retry_omf", 0.05);
+#endif
     y3cap    = pin->GetOrAddInteger(block, "c2p_y3cap", 100);
     ny3clamp = 0;
     wb_dY0   = 0.0;
@@ -419,6 +441,15 @@ class PrimitiveSolverHydro {
     const int nerrs_ = nerrs;
     const int errcap_ = errcap;
     const int scaldiag_ = scaldiag;
+#if ZLA_C2P_RETRY2
+    const bool retry_ = c2p_retry && !floors_only && nscal >= 4;
+    if (retry_ && (c2p_rflag.extent(0) != cons.extent(0) || c2p_rflag.extent(1) != cons.extent(2) ||
+                   c2p_rflag.extent(2) != cons.extent(3) || c2p_rflag.extent(3) != cons.extent(4))) {
+      Kokkos::realloc(c2p_rflag, cons.extent(0), cons.extent(2), cons.extent(3), cons.extent(4));
+      Kokkos::deep_copy(c2p_rflag, 0);
+    }
+    auto rflag_ = c2p_rflag;
+#endif
     const int y3cap_ = y3cap;
     const unsigned int ny3clamp_ = ny3clamp;
     // Phase 0 attribution: which defect actually carries the clamp injection.
@@ -548,6 +579,9 @@ class PrimitiveSolverHydro {
       if (result.error != Primitive::Error::SUCCESS && floors_only) {
         fofc_(m,k,j,i) = true;
       } else if (!floors_only) {
+#if ZLA_C2P_RETRY2
+        if (retry_ && result.error == Primitive::Error::NO_SOLUTION) rflag_(m, k, j, i) = 1;
+#endif
         if (result.error != Primitive::Error::SUCCESS && (nerrs_ + sumerrs < errcap_)) {
           sumerrs++;
           // Find out where the point went bad and report a bunch of information about it.
@@ -740,6 +774,70 @@ class PrimitiveSolverHydro {
        Kokkos::Sum<Real>(sum_dY3), Kokkos::Sum<Real>(sum_cf),
        Kokkos::Sum<Real>(sum_sp), Kokkos::Sum<Real>(sum_pf),
        Kokkos::Sum<Real>(sum_ot));
+
+#if ZLA_C2P_RETRY2
+    if (retry_) {
+      const Real omf_ = c2p_retry_omf;
+      int nrec = 0, nflag = 0;
+      Kokkos::parallel_reduce("pshyd_c2p_retry2",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, kl, jl, il}, {nmb, ku+1, ju+1, iu+1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, int &srec, int &sflag) {
+        if (rflag_(m, k, j, i) == 0) return;
+        rflag_(m, k, j, i) = 0;
+        sflag += 1;
+        Real g3d[NSPMETRIC], g3u[NSPMETRIC];
+        g3d[S11] = adm.g_dd(m, 0, 0, k, j, i);
+        g3d[S12] = adm.g_dd(m, 0, 1, k, j, i);
+        g3d[S13] = adm.g_dd(m, 0, 2, k, j, i);
+        g3d[S22] = adm.g_dd(m, 1, 1, k, j, i);
+        g3d[S23] = adm.g_dd(m, 1, 2, k, j, i);
+        g3d[S33] = adm.g_dd(m, 2, 2, k, j, i);
+        const Real detg = Primitive::GetDeterminant(g3d);
+        const Real sdetg = sqrt(detg);
+        const Real isdetg = 1.0/sdetg;
+        adm::SpatialInv(1.0/detg,
+                    g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
+                   &g3u[S11], &g3u[S12], &g3u[S13], &g3u[S22], &g3u[S23], &g3u[S33]);
+        const Real D_ = cons(m, IDN, k, j, i)*isdetg;
+        if (!(D_ > 0.0)) return;
+        const Real Yc[4] = {cons(m, nhyd, k, j, i)*isdetg/D_, cons(m, nhyd + 1, k, j, i)*isdetg/D_,
+                            cons(m, nhyd + 2, k, j, i)*isdetg/D_, cons(m, nhyd + 3, k, j, i)*isdetg/D_};
+        if (!(Yc[0] < 1.0 && 1.0 - Yc[0] < omf_)) return;
+        const Real yn_ = Yc[0]*Yc[1];
+        Real cons_try[NCONS], prim_pt[NPRIM];
+        cons_try[CDN] = D_;
+        cons_try[CSX] = cons(m, IM1, k, j, i)*isdetg;
+        cons_try[CSY] = cons(m, IM2, k, j, i)*isdetg;
+        cons_try[CSZ] = cons(m, IM3, k, j, i)*isdetg;
+        cons_try[CTA] = cons(m, IEN, k, j, i)*isdetg;
+        cons_try[CYD + 0] = D_;                                         // f = 1
+        cons_try[CYD + 1] = D_;                                         // Y_N/f = 1
+        cons_try[CYD + 2] = D_*(yn_*Yc[2] + (1.0 - yn_)*Yc[3]);         // charge per baryon kept
+        cons_try[CYD + 3] = 0.0;
+        for (int n = 4; n < nscal; n++) cons_try[CYD + n] = cons(m, nhyd + n, k, j, i)*isdetg;
+        Real b3u[NMAG];
+        b3u[IBX] = bcc0(m, IBX, k, j, i)*isdetg;
+        b3u[IBY] = bcc0(m, IBY, k, j, i)*isdetg;
+        b3u[IBZ] = bcc0(m, IBZ, k, j, i)*isdetg;
+        Primitive::SolverResult r2 = ps_.ConToPrim(prim_pt, cons_try, b3u, g3d, g3u);
+        if (r2.error != Primitive::Error::SUCCESS) return;   // atmosphere primitives stay
+        prim(m, IDN, k, j, i) = prim_pt[PRH]*mb;
+        prim(m, IVX, k, j, i) = prim_pt[PVX];
+        prim(m, IVY, k, j, i) = prim_pt[PVY];
+        prim(m, IVZ, k, j, i) = prim_pt[PVZ];
+        prim(m, IPR, k, j, i) = prim_pt[PPR];
+        for (int n = 0; n < nscal; n++) {                               // the TRUE composition
+          prim(m, nhyd + n, k, j, i) = cons(m, nhyd + n, k, j, i)*isdetg/D_;
+        }
+        temperature(m, 0, k, j, i) = prim_pt[PTM];
+        srec += 1;
+      }, Kokkos::Sum<int>(nrec), Kokkos::Sum<int>(nflag));
+      if (nflag > 0) {
+        std::cout << "C2P NO_SOLUTION recovered by hadronic retry: " << nrec << " of " << nflag
+                  << " flagged cell(s) on rank " << global_variable::my_rank << std::endl;
+      }
+    }
+#endif
 
     if (floors_only) {
       ps.GetEOSMutable().SetPrimitiveFloorFailure(prim_failure);

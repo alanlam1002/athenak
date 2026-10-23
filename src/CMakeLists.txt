@@ -214,3 +214,20 @@ endif()
 
 # enable include of header files with /src/ as root of path
 target_include_directories(athena PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# Optional per-file floating-point model (e.g. -DATHENAK_PRECISE_FP_FILES="dyn_grmhd/dyn_grmhd.cpp;...").
+# Paths are relative to src/. The listed files are compiled with ATHENAK_PRECISE_FP_FLAG (default
+# -fp-model=precise), everything else keeps the toolchain default. Motivation: on PVC the ZLA continuous
+# pressure floor hits an IGC SIMD16 lane-coupling miscompile under -fp-model=fast in the C2P kernel; a
+# global precise build cures it but costs ~27 % per step, so restrict it to the EOS/C2P kernels.
+set(ATHENAK_PRECISE_FP_FILES "" CACHE STRING "src/-relative sources compiled with ATHENAK_PRECISE_FP_FLAG")
+set(ATHENAK_PRECISE_FP_FLAG "-fp-model=precise" CACHE STRING "compile option applied to ATHENAK_PRECISE_FP_FILES")
+if (ATHENAK_PRECISE_FP_FILES)
+  foreach(f ${ATHENAK_PRECISE_FP_FILES})
+    if (NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f})
+      message(FATAL_ERROR "ATHENAK_PRECISE_FP_FILES: no such source src/${f}")
+    endif()
+    set_source_files_properties(${f} PROPERTIES COMPILE_OPTIONS "${ATHENAK_PRECISE_FP_FLAG}")
+    message(STATUS "precise fp: src/${f} (${ATHENAK_PRECISE_FP_FLAG})")
+  endforeach()
+endif()

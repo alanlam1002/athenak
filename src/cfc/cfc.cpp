@@ -1235,6 +1235,16 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
+  // u_adm's ghosts: the regrid transfers MeshBlock interiors only, so a new (derefined or
+  // refined) or received block's ghosts held whatever memory did, and the re-solve below
+  // reads adm before its own ADM exchange (C-102 add. 2). Exchange them first.
+  pbval_adm->InitRecv(adm::ADM::nadm);
+  RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
+  while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
+  ProlongADMTask(pdriver, 0);
+  BCSADMTask(pdriver, 0);
+  pbval_adm->ClearSend();
+  pbval_adm->ClearRecv();
   // The vector-potential solvers (X^i, beta) have no seed: their warm start is the MG
   // finest level's previous solution, which a regrid does not remap (kept as it was when
   // a rank's MeshBlock count is unchanged, zeroed otherwise), so it held other blocks'

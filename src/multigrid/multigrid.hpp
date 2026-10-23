@@ -581,6 +581,10 @@ class MultigridDriver {
   void SolveVCycle(Driver *pdriver,int npresmooth, int npostsmooth);
   void SolveFMG(Driver *pdriver);
   void SolveMG(Driver *pdriver);
+  // <job> mg_zero_hierarchy (debug, C-102 restart-at-regrid): zero every MG array but the
+  // finest level's u (initial guess) and src at the start of each solve
+  static inline bool zero_hierarchy_ = false;
+  void ZeroHierarchy();
   void SolveFMGCoarser();
   void SolveIterative(Driver *pdriver);
   void SolveIterativeFixedTimes(Driver *pdriver);

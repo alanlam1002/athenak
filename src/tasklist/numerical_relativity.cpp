@@ -16,6 +16,7 @@
 #include "mesh/mesh.hpp"
 #include "z4c/z4c.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "multigrid/multigrid.hpp"
 #include "cfc/cfc.hpp"
 #include "mhd/mhd.hpp"
 #include "coordinates/adm.hpp"
@@ -29,6 +30,7 @@ NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *p
   chksum::mg_level = pin->GetOrAddInteger("job", "checksum_mg", 2);
   // <job> checksum_start: the first cycle to checksum (default: the first cycle run)
   chksum::cycle0 = pin->GetOrAddInteger("job", "checksum_start", -1);
+  MultigridDriver::zero_hierarchy_ = pin->GetOrAddBoolean("job", "mg_zero_hierarchy", false);
 }
 
 //! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task

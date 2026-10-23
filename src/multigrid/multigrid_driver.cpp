@@ -825,8 +825,41 @@ void MultigridDriver::LoadFinestState(const DvceArray5D<Real> &src, int ns, int 
 //! \fn void MultigridDriver::SolveMG(Driver *pdriver)
 //! \brief Multigrid (MG) solve using V-cycles
 
+void MultigridDriver::ZeroHierarchy() {
+  for (Multigrid *g : {mglevels_, mgroot_}) {
+    if (g == nullptr) continue;
+    const int nl = g->nlevel_;
+    for (int l = 0; l < nl; ++l) {
+      const bool fin = (g == mglevels_) && (l == nl - 1);
+      Kokkos::deep_copy(g->def_[l].d_view, 0.0); Kokkos::deep_copy(g->def_[l].h_view, 0.0);
+      if (!fin) {
+        Kokkos::deep_copy(g->u_[l].d_view, 0.0); Kokkos::deep_copy(g->u_[l].h_view, 0.0);
+        Kokkos::deep_copy(g->src_[l].d_view, 0.0);
+        Kokkos::deep_copy(g->src_[l].h_view, 0.0);
+      }
+      if (l != nl - 1) {
+        Kokkos::deep_copy(g->uold_[l].d_view, 0.0);
+        Kokkos::deep_copy(g->uold_[l].h_view, 0.0);
+      }
+    }
+  }
+  for (int l = 0; l < nreflevel_; ++l) {
+    std::fill(oct_u_buf_[l].begin(), oct_u_buf_[l].end(), 0.0);
+    std::fill(oct_def_buf_[l].begin(), oct_def_buf_[l].end(), 0.0);
+    std::fill(oct_src_buf_[l].begin(), oct_src_buf_[l].end(), 0.0);
+    std::fill(oct_uold_buf_[l].begin(), oct_uold_buf_[l].end(), 0.0);
+  }
+  std::fill(root_u_buf_.begin(), root_u_buf_.end(), 0.0);
+  std::fill(root_uold_buf_.begin(), root_uold_buf_.end(), 0.0);
+  std::fill(cbuf_.begin(), cbuf_.end(), 0.0);
+  std::fill(cbufold_.begin(), cbufold_.end(), 0.0);
+  Kokkos::deep_copy(rootbuf_.d_view, 0.0); Kokkos::deep_copy(rootbuf_.h_view, 0.0);
+  Kokkos::fence();
+}
+
 void MultigridDriver::SolveMG(Driver *pdriver) {
   if (MGTimingOn()) ++mg_timers_.solve_count;
+  if (zero_hierarchy_) ZeroHierarchy();
   if (eps_ >= 0.0 || rtol_ > 0.0) {
     SolveIterative(pdriver);
   } else {

@@ -129,8 +129,9 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
       beta[1] = 0.25;
 
       gam0[2] = 2.0/3.0;
-      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17 exactly, a
-      // systematic -5.5e-17 per step scaling of the solution (R-115 Q2; MCLOSE item rk_coef)
+      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17
+      // exactly, a systematic -5.5e-17 per step scaling of the solution (R-115 Q2;
+      // MCLOSE item rk_coef)
       gam1[2] = 1.0 - gam0[2];
       beta[2] = 2.0/3.0;
     } else if (integrator == "rk4") {
@@ -250,8 +251,9 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
       beta[1] = 0.25;
 
       gam0[2] = 2.0/3.0;
-      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17 exactly, a
-      // systematic -5.5e-17 per step scaling of the solution (R-115 Q2; MCLOSE item rk_coef)
+      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17
+      // exactly, a systematic -5.5e-17 per step scaling of the solution (R-115 Q2;
+      // MCLOSE item rk_coef)
       gam1[2] = 1.0 - gam0[2];
       beta[2] = 2.0/3.0;
 
@@ -326,6 +328,9 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // continues bitwise (C-100)
   const bool mhd_restored = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
   InitBoundaryValuesAndPrimitives(pmesh, false, mhd_restored);
+  // <job> seed_tau_eps (R-115 Q3): the seeded interior, then its ghosts by the exchange
+  // (owner == ghost); the next stage's C2P carries the seed into the primitives
+  if (restart_state::Seed(pmesh, pin, res_flag)) ExchangeMHDGhosts(pmesh);
 
   //---- Step 1b. CFC only: converge the metric to the (fixed) initial primitives
   // before anything else reads padm->adm -- see cfc::CFC::InitializeMetric's doc

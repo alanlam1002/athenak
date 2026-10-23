@@ -25,7 +25,9 @@
 
 #include "athena.hpp"
 
+class Mesh;
 class MeshBlockPack;
+class ParameterInput;
 
 namespace restart_state {
 // number of variables this pack's state needs
@@ -36,6 +38,17 @@ void Pack(MeshBlockPack *pmbp, DvceArray5D<Real> &dst);
 void Stage(const DvceArray5D<Real> &src, int nvar);
 // true if a staged block was applied (the caller then skips the init C2P)
 bool ApplyStaged(MeshBlockPack *pmbp);
+// <job> seed_tau_eps (default 0 = off), seed_id (R-115 Q3, user-approved): once, at a
+// restart, perturb the dense cells (u0's densitized D > <mhd> dual_energy_rho_switch;
+// the selection only needs to be decomposition-independent) by the factor
+// (1 + eps xi) in tau and, with <mhd> dual_energy, in the entropy tracer D Y (dense
+// unshocked gas takes P from K and resyncs tau, primitive_solver_hyd.hpp:146-147, so a
+// tau-only seed would be erased there). xi = +-1 from a hash of the seed id and the
+// cell's global (level, i, j, k) index: the same perturbation on any decomposition. D
+// and S_i are untouched (mass and momentum exact). Interior cells only; the caller then
+// exchanges the MHD ghosts. Sets <job> seed_applied = true (carried by later restarts,
+// so a chain seeds once). Returns true if applied.
+bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag);
 }  // namespace restart_state
 
 #endif  // OUTPUTS_RESTART_STATE_HPP_

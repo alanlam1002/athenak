@@ -485,6 +485,11 @@ class MultigridDriver {
   void PrepareForAMR();
   int GetCoffset() const { return coffset_; }
   MGNormScaling GetNormScaling() const { return norm_mode_; }
+  // restart_state (outputs/restart_state.hpp): the finest level's u (the next solve's
+  // warm start), MG ghosts included, to/from a(m, ns + v, ...) padded to ngh >= its ngh_
+  int NumVars() const { return nvar_; }
+  void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
+  void LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh);
   Real TotalDefectNorm();
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and

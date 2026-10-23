@@ -425,6 +425,20 @@ class PrimitiveSolverHydro {
     UpdateTier3();
   }
 
+  //! restart_state (C-100): the tier-3 state into the restart's parameter copy (SetReal
+  //! writes max_digits10), so the restart's first cycle uses it as the run would have
+  std::string t3_block = "mhd";
+  void SaveTier3State(ParameterInput *pin) {
+    if (!t3_on) return;
+    pin->SetBoolean(t3_block, "tier3_state_active", t3_active);
+    pin->SetReal(t3_block, "tier3_state_cx", t3_c[0]);
+    pin->SetReal(t3_block, "tier3_state_cy", t3_c[1]);
+    pin->SetReal(t3_block, "tier3_state_cz", t3_c[2]);
+    pin->SetReal(t3_block, "tier3_state_r90", t3_r90);
+    pin->SetReal(t3_block, "tier3_state_d", t3_d);
+    pin->SetReal(t3_block, "tier3_state_ddot", t3_ddot);
+  }
+
   //! Tier-3 activation state from the current primitives (end of a cycle): rho_max, the
   //! dense-gas centroid and coordinate velocity, R_90 (histogram of t3_dr bins about x_c).
   void UpdateTier3() {
@@ -1406,6 +1420,18 @@ class PrimitiveSolverHydro {
       t3_dr = pin->GetOrAddReal(block, "atmosphere_zone_tier3_dr", 1.0/32.0);
       if (t3_on) {
         Kokkos::realloc(t3_hist, kT3NR);
+        // restart_state (C-100): the state measured at the end of the restart's last cycle
+        // (SaveTier3State); absent in a fresh run or an older restart: inactive, as before
+        t3_block = block;
+        if (pin->DoesParameterExist(block, "tier3_state_active")) {
+          t3_active = pin->GetBoolean(block, "tier3_state_active");
+          t3_c[0] = pin->GetReal(block, "tier3_state_cx");
+          t3_c[1] = pin->GetReal(block, "tier3_state_cy");
+          t3_c[2] = pin->GetReal(block, "tier3_state_cz");
+          t3_r90 = pin->GetReal(block, "tier3_state_r90");
+          t3_d = pin->GetReal(block, "tier3_state_d");
+          t3_ddot = pin->GetReal(block, "tier3_state_ddot");
+        }
       }
       Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);

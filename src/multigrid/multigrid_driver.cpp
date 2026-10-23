@@ -797,6 +797,31 @@ void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmoo
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::SaveFinestState / LoadFinestState
+//! \brief see multigrid.hpp: the whole finest-level u (interior and MG ghosts) at offset
+//! ngh - ngh_ in an array padded to the mesh's ghost width
+
+void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
+  auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
+  const int off = ngh - mglevels_->ngh_;
+  par_for("MG::SaveFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,
+          0, u.extent_int(2)-1, 0, u.extent_int(3)-1, 0, u.extent_int(4)-1,
+  KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
+    dst(m, ns + v, k + off, j + off, i + off) = u(m, v, k, j, i);
+  });
+}
+
+void MultigridDriver::LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh) {
+  auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
+  const int off = ngh - mglevels_->ngh_;
+  par_for("MG::LoadFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,
+          0, u.extent_int(2)-1, 0, u.extent_int(3)-1, 0, u.extent_int(4)-1,
+  KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
+    u(m, v, k, j, i) = src(m, ns + v, k + off, j + off, i + off);
+  });
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::SolveMG(Driver *pdriver)
 //! \brief Multigrid (MG) solve using V-cycles
 

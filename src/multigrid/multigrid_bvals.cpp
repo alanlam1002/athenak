@@ -1059,6 +1059,14 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
   int cnc = ncells / 2;
   int nmb = pmy_pack->nmb_thispack;
   auto cbuf = coarse_buf_;
+  // The buffer is sized for the finest MG level; this fill writes only this level's
+  // interior and face layers, but the prolongation also reads entries no fill writes
+  // (shown by pre-filling NaN: the NaN reached the solution in the first solve, C-100
+  // c100_rst12). Those reads saw whatever an earlier level or solve left there, so the
+  // result depended on history (restarts not bitwise). Zero the whole buffer first, so
+  // every read is defined. Moves results at the MG-tolerance level; cost not measurable.
+  // Which reads are affected, and their proper values, is open (C-100).
+  Kokkos::deep_copy(DevExeSpace(), coarse_buf_, 0.0);
 
   // Volume-average restriction: fill coarse_buf_ interior
   Kokkos::parallel_for("FillCoarseMG",

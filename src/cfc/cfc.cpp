@@ -10,8 +10,10 @@
 #include <climits>
 #include <cmath>
 #include <iomanip>
+#include <initializer_list>
 #include <iostream>
 #include <string>
+#include <utility>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -310,6 +312,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Phase 2 M2 xidot controller (see cfc.hpp). Parsed here, before the puncture fill
   // below, because a restart's x_BH comes from the restored xi.
   frame_ctrl_ = pin->GetOrAddBoolean("cfc", "frame_controller", false);
+  // restart_state: the MG seed flags (SaveRestartScalars); absent before it
+  if (pin->DoesParameterExist("cfc", "restart_psi_seeded")) {
+    rst_psi_seeded_ = pin->GetBoolean("cfc", "restart_psi_seeded");
+    rst_alpha_psi_seeded_ = pin->GetBoolean("cfc", "restart_alpha_psi_seeded");
+  }
   if (frame_ctrl_) {
     fc_rho_thr_ = pin->GetReal("cfc", "frame_track_rho");        // required (code units)
     fc_rtrk_ = pin->GetReal("cfc", "frame_track_radius");        // required
@@ -2958,6 +2965,61 @@ void CFC::InitFrameControl(Driver *pdriver) {
     pmy_pack->pdyngr->PrimToConInit(is, is + nx1 - 1, js, js + nx2 - 1, ks, ks + nx3 - 1);
     pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
   }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn CFC::RestartStateVars / SaveRestartState / LoadRestartState
+//! \brief see cfc.hpp. Order: delta_psi, delta_alpha_psi, then the MG finest u of
+//! pmgd_psi, pmgd_alpha, pmgd_pietax, pmgd_pietabeta (padded to the mesh's ng).
+
+int CFC::RestartStateVars() const {
+  return 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
+           + pmgd_pietabeta->NumVars();
+}
+
+void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
+  const int nmb = pmy_pack->nmb_thispack, ng = pmy_pack->pmesh->mb_indcs.ng;
+  auto mb = std::make_pair(0, nmb);
+  auto all = Kokkos::ALL;
+  Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(ns, ns + 1), all, all, all),
+                    Kokkos::subview(delta_psi, mb, all, all, all, all));
+  Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(ns + 1, ns + 2), all, all, all),
+                    Kokkos::subview(delta_alpha_psi, mb, all, all, all, all));
+  int n = ns + 2;
+  for (MultigridDriver *d : {static_cast<MultigridDriver*>(pmgd_psi),
+                             static_cast<MultigridDriver*>(pmgd_alpha),
+                             static_cast<MultigridDriver*>(pmgd_pietax),
+                             static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+    d->SaveFinestState(dst, n, ng);
+    n += d->NumVars();
+  }
+}
+
+void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
+  const int nmb = pmy_pack->nmb_thispack, ng = pmy_pack->pmesh->mb_indcs.ng;
+  auto mb = std::make_pair(0, nmb);
+  auto all = Kokkos::ALL;
+  Kokkos::deep_copy(Kokkos::subview(delta_psi, mb, all, all, all, all),
+                    Kokkos::subview(src, all, std::make_pair(ns, ns + 1), all, all, all));
+  Kokkos::deep_copy(Kokkos::subview(delta_alpha_psi, mb, all, all, all, all),
+                    Kokkos::subview(src, all, std::make_pair(ns + 1, ns + 2), all, all, all));
+  int n = ns + 2;
+  for (MultigridDriver *d : {static_cast<MultigridDriver*>(pmgd_psi),
+                             static_cast<MultigridDriver*>(pmgd_alpha),
+                             static_cast<MultigridDriver*>(pmgd_pietax),
+                             static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+    d->LoadFinestState(src, n, ng);
+    n += d->NumVars();
+  }
+  // as the restarted run left them: false after a step that accreted, so the next solves
+  // re-seed from adm exactly as the continuous run does (C-100, c100_rst7)
+  psi_seeded_ = rst_psi_seeded_;
+  alpha_psi_seeded_ = rst_alpha_psi_seeded_;
+}
+
+void CFC::SaveRestartScalars(ParameterInput *pin) const {
+  pin->SetBoolean("cfc", "restart_psi_seeded", psi_seeded_);
+  pin->SetBoolean("cfc", "restart_alpha_psi_seeded", alpha_psi_seeded_);
 }
 
 //----------------------------------------------------------------------------------------

@@ -27,6 +27,7 @@
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "outputs/restart_state.hpp"
 #include "pgen.hpp"
 
 
@@ -259,6 +260,9 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   } else if (padm != nullptr) {
     data_size_ += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
   }
+  // <job> restart_state (outputs/restart_state.hpp); absent (0) in restarts written before it
+  const int nstate = pin->GetOrAddInteger("job", "restart_state_nvar", 0);
+  data_size_ += nout1*nout2*nout3*nstate*sizeof(Real);
 
   if (data_size_ != data_size) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
@@ -634,6 +638,32 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     Kokkos::deep_copy(Kokkos::subview(padm->u_adm, std::make_pair(0,nmb), Kokkos::ALL,
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
     offset_myrank += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
+    myoffset = offset_myrank;
+  }
+  if (nstate > 0) {
+    Kokkos::realloc(ccin, nmb, nstate, nout3, nout2, nout1);
+    for (int m=0;  m<noutmbs_max; ++m) {
+      if (m < noutmbs_min || m < pm->nmb_thisrank) {
+        auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        // collective while every rank has a MeshBlock to read, as above
+        size_t nr = (m < noutmbs_min)
+            ? resfile.Read_Reals_at_all(mbptr.data(), mbcnt, myoffset, single_file_per_rank)
+            : resfile.Read_Reals_at(mbptr.data(), mbcnt, myoffset, single_file_per_rank);
+        if (nr != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "restart_state data not read correctly from rst "
+                    << "file, restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+      }
+    }
+    DvceArray5D<Real> st_d("rst-state-in-d", nmb, nstate, nout3, nout2, nout1);
+    Kokkos::deep_copy(st_d, ccin);
+    restart_state::Stage(st_d, nstate);   // applied in Driver::Initialize
+    offset_myrank += nout1*nout2*nout3*nstate*sizeof(Real);
     myoffset = offset_myrank;
   }
 

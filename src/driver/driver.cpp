@@ -129,7 +129,9 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
       beta[1] = 0.25;
 
       gam0[2] = 2.0/3.0;
-      gam1[2] = 1.0/3.0;
+      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17 exactly, a
+      // systematic -5.5e-17 per step scaling of the solution (R-115 Q2; MCLOSE item rk_coef)
+      gam1[2] = 1.0 - gam0[2];
       beta[2] = 2.0/3.0;
     } else if (integrator == "rk4") {
       // RK4()4[2S] from Table 2 of Ketcheson (2010)
@@ -248,7 +250,9 @@ Driver::Driver(ParameterInput *pin, Mesh *pmesh, Real wtlim, Kokkos::Timer* ptim
       beta[1] = 0.25;
 
       gam0[2] = 2.0/3.0;
-      gam1[2] = 1.0/3.0;
+      // 1 - gam0 (exact, Sterbenz), not fl(1/3): fl(2/3) + fl(1/3) = 1 - 5.55e-17 exactly, a
+      // systematic -5.5e-17 per step scaling of the solution (R-115 Q2; MCLOSE item rk_coef)
+      gam1[2] = 1.0 - gam0[2];
       beta[2] = 2.0/3.0;
 
       Real a = 0.24169426078821;

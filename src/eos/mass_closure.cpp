@@ -6,6 +6,7 @@
 //! \file mass_closure.cpp
 //! \brief see mass_closure.hpp. Compiled with -fp-model=precise (src/CMakeLists.txt).
 
+#include <algorithm>
 #include <cmath>
 #include <initializer_list>
 #include <iomanip>
@@ -143,16 +144,31 @@ DD Neg(const DD &a) { return {-a.hi, -a.lo}; }
 
 }  // namespace
 
-MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin) : pmy_pack(pp) {
+MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
+    pmy_pack(pp), var_(var) {
   on = pin->GetOrAddBoolean("mhd", "mass_closure", false);
   every = pin->GetOrAddInteger("mhd", "mass_closure_every", 0);
   tol = pin->GetOrAddReal("mhd", "mass_closure_tol", 1.0e-10);
   mstar = pin->GetOrAddReal("mhd", "mass_closure_mstar", 0.0);
   m_prev_end = std::numeric_limits<Real>::quiet_NaN();
+  if (var_ == IDN) {
+    tag_ = "MCLOSE"; key_ = "mass_closure";
+    if (on && pin->GetOrAddBoolean("mhd", "mass_closure_full", false)) {
+      for (int v : {static_cast<int>(IM1), static_cast<int>(IM2), static_cast<int>(IM3),
+                    static_cast<int>(IEN)}) {
+        extra_.emplace_back(new MassClosure(pp, pin, v));
+      }
+    }
+  } else if (var_ == IEN) {
+    tag_ = "ECLOSE"; key_ = "closure_tau";
+  } else {
+    tag_ = "SCLOSE" + std::to_string(var_ - IM1 + 1);
+    key_ = "closure_s" + std::to_string(var_ - IM1 + 1);
+  }
 }
 
 KSum MassClosure::Mass() const {
-  Fix loc = LocalMass(pmy_pack, pmy_pack->pmhd->u0, IDN);
+  Fix loc = LocalMass(pmy_pack, pmy_pack->pmhd->u0, var_);
   KSum g;
   GlobalSum(&loc, 1, &g);
   return g;
@@ -160,8 +176,19 @@ KSum MassClosure::Mass() const {
 
 void MassClosure::StagePre(int stage) {
   if (!on || stage < 1 || stage > 4) return;
-  st_pre[stage-1] = LocalMass(pmy_pack, pmy_pack->pmhd->u0, IDN);
-  if (stage == 1) st_u1 = LocalMass(pmy_pack, pmy_pack->pmhd->u1, IDN);
+  for (auto &x : extra_) x->StagePre(stage);
+  auto &u0 = pmy_pack->pmhd->u0;
+  if (var_ != IDN) {   // the variable before the C2P (the mass closure uses the ledger's d0)
+    if (x0_.extent_int(0) != u0.extent_int(0) || x0_.extent_int(1) != u0.extent_int(2) ||
+        x0_.extent_int(2) != u0.extent_int(3) || x0_.extent_int(3) != u0.extent_int(4)) {
+      x0_ = DvceArray4D<Real>("mclose_x0", u0.extent_int(0), u0.extent_int(2),
+                              u0.extent_int(3), u0.extent_int(4));
+    }
+    Kokkos::deep_copy(DevExeSpace(), x0_, Kokkos::subview(u0, Kokkos::ALL, var_,
+                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+  }
+  st_pre[stage-1] = LocalMass(pmy_pack, u0, var_);
+  if (stage == 1) st_u1 = LocalMass(pmy_pack, pmy_pack->pmhd->u1, var_);
 }
 
 void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam1,
@@ -169,7 +196,12 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
                             const DvceArray4D<Real> &cls, const DvceArray4D<Real> &c2p,
                             int cycle, Real time) {
   if (!on || stage < 1 || stage > ns || ns > 4) return;
+  for (auto &x : extra_) {
+    x->StagePost(stage, ns, gam0, gam1, beta, dt, d0, cls, c2p, cycle, time);
+  }
   MeshBlockPack *pp = pmy_pack;
+  const int nv = var_;
+  const DvceArray4D<Real> x0 = (nv == IDN) ? d0 : x0_;   // the variable before the C2P
   auto &indcs = pp->pmesh->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
   const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
@@ -195,9 +227,9 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
     auto &sz = size.d_view(m);
     const Real dv = sz.dx1*sz.dx2*sz.dx3;
-    acc.v[kMend].Add(u0(m, IDN, k, j, i)*dv);
-    acc.v[kMd0].Add(d0(m, k, j, i)*dv);
-    const Real dm = u0(m, IDN, k, j, i)*dv - d0(m, k, j, i)*dv;
+    acc.v[kMend].Add(u0(m, nv, k, j, i)*dv);
+    acc.v[kMd0].Add(x0(m, k, j, i)*dv);
+    const Real dm = u0(m, nv, k, j, i)*dv - x0(m, k, j, i)*dv;
     if (dm == 0.0) return;
     const Real c = cls(m, k, j, i);
     if (c < 1.5) {          // excision floor (0: and flux mask; 1: floor mask only)
@@ -237,19 +269,19 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     auto &sz = size.d_view(m);
     const Real a1f = sz.dx2*sz.dx3, a2f = sz.dx1*sz.dx3, a3f = sz.dx1*sz.dx2;
     const Real tol = 1.0e-6*sz.dx1;
-    if (i == is && sz.x1min <= mx1 + tol) acc.v[kFout].Add(-flx.x1f(m, IDN, k, j, i)*a1f);
-    if (i == ie && sz.x1max >= Mx1 - tol) acc.v[kFout].Add(flx.x1f(m, IDN, k, j, i+1)*a1f);
-    if (j == js && sz.x2min <= mx2 + tol) acc.v[kFout].Add(-flx.x2f(m, IDN, k, j, i)*a2f);
-    if (j == je && sz.x2max >= Mx2 - tol) acc.v[kFout].Add(flx.x2f(m, IDN, k, j+1, i)*a2f);
-    if (k == ks && sz.x3min <= mx3 + tol) acc.v[kFout].Add(-flx.x3f(m, IDN, k, j, i)*a3f);
-    if (k == ke && sz.x3max >= Mx3 - tol) acc.v[kFout].Add(flx.x3f(m, IDN, k+1, j, i)*a3f);
+    if (i == is && sz.x1min <= mx1 + tol) acc.v[kFout].Add(-flx.x1f(m, nv, k, j, i)*a1f);
+    if (i == ie && sz.x1max >= Mx1 - tol) acc.v[kFout].Add(flx.x1f(m, nv, k, j, i+1)*a1f);
+    if (j == js && sz.x2min <= mx2 + tol) acc.v[kFout].Add(-flx.x2f(m, nv, k, j, i)*a2f);
+    if (j == je && sz.x2max >= Mx2 - tol) acc.v[kFout].Add(flx.x2f(m, nv, k, j+1, i)*a2f);
+    if (k == ks && sz.x3min <= mx3 + tol) acc.v[kFout].Add(-flx.x3f(m, nv, k, j, i)*a3f);
+    if (k == ke && sz.x3max >= Mx3 - tol) acc.v[kFout].Add(flx.x3f(m, nv, k+1, j, i)*a3f);
     if (exc && xf(m, k, j, i)) {
-      if (!xf(m, k, j, i-1)) acc.v[kFexc].Add(flx.x1f(m, IDN, k, j, i)*a1f);
-      if (!xf(m, k, j, i+1)) acc.v[kFexc].Add(-flx.x1f(m, IDN, k, j, i+1)*a1f);
-      if (!xf(m, k, j-1, i)) acc.v[kFexc].Add(flx.x2f(m, IDN, k, j, i)*a2f);
-      if (!xf(m, k, j+1, i)) acc.v[kFexc].Add(-flx.x2f(m, IDN, k, j+1, i)*a2f);
-      if (!xf(m, k-1, j, i)) acc.v[kFexc].Add(flx.x3f(m, IDN, k, j, i)*a3f);
-      if (!xf(m, k+1, j, i)) acc.v[kFexc].Add(-flx.x3f(m, IDN, k+1, j, i)*a3f);
+      if (!xf(m, k, j, i-1)) acc.v[kFexc].Add(flx.x1f(m, nv, k, j, i)*a1f);
+      if (!xf(m, k, j, i+1)) acc.v[kFexc].Add(-flx.x1f(m, nv, k, j, i+1)*a1f);
+      if (!xf(m, k, j-1, i)) acc.v[kFexc].Add(flx.x2f(m, nv, k, j, i)*a2f);
+      if (!xf(m, k, j+1, i)) acc.v[kFexc].Add(-flx.x2f(m, nv, k, j+1, i)*a2f);
+      if (!xf(m, k-1, j, i)) acc.v[kFexc].Add(flx.x3f(m, nv, k, j, i)*a3f);
+      if (!xf(m, k+1, j, i)) acc.v[kFexc].Add(-flx.x3f(m, nv, k+1, j, i)*a3f);
     }
   }, FixArrReducer<kNFace>(f));
   for (int q = 0; q < kNFace; ++q) st_f[stage-1][q] = f.v[q];
@@ -329,7 +361,7 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     KSum xp;   // the class partition of X
     for (int n : {iExc0, iExc1, iExc2, iExc3, iExc4, iRf, iZoneRem, iZoneAdd, iFloorStage,
                   iCrec, iOther}) xp.Join(cyc[n]);
-    std::cout << std::setprecision(17) << "MCLOSE_CYC cycle=" << cycle << " time=" << time
+    std::cout << std::setprecision(17) << tag_ << "_CYC cycle=" << cycle << " time=" << time
               << " Mu1=" << mu1 << " Mend=" << m_last_end.Val()
               << " gap=" << (had_end ? gap.hi + gap.lo : 0.0)
               << " Y=" << Yd.hi + Yd.lo << " X=" << Xd.hi + Xd.lo << " Xpart=" << xp.Val()
@@ -348,11 +380,13 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
 
 void MassClosure::MarkBefore() {
   if (!on) return;
+  for (auto &x : extra_) x->MarkBefore();
   m_mark = Mass();
 }
 
 void MassClosure::MarkAfter(int item) {
   if (!on) return;
+  for (auto &x : extra_) x->MarkAfter(item);
   const KSum a = Mass();
   KSum d;
   d.Add(a.s); d.Add(a.c); d.Add(-m_mark.s); d.Add(-m_mark.c);
@@ -364,6 +398,7 @@ void MassClosure::MarkAfter(int item) {
 
 void MassClosure::RegridProlongated() {
   if (!on) return;
+  for (auto &x : extra_) x->RegridProlongated();
   const KSum a = Mass();
   if (have_last_end) {
     KSum d;
@@ -382,33 +417,38 @@ void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
   cycle0 = cycle;
   // the run's cumulative items and M* (the parameter copy of a restart)
   for (int n = 0; n < kNItem; ++n) {
-    const std::string k = "mass_closure_cum" + std::to_string(n);
+    const std::string k = key_ + "_cum" + std::to_string(n);
     if (pin->DoesParameterExist("mhd", k + "s")) {
       cum[n].s = pin->GetReal("mhd", k + "s");
       cum[n].c = pin->GetReal("mhd", k + "c");
     }
   }
-  if (!(mstar > 0.0)) {
-    mstar = pin->DoesParameterExist("mhd", "mass_closure_m0") ?
-            pin->GetReal("mhd", "mass_closure_m0") : m_start.Val();
+  if (var_ == IDN) {
+    if (!(mstar > 0.0)) {
+      mstar = pin->DoesParameterExist("mhd", "mass_closure_m0") ?
+              pin->GetReal("mhd", "mass_closure_m0") : m_start.Val();
+    }
+    pin->SetReal("mhd", "mass_closure_m0", mstar);
+    // S_i, tau: the same M* (their tolerance is in mass units too)
+    for (auto &x : extra_) { x->mstar = mstar; x->SegmentStart(pin, cycle); }
   }
-  pin->SetReal("mhd", "mass_closure_m0", mstar);
-  if (pin->DoesParameterExist("mhd", "mass_closure_mend")) {
-    m_prev_end = pin->GetReal("mhd", "mass_closure_mend");
-    const Real pc = pin->DoesParameterExist("mhd", "mass_closure_mend_c") ?
-                    pin->GetReal("mhd", "mass_closure_mend_c") : 0.0;
+  if (pin->DoesParameterExist("mhd", key_ + "_mend")) {
+    m_prev_end = pin->GetReal("mhd", key_ + "_mend");
+    const Real pc = pin->DoesParameterExist("mhd", key_ + "_mend_c") ?
+                    pin->GetReal("mhd", key_ + "_mend_c") : 0.0;
     KSum d;
     d.Add(m_start.s); d.Add(m_start.c); d.Add(-m_prev_end); d.Add(-pc);
     seg[iRestart].Join(d); cum[iRestart].Join(d);
   }
   if (global_variable::my_rank == 0) {
-    std::cout << std::setprecision(17) << "MCLOSE_START cycle=" << cycle << " M_start="
+    std::cout << std::setprecision(17) << tag_ << "_START cycle=" << cycle << " M_start="
               << m_start.Val() << " M_prev_end=" << m_prev_end << std::endl;
   }
 }
 
 void MassClosure::SegmentEnd(int cycle, Real time) {
   if (!on) return;
+  for (auto &x : extra_) x->SegmentEnd(cycle, time);
   const KSum me = Mass();
   KSum dm;
   dm.Add(me.s); dm.Add(me.c); dm.Add(-m_start.s); dm.Add(-m_start.c);
@@ -422,11 +462,16 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   rr.Add(-sum.s); rr.Add(-sum.c);
   const Real R = rr.Val(), mg = me.Val();
   const Real eps = std::numeric_limits<Real>::epsilon();
-  const Real rnd = 10.0*eps*mg*static_cast<Real>(ncyc > 0 ? ncyc : 1);   // round-off scale
+  // the round-off scale (S_i, tau: their net sum can be ~0 or negative, so at least M*)
+  const Real scl = (var_ == IDN) ? mg : std::max(std::fabs(mg), mstar);
+  const Real rnd = 10.0*eps*scl*static_cast<Real>(ncyc > 0 ? ncyc : 1);
   std::string flags;
-  const int chk[5] = {iRegrid, iCrec, iUpdate, iRestart, iOther};
-  const char *chkn[5] = {"regrid", "crec", "update", "restart", "other"};
-  for (int q = 0; q < 5; ++q) {
+  // S_i, tau: crec, the source term (update) and other (tau: the dual-energy resync) are
+  // physical changes, not checks
+  const int chk[5] = {iRegrid, iRestart, iCrec, iUpdate, iOther};
+  const char *chkn[5] = {"regrid", "restart", "crec", "update", "other"};
+  const int nchk = (var_ == IDN) ? 5 : 2;
+  for (int q = 0; q < nchk; ++q) {
     if (std::fabs(seg[chk[q]].Val()) > rnd) flags += std::string(flags.empty() ? "" : ",")
                                                      + chkn[q];
   }
@@ -435,9 +480,10 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   const char *nm[kNItem] = {"out", "exc<0.59", "exc0.59-0.78", "exc0.78-1.88",
                             "exc1.88-2.92", "exc>=2.92", "rf", "zone_rem", "zone_add",
                             "unmask", "floor_stage", "floor_init", "regrid", "crec",
-                            "update", "rk_coef", "restart", "other", "fexc_info"};
+                            (var_ == IDN) ? "update" : "source", "rk_coef", "restart",
+                            "other", "fexc_info"};
   std::ostringstream o;
-  o << std::setprecision(10) << "MCLOSE cycles=" << cycle0 << "-" << cycle << " ncyc=" << ncyc
+  o << std::setprecision(10) << tag_ << " cycles=" << cycle0 << "-" << cycle << " ncyc=" << ncyc
     << " time=" << time << " Mstar=" << mstar << std::setprecision(17) << " M_start="
     << m_start.Val() << " M_end=" << mg << " M_last_end=" << m_last_end.Val()
     << std::setprecision(10) << " dM=" << dm.Val();
@@ -446,7 +492,7 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     << " " << (pass ? "PASS" : "FAIL") << " flags=" << (flags.empty() ? "none" : flags);
   std::cout << o.str() << std::endl;
   std::ostringstream c;
-  c << std::setprecision(10) << "MCLOSE_RUN cycle=" << cycle << " (cumulative since the run's"
+  c << std::setprecision(10) << tag_ << "_RUN cycle=" << cycle << " (cumulative since the run's"
     << " start, restarts included)";
   for (int n = 0; n < kNItem; ++n) c << " " << nm[n] << "=" << cum[n].Val();
   std::cout << c.str() << std::endl;
@@ -454,16 +500,17 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
 
 void MassClosure::Save(ParameterInput *pin) const {
   if (!on) return;
+  for (auto &x : extra_) x->Save(pin);
   if (have_last_end) {   // both parts: the value is exact beyond a double (Fix sums)
-    pin->SetReal("mhd", "mass_closure_mend", m_last_end.s);
-    pin->SetReal("mhd", "mass_closure_mend_c", m_last_end.c);
+    pin->SetReal("mhd", key_ + "_mend", m_last_end.s);
+    pin->SetReal("mhd", key_ + "_mend_c", m_last_end.c);
   }
   for (int n = 0; n < kNItem; ++n) {
-    const std::string k = "mass_closure_cum" + std::to_string(n);
+    const std::string k = key_ + "_cum" + std::to_string(n);
     pin->SetReal("mhd", k + "s", cum[n].s);
     pin->SetReal("mhd", k + "c", cum[n].c);
   }
-  pin->SetReal("mhd", "mass_closure_m0", mstar);
+  if (var_ == IDN) pin->SetReal("mhd", "mass_closure_m0", mstar);
 }
 
 }  // namespace mclose

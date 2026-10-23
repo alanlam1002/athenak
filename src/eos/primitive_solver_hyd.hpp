@@ -18,6 +18,7 @@
 #include <type_traits>
 #include <iostream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <algorithm>
 #include <cstdio>
@@ -428,6 +429,23 @@ class PrimitiveSolverHydro {
   //! restart_state (C-100): the tier-3 state into the restart's parameter copy (SetReal
   //! writes max_digits10), so the restart's first cycle uses it as the run would have
   std::string t3_block = "mhd";
+  // the user.hst column de-dE-total is the sum over ranks of each rank's accumulation, so
+  // every rank's value goes into the restart (collective: called on all ranks), as a
+  // comma-separated list; restored per rank at the same rank count (bitwise), else the
+  // total on rank 0
+  void SaveDualEnergyTotal(ParameterInput *pin) {
+    if (!de_on) return;
+    std::vector<Real> all(global_variable::nranks, de_dE_total);
+#if MPI_PARALLEL_ENABLED
+    MPI_Allgather(&de_dE_total, 1, MPI_ATHENA_REAL, all.data(), 1, MPI_ATHENA_REAL,
+                  MPI_COMM_WORLD);
+#endif
+    std::ostringstream o;
+    o << std::setprecision(std::numeric_limits<Real>::max_digits10);
+    for (int r = 0; r < global_variable::nranks; ++r) o << (r ? "," : "") << all[r];
+    // in <job>: a block pads every value to its longest, and <mhd> has ~300 lines
+    pin->SetString("job", "dual_energy_dE_total_state", o.str());
+  }
   void SaveTier3State(ParameterInput *pin) {
     if (!t3_on) return;
     pin->SetBoolean(t3_block, "tier3_state_active", t3_active);
@@ -1451,6 +1469,18 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
       de_idx = nsc - 1;
+      if (pin->DoesParameterExist("job", "dual_energy_dE_total_state")) {
+        std::vector<Real> all;
+        std::istringstream in(pin->GetString("job", "dual_energy_dE_total_state"));
+        for (std::string t; std::getline(in, t, ',');) all.push_back(std::stod(t));
+        Real tot = 0.0;
+        for (Real v : all) tot += v;
+        if (static_cast<int>(all.size()) == global_variable::nranks) {
+          de_dE_total = all[global_variable::my_rank];
+        } else {
+          de_dE_total = (global_variable::my_rank == 0) ? tot : 0.0;
+        }
+      }
       de_gamma = pin->GetOrAddReal(block, "gamma", 5.0/3.0);
       de_kmax = pin->GetReal(block, "dual_energy_kmax");
       de_rho_sw = pin->GetReal(block, "dual_energy_rho_switch");

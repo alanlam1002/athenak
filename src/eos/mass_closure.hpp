@@ -34,9 +34,17 @@
 //! with Neumaier on the host. This file is compiled with -fp-model=precise and
 //! -ffp-contract=off (src/CMakeLists.txt) for the host-side compensated arithmetic.
 //! Pass: |R| <= mass_closure_tol M*.
+//! <mhd> mass_closure_full (default false; R-115 Q5, user-approved): the same closure for
+//! S_1, S_2, S_3 and tau (lines SCLOSE1/2/3, ECLOSE, each with _START/_RUN/_CYC), from a
+//! copy of each before the C2P. Their item "source" (in place of "update") is Y + F_out,
+//! the RK-weighted geometric source term plus the update's rounding; "crec" and "other"
+//! (tau: the dual-energy resync) are physical changes there, so only regrid and restart
+//! are flagged. Same exact sums, same tolerance (in M*).
 
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "athena.hpp"
 
@@ -119,7 +127,8 @@ enum Item {
 
 class MassClosure {
  public:
-  MassClosure(MeshBlockPack *pp, ParameterInput *pin);
+  // var: the conserved variable (IDN: the mass closure, which owns the others)
+  MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var = IDN);
   bool on = false;
   // before a stage's C2P (u1 is the cycle-start register; read on stage 1)
   void StagePre(int stage);
@@ -140,6 +149,10 @@ class MassClosure {
 
  private:
   MeshBlockPack *pmy_pack;
+  int var_ = IDN;             // the conserved variable
+  std::string tag_, key_;     // its output tag (MCLOSE, ...) and parameter-key prefix
+  DvceArray4D<Real> x0_;      // S_i / tau: the variable before the C2P (IDN: ledger d0)
+  std::vector<std::unique_ptr<MassClosure>> extra_;   // mass_closure_full: S_1..3, tau
   int every = 0;              // <mhd> mass_closure_every: per-cycle MCLOSE_CYC lines
   Real tol = 1.0e-10;         // <mhd> mass_closure_tol (in M*)
   Real mstar = 0.0;           // <mhd> mass_closure_mstar (0: the grid mass at run start)

@@ -6,6 +6,7 @@
 //! \file mass_closure.cpp
 //! \brief see mass_closure.hpp. Compiled with -fp-model=precise (src/CMakeLists.txt).
 
+#include <algorithm>
 #include <cmath>
 #include <initializer_list>
 #include <iomanip>
@@ -461,7 +462,9 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   rr.Add(-sum.s); rr.Add(-sum.c);
   const Real R = rr.Val(), mg = me.Val();
   const Real eps = std::numeric_limits<Real>::epsilon();
-  const Real rnd = 10.0*eps*mg*static_cast<Real>(ncyc > 0 ? ncyc : 1);   // round-off scale
+  // the round-off scale (S_i, tau: their net sum can be ~0 or negative, so at least M*)
+  const Real scl = (var_ == IDN) ? mg : std::max(std::fabs(mg), mstar);
+  const Real rnd = 10.0*eps*scl*static_cast<Real>(ncyc > 0 ? ncyc : 1);
   std::string flags;
   // S_i, tau: crec, the source term (update) and other (tau: the dual-energy resync) are
   // physical changes, not checks

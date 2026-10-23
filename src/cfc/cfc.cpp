@@ -1235,6 +1235,13 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
+  // The vector-potential solvers (X^i, beta) have no seed: their warm start is the MG
+  // finest level's previous solution, which a regrid does not remap (kept as it was when
+  // a rank's MeshBlock count is unchanged, zeroed otherwise), so it held other blocks'
+  // data and depended on memory history (C-102: restarts not bitwise across a regrid).
+  // Cold-start them from zero.
+  pmgd_pietax->ZeroFinestSolution();
+  pmgd_pietabeta->ZeroFinestSolution();
   numrel::ChecksumAfterTask(pmy_pack, "regrid_enter", -1);   // debug (checksum_cycles)
   numrel::ChecksumPerBlock(pmy_pack, "regrid_enter");
 

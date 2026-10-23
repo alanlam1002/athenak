@@ -489,6 +489,9 @@ class MultigridDriver {
   // warm start), MG ghosts included, to/from a(m, ns + v, ...) padded to ngh >= its ngh_
   int NumVars() const { return nvar_; }
   void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
+  // zero the finest level's solution (the next solve's initial guess): the regrid
+  // re-solve's cold start for solvers without a seed (C-102)
+  void ZeroFinestSolution();
   void LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh);
   Real TotalDefectNorm();
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before

@@ -801,6 +801,12 @@ void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmoo
 //! \brief see multigrid.hpp: the whole finest-level u (interior and MG ghosts) at offset
 //! ngh - ngh_ in an array padded to the mesh's ghost width
 
+void MultigridDriver::ZeroFinestSolution() {
+  auto &u = mglevels_->u_[mglevels_->nlevel_ - 1];
+  Kokkos::deep_copy(u.d_view, 0.0);
+  Kokkos::deep_copy(u.h_view, 0.0);
+}
+
 void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
   auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
   const int off = ngh - mglevels_->ngh_;

@@ -1065,7 +1065,8 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
   // c100_rst12). Those reads saw whatever an earlier level or solve left there, so the
   // result depended on history (restarts not bitwise). Zero the whole buffer first, so
   // every read is defined. Moves results at the MG-tolerance level; cost not measurable.
-  // Which reads are affected, and their proper values, is open (C-100).
+  // The reads were the face prolongation's transverse cell past the coarse neighbour's
+  // range (ProlongateFCMG, R-115 Q1), which no longer reads it unless it is filled.
   Kokkos::deep_copy(DevExeSpace(), coarse_buf_, 0.0);
 
   // Volume-average restriction: fill coarse_buf_ interior
@@ -1165,6 +1166,16 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
       int child_x = fc_cx(m);
       int child_y = fc_cy(m);
       int child_z = fc_cz(m);
+      // true if the edge/face neighbour at offset (a,b,c) is coarser: its icoar receive
+      // then fills the coarse_buf_ cell just past the face neighbour's transverse range
+      auto coarser_at = [&](const int a, const int b, const int c) {
+        for (int f = 0; f <= 1; ++f) {
+          const int nn = NeighborIndex(a, b, c, f, 0);
+          if (nn >= 0 && nn < 56 && nghbr_d(m, nn).gid >= 0 &&
+              nghbr_d(m, nn).lev < m_lev) return true;
+        }
+        return false;
+      };
 
       for (int ox3 = -1; ox3 <= 1; ++ox3) {
         for (int ox2 = -1; ox2 <= 1; ++ox2) {
@@ -1252,21 +1263,21 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int si  = (ox1 < 0) ? ngh_l - 1 : ngh_l + half;
                     int sj0 = ngh_l;
                     int sk0 = ngh_l;
-                    // Low-edge valid-read bound depends on which half of the coarse
-                    // neighbor's face this child actually received (compute_recv's icoar
-                    // block, ComputePerLevelIndices): a "high" child (fc_childy_/
-                    // fc_childz_ == 1) receives one extra overlap cell on the LOW side
-                    // that the original fixed (ngh_l) bound never read, degrading the
-                    // gradient at that edge to a wasted one-sided difference. The high
-                    // bound is deliberately left unconditional (always ngh_l+half): an
-                    // earlier attempt that also narrowed it for high children (mirroring
-                    // the low-edge fix) made things WORSE there -- so whatever cbuf holds
-                    // one past the nominal high edge is apparently still useful and must
-                    // not be clamped away. Only the low edge was ever actually wasted.
-                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
-                    int y_hi = ngh_l + half;
-                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
-                    int z_hi = ngh_l + half;
+                    // Transverse valid-read range (R-115 Q1). The coarse face neighbour
+                    // sends (compute_recv's icoar, ComputePerLevelIndices) this child's
+                    // half of its face plus one overlap cell on the side interior to the
+                    // coarse block: a "low" child (fc_child == 0) gets [ngh, ngh+half],
+                    // a "high" one [ngh-1, ngh+half-1]. The cell past the other end lies
+                    // in the edge neighbour's block, and is filled (by its icoar receive)
+                    // only if that neighbour is coarser; otherwise nothing writes it
+                    // (C-100: a high child's ngh+half read was stale, now the zero-fill).
+                    // There the slope is one-sided, at its full value (below).
+                    int y_lo = (child_y || coarser_at(ox1, -1, 0)) ? ngh_l - 1 : ngh_l;
+                    int y_hi = (!child_y || coarser_at(ox1, 1, 0)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
+                    int z_lo = (child_z || coarser_at(ox1, 0, -1)) ? ngh_l - 1 : ngh_l;
+                    int z_hi = (!child_z || coarser_at(ox1, 0, 1)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sk = sk0; sk < sk0 + half; ++sk) {
                         for (int sj = sj0; sj < sj0 + half; ++sj) {
@@ -1277,8 +1288,10 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                           int sjp = (sj < y_hi) ? sj+1 : sj;
                           int skm = (sk > z_lo) ? sk-1 : sk;
                           int skp = (sk < z_hi) ? sk+1 : sk;
-                          Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
-                          Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
+                          Real gy = ((sjp-sjm == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
+                          Real gz = ((skp-skm == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
                           u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
                           u(m,v,fk  ,fj+1,fig)=ot*(2.0*(cc+gy-gz)+u(m,v,fk  ,fj+1,fi));
                           u(m,v,fk+1,fj  ,fig)=ot*(2.0*(cc-gy+gz)+u(m,v,fk+1,fj  ,fi));
@@ -1292,13 +1305,13 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int sj  = (ox2 < 0) ? ngh_l - 1 : ngh_l + half;
                     int si0 = ngh_l;
                     int sk0 = ngh_l;
-                    // See the ox1!=0 branch above for why the low bound depends on child
-                    // parity (fc_childx_/fc_childz_ here, since x,z are transverse to y)
-                    // while the high bound stays unconditional.
-                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
-                    int x_hi = ngh_l + half;
-                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
-                    int z_hi = ngh_l + half;
+                    // the transverse valid-read range: see the ox1 != 0 branch
+                    int x_lo = (child_x || coarser_at(-1, ox2, 0)) ? ngh_l - 1 : ngh_l;
+                    int x_hi = (!child_x || coarser_at(1, ox2, 0)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
+                    int z_lo = (child_z || coarser_at(0, ox2, -1)) ? ngh_l - 1 : ngh_l;
+                    int z_hi = (!child_z || coarser_at(0, ox2, 1)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sk = sk0; sk < sk0 + half; ++sk) {
                         for (int si = si0; si < si0 + half; ++si) {
@@ -1309,8 +1322,10 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                           int sip = (si < x_hi) ? si+1 : si;
                           int skm = (sk > z_lo) ? sk-1 : sk;
                           int skp = (sk < z_hi) ? sk+1 : sk;
-                          Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
-                          Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
+                          Real gx = ((sip-sim == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
+                          Real gz = ((skp-skm == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
                           u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
                           u(m,v,fk  ,fjg,fi+1)=ot*(2.0*(cc+gx-gz)+u(m,v,fk  ,fj,fi+1));
                           u(m,v,fk+1,fjg,fi  )=ot*(2.0*(cc-gx+gz)+u(m,v,fk+1,fj,fi  ));
@@ -1324,13 +1339,13 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                     int sk  = (ox3 < 0) ? ngh_l - 1 : ngh_l + half;
                     int si0 = ngh_l;
                     int sj0 = ngh_l;
-                    // See the ox1!=0 branch above for why the low bound depends on child
-                    // parity (fc_childx_/fc_childy_ here, since x,y are transverse to z)
-                    // while the high bound stays unconditional.
-                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
-                    int x_hi = ngh_l + half;
-                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
-                    int y_hi = ngh_l + half;
+                    // the transverse valid-read range: see the ox1 != 0 branch
+                    int x_lo = (child_x || coarser_at(-1, 0, ox3)) ? ngh_l - 1 : ngh_l;
+                    int x_hi = (!child_x || coarser_at(1, 0, ox3)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
+                    int y_lo = (child_y || coarser_at(0, -1, ox3)) ? ngh_l - 1 : ngh_l;
+                    int y_hi = (!child_y || coarser_at(0, 1, ox3)) ? ngh_l + half
+                                                                   : ngh_l + half - 1;
                     for (int v = 0; v < nvar_l; ++v) {
                       for (int sj = sj0; sj < sj0 + half; ++sj) {
                         for (int si = si0; si < si0 + half; ++si) {
@@ -1341,8 +1356,10 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
                           int sip = (si < x_hi) ? si+1 : si;
                           int sjm = (sj > y_lo) ? sj-1 : sj;
                           int sjp = (sj < y_hi) ? sj+1 : sj;
-                          Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
-                          Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
+                          Real gx = ((sip-sim == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
+                          Real gy = ((sjp-sjm == 2) ? 0.125 : 0.25)*
+                                   (cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
                           u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));
                           u(m,v,fkg,fj  ,fi+1)=ot*(2.0*(cc+gx-gy)+u(m,v,fk,fj  ,fi+1));
                           u(m,v,fkg,fj+1,fi  )=ot*(2.0*(cc-gx+gy)+u(m,v,fk,fj+1,fi  ));

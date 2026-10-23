@@ -1236,6 +1236,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
   numrel::ChecksumAfterTask(pmy_pack, "regrid_enter", -1);   // debug (checksum_cycles)
+  numrel::ChecksumPerBlock(pmy_pack, "regrid_enter");
 
   // Snapshot the true initial guess (psi4^0.25-1, the same formula
   // SolveConformalFactor's own one-time psi_seeded_ block uses) directly from

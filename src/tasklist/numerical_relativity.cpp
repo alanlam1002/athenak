@@ -34,6 +34,41 @@ NumericalRelativity::NumericalRelativity(MeshBlockPack *ppack, ParameterInput *p
 }
 
 //! <job> checksum_cycles (utils/chksum.hpp): this rank's checksums after a completed task
+// debug (C-102): per-MeshBlock checksums (by gid; interior and ghosts separately) of
+// u0, w0, adm, temperature under a label
+void ChecksumPerBlock(MeshBlockPack *pp, const std::string &label) {
+  const int cycle = pp->pmesh->ncycle;
+  if (!chksum::Active(cycle) || chksum::fp == nullptr) return;
+  auto &indcs = pp->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  auto one = [&](const char *name, const DvceArray5D<Real> &a) {
+    if (a.span() == 0) return;
+    const int nv = a.extent_int(1), n3 = a.extent_int(2), n2 = a.extent_int(3);
+    const int n1 = a.extent_int(4);
+    for (int m = 0; m < pp->nmb_thispack; ++m) {
+      uint64_t si = 0, sg = 0;
+      Kokkos::parallel_reduce("chk_blk", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                              nv*n3*n2*n1),
+      KOKKOS_LAMBDA(const int idx, uint64_t &ai, uint64_t &ag) {
+        const int v = idx/(n3*n2*n1);
+        const int k = (idx/(n2*n1))%n3, j = (idx/n1)%n2, i = idx%n1;
+        const uint64_t b = Kokkos::bit_cast<uint64_t>(a(m, v, k, j, i));
+        if (k >= ks && k <= ke && j >= js && j <= je && i >= is && i <= ie) ai += b;
+        else ag += b;
+      }, Kokkos::Sum<uint64_t>(si), Kokkos::Sum<uint64_t>(sg));
+      std::fprintf(chksum::fp, "%d -1 %s %d blk_%s gid=%d lev=%d int=%016llx gh=%016llx\n",
+                   cycle, label.c_str(), 0, name, pp->pmb->mb_gid.h_view(m),
+                   pp->pmb->mb_lev.h_view(m), (unsigned long long)si,
+                   (unsigned long long)sg);
+    }
+  };
+  if (pp->pmhd != nullptr) { one("u0", pp->pmhd->u0); one("w0", pp->pmhd->w0); }
+  if (pp->padm != nullptr) one("adm", pp->padm->u_adm);
+  if (pp->pdyngr != nullptr) one("temp", pp->pdyngr->temperature);
+  std::fflush(chksum::fp);
+}
+
 void ChecksumAfterTask(MeshBlockPack *pp, const std::string &task, int stage) {
   const int cycle = pp->pmesh->ncycle;
   if (!chksum::Active(cycle)) return;

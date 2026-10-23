@@ -151,6 +151,7 @@ MeshRefinement::~MeshRefinement() {
 
 void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
   numrel::ChecksumAfterTask(pmy_mesh->pmb_pack, "amr_enter", -1);   // debug
+  numrel::ChecksumPerBlock(pmy_mesh->pmb_pack, "amr_enter");
   // first check refinement criteria
   CheckForRefinement(pmy_mesh->pmb_pack);
 

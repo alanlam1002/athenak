@@ -489,6 +489,9 @@ class MultigridDriver {
   // warm start), MG ghosts included, to/from a(m, ns + v, ...) padded to ngh >= its ngh_
   int NumVars() const { return nvar_; }
   void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
+  // zero the finest level's solution (the next solve's initial guess): the regrid
+  // re-solve's cold start for solvers without a seed (C-102)
+  void ZeroFinestSolution();
   void LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh);
   Real TotalDefectNorm();
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
@@ -581,6 +584,12 @@ class MultigridDriver {
   void SolveVCycle(Driver *pdriver,int npresmooth, int npostsmooth);
   void SolveFMG(Driver *pdriver);
   void SolveMG(Driver *pdriver);
+  // <job> mg_zero_hierarchy (debug, C-102 restart-at-regrid): zero every MG array but the
+  // finest level's u (initial guess) and src at the start of each solve
+ public:
+  static inline bool zero_hierarchy_ = false;
+ protected:
+  void ZeroHierarchy();
   void SolveFMGCoarser();
   void SolveIterative(Driver *pdriver);
   void SolveIterativeFixedTimes(Driver *pdriver);

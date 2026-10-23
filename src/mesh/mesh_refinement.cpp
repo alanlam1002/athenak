@@ -23,6 +23,7 @@
 #include "parameter_input.hpp"
 #include "mesh.hpp"
 #include "mesh_refinement.hpp"
+#include "tasklist/numerical_relativity.hpp"
 #include "refinement_criteria.hpp"
 
 #include "hydro/hydro.hpp"
@@ -149,6 +150,8 @@ MeshRefinement::~MeshRefinement() {
 //! \brief Simple driver function for adaptive mesh refinement
 
 void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin) {
+  numrel::ChecksumAfterTask(pmy_mesh->pmb_pack, "amr_enter", -1);   // debug
+  numrel::ChecksumPerBlock(pmy_mesh->pmb_pack, "amr_enter");
   // first check refinement criteria
   CheckForRefinement(pmy_mesh->pmb_pack);
 
@@ -591,6 +594,17 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   } else if (padm_needs_transfer) {
     CopyCC(padm->u_adm);
   }
+  // The C2P's own state -- w0 (its initial guess, and the shock sensor's input) and the
+  // temperature -- is not part of the transfer. Without this, a MeshBlock's slot kept
+  // whatever block occupied it before (or, beyond the previous count, older history),
+  // so the regrid C2P depended on memory history and a restart was not bitwise across
+  // a regrid (C-102). Move it with u0 for MeshBlocks that stay on this rank; MeshBlocks
+  // that are new or arrive from another rank are zeroed after Step 9.
+  dyngr::DynGRMHD *pdyngr = pm->pmb_pack->pdyngr;
+  if (pmhd != nullptr && pdyngr != nullptr) {
+    CopyCC(pmhd->w0);
+    CopyCC(pdyngr->temperature);
+  }
   // Step 7.
   // Copy evolved physics variables for MBs flagged for refinement from source fine array
   // to target coarse array, when both are on same rank.
@@ -649,6 +663,31 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (padm_needs_transfer) {
       RefineCC(new_to_old, padm->u_adm, padm->coarse_u_adm, true);
     }
+  }
+
+  // The C2P state of new MeshBlocks (refined or derefined) and of those received from
+  // another rank (the transfer carries u0's nmhd+nscalars variables only, not its
+  // non-evolved flag slot): zeroed, the init path's starting point, so the regrid C2P
+  // is defined whatever the memory held (C-102)
+  if (pmhd != nullptr && pdyngr != nullptr) {
+    const int me = global_variable::my_rank;
+    const int ngs = new_gids_eachrank[me];
+    const int fs = pmhd->nmhd + pmhd->nscalars;
+    const int nf = pmhd->u0.extent_int(1) - fs;
+    for (int m = 0; m < new_nmb_eachrank[me]; ++m) {
+      const int oldm = newtoold[ngs + m];
+      if (refine_flag.h_view(oldm) == 0 && pm->rank_eachmb[oldm] == me) continue;
+      Kokkos::deep_copy(DevExeSpace(), Kokkos::subview(pmhd->w0, m, Kokkos::ALL,
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), 0.0);
+      Kokkos::deep_copy(DevExeSpace(), Kokkos::subview(pdyngr->temperature, m,
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), 0.0);
+      if (nf > 0) {
+        Kokkos::deep_copy(DevExeSpace(), Kokkos::subview(pmhd->u0, m,
+                          std::make_pair(fs, fs + nf), Kokkos::ALL, Kokkos::ALL,
+                          Kokkos::ALL), 0.0);
+      }
+    }
+    Kokkos::fence();
   }
 
   // Step 10.

@@ -1235,6 +1235,15 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   psi_seeded_ = false;
   alpha_psi_seeded_ = false;
+  // The vector-potential solvers (X^i, beta) have no seed: their warm start is the MG
+  // finest level's previous solution, which a regrid does not remap (kept as it was when
+  // a rank's MeshBlock count is unchanged, zeroed otherwise), so it held other blocks'
+  // data and depended on memory history (C-102: restarts not bitwise across a regrid).
+  // Cold-start them from zero.
+  pmgd_pietax->ZeroFinestSolution();
+  pmgd_pietabeta->ZeroFinestSolution();
+  numrel::ChecksumAfterTask(pmy_pack, "regrid_enter", -1);   // debug (checksum_cycles)
+  numrel::ChecksumPerBlock(pmy_pack, "regrid_enter");
 
   // Snapshot the true initial guess (psi4^0.25-1, the same formula
   // SolveConformalFactor's own one-time psi_seeded_ block uses) directly from
@@ -1253,13 +1262,16 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   });
 
   RunXPsiSolvePass(pdriver);
+  numrel::ChecksumAfterTask(pmy_pack, "regrid_xpsi", -1);
   // Interior-only: RescaleMatterSources (inside RunLapseShiftAssemblePass
   // below) only reads w0 at these same interior indices, so ghost cells don't
   // need primitives yet -- and the metric they'd be read against isn't final
   // until that pass's own padm->u_adm ghost exchange completes anyway (see
   // the ghost-only pass below).
   pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
+  numrel::ChecksumAfterTask(pmy_pack, "regrid_c2p", -1);
   RunLapseShiftAssemblePass(pdriver);
+  numrel::ChecksumAfterTask(pmy_pack, "regrid_lapse", -1);
 
   // dual_energy_flag_exchange (R-076 item 1): the owners decide the flags on the new
   // interiors (from the interior C2P just done) and the MHD ghost exchange carries them

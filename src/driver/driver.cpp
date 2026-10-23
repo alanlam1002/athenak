@@ -520,42 +520,52 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
             static_cast<float>(pmesh->nmb_total);
       }
 
-      // Test for/make outputs
-      for (auto &out : pout->pout_list) {
-        // compare at floating point (32-bit) precision to reduce effect of round off
-        float time_32 = static_cast<float>(pmesh->time);
-        float next_32 = static_cast<float>(out->out_params.last_time+out->out_params.dt);
-        float tlim_32 = static_cast<float>(tlim);
-        int &dcycle_ = out->out_params.dcycle;
+      // Test for/make outputs. Restarts are written after the AMR step and the new
+      // timestep below (rst_pass), so a restart holds exactly the state the next cycle
+      // starts from: written before them, a regrid at that cycle was lost on restart
+      // (C-102: the restarted run kept the pre-regrid mesh and dt)
+      auto make_outputs = [&](const bool rst_pass) {
+        for (auto &out : pout->pout_list) {
+          if ((out->out_params.file_type == "rst") != rst_pass) continue;
+          // compare at floating point (32-bit) precision to reduce effect of round off
+          float time_32 = static_cast<float>(pmesh->time);
+          float next_32 = static_cast<float>(out->out_params.last_time +
+                                             out->out_params.dt);
+          float tlim_32 = static_cast<float>(tlim);
+          int &dcycle_ = out->out_params.dcycle;
 
-        if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
-            ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
-          if (io_timers_) {
-            // per-output fenced timers (R-066 item 2): one IO_TIMER line per write
-            Kokkos::fence();
-            Kokkos::Timer tt;
-            out->LoadOutputData(pmesh);
-            Kokkos::fence();
-            const double tl = tt.seconds();
-            out->WriteOutputFile(pmesh, pin);
-            Kokkos::fence();
-            const double tw = tt.seconds() - tl;
-            pt_[5] += tl + tw;
-            if (global_variable::my_rank == 0) {
-              std::cout << std::setprecision(6) << "IO_TIMER cycle=" << pmesh->ncycle
-                        << " time=" << pmesh->time << " block=" << out->out_params.block_name
-                        << " type=" << out->out_params.file_type << " id="
-                        << out->out_params.file_id << " load=" << tl << " write=" << tw
-                        << std::endl;
-            }
-          } else {
-            timed(5, [&]() {
+          if (((out->out_params.dt > 0.0) &&
+               ((time_32 >= next_32) && (time_32 < tlim_32))) ||
+              ((dcycle_ > 0) && ((pmesh->ncycle)%(dcycle_) == 0)) ) {
+            if (io_timers_) {
+              // per-output fenced timers (R-066 item 2): one IO_TIMER line per write
+              Kokkos::fence();
+              Kokkos::Timer tt;
               out->LoadOutputData(pmesh);
+              Kokkos::fence();
+              const double tl = tt.seconds();
               out->WriteOutputFile(pmesh, pin);
-            });
+              Kokkos::fence();
+              const double tw = tt.seconds() - tl;
+              pt_[5] += tl + tw;
+              if (global_variable::my_rank == 0) {
+                std::cout << std::setprecision(6) << "IO_TIMER cycle=" << pmesh->ncycle
+                          << " time=" << pmesh->time << " block="
+                          << out->out_params.block_name
+                          << " type=" << out->out_params.file_type << " id="
+                          << out->out_params.file_id << " load=" << tl << " write=" << tw
+                          << std::endl;
+              }
+            } else {
+              timed(5, [&]() {
+                out->LoadOutputData(pmesh);
+                out->WriteOutputFile(pmesh, pin);
+              });
+            }
           }
         }
-      }
+      };
+      make_outputs(false);
 
       // AMR.  Guard nlim across the regrid for the same reason the per-cycle task
       // lists above are guarded: a regrid re-solves the metric (CFC::Reinitialize-
@@ -575,6 +585,7 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
       }
       // compute new timestep AFTER all Meshblocks refined/derefined
       timed(7, [&]() { pmesh->NewTimeStep(tlim); });
+      make_outputs(true);
       if (pt_on_ && pt_every_ > 0 && pmesh->ncycle % pt_every_ == 0) {
         PrintPhaseTimers(pmesh, "PHASE_TIMERS");
       }

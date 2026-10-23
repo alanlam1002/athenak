@@ -224,6 +224,7 @@ class PrimitiveSolverHydro {
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
   Real de_ndense = 0.0, de_nent = 0.0, de_dE = 0.0, de_dE_total = 0.0;
+  std::string de_block;            // de_dE_total is carried across restarts (R-115)
   // <coord> excision_radius_dynamic (R-112 item 3): rest mass the C2P's excision reset removed
   // from interior cells excised only by r < r_f (alpha >= excise_lapse), this rank, since the
   // last DynGRMHD::UpdateExcisionRadius drain (the "absorbed at r_f" tally)
@@ -428,6 +429,9 @@ class PrimitiveSolverHydro {
   //! restart_state (C-100): the tier-3 state into the restart's parameter copy (SetReal
   //! writes max_digits10), so the restart's first cycle uses it as the run would have
   std::string t3_block = "mhd";
+  void SaveDualEnergyTotal(ParameterInput *pin) {   // the user.hst column de-dE-total
+    if (de_on) pin->SetReal(de_block, "dual_energy_dE_total_state", de_dE_total);
+  }
   void SaveTier3State(ParameterInput *pin) {
     if (!t3_on) return;
     pin->SetBoolean(t3_block, "tier3_state_active", t3_active);
@@ -1451,6 +1455,10 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
       de_idx = nsc - 1;
+      de_block = block;
+      if (pin->DoesParameterExist(block, "dual_energy_dE_total_state")) {
+        de_dE_total = pin->GetReal(block, "dual_energy_dE_total_state");
+      }
       de_gamma = pin->GetOrAddReal(block, "gamma", 5.0/3.0);
       de_kmax = pin->GetReal(block, "dual_energy_kmax");
       de_rho_sw = pin->GetReal(block, "dual_energy_rho_switch");

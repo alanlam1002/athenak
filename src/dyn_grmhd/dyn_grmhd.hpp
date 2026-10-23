@@ -228,7 +228,10 @@ class DynGRMHDPS : public DynGRMHD {
   int RestartStateVars() override;
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
-  void SaveRestartScalars(ParameterInput *pin) override { eos.SaveTier3State(pin); }
+  void SaveRestartScalars(ParameterInput *pin) override {
+    eos.SaveTier3State(pin);
+    eos.SaveDualEnergyTotal(pin);
+  }
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;
     out[0] = eos.de_ndense; out[1] = eos.de_nent; out[2] = eos.de_dE;

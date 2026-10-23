@@ -100,6 +100,9 @@ bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag) {
   auto &indcs = pm->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nc1 = indcs.nx1 + 2*indcs.ng;
+  const int nc2 = (nx2 > 1) ? indcs.nx2 + 2*indcs.ng : 1;
+  const int nc3 = (nx3 > 1) ? indcs.nx3 + 2*indcs.ng : 1;
   DualArray2D<int64_t> off("seed_off", nmb, 4);
   for (int m = 0; m < nmb; ++m) {
     const LogicalLocation &ll = pm->lloc_eachmb[pmbp->gids + m];
@@ -113,8 +116,11 @@ bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag) {
   auto doff = off.d_view;
   auto u0 = pmbp->pmhd->u0;
   const uint64_t s0 = Mix(static_cast<uint64_t>(sid));
-  par_for("restart_seed", DevExeSpace(), 0, nmb-1, ks, ks+nx3-1, js, js+nx2-1,
-          is, is+nx1-1,
+  // every cell, ghosts included: a same-level ghost has its owner's global index and
+  // value, so it gets the owner's factor bitwise (a ghost exchange here instead would
+  // re-derive the restored ghosts, which c102_b5 showed is not bitwise: 1e-10 with
+  // eps = 1e-300)
+  par_for("restart_seed", DevExeSpace(), 0, nmb-1, 0, nc3-1, 0, nc2-1, 0, nc1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     if (!(u0(m, IDN, k, j, i) > rsw)) return;
     uint64_t h = Mix(s0 ^ static_cast<uint64_t>(doff(m, 3)));

@@ -40,14 +40,17 @@ void Stage(const DvceArray5D<Real> &src, int nvar);
 bool ApplyStaged(MeshBlockPack *pmbp);
 // <job> seed_tau_eps (default 0 = off), seed_id (R-115 Q3, user-approved): once, at a
 // restart, perturb the dense cells (u0's densitized D > <mhd> dual_energy_rho_switch;
-// the selection only needs to be decomposition-independent) by the factor
-// (1 + eps xi) in tau and, with <mhd> dual_energy, in the entropy tracer D Y (dense
-// unshocked gas takes P from K and resyncs tau, primitive_solver_hyd.hpp:146-147, so a
-// tau-only seed would be erased there). xi = +-1 from a hash of the seed id and the
-// cell's global (level, i, j, k) index: the same perturbation on any decomposition. D
-// and S_i are untouched (mass and momentum exact). Interior cells only; the caller then
-// exchanges the MHD ghosts. Sets <job> seed_applied = true (carried by later restarts,
-// so a chain seeds once). Returns true if applied.
+// the selection only needs to be decomposition-independent) by the factor (1 + eps xi)
+// in tau and, with <mhd> dual_energy, in the entropy tracer D Y (dense unshocked gas
+// takes P from K and resyncs tau, primitive_solver_hyd.hpp:146-147, so a tau-only seed
+// would be erased there). xi = +-1 from a hash of the seed id and the cell's global
+// (level, i, j, k) index at its block's level: the same perturbation on any
+// decomposition. D and S_i are untouched (mass and momentum exact). All cells, ghosts
+// included: a same-level ghost gets its owner's factor bitwise; a coarse/fine ghost
+// (prolonged or restricted, no owner cell) gets its own O(eps) factor. No ghost exchange
+// (it would re-derive the restored ghosts, which is not bitwise). Sets <job>
+// seed_applied = true (carried by later restarts, so a chain seeds once). Returns true
+// if applied.
 bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag);
 }  // namespace restart_state
 

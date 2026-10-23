@@ -159,6 +159,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   dt_skip_excised = pin->GetOrAddBoolean("time", "dt_skip_excised", false);
   dt_floor_keep_velocity = pin->GetOrAddBoolean("time", "dt_floor_keep_velocity", false);
   dt_lim_report = pin->GetOrAddInteger("time", "dt_limiter_report", 0);
+  dt_lim_every = pin->GetOrAddInteger("time", "dt_limiter_report_every", 0);
 
   // <coord> excision_radius_dynamic (R-112 item 3): only with the lapse excision scheme
   exc_dyn = pin->GetOrAddBoolean("coord", "excision_radius_dynamic", false);

@@ -91,10 +91,12 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   const bool skip_exc_ = dt_skip_excised && pmy_pack->pcoord->coord_data.bh_excise;
   const bool keepv_ = dt_floor_keep_velocity;
   // <time> dt_limiter_report = N (debug, R-076 item 3): for the first N cycles, store each
-  // cell's dt and print the cells within 1e-4 of this rank's minimum (DTLIM lines)
+  // cell's dt and print the cells within 1e-4 of this rank's minimum (DTLIM lines);
+  // <time> dt_limiter_report_every = M (R-115 Q3c): also every M-th cycle
   const int ncyc_ = pmy_pack->pmesh->ncycle;
   if (dt_lim_report > 0 && dt_lim_cyc0 < 0) dt_lim_cyc0 = ncyc_;
-  const bool rep_ = dt_lim_report > 0 && ncyc_ < dt_lim_cyc0 + dt_lim_report;
+  const bool rep_ = (dt_lim_report > 0 && ncyc_ < dt_lim_cyc0 + dt_lim_report) ||
+                    (dt_lim_every > 0 && ncyc_ % dt_lim_every == 0);
   if (rep_ && dt_lim_cell.extent_int(0) != pmy_pack->nmb_thispack) {
     Kokkos::realloc(dt_lim_cell, pmy_pack->nmb_thispack, nx3, nx2, nx1);
   }

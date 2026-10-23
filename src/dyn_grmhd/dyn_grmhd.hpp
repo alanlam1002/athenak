@@ -176,6 +176,7 @@ class DynGRMHD {
   bool dt_skip_excised;
   bool dt_floor_keep_velocity = false;   // <time> dt_floor_keep_velocity (R-076 item 3)
   int dt_lim_report = 0, dt_lim_cyc0 = -1;   // <time> dt_limiter_report (debug)
+  int dt_lim_every = 0;                      // <time> dt_limiter_report_every (R-115)
   DvceArray4D<Real> dt_lim_cell;
 };
 

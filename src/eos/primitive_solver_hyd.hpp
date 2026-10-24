@@ -184,6 +184,10 @@ class PrimitiveSolverHydro {
   //     neighbour is demoted to a weak candidate (a resolved shock is >= 2-3 cells wide).
   //   de_persist = N > 1: a cell takes the energy branch only once its final flag has
   //     been set in N consecutive C2P calls (de_streak counts them; reset on realloc).
+  //   de_hold = N > 0 (R-124 (ii), a test option; default 0): the opposite delay -- a cell
+  //     keeps its final flag for N more C2P calls after it drops (de_held counts down;
+  //     reset on realloc; applied after de_persist). Not restart-safe: a restart with
+  //     de_hold > 0 is refused (SaveRestartState).
   bool de_isolated = false;
   // <mhd> dual_energy_shock_counters = N (R-112 item 1, diagnostic; default 0 = off): per RK
   // stage, the interior cells by the two conditions of the shock flag the stage's C2P uses,
@@ -216,6 +220,8 @@ class PrimitiveSolverHydro {
   DvceArray4D<int> de_probe0;
   int de_persist = 1;
   DvceArray4D<int> de_streak;
+  int de_hold = 0;
+  DvceArray4D<int> de_held;
   // second-law guard (item 73, default on): a dense flagged cell whose energy solution has
   // K < K_tracer takes the entropy solution instead -- a shock can only raise K, so a drop
   // there is the energy equation's numerical loss (V4F's tidal caps, RESULTS §11.5)
@@ -1532,6 +1538,7 @@ class PrimitiveSolverHydro {
       de_pcyc = pin->GetOrAddInteger(block, "dual_energy_probe_cycles", 0);
       de_xchg = pin->GetOrAddBoolean(block, "dual_energy_flag_exchange", true);  // R-078
       de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
+      de_hold = pin->GetOrAddInteger(block, "dual_energy_shock_hold", 0);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
@@ -1912,6 +1919,13 @@ class PrimitiveSolverHydro {
         Kokkos::realloc(de_streak, de_shock.extent_int(0), e3, e2, e1);
       }
       auto &stk = de_streak;
+      const int nhold = de_hold;
+      if (nhold > 0 && (de_held.extent_int(0) != de_shock.extent_int(0) ||
+                        de_held.extent_int(1) != e3 || de_held.extent_int(2) != e2 ||
+                        de_held.extent_int(3) != e1)) {
+        Kokkos::realloc(de_held, de_shock.extent_int(0), e3, e2, e1);
+      }
+      auto &hld = de_held;
       par_for("de_shock_final", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         int f = (shk(m, k, j, i) == 2) ? 1 : 0;
@@ -1919,6 +1933,11 @@ class PrimitiveSolverHydro {
           int n = f ? stk(m, k, j, i) + 1 : 0;
           stk(m, k, j, i) = (n < npers) ? n : npers;
           f = (n >= npers) ? 1 : 0;
+        }
+        if (nhold > 0) {
+          int h = f ? nhold : hld(m, k, j, i) - 1;
+          hld(m, k, j, i) = (h > 0) ? h : 0;
+          f = (f || h >= 0) ? 1 : 0;
         }
         shk(m, k, j, i) = f;
       });

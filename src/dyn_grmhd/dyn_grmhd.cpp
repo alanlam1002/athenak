@@ -483,6 +483,12 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst,
                                                           int ns) {
+  if (eos.de_hold > 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> dual_energy_shock_hold > 0 is a test option and not restart-safe"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   auto *pmhd = pmy_pack->pmhd;
   const int nmb = pmy_pack->nmb_thispack;
   const int nw = pmhd->w0.extent_int(1), nu = pmhd->nmhd + pmhd->nscalars;

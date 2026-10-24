@@ -12,6 +12,7 @@
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -347,6 +348,20 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
                                                   "bound_centroid"));
     fc_switch_frac_ = pin->GetOrAddReal("cfc", "frame_switch_mass_frac", 0.0);
     fc_ramp_T_ = pin->GetOrAddReal("cfc", "frame_ramp_time", 50.0);
+    {   // R-112 item 4 (cfc.hpp): the ramp shape and the exit triggers, default off
+      const std::string sh = pin->GetOrAddString("cfc", "frame_ramp_shape", "linear");
+      if (sh != "linear" && sh != "smoothstep") {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<cfc> frame_ramp_shape: unknown '" << sh
+                  << "' (linear, smoothstep)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      fc_ramp_shape_ = (sh == "smoothstep") ? 1 : 0;
+      fc_app_r_ = pin->GetOrAddReal("cfc", "frame_switch_approach_radius", 0.0);
+      fc_acc_rate_ = pin->GetOrAddReal("cfc", "frame_switch_accretion_rate", 0.0);
+      fc_acc_r_ = pin->GetOrAddReal("cfc", "frame_switch_accretion_radius", 6.0);
+      fc_acc_w_ = pin->GetOrAddReal("cfc", "frame_switch_accretion_shell", 2.0);
+    }
     fc_bound_rho_ = pin->GetOrAddReal("cfc", "frame_bound_rho", 1.0e-4*fc_rho_thr_);
     // R-054 (R-053 §4): bound_centroid must ignore the near-BH atmosphere zone, so both
     // gates must cover it: frame_bound_rho >= the zone's rho_thr (the default 1e-4 x
@@ -2888,8 +2903,20 @@ void CFC::FrameControlStep(Real t_new) {
       FrameSwitch(t_new, fc_switch_mode_, "tracked mass below frame_switch_mass_frac");
     }
   }
-  if (fc_mode_ == 2) {                 // ramp: xidot -> 0 linearly from the switch value
-    const Real f = fmax(0.0, 1.0 - (t_new - fc_tsw_)/fc_ramp_T_);
+  // R-112 item 4: the exit triggers (off unless set; no reduction at all then)
+  if (fc_mode_ != 2 && (fc_app_r_ > 0.0 || fc_acc_rate_ > 0.0)) {
+    MeasureExit(fc_exit_);
+    if (fc_app_r_ > 0.0 && fc_exit_[0] <= fc_app_r_) {
+      FrameSwitch(t_new, 2, "debris approach: d_min - v_in T_ramp <= "
+                            "frame_switch_approach_radius");
+    } else if (fc_acc_rate_ > 0.0 && fc_m0_ > 0.0 && fc_exit_[1] > fc_acc_rate_*fc_m0_) {
+      FrameSwitch(t_new, 2, "accretion onset: inflow through "
+                            "frame_switch_accretion_radius");
+    }
+  }
+  if (fc_mode_ == 2) {                 // ramp: xidot -> 0 from the switch value
+    const Real s = fmin(1.0, fmax(0.0, (t_new - fc_tsw_)/fc_ramp_T_));
+    const Real f = (fc_ramp_shape_ == 1) ? 1.0 - s*s*(3.0 - 2.0*s) : 1.0 - s;
     for (int a = 0; a < 3; ++a) { fc_xd_[a] = f*fc_xdsw_[a]; fc_meas_[a] = 0.0; }
     fc_meas_[3] = 0.0; fc_meas_[4] = 0.0;
     ApplyFrameShiftUpdate(t_new);
@@ -3188,6 +3215,79 @@ void CFC::MeasureBound(Real out[7]) {
   MPI_Allreduce(MPI_IN_PLACE, out, 7, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
   MPI_Bcast(out, 7, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
 #endif
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureExit(Real out[2])
+//! \brief R-112 item 4's trigger inputs (cfc.hpp): out[0] = min over the bound gas
+//! (the MeasureBound gates) of r - max(v_in, 0) frame_ramp_time; out[1] = the net inflow
+//! of gas with rho > frame_bound_rho through the shell R_acc <= r < R_acc + w,
+//! sum(D dV v_in)/w. v_in = -(V - V_BH).(x - x_BH)/r, the grid velocity
+//! V = alpha u/W - beta' relative to the hole's, V_BH = -xidot (x_BH = x_BH0 - xi).
+
+void CFC::MeasureExit(Real out[2]) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &u0 = pmy_pack->pmhd->u0;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &adm = pmy_pack->padm->adm;
+  Real xb[3];
+  BHPosition(fc_t_, xb);
+  const Real bx = xb[0], by = xb[1], bz = xb[2];
+  const Real rho_thr = fc_bound_rho_, r2min = fc_bound_rmin_*fc_bound_rmin_;
+  const Real x0 = fc_xd_[0], x1 = fc_xd_[1], x2 = fc_xd_[2];
+  const Real tr = fc_ramp_T_, ra = fc_acc_r_, rw = fc_acc_w_;
+  Real dmin = std::numeric_limits<Real>::max(), flux = 0.0;
+  Kokkos::parallel_reduce("cfc_frame_exit", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &dm_min, Real &fl) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > rho_thr)) return;
+    auto &sz = size.d_view(m);
+    const Real x = CellCenterX(i - is, nx1, sz.x1min, sz.x1max) - bx;
+    const Real y = CellCenterX(j - js, nx2, sz.x2min, sz.x2max) - by;
+    const Real z = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max) - bz;
+    const Real r2 = x*x + y*y + z*z;
+    const Real r = sqrt(r2);
+    const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i);
+    const Real uz = w0(m, IVZ, k, j, i);
+    const Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+    const Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+    const Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+    const Real lx = gxx*ux + gxy*uy + gxz*uz;
+    const Real ly = gxy*ux + gyy*uy + gyz*uz;
+    const Real lz = gxz*ux + gyz*uy + gzz*uz;
+    const Real W = sqrt(1.0 + ux*lx + uy*ly + uz*lz);
+    const Real al = adm.alpha(m,k,j,i);
+    const Real bpx = adm.beta_u(m,0,k,j,i), bpy = adm.beta_u(m,1,k,j,i);
+    const Real bpz = adm.beta_u(m,2,k,j,i);
+    const Real aw = al/W;
+    const Real vx = aw*ux - bpx + x0, vy = aw*uy - bpy + x1, vz = aw*uz - bpz + x2;
+    const Real vin = (r > 0.0) ? -(vx*x + vy*y + vz*z)/r : 0.0;
+    if (r >= ra && r < ra + rw) {
+      fl += u0(m, IDN, k, j, i)*sz.dx1*sz.dx2*sz.dx3*vin/rw;
+    }
+    if (r2 < r2min) return;
+    const Real mut = al*W - ((bpx - x0)*lx + (bpy - x1)*ly + (bpz - x2)*lz);
+    if (!(mut - 1.0 < 0.0)) return;
+    dm_min = fmin(dm_min, r - fmax(vin, 0.0)*tr);
+  }, Kokkos::Min<Real>(dmin), Kokkos::Sum<Real>(flux));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &dmin, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &flux, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(&dmin, 1, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+  MPI_Bcast(&flux, 1, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
+  out[0] = dmin;
+  out[1] = flux;
 }
 
 }  // namespace cfc

@@ -1,3 +1,8 @@
+# LAUNCH ENVIRONMENT (R-122, user-approved 2026-10-25): run with GPU IPC OFF on Aurora --
+#   MPIR_CVAR_CH4_IPC_GPU_P2P_THRESHOLD=2147483647  MPIR_CVAR_CH4_IPC_MAP_REPEAT_ADDR=0
+# (athenak_run/cfc/tde_mpi_env.sh, ensembles/template). With IPC on, AMR runs crash after many regrids (heap
+# corruption via MPICH GPU IPC: ~/athenak_tde_project/research/notes/GPU_IPC_CRASH.md); IPC off is bitwise identical.
+#
 # Athena++ (Kokkos version) input file: TDE with TRACKED two-box AMR --
 # a 1e4 Msun IMBH puncture plus a 0.7 Msun WD-like TOV star released from rest at
 # x = 30 r_g. Physics is identical to cfc_tde_wd_imbh.athinput (same EOS, star,

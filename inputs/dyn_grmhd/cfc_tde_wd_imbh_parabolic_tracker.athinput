@@ -1,3 +1,8 @@
+# LAUNCH ENVIRONMENT (R-122, user-approved 2026-10-25): run with GPU IPC OFF on Aurora --
+#   MPIR_CVAR_CH4_IPC_GPU_P2P_THRESHOLD=2147483647  MPIR_CVAR_CH4_IPC_MAP_REPEAT_ADDR=0
+# (athenak_run/cfc/tde_mpi_env.sh, ensembles/template). With IPC on, AMR runs crash after many regrids (heap
+# corruption via MPICH GPU IPC: ~/athenak_tde_project/research/notes/GPU_IPC_CRASH.md); IPC off is bitwise identical.
+#
 # PARABOLIC-ORBIT variant of cfc_tde_wd_imbh_elliptic_tracker.athinput.
 # Same WD (TOV rhoc/kappa/Gamma=5/3, M_*=7.47e-5 = 0.75 Msun), same IMBH
 # (puncture_mass=1.0 = 1e4 Msun), same release point (30,0,0) = 1.83 r_t, same

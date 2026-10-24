@@ -86,6 +86,12 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     ECNVARS = 11
   };
 
+  //! Fused cold-part evaluation for the FLUX-path functions (EOS::GetEnthalpyAndSoundSpeed, TemperatureFromP,
+  //! SoundSpeed). static constexpr: no storage (SIZE GUARD). The C2P root-solve path (TemperatureFromE, Energy,
+  //! Pressure and the Cold* functions it inlines) is deliberately left byte-identical: restructuring it broke PVC
+  //! (zla-eos-fused, RESULTS §76).
+  static constexpr bool fused_eos = true;
+
   //! \brief Expose the phase decomposition (after snapping and the pressure floor).
   //
   //  ConvertPrimitive itself is protected because it is an internal detail of the
@@ -210,12 +216,16 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     if (n < min_n) {
       // If density is OOB then return minimum temperature
       return min_T;
-    } else if (p <= MinimumPressure(n, Y)) {
+    }
+    // One phase decomposition for both the bound check and T (was two: MinimumPressure + ColdPressure).
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real p_cold = FluxColdPressureNY(n, nY);
+    Real p_th_min = n*min_T;
+    if (p <= p_cold + p_th_min) {    // == the former p <= MinimumPressure(n, Y)
       // If pressure is OOB then return minimum temperature
       return min_T;
     }
-
-    Real p_cold = ColdPressure(n, Y);
     Real T = (p-p_cold)/n;
     return Kokkos::fmax(T,min_T);
   }
@@ -250,6 +260,13 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
 
   /// Calculate the sound speed.
   KOKKOS_INLINE_FUNCTION Real SoundSpeed(Real n, Real T, Real *Y) const {
+    Real H, cs;
+    EnthalpySoundSpeed(n, T, Y, &H, &cs);
+    return cs;
+  }
+
+  /// Former SoundSpeed body (kept for reference / A-B; unused).
+  KOKKOS_INLINE_FUNCTION Real SoundSpeedSeparate(Real n, Real T, Real *Y) const {
     Real H_cold = ColdEnthalpy(n, Y);
     Real H_th   = (gamma_th*T)/(gamma_th_m1);
 
@@ -351,6 +368,72 @@ class EOSZlaBag : public EOSPolicyInterface, public LogPolicy {
     assert (m_initialized);
     Real nY[6] = {0.0};
     ConvertPrimitive(n, Y, nY);
+    Real dEdn_N = 0.0;
+    Real dEdn_Q = 0.0;
+    Real dEdn_G = 0.0;
+    Real dPdn_N = 0.0;
+    Real dPdn_Q = 0.0;
+    Real dPdn_G = 0.0;
+    if (nY[4] > 0.0) {
+      Real Y_N[3] = {0.0};
+      NucleonsFractionFromYq(nY[0], nY[2], Y_N);
+      dEdn_N = dEdn_Nucleons(nY[0], Y_N);
+      dPdn_N = dPdn_Nucleons(nY[0], Y_N);
+    }
+    if (nY[4] < 1.0) {
+      Real Y_Q[5] = {0.0};
+      QuarksFractionFromYq(nY[1], nY[3], Y_Q);
+      dEdn_Q = dEdn_Quarks(nY[1], Y_Q);
+      dPdn_Q = dPdn_Quarks(nY[1], Y_Q);
+    }
+    if (ZL_eta < 1.0) {
+      Real yf = GetHeavyLeptonFraction(n * nY[5], m_idiff_mu_e);
+      Real y_e  = nY[5] * (1.0 - yf);
+      Real y_mu = nY[5] * yf;
+      dEdn_G = dEdn_Leptons(n, y_e, y_mu);
+      dPdn_G = dPdn_Leptons(n, y_e, y_mu);
+    }
+    return ( dPdn_N * nY[4] + dPdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dPdn_G )
+        /( dEdn_N * nY[4] + dEdn_Q * (1.0-nY[4]) + (1.0-ZL_eta) * dEdn_G );
+  }
+
+  //! Enthalpy per baryon and sound speed from ONE phase decomposition (was three: ColdEnthalpy twice +
+  //! ColdSoundSpeed2). Same expressions and order as Enthalpy() and SoundSpeedSeparate().
+  KOKKOS_INLINE_FUNCTION void EnthalpySoundSpeed(Real n, Real T, const Real *Y, Real *H, Real *cs) const {
+    assert (m_initialized);
+    Real nY[6] = {0.0};
+    ConvertPrimitive(n, Y, nY);
+    Real H_cold = FluxColdEnthalpyNY(n, nY);
+    Real H_th   = (gamma_th*T)/(gamma_th_m1);
+    Real Hcs2_cold = FluxColdSoundSpeed2NY(n, nY)*H_cold;
+    Real Hcs2_th   = gamma_th*T;
+    *H  = H_cold + H_th;
+    *cs = sqrt((Hcs2_cold + Hcs2_th)/(H_cold + H_th));
+  }
+
+  //! Flux-path copies of the ColdPressure / ColdEnthalpy / ColdSoundSpeed2 bodies on a given decomposition. Copies,
+  //! not a refactor, so the functions the C2P kernel inlines stay untouched.
+  KOKKOS_INLINE_FUNCTION Real FluxColdPressureNY(Real n, const Real nY[6]) const {
+    Real P_N = 0.0;
+    Real P_Q = 0.0;
+    Real P_G = 0.0;
+    if (nY[4] > 0.0) P_N = ColdPressureNucleons(nY[0], nY[2]);
+    if (nY[4] < 1.0) P_Q = ColdPressureQuarks(nY[1], nY[3]);
+    if (ZL_eta < 1.0) P_G = ColdPressureLeptons(n, nY[5]);
+    return P_N * nY[4] + P_Q * (1.0-nY[4]) + (1.0-ZL_eta) * P_G;
+  }
+
+  KOKKOS_INLINE_FUNCTION Real FluxColdEnthalpyNY(Real n, const Real nY[6]) const {
+    Real h_N = 0.0;
+    Real h_Q = 0.0;
+    Real h_G = 0.0;
+    if (nY[4] > 0.0) h_N = ColdEnthalpyNucleons(nY[0], nY[2]);
+    if (nY[4] < 1.0) h_Q = ColdEnthalpyQuarks(nY[1], nY[3]);
+    if (ZL_eta < 1.0) h_G = ColdEnthalpyLeptons(n, nY[5]);
+    return ( h_N * nY[4] + h_Q * (1.0-nY[4]) + (1.0-ZL_eta) * h_G ) / n;
+  }
+
+  KOKKOS_INLINE_FUNCTION Real FluxColdSoundSpeed2NY(Real n, const Real nY[6]) const {
     Real dEdn_N = 0.0;
     Real dEdn_Q = 0.0;
     Real dEdn_G = 0.0;

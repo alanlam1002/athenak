@@ -55,6 +55,7 @@
 
 #include <limits>
 #include <cassert>
+#include <type_traits>
 
 #include "ps_types.hpp"
 #include "unit_system.hpp"
@@ -62,6 +63,13 @@
 namespace Primitive {
 
 enum class Error;
+
+//! True for an EOSPolicy declaring `static constexpr bool fused_eos = true` and providing EnthalpySoundSpeed
+//! (EOSZlaBag); others use the separate calls.
+template <typename P, typename = void> struct HasFusedEOS : std::false_type {};
+template <typename P>
+struct HasFusedEOS<P, std::void_t<decltype(P::fused_eos)>>
+    : std::bool_constant<P::fused_eos> {};
 
 template <typename EOSPolicy, typename ErrorPolicy>
 class EOS : public EOSPolicy, public ErrorPolicy {
@@ -131,6 +139,7 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   using ErrorPolicy::max_bsq;
 
   static constexpr bool supports_entropy = std::is_base_of_v<SupportsEntropy, EOSPolicy>;
+  static constexpr bool supports_fused = HasFusedEOS<EOSPolicy>::value;
   static constexpr bool supports_potentials =
     std::is_base_of_v<SupportsChemicalPotentials, EOSPolicy>;
 
@@ -239,6 +248,24 @@ class EOS : public EOSPolicy, public ErrorPolicy {
   KOKKOS_INLINE_FUNCTION Real GetPressure(Real n, Real T, Real *Y) const {
     return Pressure(n, T*code_units.TemperatureConversion(eos_units), Y) *
            eos_units.PressureConversion(code_units);
+  }
+
+  //! \fn void GetEnthalpyAndSoundSpeed(Real n, Real T, Real *Y, Real &h, Real &cs)
+  //  \brief h = GetEnthalpy(n, T, Y) and cs = GetSoundSpeed(n, T, Y), from one phase decomposition for a fused
+  //         EOS (three before); identical results.
+  KOKKOS_INLINE_FUNCTION void GetEnthalpyAndSoundSpeed(Real n, Real T, Real *Y, Real &h,
+                                                       Real &cs) const {
+    if constexpr (supports_fused) {
+      Real H_eos, cs_eos;
+      EOSPolicy::EnthalpySoundSpeed(n, T*code_units.TemperatureConversion(eos_units), Y,
+                                    &H_eos, &cs_eos);
+      cs = cs_eos*eos_units.VelocityConversion(code_units);
+      h = H_eos/mb *
+          (eos_units.EnergyConversion(code_units)/eos_units.MassConversion(code_units));
+    } else {
+      cs = GetSoundSpeed(n, T, Y);
+      h = GetEnthalpy(n, T, Y);
+    }
   }
 
   //! \fn Real GetEntropy(Real n, Real T, Real *Y)

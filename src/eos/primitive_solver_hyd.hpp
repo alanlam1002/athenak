@@ -989,10 +989,10 @@ class PrimitiveSolverHydro {
     Real g11 = gii - g01*beta_u[index];
 
     // Calculate the sound speed and the Alfven speed
-    Real cs = ps.GetEOS().GetSoundSpeed(prim[PRH], prim[PTM], &prim[PYF]);
+    Real cs, h;
+    ps.GetEOS().GetEnthalpyAndSoundSpeed(prim[PRH], prim[PTM], &prim[PYF], h, cs);
     Real csq = cs*cs;
-    Real H = ps.GetEOS().GetBaryonMass()*prim[PRH]*
-             ps.GetEOS().GetEnthalpy(prim[PRH], prim[PTM], &prim[PYF]);
+    Real H = ps.GetEOS().GetBaryonMass()*prim[PRH]*h;
     Real vasq = bsq/(bsq + H);
     Real cmsq = csq + vasq - csq*vasq;
 

@@ -820,6 +820,13 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   DvceArray5D<Real> coarse_buf_;
   // <job> checksum_cycles (MultigridDriver::MGChk): this rank's boundary buffers
   void ChkBuffers(int cycle, int stage, const std::string &name, int k);
+  // ATHENA_MG_EXTENT_CHECK (env, default off; host-only, bit-neutral): replay every index
+  // the pack/unpack kernels will touch against the extents of the arrays they write and
+  // read, and the rank-packed metadata against the current neighbour table; abort with
+  // the rank, neighbour, level and cycle on the first violation (R-119)
+  void CheckMGExtents(const char *where, int nvar, const DvceArray5D<Real> &u,
+                      bool send);
+  void LogMGExtents(const char *where);
 
   MGPerLevelIndcs send_mg_indcs_[56][kMaxMGLevels];
   MGPerLevelIndcs recv_mg_indcs_[56][kMaxMGLevels];

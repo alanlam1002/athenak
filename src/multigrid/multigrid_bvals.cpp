@@ -630,6 +630,7 @@ void MultigridBoundaryValues::RemapIndicesForMG() {
     int cbnx1 = cnx1 + 2*ngh;
     Kokkos::realloc(coarse_buf_, nmb, nvar, cbnx3, cbnx2, cbnx1);
   }
+  LogMGExtents("InitializeBuffers");
 }
 
 //----------------------------------------------------------------------------------------
@@ -1041,6 +1042,7 @@ void MultigridBoundaryValues::ComputePerLevelIndices() {
     int cbn = cnx_f + 2*ngh;
     Kokkos::realloc(coarse_buf_, nmb, nvar, cbn, cbn, cbn);
   }
+  LogMGExtents("ComputePerLevelIndices");
 }
 
 //----------------------------------------------------------------------------------------
@@ -1467,6 +1469,7 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
 #endif
   auto aggsbuf = mg_rank_sendbuf_vars_;
   auto soff = mg_send_agg_offset_;
+  CheckMGExtents("PackAndSendMG", nvar, u, true);
 
 #if MPI_PARALLEL_ENABLED
   for (std::size_t i = 0; i < mg_send_var_reqs_.size(); ++i) {
@@ -1683,6 +1686,7 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
 #endif
   auto aggrbuf = mg_rank_recvbuf_vars_;
   auto roff = mg_recv_agg_offset_;
+  CheckMGExtents("RecvAndUnpackMG", nvar, u, false);
 
   {
   int nmnv = nmb * nnghbr * nvar;
@@ -1835,6 +1839,7 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     }
     for (auto &s : mg_rp_cache_) s = MGRankPackLevelState();
     mg_rp_cache_seq_ = mesh_seq;
+    LogMGExtents("regrid");
     mg_rp_active_level_ = -1;
   }
   if (lev_ >= 0 && lev_ < kMaxMGLevels) {
@@ -1891,6 +1896,15 @@ TaskStatus MultigridBoundaryValues::PostRecvMG() {
   for (std::size_t i = 0; i < mg_recv_var_msgs_.size(); ++i) {
     auto &msg = mg_recv_var_msgs_[i];
     MPI_Wait(&mg_recv_var_reqs_[i], MPI_STATUS_IGNORE);
+    if (std::getenv("ATHENA_MG_EXTENT_CHECK") != nullptr &&
+        (msg.offset < 0 || msg.offset + msg.data_size > mg_rank_recvbuf_vars_.extent_int(0))) {
+      std::cout << "MGEXT FAIL PostRecvMG rank=" << global_variable::my_rank << " cycle="
+                << pmy_pack->pmesh->ncycle << " lev=" << pmy_mg->GetCurrentLevel()
+                << " msg from rank " << msg.rank << " offset+size=" << msg.offset << "+"
+                << msg.data_size << " > agg extent " << mg_rank_recvbuf_vars_.extent_int(0)
+                << "; aborting" << std::endl;
+      MPI_Abort(MPI_COMM_WORLD, 97);
+    }
 
     int ierr_d = MPI_Irecv(mg_rank_recvbuf_vars_.data() + msg.offset, msg.data_size,
                            MPI_ATHENA_REAL, msg.rank, 97, comm_vars,
@@ -1954,4 +1968,201 @@ void MultigridBoundaryValues::ChkBuffers(int cycle, int stage, const std::string
   }
   std::fprintf(chksum::fp, "%d %d %s %d rbufs %016llx\n", cycle, stage, name.c_str(), k,
                static_cast<unsigned long long>(a));
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridBoundaryValues::CheckMGExtents()
+//! \brief ATHENA_MG_EXTENT_CHECK (R-119): host replay of the PackMG (send) or UnpackMG
+//! (!send) index ranges against the extents of every array they touch -- u (or
+//! coarse_buf_ for coarser neighbours), the per-neighbour buffers (extent 0 = block,
+//! extent 1 = payload), the aggregate rank-packed buffer and its (m,n) offset map -- and
+//! of the rank-packed entries against the current neighbour table (stale metadata).
+//! Host-only: reads the host mirrors, launches nothing, so it changes no bits.
+
+namespace {
+bool MGExtentCheckOn() {
+  static const bool on = (std::getenv("ATHENA_MG_EXTENT_CHECK") != nullptr);
+  return on;
+}
+}  // namespace
+
+void MultigridBoundaryValues::LogMGExtents(const char *where) {
+  if (!MGExtentCheckOn()) return;
+  int nmb = pmy_pack->nmb_thispack;
+  int nnghbr = pmy_pack->pmb->nnghbr;
+  int s0 = 1 << 30, r0 = 1 << 30, s1 = 1 << 30, r1 = 1 << 30;
+  for (int n = 0; n < nnghbr; ++n) {
+    s0 = std::min(s0, sendbuf[n].vars.extent_int(0));
+    r0 = std::min(r0, recvbuf[n].vars.extent_int(0));
+    s1 = std::min(s1, sendbuf[n].vars.extent_int(1));
+    r1 = std::min(r1, recvbuf[n].vars.extent_int(1));
+  }
+  std::cout << "MGEXT " << where << " rank=" << global_variable::my_rank
+            << " cycle=" << pmy_pack->pmesh->ncycle
+            << " seq=" << pmy_pack->pmesh->GetAMRLoadBalanceUpdateSeq()
+            << " nmb_thispack=" << nmb << " nmb_maxperrank=" << pmy_pack->pmesh->nmb_maxperrank
+            << " sendbuf_ext0_min=" << s0 << " recvbuf_ext0_min=" << r0
+            << " sendbuf_ext1_min=" << s1 << " recvbuf_ext1_min=" << r1
+            << " coarse_buf_ext0=" << coarse_buf_.extent_int(0)
+            << " nghbr_ext0=" << pmy_pack->pmb->nghbr.h_view.extent_int(0)
+#if MPI_PARALLEL_ENABLED
+            << " agg_send=" << mg_rank_sendbuf_vars_.extent_int(0)
+            << " agg_recv=" << mg_rank_recvbuf_vars_.extent_int(0)
+            << " nmsg_send=" << mg_send_var_msgs_.size()
+            << " nmsg_recv=" << mg_recv_var_msgs_.size()
+#endif
+            << std::endl;
+}
+
+void MultigridBoundaryValues::CheckMGExtents(const char *where, int nvar,
+                                             const DvceArray5D<Real> &u, bool send) {
+  if (!MGExtentCheckOn()) return;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nnghbr = pmy_pack->pmb->nnghbr;
+  const int my_rank = global_variable::my_rank;
+  auto &nghbr = pmy_pack->pmb->nghbr;
+  auto &mblev = pmy_pack->pmb->mb_lev;
+  auto &mbgid = pmy_pack->pmb->mb_gid;
+  const int lev = pmy_mg->GetCurrentLevel();
+  const int shift = pmy_mg->GetNumberOfLevels() - 1 - lev;
+  const bool skip_fc = ((pmy_mg->GetSize() >> shift) < 2);
+  const int cycle = pmy_pack->pmesh->ncycle;
+  int nbad = 0;
+  auto fail = [&](const std::string &msg) {
+    if (nbad++ < 20) {
+      std::cout << "MGEXT FAIL " << where << " rank=" << my_rank << " cycle=" << cycle
+                << " lev=" << lev << " nmb=" << nmb << " nvar=" << nvar << " : " << msg
+                << std::endl;
+    }
+  };
+  auto chk5 = [&](const DvceArray5D<Real> &a, const char *name, int m, int v, int kl,
+                  int ku, int jl, int ju, int il, int iu) {
+    if (m >= a.extent_int(0) || v >= a.extent_int(1) || kl < 0 || ku >= a.extent_int(2) ||
+        jl < 0 || ju >= a.extent_int(3) || il < 0 || iu >= a.extent_int(4)) {
+      std::ostringstream s;
+      s << name << " m=" << m << " v=" << v << " k=[" << kl << "," << ku << "] j=[" << jl
+        << "," << ju << "] i=[" << il << "," << iu << "] extents=(" << a.extent(0) << ","
+        << a.extent(1) << "," << a.extent(2) << "," << a.extent(3) << "," << a.extent(4)
+        << ")";
+      fail(s.str());
+    }
+  };
+  if (u.extent_int(0) < nmb || u.extent_int(1) < nvar) {
+    std::ostringstream s;
+    s << "u extents (" << u.extent(0) << "," << u.extent(1) << ") < (nmb, nvar)";
+    fail(s.str());
+  }
+  if (nghbr.h_view.extent_int(0) < nmb || nghbr.h_view.extent_int(1) < nnghbr ||
+      mblev.h_view.extent_int(0) < nmb) {
+    fail("nghbr/mb_lev host extents < nmb");
+  }
+#if MPI_PARALLEL_ENABLED
+  // the (m,n) -> (offset, size) the rank-packed metadata recorded for this direction
+  std::map<int, std::pair<int, int>> agg;
+  const auto &ent = send ? mg_send_var_entries_ : mg_recv_var_entries_;
+  const auto &msgs = send ? mg_send_var_msgs_ : mg_recv_var_msgs_;
+  const int aggext = send ? mg_rank_sendbuf_vars_.extent_int(0)
+                          : mg_rank_recvbuf_vars_.extent_int(0);
+  const int offext = send ? mg_send_agg_offset_.extent_int(0)
+                          : mg_recv_agg_offset_.extent_int(0);
+  for (const auto &e : ent) {
+    if (e.m < 0 || e.m >= nmb || e.n < 0 || e.n >= nnghbr) {
+      std::ostringstream s;
+      s << "entry (m,n)=(" << e.m << "," << e.n << ") outside (nmb,nnghbr)";
+      fail(s.str());
+    }
+    if (e.offset < 0 || e.offset + e.data_size > aggext) {
+      std::ostringstream s;
+      s << "entry (m,n)=(" << e.m << "," << e.n << ") offset+size=" << e.offset << "+"
+        << e.data_size << " > agg extent " << aggext;
+      fail(s.str());
+    }
+    agg[e.m * nnghbr + e.n] = {e.offset, e.data_size};
+  }
+  for (const auto &msg : msgs) {
+    if (msg.offset < 0 || msg.offset + msg.data_size > aggext) {
+      std::ostringstream s;
+      s << "msg to/from rank " << msg.rank << " offset+size=" << msg.offset << "+"
+        << msg.data_size << " > agg extent " << aggext;
+      fail(s.str());
+    }
+  }
+  if ((send ? mg_send_var_reqs_.size() : mg_recv_var_reqs_.size()) != msgs.size()) {
+    fail("request vector size != message count");
+  }
+  if (offext < std::max(1, nmb * nnghbr)) {
+    std::ostringstream s;
+    s << "agg offset map extent " << offext << " < nmb*nnghbr " << nmb * nnghbr;
+    fail(s.str());
+  }
+  std::size_t nused = 0;
+#endif
+  for (int m = 0; m < nmb; ++m) {
+    for (int n = 0; n < nnghbr; ++n) {
+      const auto &nb = nghbr.h_view(m, n);
+      if (nb.gid < 0) continue;
+      const int nlev = nb.lev, mlev = mblev.h_view(m);
+      if (nlev != mlev && skip_fc) continue;
+      const auto &pl = send ? send_mg_indcs_[n][lev] : recv_mg_indcs_[n][lev];
+      const MeshBufferIndcs &ix = (nlev == mlev) ? pl.isame
+                                : ((nlev < mlev) ? pl.icoar : pl.ifine);
+      const int ni = ix.bie - ix.bis + 1, nj = ix.bje - ix.bjs + 1, nk = ix.bke - ix.bks + 1;
+      const int size = nvar * ni * nj * nk;
+      // the array the kernel reads (send) or writes (recv): coarse_buf_ for a coarser nb
+      if (nlev < mlev) {
+        chk5(coarse_buf_, "coarse_buf_", m, nvar - 1, ix.bks, ix.bke, ix.bjs, ix.bje, ix.bis,
+             ix.bie);
+      } else {
+        chk5(u, "u", m, nvar - 1, ix.bks, ix.bke, ix.bjs, ix.bje, ix.bis, ix.bie);
+      }
+      if (nb.rank == my_rank) {
+        // send: written at recvbuf[dest].vars(dm, .); recv: read at recvbuf[n].vars(m, .)
+        const int dm = send ? nb.gid - mbgid.h_view(0) : m;
+        const int dn = send ? nb.dest : n;
+        if (dm < 0 || dm >= recvbuf[dn].vars.extent_int(0) ||
+            size > recvbuf[dn].vars.extent_int(1)) {
+          std::ostringstream s;
+          s << "on-rank (m,n)=(" << m << "," << n << ") -> recvbuf[" << dn << "].vars(" << dm
+            << ", <" << size << ") extents=(" << recvbuf[dn].vars.extent(0) << ","
+            << recvbuf[dn].vars.extent(1) << ")";
+          fail(s.str());
+        }
+      } else {
+#if MPI_PARALLEL_ENABLED
+        auto it = agg.find(m * nnghbr + n);
+        if (it == agg.end()) {
+          std::ostringstream s;
+          s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank
+            << " has no rank-packed entry (offset -1: stale metadata)";
+          fail(s.str());
+        } else {
+          ++nused;
+          if (it->second.second != size) {
+            std::ostringstream s;
+            s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank
+              << " entry size " << it->second.second << " != kernel payload " << size
+              << " (nlev " << nlev << " mlev " << mlev << ")";
+            fail(s.str());
+          }
+        }
+#endif
+      }
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  if (nused != ent.size()) {
+    std::ostringstream s;
+    s << "rank-packed entries " << ent.size() << " but the neighbour table needs " << nused;
+    fail(s.str());
+  }
+#endif
+  if (nbad > 0) {
+    std::cout << "MGEXT FAIL " << where << " rank=" << my_rank << " cycle=" << cycle
+              << " total violations " << nbad << "; aborting" << std::endl;
+    LogMGExtents(where);
+#if MPI_PARALLEL_ENABLED
+    MPI_Abort(MPI_COMM_WORLD, 97);
+#endif
+    std::exit(EXIT_FAILURE);
+  }
 }

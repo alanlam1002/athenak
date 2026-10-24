@@ -152,6 +152,14 @@ class PrimitiveSolverHydro {
   int de_idx = -1;                 // scalar index of the K tracer (nscalars - 1)
   bool de_xchg = false;            // <mhd> dual_energy_flag_exchange (owner decides)
   int de_iflag = -1;               // its cons slot (pmhd->nmhd + nscalars)
+  // <mhd> dual_energy_mean_resync (R-126 item 3(d), test option, default false): while a dense
+  // cell is flagged, accumulate its energy-solution K (sum and count) in two more non-evolved
+  // cons slots after the flag slot (de_iflag + 1, + 2); when its flag drops, resync the tracer
+  // to the flagged-period MEAN before the entropy branch reads it, then zero the slots. The
+  // slots ride the flag exchange, so every copy of a cell (owner and ghosts) reads the owner's
+  // accumulators and computes the same mean; restarts carry them (u0's non-evolved slots); a
+  // regrid zeroes them for new blocks. Needs dual_energy_flag_exchange.
+  bool de_mean = false;
   Real de_kmax = 1.0, de_rho_sw = 0.0, de_dp_shock = 0.3, de_eta1 = 0.0, de_gamma = 5./3.;
   Real de_ypow = 1.0;              // Y = (K/kmax)^de_ypow
   // shock sensor (item 72; default vcurv + one hysteresis dilation pass): 0 = jump
@@ -1532,6 +1540,7 @@ class PrimitiveSolverHydro {
       de_pcyc = pin->GetOrAddInteger(block, "dual_energy_probe_cycles", 0);
       de_xchg = pin->GetOrAddBoolean(block, "dual_energy_flag_exchange", true);  // R-078
       de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
+      de_mean = pin->GetOrAddBoolean(block, "dual_energy_mean_resync", false);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
@@ -1933,7 +1942,8 @@ class PrimitiveSolverHydro {
   //! the interior.
   void SetFlagSlot() {
     de_iflag = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars;
-    if (pmy_pack->pmhd->nflag < 1 || pmy_pack->pmhd->u0.extent_int(1) <= de_iflag) {
+    if (pmy_pack->pmhd->nflag < (de_mean ? 3 : 1) ||
+        pmy_pack->pmhd->u0.extent_int(1) <= de_iflag + (de_mean ? 2 : 0)) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "dual_energy_flag_exchange needs the u0 flag slot (<mhd> "
                 << "dual_energy_flag_exchange = true allocates it)" << std::endl;
@@ -2100,6 +2110,15 @@ class PrimitiveSolverHydro {
     const Real de_kmax_ = de_kmax, de_rho_sw_ = de_rho_sw, de_eta1_ = de_eta1;
     const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
     const bool de_2law_ = de_second_law;
+    // dual_energy_mean_resync: the accumulator slots, right after the flag slot
+    const bool dmr_ = de_on_ && de_mean && de_xchg;
+    const int iks_ = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars + 1;
+    if (dmr_ && (pmy_pack->pmhd->nflag < 3 || cons.extent_int(1) < iks_ + 2)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "dual_energy_mean_resync needs the two accumulator slots (and "
+                << "dual_energy_flag_exchange)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     const Real de_2tol_ = de_second_law_tol;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
@@ -2523,6 +2542,24 @@ class PrimitiveSolverHydro {
           const bool bzero = (b3u[IBX] == 0.0 && b3u[IBY] == 0.0 && b3u[IBZ] == 0.0);
           const bool bad = result.prim_floor ||
                            (result.error != Primitive::Error::SUCCESS);
+          if (dmr_) {
+            // accumulate K_en while flagged; on release, resync the tracer to the mean
+            Real ksum = cons(m, iks_, k, j, i), kcnt = cons(m, iks_ + 1, k, j, i);
+            if (dense && bzero && de_shock_(m,k,j,i) != 0) {
+              if (!bad) {
+                ksum += prim_pt[PPR]/pow(prim_pt[PRH]*mb, de_gamma_);
+                kcnt += 1.0;
+              }
+            } else if (kcnt > 0.5) {
+              if (dense && bzero) {
+                cons_pt_old[CYD + de_idx_] = D*DualEnergyY(ksum/kcnt, de_kmax_, de_ypow_);
+              }
+              ksum = 0.0;
+              kcnt = 0.0;
+            }
+            cons(m, iks_, k, j, i) = ksum;
+            cons(m, iks_ + 1, k, j, i) = kcnt;
+          }
           bool use_ent = dense && bzero && (de_shock_(m,k,j,i) == 0 || bad);
           int dbr = !dense ? 0 : (use_ent ? (bad ? 3 : 1) : 4);
           Real dken = 0.0, ddk = 0.0, ddtau = 0.0;

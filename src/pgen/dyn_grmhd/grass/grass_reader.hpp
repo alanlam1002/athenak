@@ -477,7 +477,10 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
     }
   }
   Real beta_phi_up = -ww_code;   // beta^phi, code-rate units
-  Real beta_up[3] = { y*beta_phi_up, -x*beta_phi_up, 0.0 };  // d(x,y,z)/dphi = (-y,x,0)
+  // d(x,y,z)/dphi = (-y,x,0). (Before 2026-10-25 this was (y,-x)*beta^phi, i.e. the
+  // shift and vu below were mirrored phi -> -phi while K_dd was not: the momentum
+  // constraint was violated at t=0 under z4c. Matches SACRA-aei read_grass.f90.)
+  Real beta_up[3] = { -y*beta_phi_up, x*beta_phi_up, 0.0 };
 
   // ---- Fluid velocity (ZAMO-frame azimuthal, AthenaK contravariant convention) ---
   // v is dimensionless (a physical velocity in units of c), so the GRASS-internal
@@ -492,7 +495,7 @@ inline void GrassData::Interpolate(Real x, Real y, Real z, const GrassEosTable &
     Real v2 = std::pow((omg - ww)*r_internal*sinth*std::exp(-rho_pot), 2);
     v2 = std::min(std::max(v2, 0.0), 1.0 - 1.0e-12);
     Real utilde_phi = (omg_code - ww_code) / (N * std::sqrt(1.0 - v2));
-    vu[0] = y*utilde_phi; vu[1] = -x*utilde_phi; vu[2] = 0.0;
+    vu[0] = -y*utilde_phi; vu[1] = x*utilde_phi; vu[2] = 0.0;   // utilde^phi * d/dphi
     // Floor energy_internal to a tiny positive value before the EOS-table log()
     // lookup. `inside_star` is based on the (separately-interpolated) enthalpy
     // field crossing its own threshold -- it does NOT guarantee energy_internal

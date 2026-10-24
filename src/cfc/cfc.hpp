@@ -363,6 +363,24 @@ class CFC {
   Real fc_bound_rho_ = 0.0, fc_bound_rmin_ = 6.0;
   // bound-gas reduction, same layout as MeasureTracked
   void MeasureBound(Real out[7]);
+  // R-112 item 4 (the comoving-gauge exit; all default off, so existing decks are
+  // unchanged). <cfc> frame_ramp_shape = linear (default) | smoothstep (C^1: xidot =
+  // xidot_sw (1 - 3s^2 + 2s^3), s = (t - t_sw)/frame_ramp_time; no jump in xi'' at the
+  // ends). Two more switches to ramp mode, checked in remnant and bound_centroid modes
+  // (the first to fire wins, with the tracked-mass switch above):
+  //   debris approach, <cfc> frame_switch_approach_radius R_trig > 0: the bound gas (the
+  //     MeasureBound gates) has min over cells of (r - max(v_in, 0) T_ramp) <= R_trig,
+  //     i.e. d_min - v_in T_ramp at each cell (v_in the inward speed relative to the BH),
+  //     so the ramp completes before returning gas nears the hole;
+  //   accretion onset, <cfc> frame_switch_accretion_rate > 0 (per unit time, in units of
+  //     m_ref): the net inflow of gas with rho > frame_bound_rho through the shell
+  //     frame_switch_accretion_radius (R_acc, default 6 M) <= r < R_acc +
+  //     frame_switch_accretion_shell (default 2 M), sum(D dV v_in)/shell, exceeds it.
+  int fc_ramp_shape_ = 0;                 // 0 linear, 1 smoothstep
+  Real fc_app_r_ = 0.0, fc_acc_rate_ = 0.0, fc_acc_r_ = 6.0, fc_acc_w_ = 2.0;
+  Real fc_exit_[2] = {0.0, 0.0};          // last MeasureExit: approach measure, inflow
+  // out = {min (r - max(v_in, 0) T_ramp) over the bound gas, the shell inflow rate}
+  void MeasureExit(Real out[2]);
   void FrameSwitch(Real t_new, int mode, const char *why);
   void FrameControlStep(Real t_new);
 

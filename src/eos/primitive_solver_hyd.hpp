@@ -313,6 +313,12 @@ class PrimitiveSolverHydro {
   // puncture (it is ~1e-9 M* over a run, C-047).
   bool zone_on = false;
   Real zone_r = 0.0, zone_rho = 0.0, zone_rho_reset = 0.0, zone_vmax = 0.9;
+  // <mhd> atmosphere_zone_horizon_rest_radius (default 0 = off; R-112 item 4, for the BH
+  // frame): zone cells (and F1 unmasked cells) closer than this to the puncture get
+  // Eulerian rest (v^i = 0, always timelike) instead of grid rest, which the trumpet's
+  // own shift makes superluminal in 0.59 < r_iso < 0.78 M (capped at zone_vmax). The
+  // trumpet horizon is r_iso = 0.7793 M (M = 1).
+  Real zone_hrest_r = 0.0;
   Real zone_de = 0.677/(16.4*16.4);
   static constexpr int kZoneNE = 10, kZoneNL = 5, kZoneNR = 5;
   static constexpr int kZoneNB = kZoneNE*kZoneNL*kZoneNR;     // 250 mass bins
@@ -1420,6 +1426,7 @@ class PrimitiveSolverHydro {
       zone_rho = pin->GetReal(block, "atmosphere_zone_rho");
       zone_rho_reset = pin->GetOrAddReal(block, "atmosphere_zone_rho_reset", 1.0e-3*zone_rho);
       zone_vmax = pin->GetOrAddReal(block, "atmosphere_zone_vmax", 0.9);
+      zone_hrest_r = pin->GetOrAddReal(block, "atmosphere_zone_horizon_rest_radius", 0.0);
       zone_de = pin->GetOrAddReal(block, "atmosphere_zone_de", zone_de);
       if (!(zone_r > 0.0) || !(zone_rho > 0.0) || zone_rho_reset > zone_rho ||
           !(zone_vmax > 0.0 && zone_vmax < 1.0)) {
@@ -2150,6 +2157,7 @@ class PrimitiveSolverHydro {
     const Real fgz_ = pmy_pack->padm->bc_center[2];
     const bool zon_ = zone_on && !floors_only;
     const Real zr2_ = zone_r*zone_r, zthr_ = zone_rho, zrst_ = zone_rho_reset;
+    const Real zhr2_ = zone_hrest_r*zone_hrest_r;
     const Real zvmax_ = zone_vmax, zde_ = zone_de;
     auto &zacc_ = zone_acc;
     const bool zbook_ = zone_book && !floors_only;
@@ -2475,7 +2483,7 @@ class PrimitiveSolverHydro {
             Real cpre[NCONS];
             for (int n = 0; n < NCONS; ++n) cpre[n] = cons_pt[n];
             if (zmode == 1) prim_pt[PRH] = fmin(rho0, zrst_)/mb;
-            const Real f = ZoneGridRest(prim_pt, bu, al, g3d, zvmax_);
+            const Real f = ZoneTarget(prim_pt, bu, al, g3d, zvmax_, r2 < zhr2_);
             prim_pt[PTM] = eos_.GetTemperatureFloor();
             prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
             ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
@@ -2807,6 +2815,19 @@ class PrimitiveSolverHydro {
     return true;
   }
 
+  //! The zone's target velocity: Eulerian rest (v^i = 0) if erest (inside
+  //! atmosphere_zone_horizon_rest_radius), else grid rest (ZoneGridRest); returns the cap
+  //! factor f (1 if uncapped). Shared by the zone and ZoneUnmaskPost.
+  KOKKOS_INLINE_FUNCTION
+  static Real ZoneTarget(Real prim_pt[NPRIM], const Real bu[3], const Real al,
+                         const Real g3d[NSPMETRIC], const Real zvmax, const bool erest) {
+    if (erest) {
+      prim_pt[PVX] = 0.0; prim_pt[PVY] = 0.0; prim_pt[PVZ] = 0.0;
+      return 1.0;
+    }
+    return ZoneGridRest(prim_pt, bu, al, g3d, zvmax);
+  }
+
   //! The zone's grid-rest velocity v = beta'/alpha, capped at zvmax along beta' (shared
   //! by the zone and ZoneUnmaskPost, so both give the same state bitwise); returns the cap
   //! factor f (1 if uncapped).
@@ -2867,6 +2888,7 @@ class PrimitiveSolverHydro {
     auto &ps_ = ps;
     const Real mb = eos_.GetBaryonMass();
     const Real zr2_ = zone_r*zone_r, zthr_ = zone_rho, zrst_ = zone_rho_reset;
+    const Real zhr2_ = zone_hrest_r*zone_hrest_r;
     const Real zvmax_ = zone_vmax;
     const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
     const Real cz = pmy_pack->padm->bc_center[2];
@@ -2900,7 +2922,7 @@ class PrimitiveSolverHydro {
       Real prim_pt[NPRIM], cons_pt[NCONS];
       prim_pt[PRH] = fmin(rho0, zrst_)/mb;
       for (int n = 0; n < nscal; ++n) prim_pt[PYF + n] = prim(m, nhyd + n, k, j, i);
-      ZoneGridRest(prim_pt, bu, al, g3d, zvmax_);
+      ZoneTarget(prim_pt, bu, al, g3d, zvmax_, x*x + y*y + z*z < zhr2_);
       prim_pt[PTM] = eos_.GetTemperatureFloor();
       prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
       const Real D0 = cons(m, IDN, k, j, i)*isdetg;

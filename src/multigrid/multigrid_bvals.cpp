@@ -1976,7 +1976,8 @@ void MultigridBoundaryValues::ChkBuffers(int cycle, int stage, const std::string
 //! (!send) index ranges against the extents of every array they touch -- u (or
 //! coarse_buf_ for coarser neighbours), the per-neighbour buffers (extent 0 = block,
 //! extent 1 = payload), the aggregate rank-packed buffer and its (m,n) offset map -- and
-//! of the rank-packed entries against the current neighbour table (stale metadata).
+//! that each rank-packed message is tiled exactly by the payloads the current neighbour
+//! table implies (stale or wrong-level metadata).
 //! Host-only: reads the host mirrors, launches nothing, so it changes no bits.
 
 namespace {
@@ -2057,29 +2058,19 @@ void MultigridBoundaryValues::CheckMGExtents(const char *where, int nvar,
     fail("nghbr/mb_lev host extents < nmb");
   }
 #if MPI_PARALLEL_ENABLED
-  // the (m,n) -> (offset, size) the rank-packed metadata recorded for this direction
-  std::map<int, std::pair<int, int>> agg;
-  const auto &ent = send ? mg_send_var_entries_ : mg_recv_var_entries_;
+  // The kernels address the aggregate buffer through the (m,n) offset map, and MPI moves
+  // it per message; both are per-level state (Save/LoadRankPackState). The entry vectors
+  // are not (they hold the last level built), so they are not used here.
   const auto &msgs = send ? mg_send_var_msgs_ : mg_recv_var_msgs_;
   const int aggext = send ? mg_rank_sendbuf_vars_.extent_int(0)
                           : mg_rank_recvbuf_vars_.extent_int(0);
-  const int offext = send ? mg_send_agg_offset_.extent_int(0)
-                          : mg_recv_agg_offset_.extent_int(0);
-  for (const auto &e : ent) {
-    if (e.m < 0 || e.m >= nmb || e.n < 0 || e.n >= nnghbr) {
-      std::ostringstream s;
-      s << "entry (m,n)=(" << e.m << "," << e.n << ") outside (nmb,nnghbr)";
-      fail(s.str());
-    }
-    if (e.offset < 0 || e.offset + e.data_size > aggext) {
-      std::ostringstream s;
-      s << "entry (m,n)=(" << e.m << "," << e.n << ") offset+size=" << e.offset << "+"
-        << e.data_size << " > agg extent " << aggext;
-      fail(s.str());
-    }
-    agg[e.m * nnghbr + e.n] = {e.offset, e.data_size};
-  }
-  for (const auto &msg : msgs) {
+  auto off_h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                   send ? mg_send_agg_offset_ : mg_recv_agg_offset_);
+  const int offext = off_h.extent_int(0);
+  std::map<int, int> msg_of_rank;
+  for (std::size_t i = 0; i < msgs.size(); ++i) {
+    const auto &msg = msgs[i];
+    msg_of_rank[msg.rank] = static_cast<int>(i);
     if (msg.offset < 0 || msg.offset + msg.data_size > aggext) {
       std::ostringstream s;
       s << "msg to/from rank " << msg.rank << " offset+size=" << msg.offset << "+"
@@ -2095,11 +2086,14 @@ void MultigridBoundaryValues::CheckMGExtents(const char *where, int nvar,
     s << "agg offset map extent " << offext << " < nmb*nnghbr " << nmb * nnghbr;
     fail(s.str());
   }
-  std::size_t nused = 0;
+  std::map<int, std::vector<std::pair<int, int>>> spans;   // rank -> (offset, size)
 #endif
   for (int m = 0; m < nmb; ++m) {
     for (int n = 0; n < nnghbr; ++n) {
       const auto &nb = nghbr.h_view(m, n);
+#if MPI_PARALLEL_ENABLED
+      const int off = (m * nnghbr + n < offext) ? off_h(m * nnghbr + n) : -2;
+#endif
       if (nb.gid < 0) continue;
       const int nlev = nb.lev, mlev = mblev.h_view(m);
       if (nlev != mlev && skip_fc) continue;
@@ -2127,33 +2121,69 @@ void MultigridBoundaryValues::CheckMGExtents(const char *where, int nvar,
             << recvbuf[dn].vars.extent(1) << ")";
           fail(s.str());
         }
+#if MPI_PARALLEL_ENABLED
+        if (off != -1) {   // the unpack kernel would read the aggregate buffer instead
+          std::ostringstream s;
+          s << "on-rank (m,n)=(" << m << "," << n << ") has agg offset " << off;
+          fail(s.str());
+        }
+#endif
       } else {
 #if MPI_PARALLEL_ENABLED
-        auto it = agg.find(m * nnghbr + n);
-        if (it == agg.end()) {
+        auto it = msg_of_rank.find(nb.rank);
+        if (off < 0 || off + size > aggext || it == msg_of_rank.end()) {
           std::ostringstream s;
-          s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank
-            << " has no rank-packed entry (offset -1: stale metadata)";
+          s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank << " agg offset "
+            << off << " + payload " << size << " vs agg extent " << aggext
+            << (it == msg_of_rank.end() ? " (no message for that rank)" : "")
+            << " (nlev " << nlev << " mlev " << mlev << ")";
           fail(s.str());
         } else {
-          ++nused;
-          if (it->second.second != size) {
+          const auto &msg = msgs[it->second];
+          if (off < msg.offset || off + size > msg.offset + msg.data_size) {
             std::ostringstream s;
-            s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank
-              << " entry size " << it->second.second << " != kernel payload " << size
-              << " (nlev " << nlev << " mlev " << mlev << ")";
+            s << "off-rank (m,n)=(" << m << "," << n << ") rank " << nb.rank << " span ["
+              << off << "," << off + size << ") outside its message [" << msg.offset << ","
+              << msg.offset + msg.data_size << ")";
             fail(s.str());
           }
+          spans[nb.rank].push_back({off, size});
         }
 #endif
       }
     }
   }
 #if MPI_PARALLEL_ENABLED
-  if (nused != ent.size()) {
-    std::ostringstream s;
-    s << "rank-packed entries " << ent.size() << " but the neighbour table needs " << nused;
-    fail(s.str());
+  // each message must be tiled exactly by its (m,n) payloads: no gap, no overlap
+  for (auto &kv : spans) {
+    auto &v = kv.second;
+    std::sort(v.begin(), v.end());
+    const auto &msg = msgs[msg_of_rank[kv.first]];
+    int pos = msg.offset;
+    for (const auto &sp : v) {
+      if (sp.first != pos) {
+        std::ostringstream s;
+        s << "message to/from rank " << kv.first << ": payload at " << sp.first
+          << " but expected " << pos << (sp.first < pos ? " (overlap)" : " (gap)");
+        fail(s.str());
+        break;
+      }
+      pos += sp.second;
+    }
+    if (pos != msg.offset + msg.data_size) {
+      std::ostringstream s;
+      s << "message to/from rank " << kv.first << ": payloads end at " << pos
+        << " but the message ends at " << msg.offset + msg.data_size;
+      fail(s.str());
+    }
+  }
+  for (const auto &msg : msgs) {
+    if (spans.find(msg.rank) == spans.end()) {
+      std::ostringstream s;
+      s << "message to/from rank " << msg.rank << " (" << msg.data_size
+        << " reals) has no payload in the neighbour table";
+      fail(s.str());
+    }
   }
 #endif
   if (nbad > 0) {

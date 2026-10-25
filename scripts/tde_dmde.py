@@ -105,7 +105,8 @@ def frame_state(par, time):
 def cells(fn, rcut=3.0, nscal=1):
     """per-cell E, E_B, dM, rho, P outside r_BH < rcut (rcut=0: all cells); also position
     (grid coordinates), Eulerian v^i, covariant u_i and the MeshBlock level above the root
-    (lev). Comoving-gauge restarts: r_BH is measured from x_BH(t) (returned as xbh), and E is
+    (lev), the ADM psi4 and alpha (slots 12, 13) and the coordinate cell volume dV.
+    Comoving-gauge restarts: r_BH is measured from x_BH(t) (returned as xbh), and E is
     the BH-frame Killing energy, -u_t = alpha W - (beta'^i - xidot^i) u_i, since the stored
     shift beta' carries xidot (the slicing is unchanged by the frame)."""
     t = header(fn)
@@ -128,6 +129,7 @@ def cells(fn, rcut=3.0, nscal=1):
     Es, EBs, dMs, rhos, Ps = [], [], [], [], []
     Xs, Ys, Zs, Vx, Vy, Vz = [], [], [], [], [], []
     Ls, Ux, Uy, Uz = [], [], [], []
+    Ps4, Als, dVs = [], [], []
     s = slice(ng, ng + nx)
     ic = (np.arange(nx) + 0.5)
     xbh, xdot = frame_state(t['par'], t['time'])
@@ -178,10 +180,12 @@ def cells(fn, rcut=3.0, nscal=1):
         Vz.append(sum(gi[2][j] * uj[j] for j in range(3)) / W)
         Ux.append(uj[0]); Uy.append(uj[1]); Uz.append(uj[2])
         Ls.append(np.full(len(uj[0]), lev[b] - root))
+        Ps4.append(adm[12][ok]); Als.append(alpha); dVs.append(np.full(len(alpha), dx.prod()))
     cat = np.concatenate
     return dict(t=t['time'], E=cat(Es), EB=cat(EBs), dM=cat(dMs), rho=cat(rhos), P=cat(Ps),
                 par=t['par'], x=cat(Xs), y=cat(Ys), z=cat(Zs), vx=cat(Vx), vy=cat(Vy),
-                vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls), xbh=xbh)
+                vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls), xbh=xbh,
+                psi4=cat(Ps4), alpha=cat(Als), dV=cat(dVs))
 
 
 def hist(E, dM, dE, edges):

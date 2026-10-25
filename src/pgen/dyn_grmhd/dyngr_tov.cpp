@@ -693,6 +693,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     const Real ts_h = pin->GetOrAddReal("problem", "amr_test_stream_h", 0.35);
     const Real ts_hl = 0.5*pin->GetOrAddReal("problem", "amr_test_stream_length", 8.0);
     const Real ts_vx = pin->GetOrAddReal("problem", "amr_test_stream_vx", 0.0);
+    // tde_debris rung 1 (R-140 item 9; research POST_DISRUPTION_PLAN.md 7.3): a homologously
+    // stretching filament. amr_test_stream_ts = t_s > 0 adds v^x = (x - x0)/t_s and, with
+    // amr_test_stream_q = q, the transverse v^y,z = -q (y, z)/t_s (ballistic in flat space:
+    // length ~ 1 + t/t_s, width ~ 1 - q t/t_s); amr_test_stream_x0 = x0 shifts the
+    // filament's centre. All three are read only here (absent: the U3/U4 stream above).
+    const bool ts_hom = pin->DoesParameterExist("problem", "amr_test_stream_ts") ||
+                        pin->DoesParameterExist("problem", "amr_test_stream_x0");
+    const Real ts_ts = ts_hom ? pin->GetOrAddReal("problem", "amr_test_stream_ts", 0.0) : 0.0;
+    const Real ts_q = ts_hom ? pin->GetOrAddReal("problem", "amr_test_stream_q", 0.0) : 0.0;
+    const Real ts_x0 = ts_hom ? pin->GetOrAddReal("problem", "amr_test_stream_x0", 0.0) : 0.0;
+    const Real ts_its = (ts_ts > 0.0) ? 1.0/ts_ts : 0.0;
     const Real ts_k = pin->GetReal("problem", "kappa");
     const Real ts_g = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
     const Real rho_v = pin->GetReal("mhd", "dfloor");
@@ -702,6 +713,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     auto &size = pmbp->pmb->mb_size;
     const int is = indcs.is, js = indcs.js, ks = indcs.ks;
     const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+    if (!ts_hom) {
     par_for("pgen_test_stream", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, n3-1, 0, n2-1,
             0, n1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
       const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
@@ -714,6 +726,24 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       w0s(m,IVX,k,j,i) = (rho > rho_v) ? ts_ux : 0.0;
       w0s(m,IVY,k,j,i) = 0.0; w0s(m,IVZ,k,j,i) = 0.0;
     });
+    } else {
+    par_for("pgen_test_stream_hom", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, n3-1, 0,
+            n2-1, 0, n1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      const Real dxe = fmax(fabs(x - ts_x0) - ts_hl, 0.0);
+      const Real rho = ts_rho0*exp(-(y*y + z*z + dxe*dxe)/(2.0*ts_h*ts_h));
+      const Real vx = ts_vx + (x - ts_x0)*ts_its, vy = -ts_q*y*ts_its, vz = -ts_q*z*ts_its;
+      const Real w = 1.0/sqrt(1.0 - (vx*vx + vy*vy + vz*vz));
+      const bool in = rho > rho_v;
+      w0s(m,IDN,k,j,i) = fmax(rho, rho_v);
+      w0s(m,IPR,k,j,i) = fmax(ts_k*pow(rho, ts_g), p_v);
+      w0s(m,IVX,k,j,i) = in ? w*vx : 0.0;
+      w0s(m,IVY,k,j,i) = in ? w*vy : 0.0;
+      w0s(m,IVZ,k,j,i) = in ? w*vz : 0.0;
+    });
+    }
   }
 
   // Convert primitives to conserved

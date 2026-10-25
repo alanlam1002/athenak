@@ -17,6 +17,14 @@
 //!                rho0, p0, v: B advected at V; div B must stay at round-off (CT).
 //!   homologous   isentropic slab with v1 = -(x1 - x1c)/tau, smoothly compressing (outflow
 //!                boundaries): the dual-energy shock flag must stay off (item 72).
+//!   colliding    (R-128) 1D colliding flows: uniform rho0, p0, Eulerian v1 = vl for
+//!                x1 < xshock and vr beyond (outflow boundaries), two shocks from the
+//!                contact; with frame_vel1 the contact moves on the grid at V = v - xidot,
+//!                so the shock's grid speed and the gas's Eulerian speed are set apart.
+//!   sound_wave   (R-128) a weak right-going simple wave on uniform Eulerian v1: rho =
+//!                rho0 (1 + amp sin(2 pi x1/L1)), P = p0 (rho/rho0)^gamma (isentropic), and
+//!                the rapidity atanh(v) = atanh(v1) + c_s0 amp sin(...) (the relativistic
+//!                Riemann invariant to first order in amp; periodic box).
 //! The pgen writes no error file: compare outputs offline (scripts/frame_shift_tests.py).
 
 #include <cmath>
@@ -68,6 +76,10 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     itype = 2;
   } else if (type == "homologous") {
     itype = 3;
+  } else if (type == "colliding") {
+    itype = 4;
+  } else if (type == "sound_wave") {
+    itype = 5;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "unknown <problem> type = " << type << std::endl;
@@ -89,6 +101,12 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
   const Real slab_n = pin->GetOrAddReal("problem", "slab_n", 1.5);
   const Real rho_atm = pin->GetOrAddReal("problem", "rho_atm", 1.0e-8);
   const Real gam = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
+  // colliding: the left/right Eulerian v1 and the initial interface
+  const Real vl = pin->GetOrAddReal("problem", "vl", 0.0);
+  const Real vr = pin->GetOrAddReal("problem", "vr", 0.0);
+  const Real xshock = pin->GetOrAddReal("problem", "xshock", 0.0);
+  // sound_wave: the unperturbed sound speed (h = 1 + gamma/(gamma-1) p0/rho0)
+  const Real cs0 = std::sqrt(gam*p0/(rho0 + gam/(gam - 1.0)*p0));
   const Real x1m = pmy_mesh_->mesh_size.x1min;
   const Real lx1 = pmy_mesh_->mesh_size.x1max - x1m;
   const Real x1c = 0.5*(pmy_mesh_->mesh_size.x1max + pmy_mesh_->mesh_size.x1min);
@@ -117,6 +135,17 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
       rho = rho_atm + rho0*pow(fmax(1.0 - xi*xi, 0.0), slab_n);
       p = p0*pow(rho/rho0, gam);
       u1 = v1 - (x1v - x1c)/tau;
+      lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
+    }
+    if (itype == 4) {
+      u1 = (x1v < xshock) ? vl : vr;
+      lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
+    }
+    if (itype == 5) {
+      Real ph = amp*sin(2.0*M_PI*(x1v - x1m)/lx1);
+      rho = rho0*(1.0 + ph);
+      p = p0*pow(rho/rho0, gam);
+      u1 = tanh(atanh(v1) + cs0*ph);
       lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
     }
     w0(m,IDN,k,j,i) = rho;

@@ -480,6 +480,20 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
   return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0);
 }
 
+//! the same variables as named groups (restart_state.hpp: the file's layout, so a later
+//! binary maps them by name)
+template<class EOSPolicy, class ErrorPolicy>
+std::string DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateLayout() {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nw = pmhd->w0.extent_int(1);
+  const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
+  std::string s = "dyngr.w0:" + std::to_string(nw);
+  if (nflag > 0) s += ",dyngr.flag:" + std::to_string(nflag);
+  s += ",dyngr.bcc0:3,dyngr.temp:1";
+  if (eos.de_persist > 1) s += ",dyngr.streak:1";
+  return s;
+}
+
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst,
                                                           int ns) {

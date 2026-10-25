@@ -3052,6 +3052,13 @@ int CFC::RestartStateVars() const {
            + pmgd_pietabeta->NumVars();
 }
 
+std::string CFC::RestartStateLayout() const {
+  return "cfc.dpsi:1,cfc.dap:1,cfc.mg_psi:" + std::to_string(pmgd_psi->NumVars())
+         + ",cfc.mg_alpha:" + std::to_string(pmgd_alpha->NumVars())
+         + ",cfc.mg_pietax:" + std::to_string(pmgd_pietax->NumVars())
+         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars());
+}
+
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
   const int nmb = pmy_pack->nmb_thispack, ng = pmy_pack->pmesh->mb_indcs.ng;
   auto mb = std::make_pair(0, nmb);

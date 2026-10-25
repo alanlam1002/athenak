@@ -640,6 +640,7 @@ class CFC {
   // MG solvers' finest-level solutions (warm starts); loading marks the one-shot seeding
   // (SolveConformalFactor/SolveLapse) done
   int RestartStateVars() const;
+  std::string RestartStateLayout() const;   // named groups (restart_state.hpp)
   void SaveRestartState(DvceArray5D<Real> &dst, int ns);
   void LoadRestartState(const DvceArray5D<Real> &src, int ns);
   void SaveRestartScalars(ParameterInput *pin) const;   // the seed flags

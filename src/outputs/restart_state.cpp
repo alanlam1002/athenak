@@ -9,6 +9,10 @@
 
 #include <cstdint>
 #include <iostream>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -24,8 +28,53 @@
 namespace restart_state {
 namespace {
 DvceArray5D<Real> staged;
-int staged_nvar = 0;
+int staged_nvar = 0, staged_version = 0;
+std::string staged_layout;
+
+// the groups present in format version 1: without them the state cannot be continued
+const char *const kCore[] = {"dyngr.w0", "dyngr.bcc0", "dyngr.temp", "cfc.dpsi", "cfc.dap",
+                             "cfc.mg_psi", "cfc.mg_alpha", "cfc.mg_pietax",
+                             "cfc.mg_pietabeta"};
+
+bool IsCore(const std::string &g) {
+  for (const char *c : kCore) if (g == c) return true;
+  return false;
+}
+
+// "name:n,name:n" -> {(name, n)}
+std::vector<std::pair<std::string, int>> Parse(const std::string &s) {
+  std::vector<std::pair<std::string, int>> v;
+  std::stringstream ss(s);
+  std::string tok;
+  while (std::getline(ss, tok, ',')) {
+    const auto c = tok.rfind(':');
+    if (tok.empty() || c == std::string::npos) continue;
+    v.emplace_back(tok.substr(0, c), std::stoi(tok.substr(c + 1)));
+  }
+  return v;
+}
+
+// the modules' loads from a block in this configuration's layout
+void Load(MeshBlockPack *pmbp, const DvceArray5D<Real> &src) {
+  int n = 0;
+  if (pmbp->pdyngr != nullptr) {
+    pmbp->pdyngr->LoadRestartState(src, n);
+    n += pmbp->pdyngr->RestartStateVars();
+  }
+  if (pmbp->pcfc != nullptr) pmbp->pcfc->LoadRestartState(src, n);
+  Kokkos::fence();
+}
 }  // namespace
+
+std::string Layout(MeshBlockPack *pmbp) {
+  std::string s;
+  if (pmbp->pdyngr != nullptr) s += pmbp->pdyngr->RestartStateLayout();
+  if (pmbp->pcfc != nullptr) {
+    const std::string c = pmbp->pcfc->RestartStateLayout();
+    s += (s.empty() || c.empty()) ? c : "," + c;
+  }
+  return s;
+}
 
 int NumVars(MeshBlockPack *pmbp) {
   int n = 0;
@@ -44,33 +93,87 @@ void Pack(MeshBlockPack *pmbp, DvceArray5D<Real> &dst) {
   Kokkos::fence();
 }
 
-void Stage(const DvceArray5D<Real> &src, int nvar) {
+void Stage(const DvceArray5D<Real> &src, int nvar, int version, const std::string &layout) {
   staged = src;
   staged_nvar = nvar;
+  staged_version = version;
+  staged_layout = layout;
 }
 
 bool ApplyStaged(MeshBlockPack *pmbp) {
   if (staged_nvar == 0) return false;
-  if (staged_nvar != NumVars(pmbp)) {
-    // a different physics configuration than the one that wrote the file: the state
-    // cannot be mapped, so fall back to the init C2P (not bitwise continuous)
-    if (global_variable::my_rank == 0) {
-      std::cout << "### WARNING restart_state: the restart carries " << staged_nvar
-                << " state variables, this configuration needs " << NumVars(pmbp)
-                << "; ignored (init C2P instead, not bitwise continuous)" << std::endl;
+  const int nvar = NumVars(pmbp);
+  const std::string cur = Layout(pmbp);
+  bool applied = false;
+  std::string why, zeroed, ignored;
+  if (staged_layout.empty() || staged_layout == cur) {
+    // version 0 (no layout: the same groups in the same order iff the count matches), or
+    // the same layout: the block loads as it is
+    applied = (staged_nvar == nvar);
+    if (applied) {
+      Load(pmbp, staged);
+    } else {
+      why = "the restart carries " + std::to_string(staged_nvar) + " state variables, this"
+            " configuration needs " + std::to_string(nvar);
     }
   } else {
-    int n = 0;
-    if (pmbp->pdyngr != nullptr) {
-      pmbp->pdyngr->LoadRestartState(staged, n);
-      n += pmbp->pdyngr->RestartStateVars();
+    // map the groups by name into a block in this configuration's layout
+    const auto fv = Parse(staged_layout), cv = Parse(cur);
+    std::vector<int> foff(fv.size(), 0);
+    int nf = 0;
+    for (size_t q = 0; q < fv.size(); ++q) { foff[q] = nf; nf += fv[q].second; }
+    applied = (nf == staged_nvar);
+    if (!applied) why = "the layout's count (" + std::to_string(nf) + ") is not nvar";
+    DvceArray5D<Real> map("rst-state-map", staged.extent_int(0), nvar, staged.extent_int(2),
+                          staged.extent_int(3), staged.extent_int(4));   // zero
+    auto all = Kokkos::ALL;
+    int nc = 0;
+    for (size_t g = 0; g < cv.size() && applied; ++g) {
+      size_t q = 0;
+      while (q < fv.size() && fv[q].first != cv[g].first) ++q;
+      if (q == fv.size()) {
+        if (IsCore(cv[g].first)) {
+          applied = false;
+          why = "the core group " + cv[g].first + " is missing";
+        } else {
+          zeroed += (zeroed.empty() ? "" : ",") + cv[g].first;
+        }
+      } else if (fv[q].second != cv[g].second) {
+        applied = false;
+        why = "the group " + cv[g].first + " has " + std::to_string(fv[q].second) +
+              " variables, this configuration needs " + std::to_string(cv[g].second);
+      } else {
+        Kokkos::deep_copy(
+            Kokkos::subview(map, all, std::make_pair(nc, nc + cv[g].second), all, all, all),
+            Kokkos::subview(staged, all, std::make_pair(foff[q], foff[q] + fv[q].second),
+                            all, all, all));
+      }
+      nc += cv[g].second;
     }
-    if (pmbp->pcfc != nullptr) pmbp->pcfc->LoadRestartState(staged, n);
-    Kokkos::fence();
+    for (const auto &f : fv) {
+      bool used = false;
+      for (const auto &c : cv) used = used || (c.first == f.first);
+      if (!used) ignored += (ignored.empty() ? "" : ",") + f.first;
+    }
+    if (applied) Load(pmbp, map);
   }
-  const bool applied = (staged_nvar == NumVars(pmbp));
+  if (global_variable::my_rank == 0) {
+    if (!applied) {
+      // a different physics configuration than the one that wrote the file: the state
+      // cannot be mapped, so fall back to the init C2P (not bitwise continuous)
+      std::cout << "### WARNING restart_state: " << why << "; ignored (init C2P instead, "
+                << "not bitwise continuous)" << std::endl;
+    } else if (!zeroed.empty() || !ignored.empty() || staged_version != kFormatVersion) {
+      std::cout << "restart_state: format version " << staged_version << " read by "
+                << kFormatVersion << "; zero-filled (feature off): "
+                << (zeroed.empty() ? "none" : zeroed) << "; ignored: "
+                << (ignored.empty() ? "none" : ignored) << std::endl;
+    }
+  }
   staged = DvceArray5D<Real>();
   staged_nvar = 0;
+  staged_version = 0;
+  staged_layout.clear();
   return applied;
 }
 

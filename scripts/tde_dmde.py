@@ -117,8 +117,9 @@ def cells(fn, rcut=3.0, nscal=1):
     ncc = no**3
     bsz = (no + 1) * no * no * 3
     exp = (nmhd * ncc + bsz + 17 * ncc) * 8
-    if exp != t['dsize']:
-        raise SystemExit(f'data_size {t["dsize"]} != expected {exp} (nscal={nscal}?)')
+    # base6+ restarts append <job> restart_state (nstate cell arrays) after u_adm (restart.cpp)
+    if t['dsize'] < exp or (t['dsize'] - exp) % (ncc * 8):
+        raise SystemExit(f'data_size {t["dsize"]} != expected {exp} + k x {ncc * 8} (nscal={nscal}?)')
     mm = np.memmap(fn, dtype=np.float64, mode='r', offset=t['data_off'],
                    shape=(nmb, t['dsize'] // 8))
     ll, lev = t['ll'], t['ll'][:, 3]
@@ -133,7 +134,7 @@ def cells(fn, rcut=3.0, nscal=1):
     for b in range(nmb):
         rec = mm[b]
         cons = rec[:nmhd * ncc].reshape(nmhd, no, no, no)[:, s, s, s]
-        adm = rec[nmhd * ncc + bsz:].reshape(17, no, no, no)[:, s, s, s]
+        adm = rec[nmhd * ncc + bsz:nmhd * ncc + bsz + 17 * ncc].reshape(17, no, no, no)[:, s, s, s]
         ext = w / 2.0**lev[b]
         dx = ext / nx
         x = lo[0] + ll[b, 0] * ext[0] + ic * dx[0]

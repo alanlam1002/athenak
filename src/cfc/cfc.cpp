@@ -485,6 +485,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
     FillPunctureBackground(pmbp, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
@@ -1245,6 +1246,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   }
 
@@ -2093,6 +2095,7 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 
     // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
@@ -2762,6 +2765,7 @@ void CFC::RefillMovingPuncture(Real t) {
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
   FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                          a0_dd, a0_sq, grad_ap6_0);
+  for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
   pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 }
 

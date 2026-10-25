@@ -203,6 +203,65 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   }
   pmclose = new mclose::MassClosure(pp, pin);
   if (!pmclose->on) { delete pmclose; pmclose = nullptr; }
+
+  // <dyn_grmhd> metric_terms (R-140 item 1; metric_faces.hpp). Default cell: nothing below.
+  std::string mt = pin->GetOrAddString("dyn_grmhd", "metric_terms", "cell");
+  if (mt == "cell") {
+    metric_terms = MetricTerms::cell;
+  } else if (mt == "analytic_bg") {
+    metric_terms = MetricTerms::analytic_bg;
+  } else if (mt == "wellbalanced") {
+    metric_terms = MetricTerms::wellbalanced;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<dyn_grmhd> metric_terms = '" << mt << "' (cell, analytic_bg or "
+              << "wellbalanced)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (metric_terms != MetricTerms::cell) {
+    face_residual_interp = pin->GetOrAddInteger("dyn_grmhd", "face_residual_interp", 4);
+    if (face_residual_interp != 2 && face_residual_interp != 4) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> face_residual_interp must be 2 or 4" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (!pin->GetOrAddBoolean("cfc", "puncture_enabled", false)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> metric_terms = " << mt << " needs the CFC trumpet "
+                << "background (<cfc> puncture_enabled = true)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    if (indcs.ng < 2) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> metric_terms needs nghost >= 2" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    int n1 = indcs.nx1 + 2*(indcs.ng);
+    int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(fm_res, nmb, 5, n3, n2, n1);
+    Kokkos::realloc(fm_x1, nmb, kFmN, n3, n2, n1 + 1);
+    if (n2 > 1) Kokkos::realloc(fm_x2, nmb, kFmN, n3, n2 + 1, n1);
+    if (n3 > 1) Kokkos::realloc(fm_x3, nmb, kFmN, n3 + 1, n2, n1);
+    // the table: w = sqrt(r_iso/M) in [0, 64] (r_iso <= 4096 M), h = 0.0025 (quintic
+    // Hermite; 2e-16 relative in rho and rho - 3/2, mpmath check in c122)
+    BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                      pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    fm_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "face_probe_cycles", 0);
+    const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                         "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+    for (int q = 0; q < 6; ++q) {
+      fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<dyn_grmhd> metric_terms = " << mt << ", face_residual_interp = "
+                << face_residual_interp << ", trumpet table n = " << ttab.n << std::endl;
+    }
+    const int nt = pin->GetOrAddInteger("dyn_grmhd", "metric_table_test", 0);
+    if (nt > 0) TrumpetTableTest(nt);
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -227,7 +286,19 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
 
   // Select which CalculateFlux function to add based on rsolver_method.
   // CalcFlux requires metric in flux - must happen before z4ctoadm updates the metric
-  if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
+  if (metric_terms != MetricTerms::cell) {   // the face metric (metric_faces.hpp)
+    if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
+      pnr->QueueTask(
+        &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::llf_dyngr, true>,
+        this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else if (rsolver_method == DynGRMHD_RSolver::hlle_dyngr) {
+      pnr->QueueTask(
+        &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>,
+        this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else {
+      abort();
+    }
+  } else if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
     pnr->QueueTask(
            &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::llf_dyngr>,
            this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
@@ -592,6 +663,17 @@ template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &prim,
     const DvceArray5D<Real> &bcc,
     const Real dt, DvceArray5D<Real> &rhs, int nghost) {
+  if (metric_terms != MetricTerms::cell) {   // dyn_grmhd_metric.cpp
+    switch (nghost) {
+      case 2: AddCoordTermsFM<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddCoordTermsFM<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddCoordTermsFM<4>(prim, bcc, dt, rhs);
+              break;
+    }
+    return;
+  }
   switch (nghost) {
     case 2: AddCoordTermsEOS<2>(prim, bcc, dt, rhs);
             break;

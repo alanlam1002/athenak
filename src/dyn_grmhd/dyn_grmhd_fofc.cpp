@@ -33,8 +33,11 @@ namespace dyngr {
 //! also exploited for BH excision.  If a cell is about the horizon, FOFC is automatically
 //! triggered (without estimating updated conserved variables).
 
-template<class EOSPolicy, class ErrorPolicy> template <DynGRMHD_RSolver rsolver_method_>
+template<class EOSPolicy, class ErrorPolicy>
+template <DynGRMHD_RSolver rsolver_method_, bool FM>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
+  // <dyn_grmhd> metric_terms != cell: the face metric CalcFluxes built this stage
+  auto fmx1_ = fm_x1, fmx2_ = fm_x2, fmx3_ = fm_x3;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int is = indcs.is, ie = indcs.ie;
   int js = indcs.js, je = indcs.je;
@@ -269,7 +272,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         bli[IBX] = bri[IBX] = b0_.x1f(m, k, j, i);
 
         // Compute the metric terms at i-1/2
-        adm::Face1Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha, g3d, beta_u, alpha);
+        if constexpr (FM) {
+          FaceMetricFromArrays<IVX>(fmx1_, m, k, j, i, g3d, beta_u, alpha);
+        } else {
+          adm::Face1Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha, g3d, beta_u, alpha);
+        }
 
         // compute new 1st-order LLF flux at i-face
         if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -321,8 +328,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           blj[IBY] = brj[IBY] = b0_.x2f(m, k, j, i);
 
           // Compute the metric terms at j-1/2
-          adm::Face2Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha,
+          if constexpr (FM) {
+            FaceMetricFromArrays<IVY>(fmx2_, m, k, j, i, g3d, beta_u, alpha);
+          } else {
+            adm::Face2Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha,
                             g3d, beta_u, alpha);
+          }
 
           // Compute new 1st-order LLF flux at j-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -375,8 +386,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           bmk[IBZ] = bpk[IBZ] = b0_.x3f(m, k, j, i);
 
           // Compute the metric terms at k-1/2
-          adm::Face3Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha,
+          if constexpr (FM) {
+            FaceMetricFromArrays<IVZ>(fmx3_, m, k, j, i, g3d, beta_u, alpha);
+          } else {
+            adm::Face3Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha,
                             g3d, beta_u, alpha);
+          }
 
           // Compute new 1st-order LLF flux at k-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -456,8 +471,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
         bli[IBX] = bri[IBX] = b0_.x1f(m, k, j, i+1);
 
         // Compute the metric terms at i+1/2
-        adm::Face1Metric(m, k, j, i+1, adm.g_dd, adm.beta_u, adm.alpha,
+        if constexpr (FM) {
+          FaceMetricFromArrays<IVX>(fmx1_, m, k, j, i+1, g3d, beta_u, alpha);
+        } else {
+          adm::Face1Metric(m, k, j, i+1, adm.g_dd, adm.beta_u, adm.alpha,
                           g3d, beta_u, alpha);
+        }
 
         // compute new 1st-order LLF flux at (i+1)-face
         if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -506,8 +525,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           blj[IBY] = brj[IBY] = b0_.x2f(m, k, j+1, i);
 
           // Compute the metric terms at j+1/2
-          adm::Face2Metric(m, k, j+1, i, adm.g_dd, adm.beta_u, adm.alpha,
+          if constexpr (FM) {
+            FaceMetricFromArrays<IVY>(fmx2_, m, k, j+1, i, g3d, beta_u, alpha);
+          } else {
+            adm::Face2Metric(m, k, j+1, i, adm.g_dd, adm.beta_u, adm.alpha,
                            g3d, beta_u, alpha);
+          }
 
           // Compute new 1st-order LLF flux at j-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -557,8 +580,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           bmk[IBZ] = bpk[IBZ] = b0_.x3f(m, k+1, j, i);
 
           // Compute the metric terms at k+1/2
-          adm::Face3Metric(m, k+1, j, i, adm.g_dd, adm.beta_u, adm.alpha,
+          if constexpr (FM) {
+            FaceMetricFromArrays<IVZ>(fmx3_, m, k+1, j, i, g3d, beta_u, alpha);
+          } else {
+            adm::Face3Metric(m, k+1, j, i, adm.g_dd, adm.beta_u, adm.alpha,
                            g3d, beta_u, alpha);
+          }
 
           // Compute new 1st-order LLF flux at k-face
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
@@ -842,7 +869,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
   FOFC<DynGRMHD_RSolver::llf_dyngr>(Driver *pdriver, int stage);\
 template \
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
-  FOFC<DynGRMHD_RSolver::hlle_dyngr>(Driver *pdriver, int stage);
+  FOFC<DynGRMHD_RSolver::hlle_dyngr>(Driver *pdriver, int stage);\
+template \
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+  FOFC<DynGRMHD_RSolver::llf_dyngr, true>(Driver *pdriver, int stage);\
+template \
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+  FOFC<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);
 
 INSTANTIATE_FOFC(Primitive::IdealGas, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::PiecewisePolytrope, Primitive::ResetFloor)

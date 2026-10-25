@@ -35,9 +35,13 @@ namespace dyngr {
 //! \brief Calls reconstruction and Riemann solver functions to compute hydro fluxes
 //! Note this function is templated over RS for better performance on GPUs.
 
-template<class EOSPolicy, class ErrorPolicy> template <DynGRMHD_RSolver rsolver_method_>
+template<class EOSPolicy, class ErrorPolicy>
+template <DynGRMHD_RSolver rsolver_method_, bool FM>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int stage) {
   eos.MetricProbe(1, stage);   // R-072 item 1 (debug; off unless the probe is set)
+  // <dyn_grmhd> metric_terms != cell: this stage's face metric (metric_faces.hpp)
+  if constexpr (FM) { if (!fixed_evolution) ComputeFaceMetric(stage); }
+  auto fmx1_ = fm_x1, fmx2_ = fm_x2, fmx3_ = fm_x3;
   RegionIndcs indcs_ = pmy_pack->pmesh->mb_indcs;
   int is = indcs_.is, ie = indcs_.ie;
   int js = indcs_.js, je = indcs_.je;
@@ -162,13 +166,25 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     auto &adm_ = adm;
     //int il = is; int iu = ie+1;
     if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
-      LLF_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
+      if constexpr (FM) {
+        LLF_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
+                wl, wr, bl, br, bx, nhyd_, nscal_, adm_,
+                flx1, e31, e21, fmx1_);
+      } else {
+        LLF_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
                 wl, wr, bl, br, bx, nhyd_, nscal_, adm_,
                 flx1, e31, e21);
+      }
     } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
-      HLLE_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
+      if constexpr (FM) {
+        HLLE_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
+                wl, wr, bl, br, bx, nhyd_, nscal_, adm_,
+                flx1, e31, e21, fmx1_);
+      } else {
+        HLLE_DYNGR<IVX>(member, dyn_eos, indcs, size, coord, m, k, j, il, iu,
                 wl, wr, bl, br, bx, nhyd_, nscal_, adm_,
                 flx1, e31, e21);
+      }
     }
     member.team_barrier();
 
@@ -283,11 +299,21 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         //int il = is; int iu = ie;
         if (j>(jl)) {
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
-            LLF_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+            if constexpr (FM) {
+              LLF_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+                      wl, wr, bl, br, by, nhyd_, nscal_, adm_, flx2, e12, e32, fmx2_);
+            } else {
+              LLF_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, by, nhyd_, nscal_, adm_, flx2, e12, e32);
+            }
           } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
-            HLLE_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+            if constexpr (FM) {
+              HLLE_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+                      wl, wr, bl, br, by, nhyd_, nscal_, adm_, flx2, e12, e32, fmx2_);
+            } else {
+              HLLE_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, by, nhyd_, nscal_, adm_, flx2, e12, e32);
+            }
           }
         }
         member.team_barrier();
@@ -399,11 +425,21 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
         //int il = is; int iu = ie;
         if (k>(kl)) {
           if constexpr (rsolver_method_ == DynGRMHD_RSolver::llf_dyngr) {
-            LLF_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+            if constexpr (FM) {
+              LLF_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+                      wl, wr, bl, br, bz, nhyd_, nscal_, adm_, flx3, e23, e13, fmx3_);
+            } else {
+              LLF_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, bz, nhyd_, nscal_, adm_, flx3, e23, e13);
+            }
           } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr) {
-            HLLE_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+            if constexpr (FM) {
+              HLLE_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
+                      wl, wr, bl, br, bz, nhyd_, nscal_, adm_, flx3, e23, e13, fmx3_);
+            } else {
+              HLLE_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, bz, nhyd_, nscal_, adm_, flx3, e23, e13);
+            }
           }
         }
         member.team_barrier();
@@ -436,7 +472,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
 
   // Call FOFC if necessary
   if (pmy_pack->pmhd->use_fofc || pmy_pack->pcoord->coord_data.bh_excise) {
-    FOFC<rsolver_method_>(pdriver, stage);
+    FOFC<rsolver_method_, FM>(pdriver, stage);
   }
 
   return TaskStatus::complete;
@@ -450,7 +486,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
             CalcFluxes<DynGRMHD_RSolver::llf_dyngr>(Driver *pdriver, int stage); \
 template \
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
-            CalcFluxes<DynGRMHD_RSolver::hlle_dyngr>(Driver *pdriver, int stage);
+            CalcFluxes<DynGRMHD_RSolver::hlle_dyngr>(Driver *pdriver, int stage); \
+template \
+TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+            CalcFluxes<DynGRMHD_RSolver::llf_dyngr, true>(Driver *pdriver, int stage); \
+template \
+TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+            CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);
 
 INSTANTIATE_CALC_FLUXES(Primitive::IdealGas, Primitive::ResetFloor)
 INSTANTIATE_CALC_FLUXES(Primitive::PiecewisePolytrope, Primitive::ResetFloor)

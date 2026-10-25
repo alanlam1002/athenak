@@ -99,6 +99,9 @@ class CFC {
   // for -- see cfc.cpp's constructor for both.
   bool puncture_enabled_;
   Real puncture_mass_;
+  // x_BH of the last FillPunctureBackground (u_psi0/u_alpha0_psi0/beta0_u are centred on
+  // it): <dyn_grmhd> metric_terms evaluates the face background about the same point
+  Real bg_xbh_[3] = {0.0, 0.0, 0.0};
   // <cfc> alpha_floor (default 0.0): lower clamp on adm.alpha (AssembleLapseShiftK)
   // so the fluid update never sees a negative lapse. See DEVELOPMENT.md item 59.
   Real alpha_floor_;

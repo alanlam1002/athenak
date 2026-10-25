@@ -24,7 +24,12 @@ Per 3D dump (prim_3d every 12 M plus prim_3d_peri), as c117_check3d.py:
    V = 0 rows: ex0.0 / co0.1 / co0.3 / co0.5 interpolated at the cell's |v|_E (Eulerian speed); V = 0.1: ex0.1;
    V = 0.3, 0.5: du0.3, du0.5. The table has no point between V = 0 and 0.1, where nearly all of CD's shocks sit,
    so two brackets are also reported: 'lo' (f = f(V=0) for V < 0.1) and 'hi' (f = f(V=0.1) for 0 < V < 0.1).
-    c118_error_budget.py OUT.csv LABEL=RUNDIR [...] [--tp 135.9] [--nproc 8]
+ - --supp CSV (D3, c124): the measured supplement rows at V = 0.003, 0.01, 0.03 (lo, on, n512; c113_metrics.py
+   format) become extra V nodes. 'sup': V nodes 0 (f0(vE), as above), 0.003, 0.01, 0.03 from the dual rows
+   (v_E = 0, beta = -V: pure grid speed), then 0.1 (ex0.1), 0.3, 0.5 as before; 'supex': the same with the
+   0.003-0.03 nodes from the ex rows (v_E = V, beta = 0); 'supdu': 'sup' with the 0.1 node from du0.1 instead of
+   ex0.1. Columns e_sup_mean, e_sup_absmean, e_sup_p90abs, e_supex_mean, e_supdu_mean, e_sup_Mhi_mean.
+    c118_error_budget.py OUT.csv LABEL=RUNDIR [...] [--tp 135.9] [--nproc 8] [--supp c124_results.csv]
 """
 import argparse
 import csv
@@ -57,6 +62,19 @@ def table():
 
 
 F0, FV = table()
+VSUP = (0.003, 0.01, 0.03)
+SUP = {}                                                          # mode -> [M][V node] for V = 0.003 .. 0.5
+
+
+def load_supp(path):
+    f = {}
+    for r in csv.DictReader(open(path)):
+        if r['kind'] == 'shock' and r['fam'] == 'lo' and r['var'] == 'on' and r['res'] == 'n512':
+            f[(float(r['M']), r['cfg'], round(float(r['V']), 6))] = float(r['f_RH'])
+    for md, cfg, n01 in (('sup', 'du', None), ('supex', 'ex', None), ('supdu', 'du', 'du')):
+        SUP[md] = np.array([[f[(m, cfg, v)] for v in VSUP]
+                            + [f[(m, 'du', 0.1)] if n01 else FV[i, 0], FV[i, 1], FV[i, 2]]
+                            for i, m in enumerate(MS)])
 
 
 def f_of(M, V, vE, mode):
@@ -66,6 +84,10 @@ def f_of(M, V, vE, mode):
     f0 = np.array([np.interp(vE[i], VE, a0[:, i]) for i in range(len(M))]) if len(M) else np.zeros(0)
     fV = np.vstack([f0, av])                                      # V = 0, 0.1, 0.3, 0.5
     Vc = np.clip(V, 0, VS[-1])
+    if mode in SUP:
+        fS = np.vstack([f0, w(SUP[mode])])                        # V = 0, 0.003, 0.01, 0.03, 0.1, 0.3, 0.5
+        vs = (0.0,) + VSUP + VS[1:]
+        return np.array([np.interp(Vc[i], vs, fS[:, i]) for i in range(len(M))])
     if mode == 'lin':
         return np.array([np.interp(Vc[i], VS, fV[:, i]) for i in range(len(M))])
     lin = np.array([np.interp(Vc[i], VS, fV[:, i]) for i in range(len(M))])
@@ -245,7 +267,10 @@ def main():
     ap.add_argument('runs', nargs='+')
     ap.add_argument('--tp', type=float, default=135.9)
     ap.add_argument('--nproc', type=int, default=8)
+    ap.add_argument('--supp', default=None)
     a = ap.parse_args()
+    if a.supp:
+        load_supp(a.supp)
     PH = [('pre', -1, a.tp - 10), ('peri', a.tp - 10, a.tp + 10), ('early', a.tp + 10, a.tp + 50),
           ('late', a.tp + 50, 1e9)]
     jobs = []
@@ -268,7 +293,8 @@ def main():
     np.savez_compressed(a.out.replace('.csv', '.npz'),
                         **{f'{r[0]}_{r[1]:.2f}_{k}': v for r in RR for k, v in r[2].items()})
     hdr = ('label,phase,ndumps,band,flag_mass_frac,Vn_p50,Vn_p90,dVn_metric,M_p10,M_p50,M_p90,'
-           'e_lin_mean,e_lin_absmean,e_lin_p90abs,e_lo_mean,e_hi_mean,e_Mhi_mean,e_Mhi_hi_mean,e_M2fixed_mean,e_M3fixed_mean')
+           'e_lin_mean,e_lin_absmean,e_lin_p90abs,e_lo_mean,e_hi_mean,e_Mhi_mean,e_Mhi_hi_mean,e_M2fixed_mean,e_M3fixed_mean'
+           + (',e_sup_mean,e_sup_absmean,e_sup_p90abs,e_supex_mean,e_supdu_mean,e_sup_Mhi_mean' if SUP else ''))
     rows = [hdr]
     for lab in dict.fromkeys(r[0] for r in RR):
         for ph, t0, t1 in PH:
@@ -283,7 +309,7 @@ def main():
                 bname = 'all' if bi == len(BANDS) else f'{lo:g}-{hi:g}'
                 dm = dmass.sum() if bi == len(BANDS) else dmass[bi]
                 if w.sum() == 0:
-                    rows.append(f'{lab},{ph},{len(S)},{bname},0' + ',nan' * 15)
+                    rows.append(f'{lab},{ph},{len(S)},{bname},0' + ',nan' * (21 if SUP else 15))
                     continue
                 kj = krh(np.maximum(M, 1.0))
                 e = {md: (f_of(M, Vn, vE, md) - 1) * kj for md in ('lin', 'lo', 'hi')}
@@ -301,6 +327,12 @@ def main():
                          f'{100 * mw(e["lo"]):.3f}', f'{100 * mw(e["hi"]):.3f}',
                          f'{100 * mw(eh):.3f}', f'{100 * mw(ehh):.3f}',
                          f'{100 * mw(e2):.3f}', f'{100 * mw(e3):.3f}']
+                if SUP:
+                    es = {md: (f_of(M, Vn, vE, md) - 1) * kj for md in SUP}
+                    esh = (f_of(Mh, Vn, vE, 'sup') - 1) * kh
+                    line += [f'{100 * mw(es["sup"]):.3f}', f'{100 * mw(np.abs(es["sup"])):.3f}',
+                             f'{100 * wq(np.abs(es["sup"]), w, (0.9,))[0]:.3f}', f'{100 * mw(es["supex"]):.3f}',
+                             f'{100 * mw(es["supdu"]):.3f}', f'{100 * mw(esh):.3f}']
                 rows.append(','.join(line))
     open(a.out, 'w').write('\n'.join(rows) + '\n')
     print('\n'.join(rows))

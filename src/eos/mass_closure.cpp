@@ -223,10 +223,12 @@ void MassClosure::YStage(int stage, const DvceArray4D<Real> &cls,
       q = (exdyn && !(adm.alpha(m, k, j, i) < exlap)) ? yRf : yExc;
     } else if (c < 2.5) {
       q = (dm < 0.0) ? yZoneRem : yZoneAdd;
+    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {
+      // cold recovery before the floor class: ColdRecoveryTry needs prim_floor, so every
+      // recovered cell is also class 3 (primitive_solver_hyd.hpp ColdRecoveryTry)
+      q = yCrec;
     } else if (c < 3.5) {
       q = yFloor;
-    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {
-      q = yCrec;
     } else {
       const Real dbr = dd(m, 0, k, j, i);
       if (dbr > 3.5 && dbr < 4.5) {
@@ -352,10 +354,10 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
       acc.v[kExc0 + ir].Add(dm);
     } else if (c < 2.5) {
       acc.v[(dm < 0.0) ? kZoneRem : kZoneAdd].Add(dm);
+    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {   // before class 3 (as YCLOSE)
+      acc.v[kCrec].Add(dm);
     } else if (c < 3.5) {
       acc.v[kFloor].Add(dm);
-    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {
-      acc.v[kCrec].Add(dm);
     } else {
       acc.v[kOther].Add(dm);
     }

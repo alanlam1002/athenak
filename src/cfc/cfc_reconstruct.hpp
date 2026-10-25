@@ -124,6 +124,25 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
                           const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
                           Real alpha_floor, const Real frame_vel_u[3]);
 
+//----------------------------------------------------------------------------------------
+//! \brief <cfc> residual_scale (R-140 item 6): AssembleConformalMetric/AssembleLapseShiftK
+//! with the solved residual scaled by f (psi = psi0 + f*delta_psi, alpha*psi =
+//! (alpha*psi)0 + f*delta_alpha_psi, beta = beta0 + f*b, Ahat = Ahat0 + f*(Ahat - Ahat0)).
+//! Separate kernels so the unscaled ones are untouched; called only when f != 1.
+void AssembleConformalMetricScaled(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                                   const DvceArray5D<Real> &u_psi0, bool with_ghosts,
+                                   Real f);
+void AssembleLapseShiftKScaled(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                               const DvceArray5D<Real> &delta_alpha_psi,
+                               const DvceArray5D<Real> &u_psi0,
+                               const DvceArray5D<Real> &u_alpha0_psi0,
+                               const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                               const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+                               const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
+                               const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
+                               Real alpha_floor, const Real frame_vel_u[3], Real f);
+
 }  // namespace cfc
+
 
 #endif  // CFC_CFC_RECONSTRUCT_HPP_

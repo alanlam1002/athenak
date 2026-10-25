@@ -64,10 +64,10 @@ def michel_profile(rc, rhoc, r):
         if f(tmin) >= 0.0:      # at the sonic point the two roots merge
             T = tmin
         else:
-            T = brentq(f, 1e-12, tmin, xtol=1e-16) if Ri <= rc else brentq(f, tmin, 10.0, xtol=1e-16)
+            T = brentq(f, 1e-12, tmin, xtol=1e-30, rtol=1e-15, maxiter=1000) if Ri <= rc else brentq(f, tmin, 10.0, xtol=1e-30, rtol=1e-15, maxiter=1000)
         uR = -c1/(T**N*Ri**2)
         al = np.sqrt(1 - 2*M/Ri + CC**2/Ri**4); bR = al*CC/Ri**2
-        q = brentq(lambda q: q - np.sqrt(1 + q*q/al**2)*bR/al - uR, uR - 10, uR + 10, xtol=1e-16)
+        q = brentq(lambda q: q - np.sqrt(1 + q*q/al**2)*bR/al - uR, uR - 10, uR + 10, xtol=1e-30, rtol=1e-15, maxiter=1000)
         W = np.sqrt(1 + q*q/al**2)
         rho[i] = (T/k)**N
         ur[i] = W*(q/W)*r[i]/(Ri*al)
@@ -102,7 +102,7 @@ def main():
         t0, X, Y, Z, D0 = cells(fs[0])
         r = np.sqrt(X*X + Y*Y + Z*Z)
         # the exact profile on a radial grid, interpolated in log r
-        rg = np.geomspace(max(r.min(), 0.2), r.max(), 1500)
+        rg = np.geomspace(max(r.min(), 1.0), r.max(), 1500)   # r_iso >= 1 (R > 2.3 M): outside the excised throat
         Rg = areal(rg)
         alg = np.sqrt(np.maximum(1 - 2*M/Rg + CC**2/Rg**4, 0))
         if test == 'michel':
@@ -111,7 +111,7 @@ def main():
             rhoE = np.exp(CubicSpline(np.log(rg), np.log(rho_e))(np.log(r)))
             urE = CubicSpline(np.log(rg), ur_e)(np.log(r))
         alc = np.interp(np.log(r), np.log(rg), alg)
-        ev = (alc > exl) & (r < rout - 1.0)
+        ev = (alc > exl) & (r < rout - 1.0) & (r >= 1.0)
         for f in fs:
             t, X, Y, Z, Dd = cells(f)
             rho = Dd['dens']

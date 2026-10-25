@@ -160,6 +160,23 @@ class PrimitiveSolverHydro {
   // accumulators and computes the same mean; restarts carry them (u0's non-evolved slots); a
   // regrid zeroes them for new blocks. Needs dual_energy_flag_exchange.
   bool de_mean = false;
+  // <mhd> dual_energy_mean_resync_tol (R-127 Q1 (d'), test option; default < 0 = off): with
+  // dual_energy_mean_resync, accumulate only the post-jump samples K_en > K_onset (1 + tol),
+  // K_onset = the tracer's K at the first flagged call, kept in a third slot (de_iflag + 3).
+  Real de_mean_tol = -1.0;
+  // <mhd> dual_energy_passage_guard (R-127 Q1 (b), test option, default false): the
+  // second-law guard is off for a cell in a shock passage. The owner (UpdateShockFlags)
+  // writes the flag slot as 0 (unflagged), 1 (flagged) or 2 (flagged, in a passage): a
+  // flagged cell enters a passage when psi_v >= 2 x its vcurv threshold, or when its
+  // pre-dilation sensor flag (2) and that of a face neighbour along its kink axis (the
+  // axis of the largest velocity second difference) are both set; it stays in the passage
+  // while flagged (the latch reads its own previous slot) and leaves on release. The C2P
+  // of every copy (owner and ghosts) reads the exchanged slot. Needs the vcurv sensor and
+  // dual_energy_flag_exchange.
+  bool de_passage = false;
+  DvceArray4D<Real> de_pratio;     // psi_v/(vcurv threshold), from ComputeShockFlags
+  DvceArray4D<int> de_kax;         // the kink axis (argmax_a of the second difference)
+  DvceArray4D<int> de_pre;         // the sensor flag before isolation/dilation (0/1/2)
   Real de_kmax = 1.0, de_rho_sw = 0.0, de_dp_shock = 0.3, de_eta1 = 0.0, de_gamma = 5./3.;
   Real de_ypow = 1.0;              // Y = (K/kmax)^de_ypow
   // shock sensor (item 72; default vcurv + one hysteresis dilation pass): 0 = jump
@@ -1541,8 +1558,16 @@ class PrimitiveSolverHydro {
       de_xchg = pin->GetOrAddBoolean(block, "dual_energy_flag_exchange", true);  // R-078
       de_persist = pin->GetOrAddInteger(block, "dual_energy_shock_persist", 1);
       de_mean = pin->GetOrAddBoolean(block, "dual_energy_mean_resync", false);
+      de_mean_tol = pin->GetOrAddReal(block, "dual_energy_mean_resync_tol", -1.0);
+      de_passage = pin->GetOrAddBoolean(block, "dual_energy_passage_guard", false);
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
+      if (de_passage && (!de_xchg || de_sensor != 2)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy_passage_guard needs "
+                  << "dual_energy_flag_exchange and the vcurv sensor" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
@@ -1785,6 +1810,16 @@ class PrimitiveSolverHydro {
         Kokkos::realloc(de_cls, prim.extent_int(0), e3, e2, e1);
       }
       auto &cls_ = de_cls;
+      const bool pas_ = de_passage;
+      if (pas_ && (de_pratio.extent_int(0) != prim.extent_int(0) ||
+                   de_pratio.extent_int(1) != e3 || de_pratio.extent_int(2) != e2 ||
+                   de_pratio.extent_int(3) != e1)) {
+        Kokkos::realloc(de_pratio, prim.extent_int(0), e3, e2, e1);
+        Kokkos::realloc(de_kax, prim.extent_int(0), e3, e2, e1);
+        Kokkos::realloc(de_pre, prim.extent_int(0), e3, e2, e1);
+      }
+      auto &prat_ = de_pratio;
+      auto &kax_ = de_kax;
       par_for("de_shock_flag", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         auto vel = [&](int a, int kk, int jj, int ii) {
@@ -1804,6 +1839,7 @@ class PrimitiveSolverHydro {
         };
         Real p0 = prim(m, IPR, k, j, i);
         Real divv = 0.0, dpmax = 0.0, psip = 0.0, psiv = 0.0;
+        int kax = 0;
         for (int a = 0; a < 3; ++a) {
           int ip = i, im = i, jp = j, jm = j, kp = k, km = k;
           Real dx;
@@ -1823,8 +1859,9 @@ class PrimitiveSolverHydro {
           // turn them into one-sided first differences)
           if ((ip - im) + (jp - jm) + (kp - km) == 2) {
             psip = fmax(psip, fabs(pp - 2.0*p0 + pm)/fmax(pp + 2.0*p0 + pm, 1.0e-300));
-            psiv = fmax(psiv, fabs(vel(a, kp, jp, ip) - 2.0*vel(a, k, j, i)
-                                   + vel(a, km, jm, im)));
+            Real d2v = fabs(vel(a, kp, jp, ip) - 2.0*vel(a, k, j, i) + vel(a, km, jm, im));
+            if (d2v > psiv) kax = a;
+            psiv = fmax(psiv, d2v);
           }
         }
         // <= so a discontinuity between states at rest (t = 0 of a Riemann problem)
@@ -1842,6 +1879,10 @@ class PrimitiveSolverHydro {
           Real cs0 = sqrt(fmax(gam_*p0/(fmax(rho0, 1.0e-300)*h0), 1.0e-300));
           sh = (psiv > vcsh*cs0) || (psip > psijp);
           weak = (psiv > wk*vcsh*cs0) || (psip > wk*psijp);
+          if (pas_) {
+            prat_(m, k, j, i) = psiv/(vcsh*cs0);
+            kax_(m, k, j, i) = kax;
+          }
         }
         shk(m, k, j, i) = (divv <= 0.0) ? (sh ? 2 : (weak ? 1 : 0)) : 0;
         if (cnt_) cls_(m, k, j, i) = ((divv <= 0.0) ? 1 : 0) | (sh ? 2 : 0) | (weak ? 4 : 0);
@@ -1868,6 +1909,7 @@ class PrimitiveSolverHydro {
         }
         Kokkos::deep_copy(DevExeSpace(), de_probe0, de_shock);
       }
+      if (pas_) Kokkos::deep_copy(DevExeSpace(), de_pre, de_shock);
       // optional isolation filter (de_isolated): demote a flagged cell (2) with no flagged
       // face neighbour to a weak candidate (1), so the dilation cannot re-flag it either
       if (de_isolated) {
@@ -1942,8 +1984,9 @@ class PrimitiveSolverHydro {
   //! the interior.
   void SetFlagSlot() {
     de_iflag = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars;
-    if (pmy_pack->pmhd->nflag < (de_mean ? 3 : 1) ||
-        pmy_pack->pmhd->u0.extent_int(1) <= de_iflag + (de_mean ? 2 : 0)) {
+    const int nsl = de_mean ? ((de_mean_tol >= 0.0) ? 4 : 3) : 1;
+    if (pmy_pack->pmhd->nflag < nsl ||
+        pmy_pack->pmhd->u0.extent_int(1) < de_iflag + nsl) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "dual_energy_flag_exchange needs the u0 flag slot (<mhd> "
                 << "dual_energy_flag_exchange = true allocates it)" << std::endl;
@@ -1964,10 +2007,31 @@ class PrimitiveSolverHydro {
     auto &shk = de_shock;
     const int iflag = de_iflag;
     const int nmb = pmy_pack->nmb_thispack;
-    par_for("de_flag_store", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
-    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      u0(m, iflag, k, j, i) = static_cast<Real>(shk(m, k, j, i));
-    });
+    if (!de_passage) {
+      par_for("de_flag_store", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        u0(m, iflag, k, j, i) = static_cast<Real>(shk(m, k, j, i));
+      });
+    } else {
+      // dual_energy_passage_guard: 2 = flagged and in a shock passage (see de_passage);
+      // the latch reads this cell's own previous slot (the owner's, interior cells only)
+      auto &prat_ = de_pratio;
+      auto &kax_ = de_kax;
+      auto &pre_ = de_pre;
+      par_for("de_flag_store_passage", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        Real f = 0.0;
+        if (shk(m, k, j, i) != 0) {
+          const int a = kax_(m, k, j, i);
+          const int di = (a == 0) ? 1 : 0, dj = (a == 1) ? 1 : 0, dk = (a == 2) ? 1 : 0;
+          const bool nb = pre_(m, k, j, i) == 2 &&
+                          (pre_(m, k-dk, j-dj, i-di) == 2 || pre_(m, k+dk, j+dj, i+di) == 2);
+          const bool coh = (prat_(m, k, j, i) >= 2.0) || nb;
+          f = (coh || u0(m, iflag, k, j, i) > 1.5) ? 2.0 : 1.0;
+        }
+        u0(m, iflag, k, j, i) = f;
+      });
+    }
   }
 
   //! <mhd> dual_energy_shock_counters (R-112 item 1): count this stage's interior cells by the
@@ -2113,13 +2177,18 @@ class PrimitiveSolverHydro {
     // dual_energy_mean_resync: the accumulator slots, right after the flag slot
     const bool dmr_ = de_on_ && de_mean && de_xchg;
     const int iks_ = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars + 1;
-    if (dmr_ && (pmy_pack->pmhd->nflag < 3 || cons.extent_int(1) < iks_ + 2)) {
+    const Real dmt_ = de_mean_tol;          // (d') post-jump-only mean when >= 0
+    const int nks_ = (dmt_ >= 0.0) ? 3 : 2;
+    if (dmr_ && (pmy_pack->pmhd->nflag < nks_ + 1 || cons.extent_int(1) < iks_ + nks_)) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "dual_energy_mean_resync needs the two accumulator slots (and "
                 << "dual_energy_flag_exchange)" << std::endl;
       std::exit(EXIT_FAILURE);
     }
     const Real de_2tol_ = de_second_law_tol;
+    // dual_energy_passage_guard: the owner's exchanged slot, 2 = in a shock passage
+    const bool dpg_ = de_on_ && de_passage && de_xchg;
+    const int ipf_ = pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
     const int pcyc_ = pmy_pack->pmesh->ncycle;
@@ -2545,20 +2614,30 @@ class PrimitiveSolverHydro {
           if (dmr_) {
             // accumulate K_en while flagged; on release, resync the tracer to the mean
             Real ksum = cons(m, iks_, k, j, i), kcnt = cons(m, iks_ + 1, k, j, i);
+            Real kon = (dmt_ >= 0.0) ? cons(m, iks_ + 2, k, j, i) : 0.0;
             if (dense && bzero && de_shock_(m,k,j,i) != 0) {
-              if (!bad) {
-                ksum += prim_pt[PPR]/pow(prim_pt[PRH]*mb, de_gamma_);
-                kcnt += 1.0;
+              // (d'): K_onset = the tracer's K at the first flagged call
+              if (dmt_ >= 0.0 && kon <= 0.0) {
+                kon = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
               }
-            } else if (kcnt > 0.5) {
-              if (dense && bzero) {
+              if (!bad) {
+                Real ken = prim_pt[PPR]/pow(prim_pt[PRH]*mb, de_gamma_);
+                if (dmt_ < 0.0 || ken > kon*(1.0 + dmt_)) {
+                  ksum += ken;
+                  kcnt += 1.0;
+                }
+              }
+            } else if (kcnt > 0.5 || kon > 0.0) {
+              if (dense && bzero && kcnt > 0.5) {
                 cons_pt_old[CYD + de_idx_] = D*DualEnergyY(ksum/kcnt, de_kmax_, de_ypow_);
               }
               ksum = 0.0;
               kcnt = 0.0;
+              kon = 0.0;
             }
             cons(m, iks_, k, j, i) = ksum;
             cons(m, iks_ + 1, k, j, i) = kcnt;
+            if (dmt_ >= 0.0) cons(m, iks_ + 2, k, j, i) = kon;
           }
           bool use_ent = dense && bzero && (de_shock_(m,k,j,i) == 0 || bad);
           int dbr = !dense ? 0 : (use_ent ? (bad ? 3 : 1) : 4);
@@ -2573,7 +2652,8 @@ class PrimitiveSolverHydro {
             Real eps = prim_pt[PPR]/((de_gamma_ - 1.0)*prim_pt[PRH]*mb);
             if (eps > de_eta1_*cons_pt_old[CTA]/D) use_ent = false;
           }
-          if (!use_ent && de_2law_ && dense && bzero && !bad) {
+          const bool passage = dpg_ && cons(m, ipf_, k, j, i) > 1.5;
+          if (!use_ent && de_2law_ && !passage && dense && bzero && !bad) {
             // second-law guard: the energy solution may raise K (a shock), never lower it
             Real rho_e = prim_pt[PRH]*mb;
             Real k_en = prim_pt[PPR]/pow(rho_e, de_gamma_);

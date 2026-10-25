@@ -150,6 +150,10 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
   nflag = pin->GetOrAddBoolean("mhd", "dual_energy_flag_exchange", de_default) ? 1 : 0;
   // <mhd> dual_energy_mean_resync (R-126 3(d)): two more non-evolved slots, the K_en accumulators
   if (nflag > 0 && pin->GetOrAddBoolean("mhd", "dual_energy_mean_resync", false)) nflag = 3;
+  // ... and (R-127 (d')) dual_energy_mean_resync_tol >= 0: a third, K at the flag's onset
+  if (nflag == 3 && pin->GetOrAddReal("mhd", "dual_energy_mean_resync_tol", -1.0) >= 0.0) {
+    nflag = 4;
+  }
   {
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     int ncells1 = indcs.nx1 + 2*(indcs.ng);

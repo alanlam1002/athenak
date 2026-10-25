@@ -103,10 +103,10 @@ def log_series(d):
     return np.array(T), np.array(DT), np.array(W), np.array(rg), np.array(mb).reshape(-1, 2)
 
 
-def geodesic(d, tmax):
+def geodesic(d, tmax, rp=10.0):
     import tde_parabolic_orbit_ic as P
     x0 = par_get(d, 'star_center_x1') - par_get(d, 'puncture_x1')
-    s = P.solve_ic(x0, 10.0)
+    s = P.solve_ic(x0, rp)
     o = P.integrate(x0, s['px'], s['py'], tmax, 0.05)
     return o[:, 0], np.hypot(o[:, 1], o[:, 2])
 
@@ -135,6 +135,9 @@ def main():
     ap.add_argument('runs', nargs='+')
     ap.add_argument('--ref', action='append', default=[])
     ap.add_argument('--nproc', type=int, default=8)
+    ap.add_argument('--tp', type=float, default=135.9)    # design periapsis (rp18: 132.0)
+    ap.add_argument('--rp', type=float, default=10.0)    # design periapsis R_areal of the geodesic
+    ap.add_argument('--name', default='rp10')             # output prefix and title (rp18)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     R = {}
@@ -165,30 +168,30 @@ def main():
             ax7b.set_ylabel('wall s per M (dotted)')
     if a.runs:
         d0 = R[a.runs[0].split('=')[0]][0]
-        tg, rg = geodesic(d0, tmax)
-        ax[1].plot(tg, rg, 'k:', lw=1, label='geodesic (r_p = 10)')
+        tg, rg = geodesic(d0, tmax, a.rp)
+        ax[1].plot(tg, rg, 'k:', lw=1, label=f'geodesic (r_p = {a.rp:g})')
     labels = [(r'$\rho_{max}/\rho_c$', 'log'), ('star–BH separation [M]', 'linear'),
               (r'$M_{bound}/M_*$ (thick); grid mass $/M_*$ (thin)', 'linear'),
               ('scal-0 / scal-0(0) − 1 (entropy tracer)', 'linear'), (r'$K/K_0$ at $\rho_{max}$ (z = 0)', 'linear'),
               ('tot-E / tot-E(0) − 1', 'linear'), (r'$\alpha_{min}$', 'linear'), ('dt [M] (solid)', 'linear')]
     for k, (yl, sc) in enumerate(labels):
         ax[k].set_ylabel(yl); ax[k].set_yscale(sc); ax[k].set_xlabel('t [M]'); ax[k].grid(alpha=0.3)
-        ax[k].axvline(135.9, color='0.6', lw=0.6, ls='--')
+        ax[k].axvline(a.tp, color='0.6', lw=0.6, ls='--')
     for lab, (d, s, ref) in R.items():
         if not ref and len(s['rg']):
             ax[7].plot(s['rg'], np.full(len(s['rg']), ax[7].get_ylim()[0]), '|', color=COL.get(lab, '0.5'), ms=6)
     ax[0].legend(fontsize=9); ax[1].legend(fontsize=8)
-    fig.suptitle('2x2 rp10 (L4, base8, GPU IPC off): ' + ', '.join(
+    fig.suptitle(f'2x2 {a.name} (L4, base8, GPU IPC off): ' + ', '.join(
         f'{k} to t = {np.nanmax(v[1]["t_u"]):.0f}' for k, v in R.items() if not v[2]) +
-        '; dashed = reference; grey line = design periapsis t = 135.9; ticks on (h) = regrids')
+        f'; dashed = reference; grey line = design periapsis t = {a.tp}; ticks on (h) = regrids')
     fig.tight_layout()
-    png = f'{a.out}/c110_rp10_series.png'
+    png = f'{a.out}/c110_{a.name}_series.png'
     fig.savefig(png, dpi=80)
     rows = ['label,t,rhomax_over_rhoc,sep,K_over_K0']
     for lab, (d, s, ref) in R.items():
         for t, sp, kc in zip(s['t_dump'], s['sep'], s['Kc']):
             rows.append(f'{lab},{t:.3f},{np.interp(t, s["t_u"], s["rhomax"]) / RHOC:.6g},{sp:.4f},{kc:.5g}')
-    open(f'{a.out}/c110_rp10_series.csv', 'w').write('\n'.join(rows) + '\n')
+    open(f'{a.out}/c110_{a.name}_series.csv', 'w').write('\n'.join(rows) + '\n')
     print(png, os.path.getsize(png))
 
 

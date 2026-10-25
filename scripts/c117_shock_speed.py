@@ -10,7 +10,7 @@ dilation pass at 0.5 x threshold) -- an approximation. Dense = D = rho W psi6 > 
 Phase bins (rp10, t_p = 135.9): pre < t_p - 10, peri t_p +- 10, early to t_p + 50, late to 300.
 Per arm x phase: weighted quantiles of |V.n|_coord, |v|_phys, KE/e_int over flagged dense cells, the
 flagged mass by density band, and the mass-weighted |V.n| per band.
-    c117_shock_speed.py OUT.csv LABEL=RUNDIR [...] [--nproc 16] [--every 1]
+    c117_shock_speed.py OUT.csv LABEL=RUNDIR [...] [--nproc 16] [--every 1] [--tp 135.9]
 """
 import argparse
 import glob
@@ -26,7 +26,13 @@ from tde_ensemble_plots import bc                 # noqa: E402
 B = 'cfc_tde_wd_imbh_parabolic_tracker'
 RHOC, GAM, RSW, VCSH = 3.24e-4, 5.0 / 3.0, 3.2e-8, 0.05
 TP = 135.9
-PH = [('pre', -1, TP - 10), ('peri', TP - 10, TP + 10), ('early', TP + 10, TP + 50), ('late', TP + 50, 300.01)]
+
+
+def phases(tp):
+    return [('pre', -1, tp - 10), ('peri', tp - 10, tp + 10), ('early', tp + 10, tp + 50), ('late', tp + 50, 300.01)]
+
+
+PH = phases(TP)
 BANDS = [(1e-1, 1e9), (1e-2, 1e-1), (1e-3, 1e-2), (0, 1e-3)]   # rho/rho_c
 
 
@@ -106,7 +112,9 @@ def main():
     ap.add_argument('runs', nargs='+')
     ap.add_argument('--nproc', type=int, default=16)
     ap.add_argument('--every', type=int, default=1)
+    ap.add_argument('--tp', type=float, default=TP)        # periapsis time (rp18: 132.0)
     a = ap.parse_args()
+    PH = phases(a.tp)
     jobs = []
     for spec in a.runs:
         lab, d = spec.split('=', 1)

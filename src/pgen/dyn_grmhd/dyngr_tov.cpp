@@ -563,14 +563,15 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 //                  v^i = beta^i/alpha): h alpha_K = const, alpha_K = sqrt(1 - 2M/R), with
 //                  rho -> test_hs_rhoinf at infinity.
 // Cells with r_iso >= test_hold_rout (both) or R <= test_hold_Rin (hydrostatic) are HELD:
-// the user source (TestFlowHold) resets their conserved state to the initial one every
-// stage. Inside R < test_R_floor (default 2.05 M) the floor at rest is used. Fresh starts
+// the user source (TestFlowHold) resets their conserved state every stage to the initial
+// primitives' conserved state in the evolved (background) metric. Inside R < test_R_floor (default 2.05 M) the floor at rest is used. Fresh starts
 // only (no restart, static refinement: the held state is not regridded).
 namespace {
 struct TestFlowState {
-  DvceArray5D<Real> hold;   // the initial conserved state
+  DvceArray5D<Real> hold;   // the initial primitives, then (first TestFlowHold) the conserved
   DvceArray4D<Real> mask;   // 1: held
   int nvar = 0;
+  bool cons_ready = false;
 };
 TestFlowState *ptf = nullptr;
 
@@ -611,9 +612,38 @@ void TestFlowHold(Mesh *pm, const Real bdt) {
   if (ptf == nullptr) return;
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &u0 = pmbp->pmhd->u0;
+  auto &w0 = pmbp->pmhd->w0;
   auto &h = ptf->hold;
   auto &mk = ptf->mask;
   const int nv = ptf->nvar;
+  if (!ptf->cons_ready) {
+    // The held conserved state in the metric the run evolves in (the background, fixed from
+    // the CFC initialization on): not the pgen's PrimToConInit, which densitizes with the
+    // pgen's initial ADM metric (C-113). Done once; u0 and w0 are restored.
+    DvceArray5D<Real> us("tf_usave", u0.extent(0), u0.extent(1), u0.extent(2), u0.extent(3),
+                         u0.extent(4));
+    DvceArray5D<Real> ws("tf_wsave", w0.extent(0), w0.extent(1), w0.extent(2), w0.extent(3),
+                         w0.extent(4));
+    Kokkos::deep_copy(us, u0); Kokkos::deep_copy(ws, w0);
+    par_for("test_flow_w", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, u0.extent_int(2)-1,
+            0, u0.extent_int(3)-1, 0, u0.extent_int(4)-1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mk(m,k,j,i) > 0.0) {
+        for (int n = 0; n < nv; ++n) w0(m,n,k,j,i) = h(m,n,k,j,i);
+      }
+    });
+    pmbp->pdyngr->PrimToConInit(0, u0.extent_int(4)-1, 0, u0.extent_int(3)-1, 0,
+                                u0.extent_int(2)-1);
+    par_for("test_flow_u", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, u0.extent_int(2)-1,
+            0, u0.extent_int(3)-1, 0, u0.extent_int(4)-1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mk(m,k,j,i) > 0.0) {
+        for (int n = 0; n < nv; ++n) h(m,n,k,j,i) = u0(m,n,k,j,i);
+      }
+    });
+    Kokkos::deep_copy(u0, us); Kokkos::deep_copy(w0, ws);
+    ptf->cons_ready = true;
+  }
   par_for("test_flow_hold", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, u0.extent_int(2)-1,
           0, u0.extent_int(3)-1, 0, u0.extent_int(4)-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -899,13 +929,13 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // Convert primitives to conserved
   pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
-  if (ptf != nullptr) {   // the held state: the initial conserved variables
-    auto &u0 = pmbp->pmhd->u0;
+  if (ptf != nullptr) {   // the held state: the initial primitives (converted at first use)
+    auto &w0 = pmbp->pmhd->w0;
     auto &h = ptf->hold;
     const int nv = ptf->nvar;
     par_for("test_flow_store", DevExeSpace(), 0, pmbp->nmb_thispack-1, 0, n3-1, 0, n2-1,
             0, n1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
-      for (int v = 0; v < nv; ++v) h(m,v,k,j,i) = u0(m,v,k,j,i);
+      for (int v = 0; v < nv; ++v) h(m,v,k,j,i) = w0(m,v,k,j,i);
     });
   }
 

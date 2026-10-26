@@ -662,7 +662,13 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     }
     DvceArray5D<Real> st_d("rst-state-in-d", nmb, nstate, nout3, nout2, nout1);
     Kokkos::deep_copy(st_d, ccin);
-    restart_state::Stage(st_d, nstate);   // applied in Driver::Initialize
+    // the format version and the group layout (absent: version 0, before R-140 item 4)
+    const int rver = pin->DoesParameterExist("job", "restart_format_version") ?
+                     pin->GetInteger("job", "restart_format_version") : 0;
+    const std::string rlay = pin->DoesParameterExist("job", "restart_state_layout") ?
+                             pin->GetString("job", "restart_state_layout") : std::string();
+    restart_state::Stage(st_d, nstate, rver, (rlay == "none") ? std::string() : rlay);
+    // applied in Driver::Initialize
     offset_myrank += nout1*nout2*nout3*nstate*sizeof(Real);
     myoffset = offset_myrank;
   }

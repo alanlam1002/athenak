@@ -22,6 +22,24 @@
 //! (C-100): the tier-3 state and the CFC seed flags (parameter copy), and defined MG
 //! coarse-boundary buffers (MultigridBoundaryValues::FillCoarseMG zeroes coarse_buf_). The
 //! MG levels below the finest need not be saved (c100_rst13b: bitwise without them).
+//!
+//! Forward compatibility (R-140 item 4, D6): every restart written by this binary carries
+//! <job> restart_format_version (kFormatVersion; absent = 0, i.e. base8 and earlier) and
+//! <job> restart_state_layout, the block's named groups in file order ("dyngr.w0:7,
+//! dyngr.bcc0:3,...,cfc.mg_psi:1,..."). A reader maps the groups it needs by name:
+//!   - a version-0 file (no layout) loads as before: the block must match this
+//!     configuration's count exactly (it then has the same groups in the same order);
+//!   - a group present in the file with the needed count is copied;
+//!   - a group absent from the file is zero-filled if it is not a core group (kCore below):
+//!     **the rule for new state** is that zero (or, for parameter-copy scalars, the
+//!     GetOrAdd default) is the feature-off state, so a new binary continues an old
+//!     restart bitwise with the new features off. A missing core group, or a count
+//!     mismatch, falls back to the init C2P (not bitwise; a warning says so);
+//!   - groups in the file that this configuration does not use are ignored (reported).
+//! Bump kFormatVersion when a change cannot be expressed as a new group or a new defaulted
+//! scalar (e.g. the fixed header's binary layout); the standing test is
+//! scripts/rst_compat_test.sh (a base8 checkpoint continued by the base8 and the new
+//! binary, features off: hst and dumps must match bitwise).
 
 #include "athena.hpp"
 
@@ -30,12 +48,16 @@ class MeshBlockPack;
 class ParameterInput;
 
 namespace restart_state {
+constexpr int kFormatVersion = 1;
+// the group layout this pack's state needs ("name:n,...", Pack's order)
+std::string Layout(MeshBlockPack *pmbp);
 // number of variables this pack's state needs
 int NumVars(MeshBlockPack *pmbp);
 // pack into dst(m, n, k, j, i), n < NumVars (dst sized by the caller)
 void Pack(MeshBlockPack *pmbp, DvceArray5D<Real> &dst);
-// the reader (pgen.cpp) stages the block here; Driver::Initialize applies it
-void Stage(const DvceArray5D<Real> &src, int nvar);
+// the reader (pgen.cpp) stages the block here, with the file's format version and layout
+// ("" for version 0); Driver::Initialize applies it
+void Stage(const DvceArray5D<Real> &src, int nvar, int version, const std::string &layout);
 // true if a staged block was applied (the caller then skips the init C2P)
 bool ApplyStaged(MeshBlockPack *pmbp);
 // <job> seed_tau_eps (default 0 = off), seed_id (R-115 Q3, user-approved): once, at a

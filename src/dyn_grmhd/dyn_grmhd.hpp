@@ -114,6 +114,8 @@ class DynGRMHD {
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
   // restart_state (outputs/restart_state.hpp): per-cell state beyond u0, ghosts included
   virtual int RestartStateVars() { return 0; }
+  // restart_state's group layout, "name:n,..." in SaveRestartState's order (R-140 item 4)
+  virtual std::string RestartStateLayout() { return ""; }
   virtual void SaveRestartState(DvceArray5D<Real> &dst, int ns) {}
   virtual void LoadRestartState(const DvceArray5D<Real> &src, int ns) {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
@@ -227,6 +229,7 @@ class DynGRMHDPS : public DynGRMHD {
   }
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   int RestartStateVars() override;
+  std::string RestartStateLayout() override;
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
   void SaveRestartScalars(ParameterInput *pin) override {

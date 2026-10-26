@@ -248,6 +248,10 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     nstate = restart_state::NumVars(pm->pmb_pack);
   }
   pin->SetInteger("job", "restart_state_nvar", nstate);
+  // forward compatibility (restart_state.hpp): the format version and the block's groups
+  pin->SetInteger("job", "restart_format_version", restart_state::kFormatVersion);
+  pin->SetString("job", "restart_state_layout",
+                 (nstate > 0) ? restart_state::Layout(pm->pmb_pack) : std::string("none"));
   HostArray5D<Real> outarray_state("rst-state-out", 1, 1, 1, 1, 1);
   if (nstate > 0) {
     // the per-cycle scalars the next cycle reads (tier 3), alongside the arrays

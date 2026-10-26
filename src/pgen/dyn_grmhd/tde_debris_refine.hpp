@@ -53,6 +53,8 @@ struct TDEDebrisParams {
   bool dryrun;
   int diag_ncycle;
   Real gamma;                 // ideal-gas Gamma for the Jeans length
+  int block_budget = 0;       // amr_block_budget (0: off): no refinement once the mesh has this
+                              // many MeshBlocks (TDE_DEBRIS_SPEC §5 candidate 4)
 };
 TDEDebrisParams tde_deb;
 
@@ -206,6 +208,7 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
   std::vector<Real> d_crit(kDebNCrit*(nl + 1), 0.0), d_lev(nl, 0.0), d_proj(nl, 0.0);
   Real d_flag[3] = {0.0, 0.0, 0.0};   // -1, 0, +1
   Real n_nan = 0.0;
+  Real n_budget = 0.0;   // refinements suppressed by amr_block_budget (this rank)
 
   for (int m = 0; m < nmb; ++m) {
     const LogicalLocation &ll = pmesh->lloc_eachmb[m + mbs];
@@ -252,6 +255,11 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
     } else {
       flag = 0;
     }
+    // amr_block_budget: at or above the budget no block is refined (de-refinement continues)
+    if (flag == 1 && p.block_budget > 0 && pmesh->nmb_total >= p.block_budget) {
+      flag = 0;
+      n_budget += 1.0;
+    }
     if (apply) refine_flag.h_view(m + mbs) = flag;
 
     d_flag[flag + 1] += 1.0;
@@ -289,6 +297,7 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
     MPI_Allreduce(MPI_IN_PLACE, d_proj.data(), nl, MPI_ATHENA_REAL, MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, d_flag, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &n_budget, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank == 0) {
       static const char *cn[kDebNCrit] = {"core", "ladder", "width", "jeans", "bh", "none"};
@@ -307,6 +316,10 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
         for (int l = 0; l <= nl; ++l) {
           os << static_cast<long>(d_crit[c*(nl + 1) + l]) << (l < nl ? "," : "]");
         }
+      }
+      if (p.block_budget > 0) {
+        os << " | budget " << p.block_budget << ": " << pmesh->nmb_total << " blocks, "
+           << static_cast<long>(n_budget) << " refinements suppressed";
       }
       std::cout << os.str() << std::endl;
     }

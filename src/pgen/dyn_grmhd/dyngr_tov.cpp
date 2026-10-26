@@ -614,6 +614,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tde_deb.deref_factor  = pin->GetOrAddReal("problem", "amr_deref_factor", 0.5);
     tde_deb.min_residence = pin->GetOrAddInteger("problem", "amr_min_residence", 10);
     tde_deb.dryrun        = pin->GetOrAddBoolean("problem", "amr_dryrun", false);
+    tde_deb.block_budget  = pin->GetOrAddInteger("problem", "amr_block_budget", 0);
     tde_deb.diag_ncycle   = pin->GetOrAddInteger("problem", "amr_diag_ncycle", 50);
     tde_deb.gamma         = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
     if (!(tde_deb.ladder_factor > 1.0) || !(tde_deb.deref_factor > 0.0) ||

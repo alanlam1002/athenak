@@ -551,6 +551,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
     frame_enabled_ = true;
   }
+  // <cfc> tidal_lapse (tde_debris rung 2): the star in its own freely falling frame, the tide
+  // through the lapse only (cfc_tidal.hpp). Needs a flat background (puncture off), the
+  // grid at rest (no frame velocity) and a metric assembled every stage (E_ij(t) changes).
+  tidal_.Setup(pin);
+  if (tidal_.on && (puncture_enabled_ || frame_enabled_ || cfc_solve_interval_ > 0)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<cfc> tidal_lapse needs puncture_enabled = false, no "
+              << "frame_vel/frame_accel/frame_controller, and solve_interval <= 0" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   if (frame_enabled_ && puncture_enabled_ && !puncture_moving_) {
     // Phase 1 has no moving BH: the trumpet background, excision masks, BH refinement
     // and ADM falloff all stay at the grid origin, so xidot != 0 would describe a
@@ -2770,10 +2780,41 @@ void CFC::AssembleADM(Real time) {
   if (frame_enabled_) { FrameVel(time, xd); }
   cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
                            a_dd, beta_u, beta0_u, alpha_floor_, xd);
+  if (tidal_.on) { ApplyTidalLapse(time); }
   // ADMBCs reads this as beta_u's asymptotic value (adm_bcs.cpp).
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
   frame_assembled_ = true;
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::ApplyTidalLapse(Real time)
+//! \brief <cfc> tidal_lapse: adm.alpha *= max(1 + 1/2 E_ij(time) x^i x^j, tidal_fmin) on the
+//! interior cells AssembleLapseShiftK just wrote (x relative to tidal_center). Ghosts get it
+//! through the u_adm exchange that follows every AssembleADM (CFC_RestADM .. CFC_BCSADM, and
+//! RunLapseShiftAssemblePass's own tail), so a ghost carries its owner's value bitwise.
+
+void CFC::ApplyTidalLapse(Real time) {
+  Real e[6];
+  tidal_.Eval(time, e);
+  const Real exx = e[0], exy = e[1], exz = e[2], eyy = e[3], eyz = e[4], ezz = e[5];
+  const Real cx = tidal_.cx, cy = tidal_.cy, cz = tidal_.cz, fmin = tidal_.fmin;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &adm = pmy_pack->padm->adm;
+  par_for("cfc_tidal_lapse", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, ks, ke, js, je,
+          is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - cx;
+    const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - cy;
+    const Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - cz;
+    const Real f = 1.0 + 0.5*(exx*x*x + eyy*y*y + ezz*z*z
+                              + 2.0*(exy*x*y + exz*x*z + eyz*y*z));
+    adm.alpha(m,k,j,i) *= (f < fmin) ? fmin : f;
+  });
 }
 
 //----------------------------------------------------------------------------------------

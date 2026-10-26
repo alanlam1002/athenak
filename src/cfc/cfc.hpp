@@ -31,6 +31,7 @@
 #include "mg_cfc_vector_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
+#include "cfc_tidal.hpp"
 #include <vector>
 
 class MeshBlockPack;
@@ -102,6 +103,10 @@ class CFC {
   // <cfc> alpha_floor (default 0.0): lower clamp on adm.alpha (AssembleLapseShiftK)
   // so the fluid update never sees a negative lapse. See DEVELOPMENT.md item 59.
   Real alpha_floor_;
+  // <cfc> tidal_lapse (tde_debris rung 2; cfc_tidal.hpp): alpha *= max(1 + 1/2 E_ij x^i x^j,
+  // tidal_fmin) after AssembleLapseShiftK, E_ij(t) from the host table. Default off.
+  TidalLapse tidal_;
+  void ApplyTidalLapse(Real time);
 
   // Running totals of what excision has removed from the grid over the whole run.
   // accreted_mass_ is ADM-weighted (int psi^5 E dV) and is what Step 3 hands to

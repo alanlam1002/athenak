@@ -14,6 +14,7 @@
 #include "tasklist/task_list.hpp"
 #include "driver/driver.hpp"
 #include "eos/primitive_solver_hyd.hpp"
+#include "dyn_grmhd/metric_faces.hpp"
 
 enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr};   // Riemann solvers for dynamical GR
 enum class DynGRMHD_EOS {eos_ideal, eos_piecewise_poly,
@@ -141,6 +142,19 @@ class DynGRMHD {
   // the old, maximally conservative max_dv=1 behavior.
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage) = 0;
 
+  // <dyn_grmhd> metric_terms / face_residual_interp (R-140 item 1; metric_faces.hpp).
+  // Default cell: none of the members below is allocated or used.
+  MetricTerms metric_terms = MetricTerms::cell;
+  int face_residual_interp = 4;     // 4: (-1, 9, 9, -1)/16 of the residual; 2: the average
+  TrumpetTable ttab;
+  DvceArray5D<Real> fm_res;         // the residual (delta psi, delta(alpha psi), beta_res)
+  DvceArray5D<Real> fm_x1, fm_x2, fm_x3;   // the face metric per direction (kFm*)
+  int fm_probe_cycles = 0, fm_probe_c0 = -1;   // <dyn_grmhd> face_probe_* (ghost/owner)
+  Real fm_probe_box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  void ComputeFaceMetric(int stage);   // once per stage, at the start of CalcFluxes
+  void FaceMetricProbe(int stage);
+  void TrumpetTableTest(int npts);     // <dyn_grmhd> metric_table_test (host and device)
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;
@@ -204,11 +218,12 @@ class DynGRMHDPS : public DynGRMHD {
   // Dynamical EOS
   PrimitiveSolverHydro<EOSPolicy, ErrorPolicy> eos;
 
-  // CalculateFluxes function templated over Riemann Solvers
-  template<DynGRMHD_RSolver T>
+  // CalculateFluxes function templated over Riemann Solvers; FM: the face metric of
+  // <dyn_grmhd> metric_terms != cell (FM = false is the present scheme)
+  template<DynGRMHD_RSolver T, bool FM = false>
   TaskStatus CalcFluxes(Driver *d, int stage);
 
-  template<DynGRMHD_RSolver T>
+  template<DynGRMHD_RSolver T, bool FM = false>
   void FOFC(Driver *d, int stage);
 
   // functions
@@ -254,6 +269,10 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                         const Real dt, DvceArray5D<Real> &u0);
+  // metric_terms = analytic_bg | wellbalanced (dyn_grmhd_metric.cpp)
+  template<int NGHOST>
+  void AddCoordTermsFM(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                       const Real dt, DvceArray5D<Real> &u0);
 };
 
 // Factory function for generating DynGRMHD based on parameter input.

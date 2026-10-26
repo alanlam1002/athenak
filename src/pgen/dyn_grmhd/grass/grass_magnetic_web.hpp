@@ -79,11 +79,19 @@ Real WebWindowU(Real rho, Real rho_lo, Real rho_hi) {
   return 2.0*Kokkos::log(rho/rho_lo)/Kokkos::log(rho_hi/rho_lo) - 1.0;
 }
 
+//  type 0 (web_envelope = bump, spec §2.1): the C^inf bump exp(1 - 1/(1-u^2)).
+//  type 1 (web_envelope = poly3): (1-u^2)^3, C^2 at the edges (B ~ h' and the current
+//  J ~ h'' continuous). Its tail is much broader than the bump's: on star P the bump
+//  falls 0.1 -> 0.01 in 0.08 km at the outer edge, below one 130 m cell (C-025 (a)).
 KOKKOS_INLINE_FUNCTION
-Real WebEnvelope(Real rho, Real rho_lo, Real rho_hi) {
+Real WebEnvelope(Real rho, Real rho_lo, Real rho_hi, int type = 0) {
   if (rho <= 0.0 || rho_hi <= rho_lo) { return 0.0; }
   Real u = WebWindowU(rho, rho_lo, rho_hi);
   if (Kokkos::abs(u) >= 1.0) { return 0.0; }
+  if (type == 1) {
+    Real w = 1.0 - u*u;
+    return w*w*w;
+  }
   return Kokkos::exp(1.0 - 1.0/(1.0 - u*u));
 }
 

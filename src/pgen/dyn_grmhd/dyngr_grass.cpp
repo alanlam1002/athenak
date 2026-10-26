@@ -48,6 +48,7 @@
 #include <limits>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -120,6 +121,10 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
 // Startup report on the installed field that needs the conserved variables (defined
 // below; called from UserProblem after PrimToConInit).
 void GrassMagneticReport(ParameterInput *pin, Mesh *pm);
+
+// Web-run diagnostics (<basename>.webdiag.txt and azimuthal maps), called from
+// GrassHistory; configured in UserProblem (defined below).
+void GrassWebDiagnostics(Mesh *pm);
 
 // Gauss -> AthenaK code-unit conversion factor, honoring <mhd> units (same key/
 // options as PrimitiveSolverHydro::SetPolicyParams). B^2/2 is the code's energy
@@ -381,6 +386,19 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   //                              radial component Bbar_varpi = dipole_bvarpi_rms_gauss
   // Both rms forms use the physical field and the proper volume sqrt(gamma) d^3x.
   bool dipole_confine = pin->GetOrAddInteger("problem", "dipole_confine", 0) != 0;
+  // envelope shape (web_envelope = bump|poly3, see grass::WebEnvelope) and the tor/pol
+  // definition (web_tor_pol_def = cylindrical|chandrasekhar, see the quadratic solve)
+  const std::string env_name = pin->GetOrAddString("problem", "web_envelope", "bump");
+  const int env_type = (env_name == "poly3") ? 1 : 0;
+  const std::string tor_pol_def = pin->GetOrAddString("problem", "web_tor_pol_def",
+                                                      "cylindrical");
+  if ((env_name != "bump" && env_name != "poly3") ||
+      (tor_pol_def != "cylindrical" && tor_pol_def != "chandrasekhar")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "web_envelope must be bump|poly3 and web_tor_pol_def "
+              << "cylindrical|chandrasekhar" << std::endl;
+    exit(EXIT_FAILURE);
+  }
   std::string web_norm = "bmax", dipole_norm = "bmax";
   if (web_enable) { web_norm = pin->GetOrAddString("problem", "web_norm", "bmax"); }
   if (dipole_enable) { dipole_norm = pin->GetOrAddString("problem", "dipole_norm", "bmax"); }
@@ -478,7 +496,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       for (int s = 1; s <= 20000; ++s) {
         Real r = s*(rmax/20000.0);
         Real rho_here = data.InterpolateRho(r*ex, 0.0, r*ez, eos_table);
-        Real hh = grass::WebEnvelope(rho_here, rho_lo, rho_hi);
+        Real hh = grass::WebEnvelope(rho_here, rho_lo, rho_hi, env_type);
         if (hh > hbest) { hbest = hh; sw.r_hpeak = r; }
         if (rho_here < rho_hi) {
           if (sw.r_inner < 0.0) { sw.r_inner = r; }
@@ -767,7 +785,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                                      admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i),
                                      bx(m,k,j,i), by(m,k,j,i), bz(m,k,j,i), x1v, x2v);
       rbm = fmax(rbm, sqrt(pb.bsq));
-      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi) >= 0.5) {
+      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi, env_type) >= 0.5) {
         Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
         rs2 += pb.bsq*dV;
         rsv += dV;
@@ -813,7 +831,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       Kokkos::atomic_add(&sums(iw,iz,1), pb.bvarpi*dV);
       Kokkos::atomic_add(&sums(iw,iz,2), pb.bphi*dV);
       Kokkos::atomic_add(&sums(iw,iz,3), pb.bz*dV);
-      Kokkos::atomic_add(&sums(iw,iz,4), grass::WebEnvelope(rho, rho_lo, rho_hi)*dV);
+      Kokkos::atomic_add(&sums(iw,iz,4), grass::WebEnvelope(rho, rho_lo, rho_hi, env_type)*dV);
       Kokkos::atomic_add(&sums(iw,iz,5), rho*dV);
     });
     *out = Kokkos::create_mirror_view(sums);
@@ -845,7 +863,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       int j = (idx - m*nkji - k*nji)/nx1;
       int i = (idx - m*nkji - k*nji - j*nx1) + is;
       k += ks; j += js;
-      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi) < 0.5) { return; }
+      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi, env_type) < 0.5) { return; }
       Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
       Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
       Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
@@ -918,7 +936,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
 
     std::function<Real(Real, Real, Real)> f1P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -926,7 +944,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f2P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -934,7 +952,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f3P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -942,7 +960,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f1T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -950,7 +968,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f2T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -958,7 +976,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f3T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -1056,6 +1074,12 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     if (web_test_fixed_lambda) {
       lam_T = 1.0;
       have_root = true;
+    } else if (tor_pol_def == "chandrasekhar") {
+      // Chandrasekhar (spherical) toroidal/poloidal: energy of the lambda_T*T generator
+      // field over that of the P generator field, cross term excluded --
+      // lambda_T^2 (c+f)/(a+d) = web_tor_pol (spec §2.2's mu_star^2 estimate; V4, C-025)
+      lam_T = std::sqrt(web_tor_pol*(sa + sd)/std::max(sc + sf, 1.0e-300));
+      have_root = (lam_T > 0.0);
     } else if (std::abs(qA) < 1.0e-12*std::max({std::abs(qB), std::abs(qC), 1.0})) {
       if (std::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
     } else {
@@ -1084,8 +1108,10 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     }
     if (global_variable::my_rank == 0) {
       std::cout << "GRASS magnetic web: lambda_P=1, lambda_T=" << lam_T
-                << ", achieved E_tor/E_pol=" << ratio_at(lam_T) << " (target="
-                << web_tor_pol << ", mu_star=" << mu_star << ")" << std::endl;
+                << ", achieved cylindrical E_tor/E_pol=" << ratio_at(lam_T)
+                << ", Chandrasekhar E_T/E_P=" << lam_T*lam_T*(sc + sf)/std::max(sa + sd, 1.0e-300)
+                << " (target " << web_tor_pol << " " << tor_pol_def << ", mu_star="
+                << mu_star << ", envelope " << env_name << ")" << std::endl;
     }
 
     // ---- Combine aP + lam_T*aT (host), normalize, add into final --------------------
@@ -1147,7 +1173,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       Real a = grass::DipoleA1(x, y, z, I_0, dipole_r0);
       if (dipole_confine) {
         Real rho = data.InterpolateRho(x, y, z, eos_table);
-        a *= grass::WebEnvelope(rho, rho_lo, rho_hi);
+        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       }
       return a;
     };
@@ -1155,7 +1181,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       Real a = grass::DipoleA2(x, y, z, I_0, dipole_r0);
       if (dipole_confine) {
         Real rho = data.InterpolateRho(x, y, z, eos_table);
-        a *= grass::WebEnvelope(rho, rho_lo, rho_hi);
+        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       }
       return a;
     };
@@ -1288,7 +1314,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       Real u = grass::WebWindowU(rho, rho_lo, rho_hi);
       if (fabs(u) >= 1.0) { bs = fmax(bs, sqrt(pb.bsq)); }
       if (fabs(u) >= 1.6) { bo = fmax(bo, sqrt(pb.bsq)); }
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
       if (h > 0.0 && w0d(m,IPR,k,j,i) > 0.0) {
         // comoving b^2 = (|B|^2 + (B_i u~^i)^2)/W^2, u~^i = primitive velocity
         Real ux = w0d(m,IVX,k,j,i), uy = w0d(m,IVY,k,j,i), uz = w0d(m,IVZ,k,j,i);
@@ -1372,6 +1398,8 @@ void GrassMagneticReport(ParameterInput *pin, Mesh *pm) {
   Real rho_lo = pin->GetOrAddReal("problem", "web_rho_lo", 0.0);
   Real rho_hi = pin->GetOrAddReal("problem", "web_rho_hi", 0.0);
   Real t_over_w = pin->GetOrAddReal("problem", "grass_t_over_w", 0.0);
+  const int env_type = (pin->GetOrAddString("problem", "web_envelope", "bump") == "poly3")
+                       ? 1 : 0;
 
   auto &indcs = pm->mb_indcs;
   int is = indcs.is, nx1 = indcs.nx1;
@@ -1417,7 +1445,7 @@ void GrassMagneticReport(ParameterInput *pin, Mesh *pm) {
       tk += 0.5*omega*(x1v*u0(m,IM2,k,j,i) - x2v*u0(m,IM1,k,j,i))*vol;
     }
     mt += u0(m,IDN,k,j,i)*vol;
-    if (grass::WebEnvelope(w0(m,IDN,k,j,i), rho_lo, rho_hi) >= 0.5) {
+    if (grass::WebEnvelope(w0(m,IDN,k,j,i), rho_lo, rho_hi, env_type) >= 0.5) {
       v5 += pb.sdetg*vol;
       m5 += u0(m,IDN,k,j,i)*vol;
     }
@@ -1453,6 +1481,319 @@ void GrassMagneticReport(ParameterInput *pin, Mesh *pm) {
   }
 }
 //----------------------------------------------------------------------------------------
+//! \fn void GrassWebDiagnostics
+//! \brief Magnetic-web run diagnostics (C-026; R-033 (c)), called from GrassHistory on
+//  every rank, so the history cadence sets theirs (0.05 ms for the web runs). Rank 0
+//  appends one line to <basename>.webdiag.txt, and every web_map_dt writes the (varpi, z)
+//  azimuthal-average map <basename>.azmap.NNNNN.txt. User history output is capped at
+//  NHISTORY_VARIABLES = 20 columns, hence the separate file.
+//  All fields are physical (B^i = bcc0^i/sqrt(gamma), components along flat unit
+//  vectors), volumes proper (sqrt(gamma) d^3x). Azimuthal means are proper-volume
+//  weighted over (varpi, z) bins of width dx_finest out to grass_diag.rmax.
+//  Columns:
+//   t, E_mag, E_m0 (energy of the azimuthal-mean field), E_mnz (rest, inside the bins),
+//   E_out (rho0 outside [rho_lo, rho_hi] now), rms Bbar_varpi, rms bbar_phi,
+//   alpha = rms bbar_phi/rms Bbar_varpi, rms Bbar_R (spherical radial), alpha_R (rms
+//   over the window bins, rho0-weighted), W1/W2/W3 (SACRA 2D: Omega averaged over
+//   0.5 km in varpi, Omega_max/Omega_min over window bins with varpi >= 1.5 km),
+//   W3_eq (equatorial bins), mono (rho0 > 1e12 fraction with dlnOmega/dlnvarpi < -1e-3),
+//   torque through cylinders varpi = 2, 4, 6 km, Maxwell (-alpha sqrt(gamma) b^varpi
+//   b_phi) and Reynolds (sqrt(gamma) S_phi alpha u^varpi/W = alpha sqrt(gamma) rho h
+//   u^varpi u_phi, from the conserved S_phi) parts, each int F^varpi varpi dphi dz from
+//   a one-cell shell, C1, C2 (rho0-weighted, varpi < 8 M), rho_c, Mb.
+
+namespace {
+struct GrassDiagConfig {
+  bool on = false;
+  Real rho_lo = 0.0, rho_hi = 0.0;
+  Real db = 0.0, rmax = 0.0;
+  Real map_dt = 0.0, next_map = -1.0;
+  int map_count = 0;
+  std::string basename;
+  bool header_done = false;
+};
+GrassDiagConfig grass_diag;
+}  // namespace
+
+void GrassWebDiagnostics(Mesh *pm) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmkji = pmbp->nmb_thispack*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &w0 = pmbp->pmhd->w0;
+  auto &u0 = pmbp->pmhd->u0;
+  auto &bcc0 = pmbp->pmhd->bcc0;
+  auto &adm = pmbp->padm->adm;
+  auto &size = pmbp->pmb->mb_size;
+  const Real rho_lo = grass_diag.rho_lo, rho_hi = grass_diag.rho_hi;
+  const Real db = grass_diag.db;
+  const int nw = static_cast<int>(std::ceil(grass_diag.rmax/db));
+  const int nz = 2*nw;
+  const Real zmin = -nw*db;
+  grass::GrassUnits units;
+  const Real km = units.LengthCgsToCode(1.0e5);
+  const Real rho_cgs = 1.0/units.MassDensityCgsToCode(1.0);
+  const Real wc0 = 2.0*km, wc1 = 4.0*km, wc2 = 6.0*km;   // cylinder radii
+  const Real dxf = db;                                    // shell thickness
+
+  // per bin: 0 dV, 1 rho dV, 2 Bvarpi dV, 3 Bphi dV, 4 Bz dV, 5 BR dV, 6 Omega dV, 7 E dV
+  constexpr int kN = 8;
+  DvceArray3D<Real> bins("grass_diag_bins", nw, nz, kN);
+  par_for("grass_diag_bins", DevExeSpace(), 0, pmbp->nmb_thispack-1, ks, ks+nx3-1,
+          js, js+nx2-1, is, is+nx1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    Real w = sqrt(x*x + y*y);
+    int iw = static_cast<int>(w/db);
+    int iz = static_cast<int>(Kokkos::floor((z - zmin)/db));
+    if (iw >= nw || iz < 0 || iz >= nz) { return; }
+    Real g0 = adm.g_dd(m,0,0,k,j,i), g1 = adm.g_dd(m,0,1,k,j,i), g2 = adm.g_dd(m,0,2,k,j,i);
+    Real g3 = adm.g_dd(m,1,1,k,j,i), g4 = adm.g_dd(m,1,2,k,j,i), g5 = adm.g_dd(m,2,2,k,j,i);
+    GrassPhysB pb = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bcc0(m,IBX,k,j,i),
+                                   bcc0(m,IBY,k,j,i), bcc0(m,IBZ,k,j,i), x, y);
+    Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    Real r = sqrt(w*w + z*z);
+    Real bR = (r > 0.0) ? (pb.bvarpi*w + pb.bz*z)/r : 0.0;
+    Real ux = w0(m,IVX,k,j,i), uy = w0(m,IVY,k,j,i), uz = w0(m,IVZ,k,j,i);
+    Real wl = sqrt(1.0 + g0*ux*ux + g3*uy*uy + g5*uz*uz + 2.0*(g1*ux*uy + g2*ux*uz + g4*uy*uz));
+    Real a = adm.alpha(m,k,j,i);
+    Real vx = a*ux/wl - adm.beta_u(m,0,k,j,i), vy = a*uy/wl - adm.beta_u(m,1,k,j,i);
+    Real om = (w > 0.0) ? (x*vy - y*vx)/(w*w) : 0.0;
+    Real rho = w0(m,IDN,k,j,i);
+    Kokkos::atomic_add(&bins(iw,iz,0), dV);
+    Kokkos::atomic_add(&bins(iw,iz,1), rho*dV);
+    Kokkos::atomic_add(&bins(iw,iz,2), pb.bvarpi*dV);
+    Kokkos::atomic_add(&bins(iw,iz,3), pb.bphi*dV);
+    Kokkos::atomic_add(&bins(iw,iz,4), pb.bz*dV);
+    Kokkos::atomic_add(&bins(iw,iz,5), bR*dV);
+    Kokkos::atomic_add(&bins(iw,iz,6), om*dV);
+    Kokkos::atomic_add(&bins(iw,iz,7), 0.5*pb.bsq*dV);
+  });
+
+  // cell sums: 0 E_mag, 1 E_out, 2-4 Maxwell torque, 5-7 Reynolds torque,
+  // 8 rho cos phi dV, 9 rho sin phi dV, 10 rho cos 2phi dV, 11 rho sin 2phi dV, 12 rho dV
+  // (varpi < 8 M), 13 rho_c sum, 14 rho_c count, 15 Mb
+  constexpr int kS = 16;
+  DvceArray1D<Real> sums("grass_diag_sums", kS);
+  par_for("grass_diag_sums", DevExeSpace(), 0, pmbp->nmb_thispack-1, ks, ks+nx3-1,
+          js, js+nx2-1, is, is+nx1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
+    Real vol = dx1*dx2*dx3;
+    Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    Real w = sqrt(x*x + y*y);
+    Real g0 = adm.g_dd(m,0,0,k,j,i), g1 = adm.g_dd(m,0,1,k,j,i), g2 = adm.g_dd(m,0,2,k,j,i);
+    Real g3 = adm.g_dd(m,1,1,k,j,i), g4 = adm.g_dd(m,1,2,k,j,i), g5 = adm.g_dd(m,2,2,k,j,i);
+    GrassPhysB pb = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bcc0(m,IBX,k,j,i),
+                                   bcc0(m,IBY,k,j,i), bcc0(m,IBZ,k,j,i), x, y);
+    Real rho = w0(m,IDN,k,j,i);
+    Kokkos::atomic_add(&sums(0), 0.5*pb.bsq*pb.sdetg*vol);
+    if (rho < rho_lo || rho > rho_hi) {
+      Kokkos::atomic_add(&sums(1), 0.5*pb.bsq*pb.sdetg*vol);
+    }
+    Kokkos::atomic_add(&sums(15), u0(m,IDN,k,j,i)*vol);
+    if (fabs(x) < dx1 && fabs(y) < dx2 && fabs(z) < dx3) {
+      Kokkos::atomic_add(&sums(13), rho);
+      Kokkos::atomic_add(&sums(14), 1.0);
+    }
+    if (w < 8.0 && w > 0.0) {
+      Real c1 = x/w, s1 = y/w;
+      Real dm = rho*pb.sdetg*vol;
+      Kokkos::atomic_add(&sums(8), dm*c1);
+      Kokkos::atomic_add(&sums(9), dm*s1);
+      Kokkos::atomic_add(&sums(10), dm*(c1*c1 - s1*s1));
+      Kokkos::atomic_add(&sums(11), dm*2.0*s1*c1);
+      Kokkos::atomic_add(&sums(12), dm);
+    }
+    // angular-momentum flux through the cylinders: F^varpi = alpha sqrt(gamma) T^varpi_phi
+    Real wcs[3] = {wc0, wc1, wc2};
+    for (int c = 0; c < 3; ++c) {
+      if (fabs(w - wcs[c]) >= 0.5*dxf) { continue; }
+      Real ux = w0(m,IVX,k,j,i), uy = w0(m,IVY,k,j,i), uz = w0(m,IVZ,k,j,i);
+      Real uxd = g0*ux + g1*uy + g2*uz, uyd = g1*ux + g3*uy + g4*uz, uzd = g2*ux + g4*uy + g5*uz;
+      Real wl = sqrt(1.0 + uxd*ux + uyd*uy + uzd*uz);
+      Real a = adm.alpha(m,k,j,i);
+      Real bx = adm.beta_u(m,0,k,j,i), by = adm.beta_u(m,1,k,j,i);
+      // u^i = u~^i - W beta^i/alpha; u_i = u~_i (spatial)
+      Real upx = ux - wl*bx/a, upy = uy - wl*by/a;
+      Real u_var = (x*upx + y*upy)/w;            // u^varpi
+      // b^mu from B^i: b^0 = W (B.v)/alpha, b^i = B^i/W + b^0 u^i/u^t... in the form
+      // b^i = (B^i + alpha b^0 u^i)/W, b_i = (B_i + alpha b^0 u_i)/W
+      Real sd = pb.sdetg;
+      Real Bx = bcc0(m,IBX,k,j,i)/sd, By = bcc0(m,IBY,k,j,i)/sd, Bz = bcc0(m,IBZ,k,j,i)/sd;
+      Real Bxd = g0*Bx + g1*By + g2*Bz, Byd = g1*Bx + g3*By + g4*Bz, Bzd = g2*Bx + g4*By + g5*Bz;
+      Real Bu = Bxd*ux + Byd*uy + Bzd*uz;        // B_i u~^i = W B.v
+      Real ab0 = Bu;                             // alpha b^0
+      Real bvx = (Bx + ab0*upx)/wl, bvy = (By + ab0*upy)/wl;
+      Real b_var = (x*bvx + y*bvy)/w;            // b^varpi
+      Real b_phi = (x*(Byd + ab0*uyd) - y*(Bxd + ab0*uxd))/wl;   // b_phi
+      Real fac = vol/dxf;                        // int F^varpi varpi dphi dz from the shell
+      Kokkos::atomic_add(&sums(2 + c), -fac*a*sd*b_var*b_phi);
+      // Reynolds: alpha sqrt(gamma) rho h u^varpi u_phi = (sqrt(gamma) S_phi)(alpha v^varpi
+      // - beta^varpi), S_phi from the conserved momentum (its small Poynting part included)
+      Real s_phi = x*u0(m,IM2,k,j,i) - y*u0(m,IM1,k,j,i);
+      Kokkos::atomic_add(&sums(5 + c), fac*s_phi*a*u_var/wl);
+    }
+  });
+
+  auto bins_h = Kokkos::create_mirror_view(bins);
+  Kokkos::deep_copy(bins_h, bins);
+  auto sums_h = Kokkos::create_mirror_view(sums);
+  Kokkos::deep_copy(sums_h, sums);
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, bins_h.data(), static_cast<int>(bins_h.size()),
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, sums_h.data(), kS, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank != 0) { return; }
+
+  // ---- host post-processing of the bins (rank 0) ----
+  auto mean = [&](int iw, int iz, int q) {
+    return (bins_h(iw,iz,0) > 0.0) ? bins_h(iw,iz,q)/bins_h(iw,iz,0) : 0.0;
+  };
+  Real e_m0 = 0.0, e_bins = 0.0;
+  Real s_bv = 0.0, s_bp = 0.0, s_br = 0.0, s_rho = 0.0;
+  for (int iw = 0; iw < nw; ++iw) {
+    for (int iz = 0; iz < nz; ++iz) {
+      Real dv = bins_h(iw,iz,0);
+      if (dv <= 0.0) { continue; }
+      Real bv = mean(iw,iz,2), bp = mean(iw,iz,3), bz = mean(iw,iz,4), br = mean(iw,iz,5);
+      e_m0 += 0.5*(bv*bv + bp*bp + bz*bz)*dv;
+      e_bins += bins_h(iw,iz,7);
+      Real rho = mean(iw,iz,1);
+      if (rho >= rho_lo && rho <= rho_hi) {
+        s_bv += rho*bv*bv*dv; s_bp += rho*bp*bp*dv; s_br += rho*br*br*dv; s_rho += rho*dv;
+      }
+    }
+  }
+  Real rms_bv = (s_rho > 0.0) ? std::sqrt(s_bv/s_rho) : 0.0;
+  Real rms_bp = (s_rho > 0.0) ? std::sqrt(s_bp/s_rho) : 0.0;
+  Real rms_br = (s_rho > 0.0) ? std::sqrt(s_br/s_rho) : 0.0;
+
+  // Omega windows, SACRA 2D definition: |Omega| (sign-agnostic), z folded, averaged over
+  // 0.5 km along varpi (running mean over the populated bins), varpi >= 1.5 km
+  const int nzh = nw;                         // folded |z| bins
+  std::vector<Real> om(nw*nzh, 0.0), rh(nw*nzh, 0.0), vv(nw*nzh, 0.0);
+  for (int iw = 0; iw < nw; ++iw) {
+    for (int iz = 0; iz < nz; ++iz) {
+      int jz = (iz >= nw) ? (iz - nw) : (nw - 1 - iz);
+      int q = iw*nzh + jz;
+      om[q] += bins_h(iw,iz,6); rh[q] += bins_h(iw,iz,1); vv[q] += bins_h(iw,iz,0);
+    }
+  }
+  const int nsm = std::max(1, static_cast<int>(std::lround(0.5*km/db)));
+  std::vector<Real> oms(nw*nzh, 0.0);
+  Real rho_max = 0.0;
+  for (int q = 0; q < nw*nzh; ++q) {
+    if (vv[q] > 0.0) { rho_max = std::max(rho_max, rh[q]/vv[q]); }
+  }
+  for (int jz = 0; jz < nzh; ++jz) {
+    for (int iw = 0; iw < nw; ++iw) {
+      Real s = 0.0; int c = 0; bool full = true;
+      for (int d = -(nsm/2); d < nsm - nsm/2; ++d) {
+        int iv = iw + d;
+        if (iv < 0 || iv >= nw || vv[iv*nzh + jz] <= 0.0) { full = false; continue; }
+        s += std::abs(om[iv*nzh + jz]/vv[iv*nzh + jz]); ++c;
+      }
+      oms[iw*nzh + jz] = (full && c > 0) ? s/c : -1.0;
+    }
+  }
+  auto window_ratio = [&](Real lo, Real hi, bool eq_only) {
+    Real omax = 0.0, omin = 1.0e300;
+    for (int iw = 0; iw < nw; ++iw) {
+      if ((iw + 0.5)*db < 1.5*km) { continue; }
+      for (int jz = 0; jz < (eq_only ? 1 : nzh); ++jz) {
+        int q = iw*nzh + jz;
+        if (vv[q] <= 0.0 || oms[q] < 0.0) { continue; }
+        Real rho = rh[q]/vv[q]*rho_cgs;
+        if (rho < lo || rho > hi) { continue; }
+        omax = std::max(omax, oms[q]); omin = std::min(omin, oms[q]);
+      }
+    }
+    return (omax > 0.0 && omin < 1.0e300) ? omax/omin : 0.0;
+  };
+  Real w1 = window_ratio(1.0e13, 5.0e14, false), w2 = window_ratio(1.0e12, 1.0e14, false);
+  Real w3 = window_ratio(1.0e14, 0.9*rho_max*rho_cgs, false);
+  Real w3eq = window_ratio(1.0e14, 0.9*rho_max*rho_cgs, true);
+  Real mono_bad = 0.0, mono_all = 0.0;
+  for (int jz = 0; jz < nzh; ++jz) {
+    for (int iw = 1; iw < nw - 1; ++iw) {
+      int q = iw*nzh + jz, qm = (iw - 1)*nzh + jz, qp = (iw + 1)*nzh + jz;
+      Real wv = (iw + 0.5)*db;
+      if (wv < 1.5*km || vv[q] <= 0.0 || oms[q] <= 0.0 || oms[qm] <= 0.0 || oms[qp] <= 0.0) {
+        continue;
+      }
+      Real rho = rh[q]/vv[q];
+      if (rho*rho_cgs <= 1.0e12) { continue; }
+      Real dl = (oms[qp] - oms[qm])/(2.0*db)*wv/oms[q];
+      mono_all += rho*wv;
+      if (dl < -1.0e-3) { mono_bad += rho*wv; }
+    }
+  }
+
+  Real e_mag = sums_h(0);
+  Real c1 = (sums_h(12) > 0.0) ? std::hypot(sums_h(8), sums_h(9))/sums_h(12) : 0.0;
+  Real c2 = (sums_h(12) > 0.0) ? std::hypot(sums_h(10), sums_h(11))/sums_h(12) : 0.0;
+  Real rho_c = (sums_h(14) > 0.0) ? sums_h(13)/sums_h(14) : 0.0;
+  std::string fname = grass_diag.basename + ".webdiag.txt";
+  FILE *fp = std::fopen(fname.c_str(), "a");
+  if (fp != nullptr) {
+    if (!grass_diag.header_done) {
+      std::fprintf(fp, "# GrassWebDiagnostics (dyngr_grass.cpp; C-026). Code units, physical "
+                   "field; window rho0 in [%.6e, %.6e] code\n# 1:t 2:E_mag 3:E_m0 4:E_mnz "
+                   "5:E_out 6:Bbar_varpi_rms 7:bbar_phi_rms 8:alpha 9:Bbar_R_rms 10:alpha_R "
+                   "11:W1_2d 12:W2_2d 13:W3_2d 14:W3_eq 15:mono_2d 16:tqM_2km 17:tqM_4km "
+                   "18:tqM_6km 19:tqR_2km 20:tqR_4km 21:tqR_6km 22:C1 23:C2 24:rho_c 25:Mb\n",
+                   rho_lo, rho_hi);
+      grass_diag.header_done = true;
+    }
+    std::fprintf(fp, "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
+                 "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
+                 "%.10e %.10e\n", pm->time, e_mag, e_m0, e_bins - e_m0, sums_h(1), rms_bv,
+                 rms_bp, (rms_bv > 0.0) ? rms_bp/rms_bv : 0.0, rms_br,
+                 (rms_br > 0.0) ? rms_bp/rms_br : 0.0, w1, w2, w3, w3eq,
+                 (mono_all > 0.0) ? mono_bad/mono_all : 0.0, sums_h(2), sums_h(3), sums_h(4),
+                 sums_h(5), sums_h(6), sums_h(7), c1, c2, rho_c, sums_h(15));
+    std::fclose(fp);
+  }
+
+  // ---- (varpi, z) map every web_map_dt ----
+  if (grass_diag.map_dt > 0.0) {
+    if (grass_diag.next_map < 0.0) {
+      grass_diag.next_map = std::ceil(pm->time/grass_diag.map_dt - 1.0e-9)*grass_diag.map_dt;
+      grass_diag.map_count = static_cast<int>(std::lround(grass_diag.next_map/grass_diag.map_dt));
+    }
+    if (pm->time >= grass_diag.next_map - 1.0e-9) {
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), ".azmap.%05d.txt", grass_diag.map_count);
+      FILE *fm = std::fopen((grass_diag.basename + buf).c_str(), "w");
+      if (fm != nullptr) {
+        std::fprintf(fm, "# t = %.10e; azimuthal averages on (varpi, z) bins of %.6g M "
+                     "(proper-volume weighted), code units\n# varpi z rho0 Omega Bvarpi "
+                     "Bphi Bz BR\n", pm->time, db);
+        for (int iw = 0; iw < nw; ++iw) {
+          for (int iz = 0; iz < nz; ++iz) {
+            if (bins_h(iw,iz,0) <= 0.0 || mean(iw,iz,1)*rho_cgs < 1.0e10) { continue; }
+            std::fprintf(fm, "%.5e %.5e %.6e %.6e %.6e %.6e %.6e %.6e\n", (iw + 0.5)*db,
+                         zmin + (iz + 0.5)*db, mean(iw,iz,1), mean(iw,iz,6), mean(iw,iz,2),
+                         mean(iw,iz,3), mean(iw,iz,4), mean(iw,iz,5));
+          }
+        }
+        std::fclose(fm);
+      }
+      grass_diag.map_count += 1;
+      grass_diag.next_map += grass_diag.map_dt;
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
 //  \brief Sets initial conditions for a GRASS-built (possibly differentially rotating)
 //  neutron star, under either <z4c> or <cfc>/<adm>.
@@ -1468,6 +1809,22 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   user_hist_func = &GrassHistory;
+
+  // Web-run diagnostics (GrassWebDiagnostics): on by default when a field is installed,
+  // web_diag = 1 also turns them on for a B = 0 twin. Set here, before the restart
+  // return, so restarted segments keep them.
+  {
+    bool field = pin->GetOrAddInteger("problem", "web_enable", 0) != 0 ||
+                 pin->GetOrAddInteger("problem", "dipole_enable", 0) != 0;
+    grass_diag.on = pin->GetOrAddInteger("problem", "web_diag", field ? 1 : 0) != 0;
+    grass_diag.rho_lo = pin->GetOrAddReal("problem", "web_rho_lo", 0.0);
+    grass_diag.rho_hi = pin->GetOrAddReal("problem", "web_rho_hi", 0.0);
+    grass_diag.db = pmy_mesh_->mesh_size.dx1 /
+                    std::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
+    grass_diag.rmax = pin->GetOrAddReal("problem", "web_diag_rmax", 9.0);
+    grass_diag.map_dt = pin->GetOrAddReal("problem", "web_map_dt", 0.0);
+    grass_diag.basename = pin->GetString("job", "basename");
+  }
 
   // No restart-path special-casing: this pgen only ever sets initial data once --
   // evolution afterward proceeds from checkpointed Z4c/CFC/hydro state like any other
@@ -1661,4 +2018,6 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[6] = divb_max;
   pdata->hdata[7] = ang_mom;
   pdata->hdata[8] = maxwell;
+
+  if (grass_diag.on) { GrassWebDiagnostics(pm); }
 }

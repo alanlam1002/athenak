@@ -9,7 +9,8 @@
       K0 = its t = 0 value)
   (g) alpha_min (user hst)                           (h) dt (out.log) and the cumulative regrid count; the wall
                                                          time per M of evolution (out.log elapsed)
-    c110_analysis.py OUTDIR LABEL=RUNDIR [LABEL=RUNDIR ...] [--ref LABEL=RUNDIR]
+    c110_analysis.py OUTDIR LABEL=RUNDIR [LABEL=RUNDIR ...] [--ref LABEL=RUNDIR] [--split]
+--split also writes each panel as its own figure, c110_<name>_<a-h>_<tag>.png.
 The decks are read from RUNDIR/parfile.par (the BH position and the geodesic's release state).
 """
 import argparse
@@ -31,6 +32,14 @@ from tde_ensemble_plots import bc                 # noqa: E402  (stubs h5py, as 
 B = 'cfc_tde_wd_imbh_parabolic_tracker'
 RHOC, GAM, MSTAR = 3.24e-4, 5.0 / 3.0, 7.47e-5
 COL = {'CN': 'C0', 'BN': 'C3', 'CD': 'C2', 'BD': 'C1'}
+LABELS = [(r'$\rho_{max}/\rho_c$', 'log'), ('star–BH separation [M]', 'linear'),
+          (r'$M_{bound}/M_*$ (thick); grid mass $/M_*$ (thin)', 'linear'),
+          ('scal-0 / scal-0(0) − 1 (entropy tracer)', 'linear'), (r'$K/K_0$ at $\rho_{max}$ (z = 0)', 'linear'),
+          ('tot-E / tot-E(0) − 1', 'linear'), (r'$\alpha_{min}$', 'linear'), ('dt [M] (solid)', 'linear')]
+SPLIT = [('rhomax', 'density maximum'), ('separation', 'star–BH separation vs the geodesic'),
+         ('mass', 'bound mass (thick) and grid mass (thin)'), ('tracer', 'entropy-tracer total'),
+         ('K_at_rhomax', 'adiabat at the density maximum'), ('totE', 'total energy (Eulerian)'),
+         ('alphamin', 'minimum lapse'), ('dt_cost', 'time step, wall time per M (dotted), regrids (ticks)')]
 
 
 def par_get(d, k, dflt=0.0):
@@ -138,49 +147,67 @@ def main():
     ap.add_argument('--tp', type=float, default=135.9)    # design periapsis (rp18: 132.0)
     ap.add_argument('--rp', type=float, default=10.0)    # design periapsis R_areal of the geodesic
     ap.add_argument('--name', default='rp10')             # output prefix and title (rp18)
+    ap.add_argument('--split', action='store_true')       # also one PNG per panel: c110_<name>_<a-h>_<tag>.png
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     R = {}
     for spec in a.runs + a.ref:
         lab, d = spec.split('=', 1)
         R[lab] = (d, series(lab, d, a.nproc), spec in a.ref)
+    tmax = max(np.nanmax(s['t_u']) for _, s, _ in R.values())
+    geo = None
+    if a.runs:
+        geo = geodesic(R[a.runs[0].split('=')[0]][0], tmax, a.rp)
+
+    def panel(k, ax, legend):
+        """draw panel k ((a)-(h) of the docstring) on ax"""
+        first = next((lab for lab, v in R.items() if not v[2]), None)
+        axb = None
+        for lab, (d, s, ref) in R.items():
+            kw = dict(color=COL.get(lab, '0.5'), lw=1.6 if not ref else 1.0, ls='-' if not ref else '--',
+                      label=lab)
+            if k == 0:
+                ax.plot(s['t_u'], s['rhomax'] / RHOC, **kw)
+            elif k == 1:
+                ax.plot(s['t_dump'], s['sep'], **kw)
+            elif k == 2:
+                if len(s['mb']):
+                    ax.plot(s['mb'][:, 0], s['mb'][:, 1] / MSTAR, **kw)
+                ax.plot(s['t_m'], s['mass'] / MSTAR, **{**kw, 'lw': 0.8, 'label': None})
+            elif k in (3, 4, 5) and not ref:
+                if k == 3:
+                    ax.plot(s['t_m'], s['scal0'] / s['scal0'][0] - 1, **kw)
+                elif k == 4:
+                    ax.plot(s['t_dump'], s['Kc'], **kw)
+                else:
+                    ax.plot(s['t_m'], s['totE'] / s['totE'][0] - 1, **kw)
+            elif k == 6:
+                ax.plot(s['t_u'], s['amin'], **kw)
+            elif k == 7:
+                ax.plot(s['T'], s['DT'], **kw)
+                if not ref and len(s['W']) > 1:
+                    tw = np.arange(np.ceil(s['T'][0]), s['T'][-1], 5.0)
+                    wt = np.interp(tw, s['T'], s['W'])
+                    axb = ax.twinx() if lab == first else axb
+                    axb.step(tw[1:], np.diff(wt) / 5.0, where='pre', color=kw['color'], lw=0.8, ls=':')
+                    axb.set_ylabel('wall s per M (dotted)')
+        if k == 1 and geo is not None:
+            ax.plot(geo[0], geo[1], 'k:', lw=1, label=f'geodesic (r_p = {a.rp:g})')
+        yl, sc = LABELS[k]
+        ax.set_ylabel(yl); ax.set_yscale(sc); ax.set_xlabel('t [M]'); ax.grid(alpha=0.3)
+        ax.axvline(a.tp, color='0.6', lw=0.6, ls='--')
+        if k == 7:
+            for lab, (d, s, ref) in R.items():
+                if not ref and len(s['rg']):
+                    ax.plot(s['rg'], np.full(len(s['rg']), ax.get_ylim()[0]), '|', color=COL.get(lab, '0.5'),
+                            ms=6)
+        if legend:
+            ax.legend(fontsize=9 if k == 0 else 8)
+
     fig, ax = plt.subplots(2, 4, figsize=(20, 8.6))
     ax = ax.ravel()
-    tmax = max(np.nanmax(s['t_u']) for _, s, _ in R.values())
-    for lab, (d, s, ref) in R.items():
-        kw = dict(color=COL.get(lab, '0.5'), lw=1.6 if not ref else 1.0, ls='-' if not ref else '--', label=lab)
-        ax[0].plot(s['t_u'], s['rhomax'] / RHOC, **kw)
-        ax[1].plot(s['t_dump'], s['sep'], **kw)
-        if len(s['mb']):
-            ax[2].plot(s['mb'][:, 0], s['mb'][:, 1] / MSTAR, **kw)
-        ax[2].plot(s['t_m'], s['mass'] / MSTAR, **{**kw, 'lw': 0.8, 'label': None})
-        if not ref:
-            ax[3].plot(s['t_m'], s['scal0'] / s['scal0'][0] - 1, **kw)
-            ax[4].plot(s['t_dump'], s['Kc'], **kw)
-            ax[5].plot(s['t_m'], s['totE'] / s['totE'][0] - 1, **kw)
-        ax[6].plot(s['t_u'], s['amin'], **kw)
-        ax[7].plot(s['T'], s['DT'], **kw)
-        if not ref and len(s['W']) > 1:
-            tw = np.arange(np.ceil(s['T'][0]), s['T'][-1], 5.0)
-            wt = np.interp(tw, s['T'], s['W'])
-            ax7b = ax[7].twinx() if lab == next(k for k, v in R.items() if not v[2]) else ax7b
-            ax7b.step(tw[1:], np.diff(wt) / 5.0, where='pre', color=kw['color'], lw=0.8, ls=':')
-            ax7b.set_ylabel('wall s per M (dotted)')
-    if a.runs:
-        d0 = R[a.runs[0].split('=')[0]][0]
-        tg, rg = geodesic(d0, tmax, a.rp)
-        ax[1].plot(tg, rg, 'k:', lw=1, label=f'geodesic (r_p = {a.rp:g})')
-    labels = [(r'$\rho_{max}/\rho_c$', 'log'), ('star–BH separation [M]', 'linear'),
-              (r'$M_{bound}/M_*$ (thick); grid mass $/M_*$ (thin)', 'linear'),
-              ('scal-0 / scal-0(0) − 1 (entropy tracer)', 'linear'), (r'$K/K_0$ at $\rho_{max}$ (z = 0)', 'linear'),
-              ('tot-E / tot-E(0) − 1', 'linear'), (r'$\alpha_{min}$', 'linear'), ('dt [M] (solid)', 'linear')]
-    for k, (yl, sc) in enumerate(labels):
-        ax[k].set_ylabel(yl); ax[k].set_yscale(sc); ax[k].set_xlabel('t [M]'); ax[k].grid(alpha=0.3)
-        ax[k].axvline(a.tp, color='0.6', lw=0.6, ls='--')
-    for lab, (d, s, ref) in R.items():
-        if not ref and len(s['rg']):
-            ax[7].plot(s['rg'], np.full(len(s['rg']), ax[7].get_ylim()[0]), '|', color=COL.get(lab, '0.5'), ms=6)
-    ax[0].legend(fontsize=9); ax[1].legend(fontsize=8)
+    for k in range(8):
+        panel(k, ax[k], legend=k in (0, 1))
     fig.suptitle(f'2x2 {a.name} (L4, base8, GPU IPC off): ' + ', '.join(
         f'{k} to t = {np.nanmax(v[1]["t_u"]):.0f}' for k, v in R.items() if not v[2]) +
         f'; dashed = reference; grey line = design periapsis t = {a.tp}; ticks on (h) = regrids')
@@ -193,6 +220,16 @@ def main():
             rows.append(f'{lab},{t:.3f},{np.interp(t, s["t_u"], s["rhomax"]) / RHOC:.6g},{sp:.4f},{kc:.5g}')
     open(f'{a.out}/c110_{a.name}_series.csv', 'w').write('\n'.join(rows) + '\n')
     print(png, os.path.getsize(png))
+    if a.split:   # one figure per panel, each with its own legend
+        for k, (tag, title) in enumerate(SPLIT):
+            f1, a1 = plt.subplots(figsize=(7.5, 5))
+            panel(k, a1, legend=True)
+            a1.set_title(f'{a.name}: {title}' + (f' (grey: design periapsis t = {a.tp})'), fontsize=10)
+            f1.tight_layout()
+            fn = f'{a.out}/c110_{a.name}_{chr(97 + k)}_{tag}.png'
+            f1.savefig(fn, dpi=100)
+            plt.close(f1)
+            print(fn, os.path.getsize(fn))
 
 
 if __name__ == '__main__':

@@ -1,141 +1,156 @@
 # Magnetic-web + dipole implementation notes
 
-Answers to `magnetic_web_id_athenak.md` (repo root) section 1's prerequisite
-questions, as investigated and confirmed this session before writing any code.
+Answers to the prerequisite questions of the web spec §1
+(`Athenak_magnetic-web/research/spec/magnetic_web_id_athenak.md`) and to the design's
+§8 questions (`research/spec/web_field_design_P_CFC.md`), for star P
+(uryu_inc p1 λ2, Mb 3.0, J 1.5, DD2-hc, `res.rst` md5 e8cba651).
 
-## 1. How is rho obtained?
+**Revised 2026-10-26.** The earlier version (2026-08) said that `b0` is *not*
+densitized. That was wrong (§3 below); it was based on the curl kernel having no
+metric factors, which says nothing about what the evolution treats `b0` as. All
+magnetic diagnostics and normalizations were re-written accordingly in the same
+commit.
 
-`grass::GrassData::Interpolate()` (`grass_reader.hpp`) is the density source —
-a host-only Lagrange-stencil interpolator over GRASS's restart binary, callable
-at arbitrary Cartesian `(x,y,z)`, including exactly the edge-staggered
-coordinates the vector-potential construction needs (no cell-centered-only
-limitation). It returns the full ADM+hydro `Point` struct.
+## 1. How is rho obtained? Can it be evaluated at the staggered edges?
 
-A slimmed variant, `GrassData::InterpolateRho(x,y,z,eos_table)`, was added
-specifically for this feature — it shares the stencil-*location* logic with
-`Interpolate()` via a factored-out `LocateStencil()` helper (that logic is
-exactly where two real indexing bugs were found and fixed earlier this
-session; keeping it in one place matters), but evaluates only the two fields
-(`energy`, `enthalpy`) needed to recover `rho0`, skipping the metric/Jacobian/
-velocity construction `Interpolate()` also does. This matters because the
-web/dipole construction calls it *far* more often than the ADM/hydro fill loop
-calls `Interpolate()` — three separate edge-staggered grids (`a1`, `a2`, `a3`),
-each evaluated at least twice (poloidal pass, toroidal pass), plus AMR
-boundary corrections.
+Preference 1 of spec §4.3 is available. `grass::GrassData::Interpolate()`
+(`grass_reader.hpp`) is a host-side Lagrange-stencil interpolator over GRASS's
+(s, μ) restart grid, callable at any Cartesian (x, y, z). `InterpolateRho()` is the
+rho-only variant: it interpolates GRASS's `energy` (and `enthalpy`, which gates the
+surface) and maps energy to n0 through GRASS's own EOS table (`grass_eos_table.hpp`),
+rho0 = n0 m_b. The cell-centre `w0(IDN)` is filled through the same path, so the edge
+and cell-centre densities are the same function.
 
-## 2. `rho_max` / atmosphere floor, in code units
+`BuildMagneticField()` calls `InterpolateRho()` at each of the three edge staggerings
+(`a1` at (x1v, x2f, x3f), `a2` at (x1f, x2v, x3f), `a3` at (x1f, x2f, x3v)) and at
+the x±dx/4 half-cell points of the AMR correction. No cell-centre averaging or
+trilinear interpolation of `w0` is used anywhere.
 
-No existing accessor exposed `rho_max` — `BuildMagneticField()` (`dyngr_grass.cpp`)
-adds a one-time device `parallel_reduce` + genuine `MPI_Allreduce(MAX)` (not
-`GrassHistory`'s rank-0-only hack, since `web_rho_hi <= rho_max` must be
-validated identically on every rank) over the already-populated `w0(IDN)`
-array. This is diagnostic/validation-only, not load-bearing to the field
-construction itself (`web_rho_hi` is a direct user input).
+## 2. rho_max, surface density and atmosphere floor for P (code units: G = c = Msun = 1, rho unit 6.1760e17 g/cm^3)
 
-Atmosphere floor: `<mhd> dfloor` (e.g. `2.8e-15` code units in the test inputs,
-derived from the runtime EOS table's own native `nb` floor — see
-`/u/tlam/GRASS/docs/DD2_hot_equal_pinned_investigation_notes.md`) is applied
-post-hoc by AthenaK's primitive-solver flooring, **not** by `SetupGrass`'s host
-loop itself, which writes literal `rho0=0.0` for exterior cells
-(`dyngr_grass.cpp`, gated on `pt.rho0>0.0`). `WebEnvelope()`/`h(rho)` guards
-`rho<=0` explicitly (never calls `log()` of a non-positive value) before any
-floor is applied, so this distinction doesn't matter for the field's
-correctness, but is worth recording since it's easy to assume `dfloor` is
-already reflected in `w0` at the point `BuildMagneticField` reads it (it is,
-since `Kokkos::deep_copy(w0, host_w0)` runs before `BuildMagneticField` is
-called, and AthenaK's own C2P/flooring machinery, not this pgen, is what
-would enforce `dfloor` on any *evolved* state — the pgen's own initial `w0`
-fill is unaffected either way since GRASS's own zero-outside-star convention
-already sits well below any sane `dfloor`).
+| quantity | code units | cgs |
+|---|---|---|
+| rho0_c = rho_max (GRASS) | 1.9430e-3 | 1.19998e15 g/cm^3 |
+| AthenaK cell-centre rho_max at t=0 (C-023) | 1.9422e-3 | 1.1995e15 |
+| window rho_lo / rho_hi (design §2) | 4.8575e-4 / 1.7487e-3 | 3e14 / 1.08e15 |
+| h peak (u = 0), sqrt(rho_lo rho_hi) | 9.217e-4 | 5.69e14 |
+| GRASS surface (enthalpy cut) | rho0 → 0 | equator 11.725 km = 7.94 M (= GRASS r_e, so r_e is a coordinate radius); pole 10.48 km |
+| rho0 = 1e10 g/cm^3 | 1.62e-8 | equator 9.79 km (6.63 M), pole 9.14 km |
+| atmosphere floor `<mhd> dfloor` | 2.8e-15 | 1.73e3 g/cm^3 |
 
-## 3. `b0` densitization convention
+- rho_lo / dfloor = 1.7e11, far above the spec's "≥ 3 orders".
+- The pgen writes rho0 = 0 outside GRASS's surface. The floor is applied by
+  AthenaK's primitive-solver flooring at the first C2P, not by the pgen.
+- `h(rho)` returns 0 for rho ≤ 0, so it never takes the log of zero.
+- The window radii on P (from the reference profiles; the pgen prints its own sweep):
+  - rho_hi at 1.85 km (equator) and 1.82 km (pole);
+  - rho_lo at 7.47 km = 5.05 M (equator) and 7.17 km (pole).
 
-Confirmed directly from `src/pgen/dyn_grmhd/lorene/lorene_bns.cpp`'s own curl
-kernel (`pgen_Bfc`, lines ~447-475): plain Cartesian curl, `dx1/dx2/dx3` are
-bare coordinate cell widths (`size.d_view(m).dx1` etc.) — **no** `sqrt(gamma)`
-or any other metric factor appears anywhere in the curl. `b0` therefore stores
-the plain (non-densitized) Eulerian `B^i`, not `sqrt(gamma)*B^i`. This
-implementation matches that exactly — `sqrt(gamma)` (via `adm::SpatialDet`)
-is used **only** for the diagnostic-integral volume element
-`dV = sqrt(gamma)*dx1*dx2*dx3` (the tor/pol normalization reduction, `E_mag`/
-`E_tor`/`E_pol` in both `BuildMagneticField` and `GrassHistory`), never fed
-back into the evolved `b0`/`bcc0` arrays.
+## 3. What does `b0` store? Densitized: Btilde^i = sqrt(gamma) B^i
 
-## 4. SMR/AMR status
+Evidence (`src/eos/primitive_solver_hyd.hpp`):
+- `PrimToCons` builds the conserved variables with `b = bcc/sdetg` (lines 249-251).
+- `ConsToPrim` uses `b3u = bcc0*isdetg` (lines 406-417). It rebuilds `bcc0` from the
+  face values `bfc` = `b0` (lines 412-414) and then divides by sqrt(gamma) again.
+- `dyn_grmhd.cpp` (SetTmunu, line 467ff) and `cfc.cpp`'s `RescaleMatterSources`
+  (line 1320ff) both use `bcc(...)*ivol` with ivol = 1/sqrt(gamma).
 
-Confirmed this session: production GRASS runs use **static AMR**
-(`<mesh_refinement> refinement=static`, up to 5 levels, nested
-`<refined_regionN>` blocks — the exact configuration that originally crashed
-this pgen twice before those bugs were fixed). The `a3` fine/coarse
-vector-potential correction (below) is therefore **mandatory**, not optional,
-for this pgen — confirmed by an actual static-AMR test
-(`dyngr_grass_web_amr_test.athinput`, 216 MeshBlocks, 2 physical levels)
-achieving `max|div(B)|*dx/|B| = 1.68e-15` (see `VALIDATION.md`, V1/V7).
+So `b0`/`bcc0` hold the densitized field. This is also what CT preserves: the discrete
+∂_i Btilde^i = 0. The plain Cartesian curl of the edge potential A_i (no metric
+factors, as in `lorene_bns.cpp`) therefore produces Btilde directly, with div = 0 to
+round-off. The pgen matches `lorene_bns.cpp` exactly and never inserts sqrt(gamma)
+into the evolved arrays.
 
-`lorene_bns.cpp`'s own dipole never needed an `a3` correction because its
-dipole's vector potential has `a3 ≡ 0` identically (a pure current loop in the
-x-y plane has no z-component of `A`) — the web's Chandrasekhar poloidal-
-toroidal potential does not share that property (`Az` is generically
-nonzero), so the correction had to be derived from scratch this session, by
-direct analogy to `lorene_bns.cpp`'s existing `a1`/`a2` corrections and
-verified against `src/mesh/nghbr_index.hpp`'s documented neighbor-index
-blocks (`x1faces:[0-7], x2faces:[8-15], x1x2edges:[16-23]` for the `a3` case)
-before being written.
+Consequences:
+- **Diagnostics** convert to the physical Eulerian field B^i = Btilde^i/sqrt(gamma)
+  with the cell's own g_dd. Energy density is g_ij B^i B^j / 2 (code units are
+  Heaviside-Lorentz), and the volume element is sqrt(gamma) d^3x.
+- **Components** along the flat unit directions e are g(B, e)/sqrt(g(e, e)).
+- **Where this applies:** `GrassPhysicalB()` in `dyngr_grass.cpp` is used by the
+  normalization reductions, the startup report and `GrassHistory`.
+- **What the old code got wrong:** before this revision, all of these treated `bcc0` as
+  B. In a conformally flat metric the physical |B| = psi^-4 |Btilde|, so the old
+  "max|Btilde| = target" left the physical field a factor psi^4 below the target
+  (psi^4 ≈ 2-3 in P's core).
+- **Helicity:** H = ∫ A_i Btilde^i d^3x (= ∫ A·B sqrt(gamma) d^3x). It needs no metric
+  factor.
 
-## 5. `nscalars` / Y[e] status
+## 4. Mesh layout and the a3 correction
 
-`<mhd> nscalars=1`, `dyn_eos=compose` (3D trapped-neutrino DD2 table) were
-already wired in an earlier phase of this pgen's development, seeding the
-passive scalar `Y[e]` from a separate 1D slice table. Entirely unrelated to,
-and unaffected by, this magnetic-field work.
+The production grid (`grass_P_B0_cfc`, C-022) is:
+- root 256^3 over ±180 M (Δx = 1.40625 M), 32^3 meshblocks;
+- static refinement with `num_levels = 5` and one `<refined_region1>` at level 4 over
+  ±10 M. The finest level has Δx = 0.08789 M = 130 m, with the intermediate levels for
+  2:1 nesting.
 
-## 6. `lorene_bns.cpp` pattern reused/extended
+The window (r ≤ 5.05 M on the equator) lies wholly inside the level-4 box. The field
+therefore never reaches a fine/coarse boundary on the production grid, but the
+correction is still required for generality, and for the 260 m comparison grid, whose
+box is the same in M.
 
-Read in full this session (`src/pgen/dyn_grmhd/lorene/lorene_bns.cpp`).
-Reused/extended:
-- Edge-staggered `DvceArray4D<Real> a1,a2,a3` allocation and `CellCenterX`/
-  `LeftEdgeX` staggering convention (`a1` at `(x1v,x2f,x3f)`, `a2` at
-  `(x1f,x2v,x3f)`, `a3` at `(x1f,x2f,x3v)`), filled over the staggered range
-  `is..ie+1, js..je+1, ks..ke+1`.
-- The discrete-curl `pgen_Bfc`/cell-centered-average `pgen_bcc` kernel pair,
-  including the "extra face at edge of block" terms — reused essentially
-  verbatim (`CurlToBcc` lambda / the final curl block in `BuildMagneticField`).
-- The AMR fine/coarse vector-potential correction pattern (average over
-  `x_center ± 0.25*dx` on the correction axis, gated by neighbor-level checks
-  via `nghbr`/`mb_lev`) — reused for `a1`/`a2` (same neighbor-index blocks),
-  extended (new, this session) for `a3`.
-- The Gauss-to-code-unit conversion: initially reused `lorene_bns.cpp`'s
-  hardcoded `8.3519664583273e+19` constant, which silently assumed `<mhd>
-  units=geometric_solar`. Replaced (2026-08-12, user request) with
-  `GaussToCode(pin)` in `dyngr_grass.cpp`, derived from
-  `Primitive::UnitSystem::EnergyDensityConversion` and honoring the actual
-  `<mhd> units` setting, the same key/options `PrimitiveSolverHydro::
-  SetPolicyParams` already reads. Matches the old constant to ~4-5
-  significant figures under the default `geometric_solar` (the sub-permille
-  residual is `lorene_bns.cpp`'s own SI constants vs. this codebase's CGS
-  ones, not a bug).
+`BuildAndCorrect()` applies the `lorene_bns.cpp` a1/a2 corrections verbatim. It adds the
+a3 correction: an average over x3 ± dx3/4 on x1-faces (neighbours 0-7), x2-faces (8-15)
+and x1x2-edges (16-23), from `mesh/nghbr_index.hpp`. This was verified at the time:
+div B = 1.7e-15 under 2-level SMR (VALIDATION.md V1/V7).
 
-**Not reused**: `lorene_bns.cpp`'s current-loop `A1`/`A2` functions themselves
-*were* ported verbatim into `grass_magnetic_web.hpp` as `DipoleA1`/`DipoleA2`
-(with `center=0`, one star at the origin, vs. Lorene's two-star `center_m`/
-`center_p`).
+## 5. Is Y_l advected?
 
-## Design choices made this session (not spelled out verbatim in the spec)
+Yes:
+- `<mhd> nscalars = 1` with `dyn_eos = compose` on the 3D table `DD2_hot_trapped_3d.athtab`.
+- The pgen seeds the passive scalar from the 1D slice table's Y_l(nb) (`tov_tabulated`;
+  the seeding bug was fixed in d5e09cb4, C-009).
+- The evolved EOS is not barotropic: P(rho, T, Y_l) from the 3D table, with Y_l
+  advected and T recovered from (rho, P, Y_l) at t=0. The composition stratification
+  is therefore carried by the evolution.
 
-- **Host-side construction throughout.** `GrassData::Interpolate`/
-  `InterpolateRho` are host-only; porting them to device would be a real
-  re-architecture risk for a one-time startup cost that doesn't need device
-  speed. Vector potentials are built as host arrays, `deep_copy`'d to device
-  only for the curl/reduction steps (which *are* pure arithmetic, safe on
-  device, and reused directly from `lorene_bns.cpp`'s own device kernels).
-- **Unified `BuildAndCorrect` helper**, parameterized by per-component
-  evaluator closures (`std::function<Real(Real,Real,Real)>`), shared by the
-  web's poloidal pass, toroidal pass, *and* the dipole. The alternative
-  (three separate hand-written build+correct blocks) would have tripled the
-  surface area for exactly the kind of boundary-indexing bug this session
-  already hit twice elsewhere in this pgen.
-- **`E_mag/|W|` uses a rest-mass-energy proxy** (`M_rest = integral(rho0) dV`),
-  not a true gravitational binding-energy calculation — flagged explicitly in
-  the startup print, not silently presented as the real thing.
-- **Helicity (`H`) and total angular momentum (`J`) are NOT implemented** in
-  `GrassHistory` — see `VALIDATION.md` for the explicit scope decision.
+## 6. `lorene_bns.cpp`, read end to end
+
+What is reused:
+- the edge allocation and staggering;
+- `CellCenterX`/`LeftEdgeX`;
+- the discrete curl with the extra faces at ie/je/ke;
+- the face-average `bcc0`;
+- the a1/a2 AMR corrections;
+- the current-loop `A1`/`A2` (as `DipoleA1`/`DipoleA2`, center = 0, a3 ≡ 0).
+
+What differs:
+- **Gauss conversion:** `lorene_bns.cpp` hard-codes `b_max/8.3519664583273e19`.
+  `GaussToCode()` derives the same factor from the `<mhd> units` system: sqrt(energy
+  density conversion/4π) = 1/8.3520e19 for geometric_solar.
+- **Normalization:** `lorene_bns.cpp` uses max|B| on its own (non-densitized-aware)
+  bcc. Here every normalization uses the physical field (§3).
+- **Ordering:** after the field, `PrimToConInit` builds the conserved variables
+  (including B); under `<z4c>` `ADMToZ4c` follows, as in the reference.
+
+## 7. Design §8: does the CFC metric source include the EM terms?
+
+Yes, all three:
+- **E** (Hamiltonian/psi source): `u_tilde = cons(IEN) + cons(IDN)` (cfc.cpp:1140) is
+  sqrt(gamma) (tau + D) = sqrt(gamma) E. `PrimToCons` builds tau with the magnetic
+  energy.
+- **S_i** (shift source): `cons(IM1+a)` (cfc.cpp:1162) is the full conserved momentum,
+  Poynting term included.
+- **S** (lapse source): `RescaleMatterSources` (cfc.cpp:1280-1350) rebuilds S_ij with
+  the magnetic stress, -(B_i + (B·v) v_i)B_j/W^2 + (P + b^2/2) g_ij, and takes the trace.
+
+## 8. Normalization options (design §3-4)
+
+| key | values | meaning |
+|---|---|---|
+| `web_norm` | `bmax` (spec default, `web_bmax_gauss`) / `rms` (`web_brms_gauss`) | rms of physical \|B_web\| over cells with h(rho_cell) ≥ 0.5, proper-volume weighted |
+| `dipole_norm` | `bmax` (`dipole_bmax_gauss`) / `bvarpi_rms` (`dipole_bvarpi_rms_gauss`) | rms over h ≥ 0.5 of the azimuthal mean of the physical cylindrical-radial component, B̄_varpi |
+| `grass_t_over_w` | GRASS T/\|W\| | lets the report give E_mag/\|W\| with \|W\| = T/(T/\|W\|), T = ½∫Ω dJ on the AthenaK grid |
+
+How B̄_varpi is computed:
+- a proper-volume-weighted mean over (varpi, z) bins of width Δx_finest, covering
+  1.25× the window's outer radius;
+- the same bins give the t=0 map `<basename>.web_map_t0.txt`.
+
+The tor/pol quadratic (spec §3) uses the physical B_phi and |B|^2 - B_phi^2.
+
+## Design choices (unchanged from 2026-08)
+
+- **Host-side construction:** the GRASS interpolator is host-only. The potentials are
+  built on the host and copied to the device for the curl and the reductions.
+- **One builder:** a single `BuildAndCorrect` serves the web P pass, the T pass and the
+  dipole, so the boundary-correction logic exists once.

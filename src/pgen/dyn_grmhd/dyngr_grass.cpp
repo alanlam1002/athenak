@@ -43,6 +43,7 @@
 #include <math.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 #include <limits>
 #include <sstream>
@@ -66,6 +67,45 @@
 #include "grass/grass_magnetic_web.hpp"
 #include "utils/tov/tov_tabulated.hpp"
 
+// b0/bcc0 hold the DENSITIZED field Btilde^i = sqrt(gamma)*B^i: PrimToCons and
+// ConsToPrim divide bcc0 by sqrt(gamma) (eos/primitive_solver_hyd.hpp), and the CT
+// update evolves the face values as fluxes. The discrete curl of the edge potential
+// A_i therefore yields Btilde directly (same as lorene_bns.cpp). All magnetic
+// diagnostics below convert to the physical Eulerian field B^i = Btilde^i/sqrt(gamma)
+// with the cell's own g_dd: |B|^2 = g_ij B^i B^j, energy density |B|^2/2 (code
+// units, Heaviside-Lorentz), volume element sqrt(gamma) d^3x. Components along the
+// flat unit directions e (varpi-hat, phi-hat, z-hat) are g(B,e)/sqrt(g(e,e)); the
+// poloidal energy is |B|^2 - B_phi^2.
+struct GrassPhysB {
+  Real bvarpi, bphi, bz;   // physical components (code units)
+  Real bsq;                // g_ij B^i B^j
+  Real sdetg;              // sqrt(gamma)
+};
+
+KOKKOS_INLINE_FUNCTION
+GrassPhysB GrassPhysicalB(Real gxx, Real gxy, Real gxz, Real gyy, Real gyz, Real gzz,
+                          Real btx, Real bty, Real btz, Real x, Real y) {
+  GrassPhysB out;
+  Real detg = adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz);
+  out.sdetg = Kokkos::sqrt(fmax(detg, 1.0e-300));
+  Real bx = btx/out.sdetg, by = bty/out.sdetg, bz = btz/out.sdetg;
+  Real bdx = gxx*bx + gxy*by + gxz*bz;
+  Real bdy = gxy*bx + gyy*by + gyz*bz;
+  Real bdz = gxz*bx + gyz*by + gzz*bz;
+  out.bsq = bdx*bx + bdy*by + bdz*bz;
+  out.bz = bdz/Kokkos::sqrt(gzz);
+  Real w = Kokkos::sqrt(x*x + y*y);
+  if (w > 0.0) {
+    Real ex = x/w, ey = y/w;   // varpi-hat; phi-hat = (-ey, ex)
+    out.bvarpi = (bdx*ex + bdy*ey)/Kokkos::sqrt(gxx*ex*ex + 2.0*gxy*ex*ey + gyy*ey*ey);
+    out.bphi = (-bdx*ey + bdy*ex)/Kokkos::sqrt(gxx*ey*ey - 2.0*gxy*ex*ey + gyy*ex*ex);
+  } else {
+    out.bvarpi = 0.0;
+    out.bphi = 0.0;
+  }
+  return out;
+}
+
 // Prototype for user-defined history function
 void GrassHistory(HistoryData *pdata, Mesh *pm);
 
@@ -76,6 +116,10 @@ void GrassHistory(HistoryData *pdata, Mesh *pm);
 // w0/b0/bcc0 -- no z4c/CFC-specific state, so this ported over unmodified.
 void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                          const grass::GrassData &data, const grass::GrassEosTable &eos_table);
+
+// Startup report on the installed field that needs the conserved variables (defined
+// below; called from UserProblem after PrimToConInit).
+void GrassMagneticReport(ParameterInput *pin, Mesh *pm);
 
 // Gauss -> AthenaK code-unit conversion factor, honoring <mhd> units (same key/
 // options as PrimitiveSolverHydro::SetPolicyParams). B^2/2 is the code's energy
@@ -322,33 +366,63 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   }
 
   const Real gauss_to_code = GaussToCode(pin);
+  grass::GrassUnits units;
+  const Real rho_to_cgs = 1.0/units.MassDensityCgsToCode(1.0);
+  const Real len_to_km = 1.0/units.LengthCgsToCode(1.0e5);
+  const Real dx_finest = pmy_mesh_->mesh_size.dx1 /
+                         std::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
 
   // ---- <problem> keys ---------------------------------------------------------------
+  // Normalizations (web_field_design_P_CFC.md §3-4):
+  //   web_norm = bmax : max|B_web| = web_bmax_gauss (spec default)
+  //            = rms  : rms |B_web| over cells with h(rho) >= 0.5 = web_brms_gauss
+  //   dipole_norm = bmax       : max|B_dip| = dipole_bmax_gauss (spec default)
+  //               = bvarpi_rms : rms over h >= 0.5 of the azimuthal-mean cylindrical-
+  //                              radial component Bbar_varpi = dipole_bvarpi_rms_gauss
+  // Both rms forms use the physical field and the proper volume sqrt(gamma) d^3x.
   bool dipole_confine = pin->GetOrAddInteger("problem", "dipole_confine", 0) != 0;
-  bool need_h = web_enable || (dipole_enable && dipole_confine);
+  std::string web_norm = "bmax", dipole_norm = "bmax";
+  if (web_enable) { web_norm = pin->GetOrAddString("problem", "web_norm", "bmax"); }
+  if (dipole_enable) { dipole_norm = pin->GetOrAddString("problem", "dipole_norm", "bmax"); }
+  if ((web_norm != "bmax" && web_norm != "rms") ||
+      (dipole_norm != "bmax" && dipole_norm != "bvarpi_rms")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "web_norm must be bmax|rms and dipole_norm bmax|bvarpi_rms (got '"
+              << web_norm << "', '" << dipole_norm << "')" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  bool need_h = web_enable || (dipole_enable && (dipole_confine || dipole_norm != "bmax"));
   Real rho_lo = 0.0, rho_hi = 0.0;
   if (need_h) {
     rho_lo = pin->GetReal("problem", "web_rho_lo");
     rho_hi = pin->GetReal("problem", "web_rho_hi");
   }
-  Real mu_star = 2.0, web_bmax_code = 0.0, web_tor_pol = 4.0, web_kmin = 0.0, web_kmax = 0.0;
+  Real mu_star = 2.0, web_target = 0.0, web_tor_pol = 4.0, web_kmin = 0.0, web_kmax = 0.0;
   if (web_enable) {
     mu_star = pin->GetOrAddReal("problem", "web_mu_star", 2.0);
-    web_bmax_code = pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16) * gauss_to_code;
+    web_target = (web_norm == "rms") ? pin->GetReal("problem", "web_brms_gauss")
+                                     : pin->GetOrAddReal("problem", "web_bmax_gauss", 1.0e16);
+    web_target *= gauss_to_code;
     web_tor_pol = pin->GetOrAddReal("problem", "web_tor_pol", 4.0);
     web_kmin = pin->GetReal("problem", "web_kmin");
     web_kmax = pin->GetReal("problem", "web_kmax");
   }
-  Real dipole_bmax_code = 0.0, dipole_r0 = 5.0;
+  // Test-only switches for the spec's V3/V4 checks: h == 1 everywhere (no envelope on
+  // the web), and lambda_T = lambda_P = 1 without the tor/pol solve.
+  const bool web_test_h_one = pin->GetOrAddInteger("problem", "web_test_h_one", 0) != 0;
+  const bool web_test_fixed_lambda =
+      pin->GetOrAddInteger("problem", "web_test_fixed_lambda", 0) != 0;
+  Real dipole_target = 0.0, dipole_r0 = 5.0;
   if (dipole_enable) {
-    dipole_bmax_code = pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16) * gauss_to_code;
+    dipole_target = (dipole_norm == "bvarpi_rms")
+        ? pin->GetReal("problem", "dipole_bvarpi_rms_gauss")
+        : pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16);
+    dipole_target *= gauss_to_code;
     dipole_r0 = pin->GetOrAddReal("problem", "dipole_r0", 5.0);
   }
 
   // ---- Resolution guard (web only): 2*pi/k_max must resolve on >=8 finest cells -----
   if (web_enable) {
-    Real dx_finest = pmy_mesh_->mesh_size.dx1 /
-                      Kokkos::pow(2.0, pmy_mesh_->max_level - pmy_mesh_->root_level);
     if (2.0*M_PI/web_kmax < 8.0*dx_finest) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "web_kmax=" << web_kmax << " under-resolved: 2*pi/web_kmax="
@@ -358,6 +432,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   }
 
   // ---- rho_max validation + shell -> R_cyl startup diagnostic -----------------------
+  Real r_outer_eq = -1.0, r_outer_pole = -1.0;
   if (need_h) {
     auto &w0d = pmbp->pmhd->w0;
     int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
@@ -382,47 +457,48 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                 << " -- the mass-shell window must lie within the star." << std::endl;
       exit(EXIT_FAILURE);
     }
-    // ---- Equatorial density sweep: rho_lo/rho_hi -> R_cyl mapping, plus a
-    // fragmentation guard. The rho_hi<=rho_max check above only guards against
-    // rho_hi missing the star entirely -- it does NOT guard against rho_hi sitting
-    // strictly between this star's on-axis (r=0) density and its true (possibly
-    // off-center) peak, a real risk for differentially rotating remnants whose
-    // equatorial density profile can be quasi-toroidal (peaking off-center, not at
-    // r=0). If rho_hi falls in that band, the excluded (rho>=rho_hi) region is an
-    // ANNULUS rather than a disk containing the axis, so the confinement shell
-    // (rho_lo<rho<rho_hi) silently fragments into a spurious inner disk near the
-    // center plus the intended outer shell -- confirmed empirically on
-    // grass_diff_DD2_hot_v2 (VALIDATION.md's 2026-08-14 m=0-split reanalysis).
-    // Detected here by walking the same equatorial ray used for the r_inner/r_outer
-    // diagnostic below: once the profile has dropped below rho_hi (entering the
-    // shell), it must never rise back above rho_hi before dropping below rho_lo
-    // (leaving the star) -- any re-crossing means the excluded core is not
-    // simply-connected. Runs identically on every rank (InterpolateRho is a
-    // deterministic host-side evaluation -- same reproducibility guarantee as
-    // GenerateWebModeTable), so a detected fragmentation aborts every rank
-    // together, avoiding an MPI deadlock from only rank 0 calling exit().
-    Real r_inner = -1.0, r_outer = -1.0, r_reentry = -1.0;
-    {
-      Real x1max = pmy_mesh_->mesh_size.x1max;
+    // ---- Density sweeps along the equator (x axis) and the pole (z axis): the
+    // rho_lo/rho_hi -> radius mapping, the h peak, plus a fragmentation guard. The
+    // rho_hi<=rho_max check above only guards against rho_hi missing the star
+    // entirely -- it does NOT guard against rho_hi sitting strictly between this
+    // star's on-axis (r=0) density and its true (possibly off-center) peak, a real
+    // risk for differentially rotating remnants whose equatorial density profile can
+    // be quasi-toroidal. If rho_hi falls in that band, the excluded (rho>=rho_hi)
+    // region is an ANNULUS, so the shell silently fragments into a spurious inner
+    // disk plus the intended outer shell (confirmed on grass_diff_DD2_hot_v2,
+    // VALIDATION.md 2026-08-14). Detected on the equatorial ray: once the profile has
+    // dropped below rho_hi it must never rise back above rho_hi before dropping below
+    // rho_lo. InterpolateRho is a deterministic host evaluation, so every rank aborts
+    // together.
+    struct Sweep { Real r_inner = -1.0, r_outer = -1.0, r_reentry = -1.0, r_hpeak = -1.0; };
+    auto sweep = [&](Real ex, Real ez) {
+      Sweep sw;
+      Real rmax = pmy_mesh_->mesh_size.x1max, hbest = 0.0;
       bool entered_shell = false;
-      for (int s = 1; s <= 2000; ++s) {
-        Real r = s * (x1max / 2000.0);
-        Real rho_here = data.InterpolateRho(r, 0.0, 0.0, eos_table);
+      for (int s = 1; s <= 20000; ++s) {
+        Real r = s*(rmax/20000.0);
+        Real rho_here = data.InterpolateRho(r*ex, 0.0, r*ez, eos_table);
+        Real hh = grass::WebEnvelope(rho_here, rho_lo, rho_hi);
+        if (hh > hbest) { hbest = hh; sw.r_hpeak = r; }
         if (rho_here < rho_hi) {
-          if (r_inner < 0.0) { r_inner = r; }
+          if (sw.r_inner < 0.0) { sw.r_inner = r; }
           entered_shell = true;
-        } else if (entered_shell && r_reentry < 0.0) {
-          r_reentry = r;
+        } else if (entered_shell && sw.r_reentry < 0.0) {
+          sw.r_reentry = r;
         }
-        if (rho_here < rho_lo && r_outer < 0.0) { r_outer = r; break; }
+        if (rho_here < rho_lo && sw.r_outer < 0.0) { sw.r_outer = r; break; }
       }
-    }
-    if (r_reentry > 0.0) {
+      return sw;
+    };
+    Sweep eq = sweep(1.0, 0.0), pole = sweep(0.0, 1.0);
+    r_outer_eq = eq.r_outer;
+    r_outer_pole = pole.r_outer;
+    if (eq.r_reentry > 0.0) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "web_rho_hi=" << rho_hi << " sits between this star's on-axis (r=0) "
                 << "density and its true (possibly off-center) peak: the equatorial "
-                << "density profile drops below rho_hi at r=" << r_inner << " but rises "
-                << "back above it at r=" << r_reentry << ". The high-density region "
+                << "density profile drops below rho_hi at r=" << eq.r_inner << " but rises "
+                << "back above it at r=" << eq.r_reentry << ". The high-density region "
                 << "excluded from the web is therefore an annulus, not a disk containing "
                 << "the axis, so the confinement shell fragments into a spurious inner "
                 << "disk plus the intended outer shell. Lower web_rho_hi below this "
@@ -430,12 +506,32 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       exit(EXIT_FAILURE);
     }
     if (global_variable::my_rank == 0) {
-      if (r_inner > 0.0 && r_outer > r_inner) {
-        Real shell_width = r_outer - r_inner;
-        std::cout << "GRASS magnetic web: rho shell [" << rho_lo << "," << rho_hi
-                  << "] (code units) maps to equatorial R_cyl in [" << r_inner << ","
-                  << r_outer << "] (width=" << shell_width << "), rho_max=" << rho_max
-                  << std::endl;
+      std::cout << "GRASS magnetic web: window rho [" << rho_lo << ", " << rho_hi
+                << "] code = [" << rho_lo*rho_to_cgs << ", " << rho_hi*rho_to_cgs
+                << "] g/cm^3; rho_max = " << rho_max << " code = " << rho_max*rho_to_cgs
+                << " g/cm^3" << std::endl;
+      std::cout << "GRASS magnetic web: equator (x axis): rho=rho_hi at r=" << eq.r_inner
+                << " M (" << eq.r_inner*len_to_km << " km), h peak at " << eq.r_hpeak
+                << " M (" << eq.r_hpeak*len_to_km << " km), rho=rho_lo at " << eq.r_outer
+                << " M (" << eq.r_outer*len_to_km << " km)" << std::endl;
+      std::cout << "GRASS magnetic web: pole (z axis): rho=rho_hi at r=" << pole.r_inner
+                << " M (" << pole.r_inner*len_to_km << " km), h peak at " << pole.r_hpeak
+                << " M (" << pole.r_hpeak*len_to_km << " km), rho=rho_lo at "
+                << pole.r_outer << " M (" << pole.r_outer*len_to_km << " km)" << std::endl;
+      if (eq.r_inner > 0.0 && eq.r_outer > eq.r_inner) {
+        Real shell_width = eq.r_outer - eq.r_inner;
+        if (web_enable) {
+          std::cout << "GRASS magnetic web: k in [" << web_kmin << ", " << web_kmax
+                    << "] /M = [" << web_kmin/len_to_km << ", " << web_kmax/len_to_km
+                    << "] /km; k*R_w in [" << web_kmin*eq.r_outer << ", "
+                    << web_kmax*eq.r_outer << "] with R_w = " << eq.r_outer
+                    << " M (equatorial rho_lo radius); wavelengths "
+                    << 2.0*M_PI/web_kmax*len_to_km << "-" << 2.0*M_PI/web_kmin*len_to_km
+                    << " km = " << 2.0*M_PI/web_kmax/dx_finest << "-"
+                    << 2.0*M_PI/web_kmin/dx_finest << " cells at dx_finest="
+                    << dx_finest << " M (" << dx_finest*len_to_km*1.0e3 << " m)"
+                    << std::endl;
+        }
         if (web_enable && 2.0*M_PI/web_kmin > shell_width) {
           std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
                     << "web_kmin=" << web_kmin << " gives the longest mode wavelength "
@@ -645,6 +741,160 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     });
   };
 
+  // ---- Cell reductions shared by the normalization passes and the startup report ----
+  auto &w0d = pmbp->pmhd->w0;
+  auto &admd = pmbp->padm->adm;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmkji = nmb*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+
+  // max physical |B| over all cells, and rms physical |B| over cells with h >= 0.5,
+  // of a densitized cell-centred field
+  auto BmaxRms = [&](DvceArray4D<Real> &bx, DvceArray4D<Real> &by, DvceArray4D<Real> &bz,
+                     Real *bmax, Real *brms) {
+    Real bm = 0.0, s2 = 0.0, sv = 0.0;
+    Kokkos::parallel_reduce("GrassWebBmaxRms", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &rbm, Real &rs2, Real &rsv) {
+      int m = idx/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks; j += js;
+      Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      GrassPhysB pb = GrassPhysicalB(admd.g_dd(m,0,0,k,j,i), admd.g_dd(m,0,1,k,j,i),
+                                     admd.g_dd(m,0,2,k,j,i), admd.g_dd(m,1,1,k,j,i),
+                                     admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i),
+                                     bx(m,k,j,i), by(m,k,j,i), bz(m,k,j,i), x1v, x2v);
+      rbm = fmax(rbm, sqrt(pb.bsq));
+      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi) >= 0.5) {
+        Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        rs2 += pb.bsq*dV;
+        rsv += dV;
+      }
+    }, Kokkos::Max<Real>(bm), Kokkos::Sum<Real>(s2), Kokkos::Sum<Real>(sv));
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &bm, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    Real l2[2] = {s2, sv};
+    MPI_Allreduce(MPI_IN_PLACE, l2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    s2 = l2[0]; sv = l2[1];
+#endif
+    *bmax = bm;
+    *brms = (sv > 0.0) ? std::sqrt(s2/sv) : 0.0;
+  };
+
+  // Azimuthal averages on (varpi, z) bins of width dx_finest (proper-volume weighted):
+  // per bin 0: dV, 1: B_varpi dV, 2: B_phi dV, 3: B_z dV, 4: h dV, 5: rho0 dV.
+  const Real az_db = dx_finest;
+  const Real az_rmax = 1.25*std::max({r_outer_eq, r_outer_pole, 4.0*dx_finest});
+  const int az_nw = static_cast<int>(std::ceil(az_rmax/az_db));
+  const int az_nz = 2*az_nw;
+  const Real az_zmin = -az_nw*az_db;
+  constexpr int kAzN = 6;
+  using AzHost = typename DvceArray3D<Real>::HostMirror;
+  auto AzimuthalSums = [&](DvceArray4D<Real> &bx, DvceArray4D<Real> &by,
+                           DvceArray4D<Real> &bz, AzHost *out) {
+    DvceArray3D<Real> sums("grass_az_sums", az_nw, az_nz, kAzN);
+    par_for("grass_az_sums", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      int iw = static_cast<int>(sqrt(x1v*x1v + x2v*x2v)/az_db);
+      int iz = static_cast<int>(Kokkos::floor((x3v - az_zmin)/az_db));
+      if (iw >= az_nw || iz < 0 || iz >= az_nz) { return; }
+      GrassPhysB pb = GrassPhysicalB(admd.g_dd(m,0,0,k,j,i), admd.g_dd(m,0,1,k,j,i),
+                                     admd.g_dd(m,0,2,k,j,i), admd.g_dd(m,1,1,k,j,i),
+                                     admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i),
+                                     bx(m,k,j,i), by(m,k,j,i), bz(m,k,j,i), x1v, x2v);
+      Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+      Real rho = w0d(m,IDN,k,j,i);
+      Kokkos::atomic_add(&sums(iw,iz,0), dV);
+      Kokkos::atomic_add(&sums(iw,iz,1), pb.bvarpi*dV);
+      Kokkos::atomic_add(&sums(iw,iz,2), pb.bphi*dV);
+      Kokkos::atomic_add(&sums(iw,iz,3), pb.bz*dV);
+      Kokkos::atomic_add(&sums(iw,iz,4), grass::WebEnvelope(rho, rho_lo, rho_hi)*dV);
+      Kokkos::atomic_add(&sums(iw,iz,5), rho*dV);
+    });
+    *out = Kokkos::create_mirror_view(sums);
+    Kokkos::deep_copy(*out, sums);
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, out->data(), static_cast<int>(out->size()),
+                  MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  };
+
+  // rms over h >= 0.5 of the azimuthal mean Bbar_varpi (from AzimuthalSums) and of the
+  // non-axisymmetric remainder B_varpi - Bbar_varpi
+  auto BvarpiMeanRms = [&](DvceArray4D<Real> &bx, DvceArray4D<Real> &by,
+                           DvceArray4D<Real> &bz, const AzHost &sums,
+                           Real *rms_mean, Real *rms_fluct) {
+    DvceArray2D<Real> mean("grass_az_mean", az_nw, az_nz);
+    auto mean_h = Kokkos::create_mirror_view(mean);
+    for (int iw = 0; iw < az_nw; ++iw) {
+      for (int iz = 0; iz < az_nz; ++iz) {
+        mean_h(iw,iz) = (sums(iw,iz,0) > 0.0) ? sums(iw,iz,1)/sums(iw,iz,0) : 0.0;
+      }
+    }
+    Kokkos::deep_copy(mean, mean_h);
+    Real s2m = 0.0, s2f = 0.0, sv = 0.0;
+    Kokkos::parallel_reduce("GrassAzRms", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &rm, Real &rf, Real &rv) {
+      int m = idx/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks; j += js;
+      if (grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi) < 0.5) { return; }
+      Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      int iw = static_cast<int>(sqrt(x1v*x1v + x2v*x2v)/az_db);
+      int iz = static_cast<int>(Kokkos::floor((x3v - az_zmin)/az_db));
+      if (iw >= az_nw || iz < 0 || iz >= az_nz) { return; }
+      GrassPhysB pb = GrassPhysicalB(admd.g_dd(m,0,0,k,j,i), admd.g_dd(m,0,1,k,j,i),
+                                     admd.g_dd(m,0,2,k,j,i), admd.g_dd(m,1,1,k,j,i),
+                                     admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i),
+                                     bx(m,k,j,i), by(m,k,j,i), bz(m,k,j,i), x1v, x2v);
+      Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+      rm += SQR(mean(iw,iz))*dV;
+      rf += SQR(pb.bvarpi - mean(iw,iz))*dV;
+      rv += dV;
+    }, Kokkos::Sum<Real>(s2m), Kokkos::Sum<Real>(s2f), Kokkos::Sum<Real>(sv));
+#if MPI_PARALLEL_ENABLED
+    Real l3[3] = {s2m, s2f, sv};
+    MPI_Allreduce(MPI_IN_PLACE, l3, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    s2m = l3[0]; s2f = l3[1]; sv = l3[2];
+#endif
+    *rms_mean = (sv > 0.0) ? std::sqrt(s2m/sv) : 0.0;
+    *rms_fluct = (sv > 0.0) ? std::sqrt(s2f/sv) : 0.0;
+  };
+
+  // Magnetic helicity H = integral A_i Btilde^i d^3x (= integral A.B sqrt(gamma) d^3x):
+  // edge potentials averaged to the cell centre, cell-centred densitized B. Gauge
+  // invariant when B.n = 0 on the boundary of the support (the h-confined fields).
+  auto Helicity = [&](DvceArray4D<Real> &a1, DvceArray4D<Real> &a2, DvceArray4D<Real> &a3,
+                      DvceArray4D<Real> &bx, DvceArray4D<Real> &by, DvceArray4D<Real> &bz) {
+    Real hel = 0.0;
+    Kokkos::parallel_reduce("GrassHelicity", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &rh) {
+      int m = idx/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks; j += js;
+      Real ac1 = 0.25*(a1(m,k,j,i) + a1(m,k,j+1,i) + a1(m,k+1,j,i) + a1(m,k+1,j+1,i));
+      Real ac2 = 0.25*(a2(m,k,j,i) + a2(m,k,j,i+1) + a2(m,k+1,j,i) + a2(m,k+1,j,i+1));
+      Real ac3 = 0.25*(a3(m,k,j,i) + a3(m,k,j,i+1) + a3(m,k,j+1,i) + a3(m,k,j+1,i+1));
+      rh += (ac1*bx(m,k,j,i) + ac2*by(m,k,j,i) + ac3*bz(m,k,j,i))*
+            size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    }, Kokkos::Sum<Real>(hel));
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, &hel, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    return hel;
+  };
+
   HostArray4D<Real> final_a1, final_a2, final_a3;
   Kokkos::realloc(final_a1, nmb, n3, n2, n1);
   Kokkos::realloc(final_a2, nmb, n3, n2, n1);
@@ -654,13 +904,21 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   Kokkos::deep_copy(final_a3, 0.0);
 
   // ==== Web: build P/T decomposition, enforce E_tor/E_pol exactly, rescale, combine ==
+  Real web_scale = 0.0, web_bmax_raw = 0.0, web_brms_raw = 0.0, hel_web = 0.0;
   if (web_enable) {
     grass::WebModeTable mode_table;
     grass::GenerateWebModeTable(pin, &mode_table);
+    if (global_variable::my_rank == 0 && mode_table.nmodes <= 4) {
+      for (int p = 0; p < mode_table.nmodes; ++p) {
+        std::printf("GRASS magnetic web: mode %d k=(%.17g, %.17g, %.17g) amp=%.17g "
+                    "phase=%.17g\n", p, mode_table.kx[p], mode_table.ky[p], mode_table.kz[p],
+                    mode_table.amp[p], mode_table.phase[p]);
+      }
+    }
 
     std::function<Real(Real, Real, Real)> f1P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -668,7 +926,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f2P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -676,7 +934,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f3P = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 0.0, 1.0, &ax, &ay, &az);
@@ -684,7 +942,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f1T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -692,7 +950,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f2T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -700,7 +958,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     };
     std::function<Real(Real, Real, Real)> f3T = [&](Real x, Real y, Real z) -> Real {
       Real rho = data.InterpolateRho(x, y, z, eos_table);
-      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      Real h = web_test_h_one ? 1.0 : grass::WebEnvelope(rho, rho_lo, rho_hi);
       if (h == 0.0) { return 0.0; }
       Real ax, ay, az;
       grass::WebA(x, y, z, mode_table, mu_star, 1.0, 0.0, &ax, &ay, &az);
@@ -729,11 +987,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     CurlToBcc(d_a1T, d_a2T, d_a3T, bxT, byT, bzT);
 
     // ---- Six-integral reduction (restricted to rho>rho_lo), quadratic solve --------
-    auto &w0d = pmbp->pmhd->w0;
-    auto &admd = pmbp->padm->adm;
-    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
-    const int nmkji = nmb*nx3*nx2*nx1;
-    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    // Physical field, proper volume; E_tor = int B_phi^2, E_pol = int (|B|^2 - B_phi^2).
+    // The P-T cross term g(B^P,B^T) comes from polarization of |B^P + B^T|^2.
     Real sa=0.0, sb=0.0, sc=0.0, sd=0.0, se=0.0, sf=0.0;
     Kokkos::parallel_reduce("GrassWebRatioSums", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
     KOKKOS_LAMBDA(const int &idx, Real &ra, Real &rb, Real &rc, Real &rd, Real &re, Real &rf) {
@@ -748,22 +1003,24 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       Real rcyl = sqrt(x1v*x1v + x2v*x2v);
       Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
       if (rcyl < 1.0e-6*dx1) { return; }
-      Real phix = -x2v/rcyl, phiy = x1v/rcyl;
-      Real rhx = x1v/rcyl, rhy = x2v/rcyl;
-      Real btorP = bxP(m,k,j,i)*phix + byP(m,k,j,i)*phiy;
-      Real btorT = bxT(m,k,j,i)*phix + byT(m,k,j,i)*phiy;
-      Real bRP = bxP(m,k,j,i)*rhx + byP(m,k,j,i)*rhy, bZP = bzP(m,k,j,i);
-      Real bRT = bxT(m,k,j,i)*rhx + byT(m,k,j,i)*rhy, bZT = bzT(m,k,j,i);
-      Real detg = adm::SpatialDet(admd.g_dd(m,0,0,k,j,i), admd.g_dd(m,0,1,k,j,i),
-                                   admd.g_dd(m,0,2,k,j,i), admd.g_dd(m,1,1,k,j,i),
-                                   admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i));
-      Real dV = sqrt(fmax(detg, 0.0)) * dx1*dx2*dx3;
-      ra += btorP*btorP*dV;
-      rb += 2.0*btorP*btorT*dV;
-      rc += btorT*btorT*dV;
-      rd += (bRP*bRP + bZP*bZP)*dV;
-      re += 2.0*(bRP*bRT + bZP*bZT)*dV;
-      rf += (bRT*bRT + bZT*bZT)*dV;
+      Real g0 = admd.g_dd(m,0,0,k,j,i), g1 = admd.g_dd(m,0,1,k,j,i);
+      Real g2 = admd.g_dd(m,0,2,k,j,i), g3 = admd.g_dd(m,1,1,k,j,i);
+      Real g4 = admd.g_dd(m,1,2,k,j,i), g5 = admd.g_dd(m,2,2,k,j,i);
+      GrassPhysB pP = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bxP(m,k,j,i), byP(m,k,j,i),
+                                     bzP(m,k,j,i), x1v, x2v);
+      GrassPhysB pT = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bxT(m,k,j,i), byT(m,k,j,i),
+                                     bzT(m,k,j,i), x1v, x2v);
+      GrassPhysB pS = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bxP(m,k,j,i) + bxT(m,k,j,i),
+                                     byP(m,k,j,i) + byT(m,k,j,i),
+                                     bzP(m,k,j,i) + bzT(m,k,j,i), x1v, x2v);
+      Real cross = 0.5*(pS.bsq - pP.bsq - pT.bsq);
+      Real dV = pP.sdetg*dx1*dx2*dx3;
+      ra += pP.bphi*pP.bphi*dV;
+      rb += 2.0*pP.bphi*pT.bphi*dV;
+      rc += pT.bphi*pT.bphi*dV;
+      rd += (pP.bsq - pP.bphi*pP.bphi)*dV;
+      re += 2.0*(cross - pP.bphi*pT.bphi)*dV;
+      rf += (pT.bsq - pT.bphi*pT.bphi)*dV;
     }, Kokkos::Sum<Real>(sa), Kokkos::Sum<Real>(sb), Kokkos::Sum<Real>(sc),
        Kokkos::Sum<Real>(sd), Kokkos::Sum<Real>(se), Kokkos::Sum<Real>(sf));
 #if MPI_PARALLEL_ENABLED
@@ -774,19 +1031,41 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       sa=global6[0]; sb=global6[1]; sc=global6[2]; sd=global6[3]; se=global6[4]; sf=global6[5];
     }
 #endif
+    // Range of E_tor/E_pol reachable with lambda_T/lambda_P >= 0, for the report.
+    auto ratio_at = [&](Real x) {
+      return (sa + sb*x + sc*x*x)/std::max(sd + se*x + sf*x*x, 1.0e-300);
+    };
+    Real tp_min = std::min(ratio_at(0.0), sc/std::max(sf, 1.0e-300));
+    Real tp_max = std::max(ratio_at(0.0), sc/std::max(sf, 1.0e-300));
+    for (int s = 0; s <= 4000; ++s) {
+      Real r = ratio_at(std::pow(10.0, -6.0 + 12.0*s/4000.0));
+      tp_min = std::min(tp_min, r);
+      tp_max = std::max(tp_max, r);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "GRASS magnetic web: E_tor/E_pol of the P pass alone " << sa/sd
+                << ", of the T pass alone " << sc/sf << "; reachable range for "
+                << "lambda_T/lambda_P >= 0: [" << tp_min << ", " << tp_max << "]; "
+                << "E(T pass)/E(P pass) = " << (sc + sf)/std::max(sa + sd, 1.0e-300)
+                << " (Chandrasekhar toroidal/poloidal, ~mu_star^2)" << std::endl;
+    }
+
     Real qA = sc - web_tor_pol*sf, qB = sb - web_tor_pol*se, qC = sa - web_tor_pol*sd;
     Real lam_T = 0.0;
     bool have_root = false;
-    if (Kokkos::abs(qA) < 1.0e-12*Kokkos::max({Kokkos::abs(qB), Kokkos::abs(qC), 1.0})) {
-      if (Kokkos::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
+    if (web_test_fixed_lambda) {
+      lam_T = 1.0;
+      have_root = true;
+    } else if (std::abs(qA) < 1.0e-12*std::max({std::abs(qB), std::abs(qC), 1.0})) {
+      if (std::abs(qB) > 0.0) { lam_T = -qC/qB; have_root = (lam_T > 0.0); }
     } else {
       Real disc = qB*qB - 4.0*qA*qC;
       if (disc >= 0.0) {
-        Real sq = Kokkos::sqrt(disc);
+        Real sq = std::sqrt(disc);
         Real x1r = (-qB+sq)/(2.0*qA), x2r = (-qB-sq)/(2.0*qA);
         bool p1 = x1r > 0.0, p2 = x2r > 0.0;
         if (p1 && p2) {
-          lam_T = (Kokkos::abs(x1r-mu_star) < Kokkos::abs(x2r-mu_star)) ? x1r : x2r;
+          lam_T = (std::abs(x1r-mu_star) < std::abs(x2r-mu_star)) ? x1r : x2r;
           have_root = true;
         } else if (p1) {
           lam_T = x1r; have_root = true;
@@ -798,19 +1077,18 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     if (!have_root) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "No positive real root for lambda_T/lambda_P in the web tor/pol "
-                << "normalization quadratic (A=" << qA << " B=" << qB << " C=" << qC << ")."
-                << std::endl;
+                << "normalization quadratic (A=" << qA << " B=" << qB << " C=" << qC << "): "
+                << "web_tor_pol=" << web_tor_pol << " lies outside the reachable range ["
+                << tp_min << ", " << tp_max << "]." << std::endl;
       exit(EXIT_FAILURE);
     }
     if (global_variable::my_rank == 0) {
-      Real achieved = (sa + sb*lam_T + sc*lam_T*lam_T) /
-                       Kokkos::max(sd + se*lam_T + sf*lam_T*lam_T, 1.0e-300);
       std::cout << "GRASS magnetic web: lambda_P=1, lambda_T=" << lam_T
-                << ", achieved E_tor/E_pol=" << achieved << " (target=" << web_tor_pol << ")"
-                << std::endl;
+                << ", achieved E_tor/E_pol=" << ratio_at(lam_T) << " (target="
+                << web_tor_pol << ", mu_star=" << mu_star << ")" << std::endl;
     }
 
-    // ---- Combine aP + lam_T*aT (host), rescale to web_bmax_code, add into final -----
+    // ---- Combine aP + lam_T*aT (host), normalize, add into final --------------------
     HostArray4D<Real> web_a1, web_a2, web_a3;
     Kokkos::realloc(web_a1, nmb, n3, n2, n1); Kokkos::realloc(web_a2, nmb, n3, n2, n1);
     Kokkos::realloc(web_a3, nmb, n3, n2, n1);
@@ -834,25 +1112,10 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Kokkos::realloc(wbz, nmb, n3, n2, n1);
     CurlToBcc(d_wa1, d_wa2, d_wa3, wbx, wby, wbz);
 
-    Real bmax_raw = 0.0;
-    {
-      const int nmkji2 = nmb*nx3*nx2*nx1;
-      Kokkos::parallel_reduce("GrassWebBmax", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji2),
-      KOKKOS_LAMBDA(const int &idx, Real &bm) {
-        int m = idx/nkji;
-        int k = (idx - m*nkji)/nji;
-        int j = (idx - m*nkji - k*nji)/nx1;
-        int i = (idx - m*nkji - k*nji - j*nx1) + is;
-        k += ks; j += js;
-        Real bsq = wbx(m,k,j,i)*wbx(m,k,j,i) + wby(m,k,j,i)*wby(m,k,j,i) +
-                   wbz(m,k,j,i)*wbz(m,k,j,i);
-        bm = fmax(bm, sqrt(bsq));
-      }, Kokkos::Max<Real>(bmax_raw));
-#if MPI_PARALLEL_ENABLED
-      MPI_Allreduce(MPI_IN_PLACE, &bmax_raw, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-#endif
-    }
-    Real web_scale = (bmax_raw > 0.0) ? (web_bmax_code/bmax_raw) : 0.0;
+    BmaxRms(wbx, wby, wbz, &web_bmax_raw, &web_brms_raw);
+    Real web_norm_raw = (web_norm == "rms") ? web_brms_raw : web_bmax_raw;
+    web_scale = (web_norm_raw > 0.0) ? (web_target/web_norm_raw) : 0.0;
+    hel_web = SQR(web_scale)*Helicity(d_wa1, d_wa2, d_wa3, wbx, wby, wbz);
     for (int m = 0; m < nmb; ++m) {
       for (int k = ks; k <= ke+1; ++k) {
         for (int j = js; j <= je+1; ++j) {
@@ -865,14 +1128,21 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       }
     }
     if (global_variable::my_rank == 0) {
-      std::cout << "GRASS magnetic web: max|B|(raw)=" << bmax_raw << ", scale factor="
-                << web_scale << " -> web_bmax_gauss target reached." << std::endl;
+      std::cout << "GRASS magnetic web: normalized by " << web_norm << " -> rms|B| (h>=0.5) = "
+                << web_scale*web_brms_raw/gauss_to_code << " G, max|B| = "
+                << web_scale*web_bmax_raw/gauss_to_code << " G; helicity H_web = " << hel_web
+                << " (code units; sign " << ((hel_web >= 0.0) ? "+" : "-") << ")"
+                << std::endl;
     }
   }
 
   // ==== Dipole: current-loop A1/A2 (ported from lorene_bns.cpp), own normalization ===
+  AzHost dip_az;
+  Real dip_scale = 0.0;
   if (dipole_enable) {
-    Real I_0 = 4.0*dipole_r0*dipole_bmax_code/(23.0*M_PI);
+    // I_0 > 0 gives a dipole moment along +z (lorene_bns.cpp convention); the overall
+    // scale is fixed by the normalization below, which keeps that sign.
+    Real I_0 = 4.0*dipole_r0*dipole_target/(23.0*M_PI);
     std::function<Real(Real, Real, Real)> fd1 = [&](Real x, Real y, Real z) -> Real {
       Real a = grass::DipoleA1(x, y, z, I_0, dipole_r0);
       if (dipole_confine) {
@@ -905,27 +1175,12 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Kokkos::realloc(dbz, nmb, n3, n2, n1);
     CurlToBcc(d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz);
 
-    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
-    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
-    Real dip_bmax_raw = 0.0;
-    {
-      const int nmkji2 = nmb*nx3*nx2*nx1;
-      Kokkos::parallel_reduce("GrassDipoleBmax", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji2),
-      KOKKOS_LAMBDA(const int &idx, Real &bm) {
-        int m = idx/nkji;
-        int k = (idx - m*nkji)/nji;
-        int j = (idx - m*nkji - k*nji)/nx1;
-        int i = (idx - m*nkji - k*nji - j*nx1) + is;
-        k += ks; j += js;
-        Real bsq = dbx(m,k,j,i)*dbx(m,k,j,i) + dby(m,k,j,i)*dby(m,k,j,i) +
-                   dbz(m,k,j,i)*dbz(m,k,j,i);
-        bm = fmax(bm, sqrt(bsq));
-      }, Kokkos::Max<Real>(dip_bmax_raw));
-#if MPI_PARALLEL_ENABLED
-      MPI_Allreduce(MPI_IN_PLACE, &dip_bmax_raw, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-#endif
-    }
-    Real dip_scale = (dip_bmax_raw > 0.0) ? (dipole_bmax_code/dip_bmax_raw) : 0.0;
+    Real dip_bmax_raw = 0.0, dip_brms_raw = 0.0, dip_bvm_raw = 0.0, dip_bvf_raw = 0.0;
+    BmaxRms(dbx, dby, dbz, &dip_bmax_raw, &dip_brms_raw);
+    AzimuthalSums(dbx, dby, dbz, &dip_az);
+    if (need_h) { BvarpiMeanRms(dbx, dby, dbz, dip_az, &dip_bvm_raw, &dip_bvf_raw); }
+    Real dip_norm_raw = (dipole_norm == "bvarpi_rms") ? dip_bvm_raw : dip_bmax_raw;
+    dip_scale = (dip_norm_raw > 0.0) ? (dipole_target/dip_norm_raw) : 0.0;
     for (int m = 0; m < nmb; ++m) {
       for (int k = ks; k <= ke+1; ++k) {
         for (int j = js; j <= je+1; ++j) {
@@ -938,9 +1193,14 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       }
     }
     if (global_variable::my_rank == 0) {
-      std::cout << "GRASS dipole: max|B|(raw)=" << dip_bmax_raw << ", scale factor="
-                << dip_scale << " -> dipole_bmax_gauss target reached (confine="
-                << dipole_confine << ")." << std::endl;
+      std::cout << "GRASS dipole: normalized by " << dipole_norm << " (confine="
+                << dipole_confine << ", r0=" << dipole_r0 << " M) -> rms Bbar_varpi "
+                << "(h>=0.5) = " << dip_scale*dip_bvm_raw/gauss_to_code
+                << " G, rms of its non-axisymmetric part = "
+                << dip_scale*dip_bvf_raw/gauss_to_code << " G, rms|B| (h>=0.5) = "
+                << dip_scale*dip_brms_raw/gauss_to_code << " G, max|B| = "
+                << dip_scale*dip_bmax_raw/gauss_to_code << " G; moment along "
+                << ((I_0*dip_scale > 0.0) ? "+z" : "-z") << std::endl;
     }
   }
 
@@ -977,75 +1237,221 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     bcc0(m,IBZ,k,j,i) = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
   });
 
-  // ==== Startup diagnostics: E_mag, E_mag/M_rest (proxy for |W|), max|div B| ==========
-  {
-    auto &admd = pmbp->padm->adm;
-    auto &w0d = pmbp->pmhd->w0;
-    int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
-    const int nmkji = nmb*nx3*nx2*nx1;
-    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
-    Real e_mag = 0.0, m_rest = 0.0;
-    Kokkos::parallel_reduce("GrassWebEmag", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int &idx, Real &em, Real &mr) {
-      int m = idx/nkji;
-      int k = (idx - m*nkji)/nji;
-      int j = (idx - m*nkji - k*nji)/nx1;
-      int i = (idx - m*nkji - k*nji - j*nx1) + is;
-      k += ks; j += js;
-      Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
-      Real detg = adm::SpatialDet(admd.g_dd(m,0,0,k,j,i), admd.g_dd(m,0,1,k,j,i),
-                                   admd.g_dd(m,0,2,k,j,i), admd.g_dd(m,1,1,k,j,i),
-                                   admd.g_dd(m,1,2,k,j,i), admd.g_dd(m,2,2,k,j,i));
-      Real dV = sqrt(fmax(detg, 0.0)) * dx1*dx2*dx3;
-      Real bsq = bcc0(m,IBX,k,j,i)*bcc0(m,IBX,k,j,i) + bcc0(m,IBY,k,j,i)*bcc0(m,IBY,k,j,i) +
-                 bcc0(m,IBZ,k,j,i)*bcc0(m,IBZ,k,j,i);
-      em += 0.5*bsq*dV;
-      mr += w0d(m,IDN,k,j,i)*dV;
-    }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(m_rest));
+  // ==== Startup report on the total field ============================================
+  // (E_mag/|W|, the h >= 0.5 mass and T need the conserved variables and are printed
+  // by GrassMagneticReport() after PrimToConInit.)
+  DvceArray4D<Real> tbx, tby, tbz;
+  Kokkos::realloc(tbx, nmb, n3, n2, n1); Kokkos::realloc(tby, nmb, n3, n2, n1);
+  Kokkos::realloc(tbz, nmb, n3, n2, n1);
+  CurlToBcc(d_fa1, d_fa2, d_fa3, tbx, tby, tbz);
+  Real tot_bmax = 0.0, tot_brms = 0.0, tot_bvm = 0.0, tot_bvf = 0.0;
+  BmaxRms(tbx, tby, tbz, &tot_bmax, &tot_brms);
+  AzHost tot_az;
+  AzimuthalSums(tbx, tby, tbz, &tot_az);
+  if (need_h) { BvarpiMeanRms(tbx, tby, tbz, tot_az, &tot_bvm, &tot_bvf); }
+  Real hel_tot = Helicity(d_fa1, d_fa2, d_fa3, tbx, tby, tbz);
 
-    Real divb_max = 0.0;
-    Kokkos::parallel_reduce("GrassWebDivB", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-    KOKKOS_LAMBDA(const int &idx, Real &dm) {
+  {
+    // E_mag, E_tor, E_pol (physical, proper volume); max|div B|*dx/|B|; confinement
+    // (max|B| on cells whose own rho lies outside the window: |u| >= 1 is the one-cell
+    // skin where edge-staggered h is still non-zero, |u| >= 1.6 must be exactly zero);
+    // max comoving b^2/(2P) where h > 0 and where h >= 0.5.
+    Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0;
+    Real divb_max = 0.0, bmax_skin = 0.0, bmax_out = 0.0, pm_max = 0.0, pm_max05 = 0.0;
+    Kokkos::parallel_reduce("GrassWebReport", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &em, Real &et, Real &ep, Real &dm, Real &bs,
+                  Real &bo, Real &pm, Real &pm5) {
       int m = idx/nkji;
       int k = (idx - m*nkji)/nji;
       int j = (idx - m*nkji - k*nji)/nx1;
       int i = (idx - m*nkji - k*nji - j*nx1) + is;
       k += ks; j += js;
       Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
+      Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real g0 = admd.g_dd(m,0,0,k,j,i), g1 = admd.g_dd(m,0,1,k,j,i);
+      Real g2 = admd.g_dd(m,0,2,k,j,i), g3 = admd.g_dd(m,1,1,k,j,i);
+      Real g4 = admd.g_dd(m,1,2,k,j,i), g5 = admd.g_dd(m,2,2,k,j,i);
+      GrassPhysB pb = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bcc0(m,IBX,k,j,i),
+                                     bcc0(m,IBY,k,j,i), bcc0(m,IBZ,k,j,i), x1v, x2v);
+      Real dV = pb.sdetg*dx1*dx2*dx3;
+      em += 0.5*pb.bsq*dV;
+      et += 0.5*pb.bphi*pb.bphi*dV;
+      ep += 0.5*(pb.bsq - pb.bphi*pb.bphi)*dV;
       Real divb = (b0.x1f(m,k,j,i+1)-b0.x1f(m,k,j,i))/dx1 +
                   (b0.x2f(m,k,j+1,i)-b0.x2f(m,k,j,i))/dx2 +
                   (b0.x3f(m,k+1,j,i)-b0.x3f(m,k,j,i))/dx3;
-      Real bmag = sqrt(bcc0(m,IBX,k,j,i)*bcc0(m,IBX,k,j,i) + bcc0(m,IBY,k,j,i)*bcc0(m,IBY,k,j,i) +
-                        bcc0(m,IBZ,k,j,i)*bcc0(m,IBZ,k,j,i));
-      Real dx_local = Kokkos::cbrt(dx1*dx2*dx3);
-      dm = fmax(dm, (bmag > 1.0e-300) ? Kokkos::abs(divb)*dx_local/bmag : 0.0);
-    }, Kokkos::Max<Real>(divb_max));
-
+      Real btmag = sqrt(SQR(bcc0(m,IBX,k,j,i)) + SQR(bcc0(m,IBY,k,j,i)) +
+                        SQR(bcc0(m,IBZ,k,j,i)));
+      dm = fmax(dm, (btmag > 1.0e-300) ? fabs(divb)*cbrt(dx1*dx2*dx3)/btmag : 0.0);
+      Real rho = w0d(m,IDN,k,j,i);
+      Real u = grass::WebWindowU(rho, rho_lo, rho_hi);
+      if (fabs(u) >= 1.0) { bs = fmax(bs, sqrt(pb.bsq)); }
+      if (fabs(u) >= 1.6) { bo = fmax(bo, sqrt(pb.bsq)); }
+      Real h = grass::WebEnvelope(rho, rho_lo, rho_hi);
+      if (h > 0.0 && w0d(m,IPR,k,j,i) > 0.0) {
+        // comoving b^2 = (|B|^2 + (B_i u~^i)^2)/W^2, u~^i = primitive velocity
+        Real ux = w0d(m,IVX,k,j,i), uy = w0d(m,IVY,k,j,i), uz = w0d(m,IVZ,k,j,i);
+        Real usq = g0*ux*ux + g3*uy*uy + g5*uz*uz + 2.0*(g1*ux*uy + g2*ux*uz + g4*uy*uz);
+        Real bx = bcc0(m,IBX,k,j,i)/pb.sdetg, by = bcc0(m,IBY,k,j,i)/pb.sdetg;
+        Real bz = bcc0(m,IBZ,k,j,i)/pb.sdetg;
+        Real bu = (g0*bx + g1*by + g2*bz)*ux + (g1*bx + g3*by + g4*bz)*uy +
+                  (g2*bx + g4*by + g5*bz)*uz;
+        Real ratio = 0.5*(pb.bsq + bu*bu)/(1.0 + usq)/w0d(m,IPR,k,j,i);
+        pm = fmax(pm, ratio);
+        if (h >= 0.5) { pm5 = fmax(pm5, ratio); }
+      }
+    }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(e_tor), Kokkos::Sum<Real>(e_pol),
+       Kokkos::Max<Real>(divb_max), Kokkos::Max<Real>(bmax_skin), Kokkos::Max<Real>(bmax_out),
+       Kokkos::Max<Real>(pm_max), Kokkos::Max<Real>(pm_max05));
 #if MPI_PARALLEL_ENABLED
     {
-      Real local2[2] = {e_mag, m_rest};
-      Real global2[2];
-      MPI_Allreduce(local2, global2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-      e_mag = global2[0]; m_rest = global2[1];
-      MPI_Allreduce(MPI_IN_PLACE, &divb_max, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+      Real l3[3] = {e_mag, e_tor, e_pol};
+      MPI_Allreduce(MPI_IN_PLACE, l3, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+      e_mag = l3[0]; e_tor = l3[1]; e_pol = l3[2];
+      Real l5[5] = {divb_max, bmax_skin, bmax_out, pm_max, pm_max05};
+      MPI_Allreduce(MPI_IN_PLACE, l5, 5, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+      divb_max = l5[0]; bmax_skin = l5[1]; bmax_out = l5[2]; pm_max = l5[3];
+      pm_max05 = l5[4];
     }
 #endif
     if (global_variable::my_rank == 0) {
-      Real ratio = (m_rest > 0.0) ? (e_mag/m_rest) : 0.0;
-      std::cout << "GRASS magnetic field: E_mag=" << e_mag
-                << ", E_mag/M_rest=" << ratio << " (M_rest=int(rho0)dV, a rest-mass-"
-                << "energy PROXY for |W| -- not a true binding-energy calculation; warn "
-                << "above 1e-3), max|div(B)|*dx/|B|=" << divb_max << std::endl;
-      if (ratio > 1.0e-3) {
-        std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
-                  << "E_mag/M_rest=" << ratio << " exceeds 1e-3 -- the field may be "
-                  << "dynamically significant enough to need a constraint re-solve."
-                  << std::endl;
+      const Real g2c = gauss_to_code;
+      std::cout << "GRASS magnetic field (total): E_mag=" << e_mag << " (E_tor/E_pol="
+                << e_tor/std::max(e_pol, 1.0e-300) << "), max|B| = " << tot_bmax/g2c
+                << " G, rms|B| (h>=0.5) = " << tot_brms/g2c << " G, rms Bbar_varpi "
+                << "(h>=0.5) = " << tot_bvm/g2c << " G, rms of the non-axisymmetric "
+                << "B_varpi = " << tot_bvf/g2c << " G, helicity H = " << hel_tot
+                << std::endl;
+      std::cout << "GRASS magnetic field: max|div(B)|*dx/|B| = " << divb_max
+                << "; confinement max|B| on cells outside the window: one-cell skin "
+                << "(|u|>=1) " << bmax_skin/std::max(tot_bmax, 1.0e-300)
+                << " of max|B|, beyond it (|u|>=1.6) " << bmax_out << " (code units)"
+                << std::endl;
+      std::cout << "GRASS magnetic field: max (b^2/2)/P = (B^2/8pi)/P where h>0: "
+                << pm_max << ", where h>=0.5: " << pm_max05 << std::endl;
+      // t=0 (varpi, z) map of the azimuthal means (design §4: check that the confined
+      // dipole's Bbar_varpi covers the window)
+      std::string fname = pin->GetString("job", "basename") + ".web_map_t0.txt";
+      FILE *fp = std::fopen(fname.c_str(), "w");
+      if (fp != nullptr) {
+        std::fprintf(fp, "# t=0 azimuthal averages on (varpi, z) bins of %.6g M "
+                     "(proper-volume weighted)\n# varpi[M] z[M] h rho0[g/cm^3] "
+                     "Bvarpi[G] Bphi[G] Bz[G] Bvarpi_dipole[G]\n", az_db);
+        for (int iw = 0; iw < az_nw; ++iw) {
+          for (int iz = 0; iz < az_nz; ++iz) {
+            Real dv = tot_az(iw,iz,0);
+            if (dv <= 0.0) { continue; }
+            Real bvd = (dipole_enable && dip_az(iw,iz,0) > 0.0)
+                       ? dip_scale*dip_az(iw,iz,1)/dip_az(iw,iz,0) : 0.0;
+            std::fprintf(fp, "%.6e %.6e %.6e %.6e %.6e %.6e %.6e %.6e\n",
+                         (iw + 0.5)*az_db, az_zmin + (iz + 0.5)*az_db, tot_az(iw,iz,4)/dv,
+                         tot_az(iw,iz,5)/dv*rho_to_cgs, tot_az(iw,iz,1)/dv/g2c,
+                         tot_az(iw,iz,2)/dv/g2c, tot_az(iw,iz,3)/dv/g2c, bvd/g2c);
+          }
+        }
+        std::fclose(fp);
+        std::cout << "GRASS magnetic field: wrote " << fname << std::endl;
       }
     }
   }
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void GrassMagneticReport
+//! \brief Startup report items that need the conserved variables, so they run after
+//  PrimToConInit: E_mag/|W|, with |W| = T/(T/|W|)_GRASS (<problem> grass_t_over_w, from
+//  the GRASS solve; T = (1/2) int Omega dJ evaluated on the AthenaK grid), and the proper
+//  volume and rest mass of the region with h(rho) >= 0.5.
+
+void GrassMagneticReport(ParameterInput *pin, Mesh *pm) {
+  bool web_enable = pin->GetOrAddInteger("problem", "web_enable", 0) != 0;
+  bool dipole_enable = pin->GetOrAddInteger("problem", "dipole_enable", 0) != 0;
+  if (!web_enable && !dipole_enable) { return; }
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  Real rho_lo = pin->GetOrAddReal("problem", "web_rho_lo", 0.0);
+  Real rho_hi = pin->GetOrAddReal("problem", "web_rho_hi", 0.0);
+  Real t_over_w = pin->GetOrAddReal("problem", "grass_t_over_w", 0.0);
+
+  auto &indcs = pm->mb_indcs;
+  int is = indcs.is, nx1 = indcs.nx1;
+  int js = indcs.js, nx2 = indcs.nx2;
+  int ks = indcs.ks, nx3 = indcs.nx3;
+  const int nmkji = pmbp->nmb_thispack*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &w0 = pmbp->pmhd->w0;
+  auto &u0 = pmbp->pmhd->u0;
+  auto &bcc0 = pmbp->pmhd->bcc0;
+  auto &adm = pmbp->padm->adm;
+  auto &size = pmbp->pmb->mb_size;
+  // the gauge lives in the z4c state under <z4c>, in u_adm under <cfc>
+  auto alpha = (pmbp->pz4c != nullptr) ? pmbp->pz4c->z4c.alpha : adm.alpha;
+  auto beta_u = (pmbp->pz4c != nullptr) ? pmbp->pz4c->z4c.beta_u : adm.beta_u;
+
+  Real e_mag = 0.0, t_kin = 0.0, vol05 = 0.0, mass05 = 0.0, mass_tot = 0.0;
+  Kokkos::parallel_reduce("GrassMagReport", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &em, Real &tk, Real &v5, Real &m5, Real &mt) {
+    int m = idx/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks; j += js;
+    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real g0 = adm.g_dd(m,0,0,k,j,i), g1 = adm.g_dd(m,0,1,k,j,i);
+    Real g2 = adm.g_dd(m,0,2,k,j,i), g3 = adm.g_dd(m,1,1,k,j,i);
+    Real g4 = adm.g_dd(m,1,2,k,j,i), g5 = adm.g_dd(m,2,2,k,j,i);
+    GrassPhysB pb = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bcc0(m,IBX,k,j,i),
+                                   bcc0(m,IBY,k,j,i), bcc0(m,IBZ,k,j,i), x1v, x2v);
+    em += 0.5*pb.bsq*pb.sdetg*vol;
+    // T = (1/2) int Omega dJ; dJ = (x S_y - y S_x) d^3x with S_i densitized (u0)
+    Real ux = w0(m,IVX,k,j,i), uy = w0(m,IVY,k,j,i), uz = w0(m,IVZ,k,j,i);
+    Real wlor = sqrt(1.0 + g0*ux*ux + g3*uy*uy + g5*uz*uz +
+                     2.0*(g1*ux*uy + g2*ux*uz + g4*uy*uz));
+    Real a = alpha(m,k,j,i);
+    Real vx = a*ux/wlor - beta_u(m,0,k,j,i), vy = a*uy/wlor - beta_u(m,1,k,j,i);
+    Real w2 = x1v*x1v + x2v*x2v;
+    if (w2 > 0.0) {
+      Real omega = (x1v*vy - x2v*vx)/w2;
+      tk += 0.5*omega*(x1v*u0(m,IM2,k,j,i) - x2v*u0(m,IM1,k,j,i))*vol;
+    }
+    mt += u0(m,IDN,k,j,i)*vol;
+    if (grass::WebEnvelope(w0(m,IDN,k,j,i), rho_lo, rho_hi) >= 0.5) {
+      v5 += pb.sdetg*vol;
+      m5 += u0(m,IDN,k,j,i)*vol;
+    }
+  }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(t_kin), Kokkos::Sum<Real>(vol05),
+     Kokkos::Sum<Real>(mass05), Kokkos::Sum<Real>(mass_tot));
+#if MPI_PARALLEL_ENABLED
+  Real l5[5] = {e_mag, t_kin, vol05, mass05, mass_tot};
+  MPI_Allreduce(MPI_IN_PLACE, l5, 5, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  e_mag = l5[0]; t_kin = l5[1]; vol05 = l5[2]; mass05 = l5[3]; mass_tot = l5[4];
+#endif
+  if (global_variable::my_rank == 0) {
+    grass::GrassUnits units;
+    Real km = units.LengthCgsToCode(1.0e5);
+    std::cout << "GRASS magnetic field: region h>=0.5: proper volume " << vol05 << " M^3 = "
+              << vol05/(km*km*km) << " km^3, rest mass " << mass05 << " Msun = "
+              << mass05/std::max(mass_tot, 1.0e-300) << " of the total " << mass_tot
+              << std::endl;
+    if (t_over_w > 0.0) {
+      Real w_abs = t_kin/t_over_w;
+      Real ratio = e_mag/w_abs;
+      std::cout << "GRASS magnetic field: E_mag=" << e_mag << ", T=" << t_kin
+                << ", |W|=T/(T/|W|)=" << w_abs << " (grass_t_over_w=" << t_over_w
+                << "), E_mag/|W|=" << ratio << ", E_mag/T=" << e_mag/t_kin << std::endl;
+      if (ratio > 1.0e-3) {
+        std::cout << "### WARNING in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "E_mag/|W|=" << ratio << " exceeds 1e-3." << std::endl;
+      }
+    } else {
+      std::cout << "GRASS magnetic field: E_mag=" << e_mag << ", T=" << t_kin
+                << "; set <problem> grass_t_over_w (GRASS T/|W|) to report E_mag/|W|"
+                << std::endl;
+    }
+  }
+}
 //----------------------------------------------------------------------------------------
 //! \fn void ProblemGenerator::UserProblem()
 //  \brief Sets initial conditions for a GRASS-built (possibly differentially rotating)
@@ -1106,6 +1512,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     }
   }
 
+  GrassMagneticReport(pin, pmy_mesh_);
+
   return;
 }
 
@@ -1115,16 +1523,17 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 // E_tor, E_pol (WHOLE-domain, not restricted to the initial rho_lo shell -- unlike the
 // one-time normalization pass in BuildMagneticField, restricting an ONGOING diagnostic
 // to the field's initial confinement boundary would become physically meaningless once
-// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|, and total angular
+// the star evolves and the field moves), Bmax, max|div(B)|*dx/|B|, total angular
 // momentum ang-mom (J_z = integral of vol*(x*S_y - y*S_x), reusing xns_rotstar.cpp's
 // XNSRotStarHistory formula verbatim -- mode-agnostic since it only reads the
-// pre-densitized conserved momentum u0(IM1/IM2), not adm.g_dd/vK_dd directly). Helicity
-// is NOT implemented here (see grass/VALIDATION.md) -- it would need the vector
-// potential A, which isn't retained after BuildMagneticField returns; scoped out of
-// this implementation pass, not silently forgotten.
+// pre-densitized conserved momentum u0(IM1/IM2), not adm.g_dd/vK_dd directly), and the
+// volume-integrated Maxwell stress int B_varpi B_phi dV. Magnetic quantities use the
+// physical field B^i = bcc0^i/sqrt(gamma) (bcc0 is densitized; see GrassPhysicalB):
+// energies int |B|^2/2 sqrt(gamma) d^3x, Bmax = max sqrt(g_ij B^i B^j), code units.
+// Helicity is reported once at t=0 by BuildMagneticField (it needs A, not retained).
 
 void GrassHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 8;
+  pdata->nhist = 9;
   pdata->label[0] = "rho-max";
   pdata->label[1] = "alpha-min";
   pdata->label[2] = "E_mag";
@@ -1133,6 +1542,7 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->label[5] = "Bmax";
   pdata->label[6] = "divBmax";
   pdata->label[7] = "ang-mom";
+  pdata->label[8] = "Maxwell";
 
   auto &w0_ = pm->pmb_pack->pmhd->w0;
   auto &u0_ = pm->pmb_pack->pmhd->u0;
@@ -1151,6 +1561,8 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   Real rho_max = std::numeric_limits<Real>::max();
   Real alpha_min = -rho_max;
   Real bmax = 0.0;
+  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0, ang_mom = 0.0;
+  Real maxwell = 0.0;
   Kokkos::parallel_reduce("GrassHistSums", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
   KOKKOS_LAMBDA(const int &idx, Real &mb_max, Real &mb_alp_min, Real &mb_bmax) {
     int m = (idx)/nkji;
@@ -1162,14 +1574,19 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
 
     mb_max = fmax(mb_max, w0_(m, IDN, k, j, i));
     mb_alp_min = fmin(mb_alp_min, adm.alpha(m, k, j, i));
-    Real bsq = bcc0_(m,IBX,k,j,i)*bcc0_(m,IBX,k,j,i) + bcc0_(m,IBY,k,j,i)*bcc0_(m,IBY,k,j,i) +
-               bcc0_(m,IBZ,k,j,i)*bcc0_(m,IBZ,k,j,i);
-    mb_bmax = fmax(mb_bmax, sqrt(bsq));
+    Real x1v = CellCenterX(i-is, nx1, size_.d_view(m).x1min, size_.d_view(m).x1max);
+    Real x2v = CellCenterX(j-js, nx2, size_.d_view(m).x2min, size_.d_view(m).x2max);
+    GrassPhysB pb = GrassPhysicalB(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                                   adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                                   adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i),
+                                   bcc0_(m,IBX,k,j,i), bcc0_(m,IBY,k,j,i),
+                                   bcc0_(m,IBZ,k,j,i), x1v, x2v);
+    mb_bmax = fmax(mb_bmax, sqrt(pb.bsq));
   }, Kokkos::Max<Real>(rho_max), Kokkos::Min<Real>(alpha_min), Kokkos::Max<Real>(bmax));
 
-  Real e_mag = 0.0, e_tor = 0.0, e_pol = 0.0, divb_max = 0.0, ang_mom = 0.0;
   Kokkos::parallel_reduce("GrassHistMag", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
-  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm, Real &jz) {
+  KOKKOS_LAMBDA(const int &idx, Real &em, Real &etor, Real &epol, Real &dbm, Real &jz,
+                Real &mxw) {
     int m = (idx)/nkji;
     int k = (idx - m*nkji)/nji;
     int j = (idx - m*nkji - k*nji)/nx1;
@@ -1177,35 +1594,31 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     k += ks;
     j += js;
     Real dx1 = size_.d_view(m).dx1, dx2 = size_.d_view(m).dx2, dx3 = size_.d_view(m).dx3;
-    Real detg = adm::SpatialDet(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
-                                 adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
-                                 adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i));
-    Real dV = sqrt(fmax(detg, 0.0)) * dx1*dx2*dx3;
     Real x1v = CellCenterX(i-is, nx1, size_.d_view(m).x1min, size_.d_view(m).x1max);
     Real x2v = CellCenterX(j-js, nx2, size_.d_view(m).x2min, size_.d_view(m).x2max);
     // J_z = integral of vol*(x*S_y - y*S_x); u0(IM1/IM2) is already the densitized
     // ADM momentum density sqrt(gamma)*S_a (see dyn_grmhd.cpp's SetTmunu), so plain
-    // vol=dx1*dx2*dx3 is correct here -- no extra sqrt(gamma)/dV factor, unlike the
-    // undensitized bcc0 fields used for em/etor/epol above.
+    // vol=dx1*dx2*dx3 is correct here -- no extra sqrt(gamma)/dV factor.
     jz += dx1*dx2*dx3*(x1v*u0_(m,IM2,k,j,i) - x2v*u0_(m,IM1,k,j,i));
-    Real rcyl = sqrt(x1v*x1v + x2v*x2v);
-    Real bx = bcc0_(m,IBX,k,j,i), by = bcc0_(m,IBY,k,j,i), bz = bcc0_(m,IBZ,k,j,i);
-    em += 0.5*(bx*bx + by*by + bz*bz)*dV;
-    if (rcyl > 1.0e-6*dx1) {
-      Real phix = -x2v/rcyl, phiy = x1v/rcyl, rhx = x1v/rcyl, rhy = x2v/rcyl;
-      Real btor = bx*phix + by*phiy;
-      Real bR = bx*rhx + by*rhy;
-      etor += 0.5*btor*btor*dV;
-      epol += 0.5*(bR*bR + bz*bz)*dV;
-    }
+    GrassPhysB pb = GrassPhysicalB(adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                                   adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                                   adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i),
+                                   bcc0_(m,IBX,k,j,i), bcc0_(m,IBY,k,j,i),
+                                   bcc0_(m,IBZ,k,j,i), x1v, x2v);
+    Real dV = pb.sdetg*dx1*dx2*dx3;
+    em += 0.5*pb.bsq*dV;
+    etor += 0.5*pb.bphi*pb.bphi*dV;
+    epol += 0.5*(pb.bsq - pb.bphi*pb.bphi)*dV;
+    mxw += pb.bvarpi*pb.bphi*dV;
     Real divb = (b0_.x1f(m,k,j,i+1)-b0_.x1f(m,k,j,i))/dx1 +
                 (b0_.x2f(m,k,j+1,i)-b0_.x2f(m,k,j,i))/dx2 +
                 (b0_.x3f(m,k+1,j,i)-b0_.x3f(m,k,j,i))/dx3;
-    Real bmag = sqrt(bx*bx + by*by + bz*bz);
+    Real btmag = sqrt(SQR(bcc0_(m,IBX,k,j,i)) + SQR(bcc0_(m,IBY,k,j,i)) +
+                      SQR(bcc0_(m,IBZ,k,j,i)));
     Real dx_local = cbrt(dx1*dx2*dx3);
-    dbm = fmax(dbm, (bmag > 1.0e-300) ? fabs(divb)*dx_local/bmag : 0.0);
+    dbm = fmax(dbm, (btmag > 1.0e-300) ? fabs(divb)*dx_local/btmag : 0.0);
   }, Kokkos::Sum<Real>(e_mag), Kokkos::Sum<Real>(e_tor), Kokkos::Sum<Real>(e_pol),
-     Kokkos::Max<Real>(divb_max), Kokkos::Sum<Real>(ang_mom));
+     Kokkos::Max<Real>(divb_max), Kokkos::Sum<Real>(ang_mom), Kokkos::Sum<Real>(maxwell));
 
 #if MPI_PARALLEL_ENABLED
   if (global_variable::my_rank == 0) {
@@ -1233,7 +1646,7 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
     e_pol = 0.;
   }
 #endif
-  // ang_mom is left out of the manual reduction above: it's a genuine per-rank
+  // ang_mom and maxwell are left out of the manual reduction above: it's a genuine per-rank
   // partial volume-integral sum, and the framework's generic MPI_SUM reduction
   // over hdata (HistoryOutput::WriteOutputFile) combines per-rank partial sums
   // into the correct global total with no manual reduction needed here --
@@ -1247,4 +1660,5 @@ void GrassHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[5] = bmax;
   pdata->hdata[6] = divb_max;
   pdata->hdata[7] = ang_mom;
+  pdata->hdata[8] = maxwell;
 }

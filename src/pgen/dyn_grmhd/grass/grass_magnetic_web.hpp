@@ -71,12 +71,20 @@ namespace grass {
 //! \brief h(rho): the C^inf mass-shell bump function. rho, rho_lo, rho_hi in the
 //  SAME units (this pgen: AthenaK code-unit mass density). Guards rho<=0 (never
 //  calls log of a non-positive value) and rho_hi<=rho_lo (misconfigured window).
+//  Host- and device-callable (the cell-centred h >= 0.5 masks are device reductions).
 
-inline Real WebEnvelope(Real rho, Real rho_lo, Real rho_hi) {
+KOKKOS_INLINE_FUNCTION
+Real WebWindowU(Real rho, Real rho_lo, Real rho_hi) {
+  if (rho <= 0.0) { return -1.0e30; }
+  return 2.0*Kokkos::log(rho/rho_lo)/Kokkos::log(rho_hi/rho_lo) - 1.0;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real WebEnvelope(Real rho, Real rho_lo, Real rho_hi) {
   if (rho <= 0.0 || rho_hi <= rho_lo) { return 0.0; }
-  Real u = 2.0*std::log(rho/rho_lo)/std::log(rho_hi/rho_lo) - 1.0;
-  if (std::abs(u) >= 1.0) { return 0.0; }
-  return std::exp(1.0 - 1.0/(1.0 - u*u));
+  Real u = WebWindowU(rho, rho_lo, rho_hi);
+  if (Kokkos::abs(u) >= 1.0) { return 0.0; }
+  return Kokkos::exp(1.0 - 1.0/(1.0 - u*u));
 }
 
 //----------------------------------------------------------------------------------------

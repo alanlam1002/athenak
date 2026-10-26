@@ -40,6 +40,17 @@
 //! the RK-weighted geometric source term plus the update's rounding; "crec" and "other"
 //! (tau: the dual-energy resync) are physical changes there, so only regrid and restart
 //! are flagged. Same exact sums, same tolerance (in M*).
+//! <mhd> tracer_closure (default false; R-130/R-131 item 3, user-approved; needs mass_closure,
+//! dual_energy and dual_energy_diag): the same closure for the dual-energy tracer DY (line
+//! YCLOSE; diagnostic only, reads the state), with its item "other" (the C2P's change in the
+//! ordinary cells) split per cell by the dual-energy branch of that C2P (de_diag slot 0, dbr:
+//! 4 = flagged dense, energy solution + resync; 0 = non-dense resync; 1/2/3/5 = entropy or bad,
+//! DY unchanged, a check), the flagged-dense resyncs into up and down and binned by the gas's
+//! normal grid speed |V.n|_coord = |(alpha v^i - beta^i) n_i|, n = -grad P/|grad P| (coordinate
+//! components, central differences of w0; as scripts/c117_shock_speed.py); every C2P item binned
+//! by density band (rho/rho_c, <mhd> tracer_closure_rhoc); and every item accumulated per phase
+//! (<mhd> tracer_closure_phase_t = t1,t2,t3: phases t < t1, [t1,t2), [t2,t3), >= t3). Printed
+//! per segment (YCLOSE, YCLOSE_RUN) and cumulatively per phase (YCLOSE_PH_RUN, YCLOSE_BAND_RUN).
 
 #include <cstdint>
 #include <memory>
@@ -105,6 +116,22 @@ enum StageIdx {
   kMd0,                                    // sum d0 dV (debug: must equal M_pre)
   kNStage
 };
+// tracer_closure: the per-cell categories of the C2P change, per density band
+enum YCat {
+  yExc = 0, yRf, yZoneRem, yZoneAdd, yFloor, yCrec,
+  yNonDense,                    // dbr 0: non-dense resync
+  yDenseChk,                    // dbr 1/2/3/5: entropy or bad (DY unchanged; a check)
+  yUp0,                         // dbr 4, DY up, |V.n| bins (kYV of them)
+  kYV = 7,
+  yDn0 = yUp0 + kYV,            // dbr 4, DY down, |V.n| bins
+  kYCat = yDn0 + kYV
+};
+constexpr int kYBand = 4;       // rho/rho_c >= 1e-1, [1e-2, 1e-1), [1e-3, 1e-2), < 1e-3
+constexpr int kYPh = 4;         // phases (tracer_closure_phase_t: three edges)
+constexpr int kYN = kYBand*kYCat;
+constexpr int kYG = 16;         // reduced in groups of 16 sums
+constexpr int kYNG = (kYN + kYG - 1)/kYG;
+
 // face sums: F_out (outer faces) and F_exc (into the excision-flux mask)
 enum FaceIdx { kFout = 0, kFexc, kNFace };
 
@@ -153,6 +180,19 @@ class MassClosure {
   std::string tag_, key_;     // its output tag (MCLOSE, ...) and parameter-key prefix
   DvceArray4D<Real> x0_;      // S_i / tau: the variable before the C2P (IDN: ledger d0)
   std::vector<std::unique_ptr<MassClosure>> extra_;   // mass_closure_full: S_1..3, tau
+                                                      // (+ tracer_closure: DY)
+  // tracer_closure
+  bool ytr_req_ = false;      // (IDN) create the DY closure at the first SegmentStart
+  bool ytr_ = false;          // this is the DY closure (YCLOSE)
+  Real y_rhoc = 3.24e-4;
+  Real y_ph[kYPh-1] = {125.9, 145.9, 185.9};
+  Real y_tlast = 0.0;         // the time of the last stage (phase of the booked items)
+  DvceArray4D<int> y_cat_;    // per cell: band*kYCat + category, -1 = no change
+  DvceArray4D<Real> y_val_;   // per cell: the change dV
+  Fix y_st[4][kYN];
+  KSum yseg[kYN], ycum[kYPh][kYN], phcum[kYPh][kNItem];
+  int Phase(Real t) const;
+  void YStage(int stage, const DvceArray4D<Real> &cls, const DvceArray4D<Real> &c2p);
   int every = 0;              // <mhd> mass_closure_every: per-cycle MCLOSE_CYC lines
   Real tol = 1.0e-10;         // <mhd> mass_closure_tol (in M*)
   Real mstar = 0.0;           // <mhd> mass_closure_mstar (0: the grid mass at run start)

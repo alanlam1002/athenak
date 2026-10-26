@@ -7,6 +7,7 @@
 //! \brief see mass_closure.hpp. Compiled with -fp-model=precise (src/CMakeLists.txt).
 
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <initializer_list>
 #include <iomanip>
@@ -26,6 +27,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/mass_closure.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -153,6 +155,9 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
   m_prev_end = std::numeric_limits<Real>::quiet_NaN();
   if (var_ == IDN) {
     tag_ = "MCLOSE"; key_ = "mass_closure";
+    // tracer_closure: the DY closure is created at the first SegmentStart (the MHD's
+    // variable count and the dual-energy diagnostics exist by then)
+    ytr_req_ = on && pin->GetOrAddBoolean("mhd", "tracer_closure", false);
     if (on && pin->GetOrAddBoolean("mhd", "mass_closure_full", false)) {
       for (int v : {static_cast<int>(IM1), static_cast<int>(IM2), static_cast<int>(IM3),
                     static_cast<int>(IEN)}) {
@@ -164,6 +169,112 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
   } else {
     tag_ = "SCLOSE" + std::to_string(var_ - IM1 + 1);
     key_ = "closure_s" + std::to_string(var_ - IM1 + 1);
+  }
+}
+
+int MassClosure::Phase(Real t) const {
+  int p = 0;
+  for (int q = 0; q < kYPh - 1; ++q) p += (t >= y_ph[q]);
+  return p;
+}
+
+//! tracer_closure: this stage's C2P change of DY per (band, category), on this rank
+void MassClosure::YStage(int stage, const DvceArray4D<Real> &cls,
+                         const DvceArray4D<Real> &c2p) {
+  MeshBlockPack *pp = pmy_pack;
+  const int nv = var_;
+  auto &indcs = pp->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pp->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  if (y_cat_.extent_int(0) != nmb || y_cat_.extent_int(1) != nx3 ||
+      y_cat_.extent_int(2) != nx2 || y_cat_.extent_int(3) != nx1) {
+    Kokkos::realloc(y_cat_, nmb, nx3, nx2, nx1);
+    Kokkos::realloc(y_val_, nmb, nx3, nx2, nx1);
+  }
+  auto &size = pp->pmb->mb_size;
+  auto &u0 = pp->pmhd->u0;
+  auto &w0 = pp->pmhd->w0;
+  auto &adm = pp->padm->adm;
+  auto &dd = pp->pdyngr->de_diag;
+  const DvceArray4D<Real> x0 = x0_;
+  auto &cd = pp->pcoord->coord_data;
+  const bool exdyn = cd.bh_excise && cd.excision_dynamic &&
+                     cd.excision_scheme == ExcisionScheme::lapse;
+  const Real exlap = cd.excise_lapse;
+  const Real irc = 1.0/y_rhoc;
+  // |V.n|_coord bin edges (kYV = 7 bins)
+  const Real e0 = 0.003, e1 = 0.01, e2 = 0.03, e3 = 0.1, e4 = 0.2, e5 = 0.3;
+  auto &cat = y_cat_;
+  auto &val = y_val_;
+  par_for("yclose_cat", DevExeSpace(), 0, nmb-1, 0, nx3-1, 0, nx2-1, 0, nx1-1,
+  KOKKOS_LAMBDA(const int m, const int kk, const int jj, const int ii) {
+    const int k = kk + ks, j = jj + js, i = ii + is;
+    auto &sz = size.d_view(m);
+    const Real dv = sz.dx1*sz.dx2*sz.dx3;
+    const Real dm = u0(m, nv, k, j, i)*dv - x0(m, k, j, i)*dv;
+    val(m, kk, jj, ii) = dm;
+    if (dm == 0.0) { cat(m, kk, jj, ii) = -1; return; }
+    const Real rr = w0(m, IDN, k, j, i)*irc;
+    const int band = (rr < 1.0e-1) + (rr < 1.0e-2) + (rr < 1.0e-3);
+    const Real c = cls(m, k, j, i);
+    int q;
+    if (c < 1.5) {
+      q = (exdyn && !(adm.alpha(m, k, j, i) < exlap)) ? yRf : yExc;
+    } else if (c < 2.5) {
+      q = (dm < 0.0) ? yZoneRem : yZoneAdd;
+    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {
+      // cold recovery before the floor class: ColdRecoveryTry needs prim_floor, so every
+      // recovered cell is also class 3 (primitive_solver_hyd.hpp ColdRecoveryTry)
+      q = yCrec;
+    } else if (c < 3.5) {
+      q = yFloor;
+    } else {
+      const Real dbr = dd(m, 0, k, j, i);
+      if (dbr > 3.5 && dbr < 4.5) {
+        // the gas's normal grid speed |(alpha v^i - beta^i) n_i|, n = -grad P/|grad P|
+        const Real gx = (w0(m, IPR, k, j, i+1) - w0(m, IPR, k, j, i-1))/(2.0*sz.dx1);
+        const Real gy = (nx2 > 1) ?
+                        (w0(m, IPR, k, j+1, i) - w0(m, IPR, k, j-1, i))/(2.0*sz.dx2) : 0.0;
+        const Real gz = (nx3 > 1) ?
+                        (w0(m, IPR, k+1, j, i) - w0(m, IPR, k-1, j, i))/(2.0*sz.dx3) : 0.0;
+        const Real gn = sqrt(gx*gx + gy*gy + gz*gz);
+        const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i);
+        const Real uz = w0(m, IVZ, k, j, i);
+        const Real uu = adm.g_dd(m, 0, 0, k, j, i)*ux*ux + adm.g_dd(m, 1, 1, k, j, i)*uy*uy
+                      + adm.g_dd(m, 2, 2, k, j, i)*uz*uz
+                      + 2.0*(adm.g_dd(m, 0, 1, k, j, i)*ux*uy + adm.g_dd(m, 0, 2, k, j, i)*ux*uz
+                             + adm.g_dd(m, 1, 2, k, j, i)*uy*uz);
+        const Real iw = 1.0/sqrt(1.0 + uu);
+        const Real al = adm.alpha(m, k, j, i);
+        const Real vx = al*ux*iw - adm.beta_u(m, 0, k, j, i);
+        const Real vy = al*uy*iw - adm.beta_u(m, 1, k, j, i);
+        const Real vz = al*uz*iw - adm.beta_u(m, 2, k, j, i);
+        const Real vn = (gn > 0.0) ? fabs(vx*gx + vy*gy + vz*gz)/gn : 0.0;
+        const int vb = (vn >= e0) + (vn >= e1) + (vn >= e2) + (vn >= e3) + (vn >= e4)
+                       + (vn >= e5);
+        q = ((dm > 0.0) ? yUp0 : yDn0) + vb;
+      } else if (dbr < 0.5) {
+        q = yNonDense;
+      } else {
+        q = yDenseChk;
+      }
+    }
+    cat(m, kk, jj, ii) = band*kYCat + q;
+  });
+  for (int g = 0; g < kYNG; ++g) {
+    const int q0 = g*kYG;
+    FixArr<kYG> r;
+    Kokkos::parallel_reduce("yclose_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, FixArr<kYG> &acc) {
+      const int m = idx/nkji;
+      const int kk = (idx - m*nkji)/nji;
+      const int jj = (idx - m*nkji - kk*nji)/nx1;
+      const int ii = idx - m*nkji - kk*nji - jj*nx1;
+      const int q = cat(m, kk, jj, ii) - q0;
+      if (q >= 0 && q < kYG) acc.v[q].Add(val(m, kk, jj, ii));
+    }, FixArrReducer<kYG>(r));
+    for (int q = 0; q < kYG && q0 + q < kYN; ++q) y_st[stage-1][q0 + q] = r.v[q];
   }
 }
 
@@ -243,10 +354,10 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
       acc.v[kExc0 + ir].Add(dm);
     } else if (c < 2.5) {
       acc.v[(dm < 0.0) ? kZoneRem : kZoneAdd].Add(dm);
+    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {   // before class 3 (as YCLOSE)
+      acc.v[kCrec].Add(dm);
     } else if (c < 3.5) {
       acc.v[kFloor].Add(dm);
-    } else if (static_cast<int>(c2p(m, k, j, i)) & 256) {
-      acc.v[kCrec].Add(dm);
     } else {
       acc.v[kOther].Add(dm);
     }
@@ -286,17 +397,22 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   }, FixArrReducer<kNFace>(f));
   for (int q = 0; q < kNFace; ++q) st_f[stage-1][q] = f.v[q];
   st_bdt[stage-1] = beta[stage-1]*dt;   // applied after the global sum
+  if (ytr_) { YStage(stage, cls, c2p); y_tlast = time; }
   if (stage != ns) return;
 
   // the cycle: gather every stage's sums in one rank-ordered reduction
   const int nper = 1 + kNStage + kNFace;
-  std::vector<Fix> loc(1 + ns*nper);
-  std::vector<KSum> glb(1 + ns*nper);
+  const int ny0 = 1 + ns*nper, ny = ytr_ ? ns*kYN : 0;   // tracer_closure: the split
+  std::vector<Fix> loc(ny0 + ny);
+  std::vector<KSum> glb(ny0 + ny);
   loc[0] = st_u1;
   for (int q = 0; q < ns; ++q) {
     loc[1 + q*nper] = st_pre[q];
     for (int n = 0; n < kNStage; ++n) loc[2 + q*nper + n] = st_c[q][n];
     for (int n = 0; n < kNFace; ++n) loc[2 + kNStage + q*nper + n] = st_f[q][n];
+  }
+  for (int q = 0; q < ns && ytr_; ++q) {
+    for (int n = 0; n < kYN; ++n) loc[ny0 + q*kYN + n] = y_st[q][n];
   }
   GlobalSum(loc.data(), static_cast<int>(loc.size()), glb.data());
   for (int q = 0; q < ns; ++q) {   // the face sums x beta dt (tiny: double is ample)
@@ -350,6 +466,15 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   cyc[iUpdate].Add(-cyc[iOut].s);
   cyc[iUpdate].Add(-cyc[iOut].c);
   for (int n = 0; n < kNItem; ++n) { seg[n].Join(cyc[n]); cum[n].Join(cyc[n]); }
+  if (ytr_) {   // the split, RK-weighted like the class items; the cycle's phase
+    const int ph = Phase(time);
+    for (int n = 0; n < kNItem; ++n) phcum[ph][n].Join(cyc[n]);
+    for (int n = 0; n < kYN; ++n) {
+      KSum yc;
+      for (int q = 0; q < ns; ++q) yc.Add(w[q]*glb[ny0 + q*kYN + n].Val());
+      yseg[n].Join(yc); ycum[ph][n].Join(yc);
+    }
+  }
   // the gap since the previous cycle's end (0 unless something outside the stages and the
   // booked paths changed the mass; it ends up in R)
   DD gap = Add(mu1d, Neg(FromK(m_last_end)));
@@ -391,6 +516,7 @@ void MassClosure::MarkAfter(int item) {
   KSum d;
   d.Add(a.s); d.Add(a.c); d.Add(-m_mark.s); d.Add(-m_mark.c);
   seg[item].Join(d); cum[item].Join(d);
+  if (ytr_) phcum[Phase(y_tlast)][item].Join(d);
   // a booked change outside the stages (the F1 unmask, the regrid path's C2P) moves the
   // reference the next cycle's start (and a restart's saved M_end) is compared with
   if (have_last_end) m_last_end = a;
@@ -404,6 +530,7 @@ void MassClosure::RegridProlongated() {
     KSum d;
     d.Add(a.s); d.Add(a.c); d.Add(-m_last_end.s); d.Add(-m_last_end.c);
     seg[iRegrid].Join(d); cum[iRegrid].Join(d);
+    if (ytr_) phcum[Phase(y_tlast)][iRegrid].Join(d);
   }
   m_mark = a;   // the regrid path's C2P is booked by MarkAfter(iFloorInit)
   if (have_last_end) m_last_end = a;
@@ -411,6 +538,25 @@ void MassClosure::RegridProlongated() {
 
 void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
   if (!on) return;
+  if (ytr_req_) {
+    ytr_req_ = false;
+    auto *pm = pmy_pack->pmhd;
+    auto *pdg = pmy_pack->pdyngr;
+    if (pdg == nullptr || pm == nullptr || pm->nscalars < 1 || pdg->de_diag.extent_int(1) < 2) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> tracer_closure needs dual_energy and dual_energy_diag" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // the K tracer is the last scalar (PrimitiveSolverHydro: de_idx = nscalars - 1)
+    MassClosure *y = new MassClosure(pmy_pack, pin, pm->nmhd + pm->nscalars - 1);
+    y->ytr_ = true; y->tag_ = "YCLOSE"; y->key_ = "closure_y";
+    y->y_rhoc = pin->GetOrAddReal("mhd", "tracer_closure_rhoc", 3.24e-4);
+    std::istringstream ss(pin->GetOrAddString("mhd", "tracer_closure_phase_t",
+                                              "125.9,145.9,185.9"));
+    std::string tok;
+    for (int q = 0; q < kYPh - 1 && std::getline(ss, tok, ','); ++q) y->y_ph[q] = std::stod(tok);
+    extra_.emplace_back(y);
+  }
   m_start = Mass();
   m_last_end = m_start;
   have_last_end = true;
@@ -421,6 +567,23 @@ void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
     if (pin->DoesParameterExist("mhd", k + "s")) {
       cum[n].s = pin->GetReal("mhd", k + "s");
       cum[n].c = pin->GetReal("mhd", k + "c");
+    }
+  }
+  y_tlast = pmy_pack->pmesh->time;
+  for (int p = 0; p < kYPh && ytr_; ++p) {
+    for (int n = 0; n < kNItem; ++n) {
+      const std::string k = key_ + "_ph" + std::to_string(p) + "_" + std::to_string(n);
+      if (pin->DoesParameterExist("mhd", k + "s")) {
+        phcum[p][n].s = pin->GetReal("mhd", k + "s");
+        phcum[p][n].c = pin->GetReal("mhd", k + "c");
+      }
+    }
+    for (int n = 0; n < kYN; ++n) {
+      const std::string k = key_ + "_yc" + std::to_string(p) + "_" + std::to_string(n);
+      if (pin->DoesParameterExist("mhd", k + "s")) {
+        ycum[p][n].s = pin->GetReal("mhd", k + "s");
+        ycum[p][n].c = pin->GetReal("mhd", k + "c");
+      }
     }
   }
   if (var_ == IDN) {
@@ -439,6 +602,7 @@ void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
     KSum d;
     d.Add(m_start.s); d.Add(m_start.c); d.Add(-m_prev_end); d.Add(-pc);
     seg[iRestart].Join(d); cum[iRestart].Join(d);
+    if (ytr_) phcum[Phase(y_tlast)][iRestart].Join(d);
   }
   if (global_variable::my_rank == 0) {
     std::cout << std::setprecision(17) << tag_ << "_START cycle=" << cycle << " M_start="
@@ -496,6 +660,51 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     << " start, restarts included)";
   for (int n = 0; n < kNItem; ++n) c << " " << nm[n] << "=" << cum[n].Val();
   std::cout << c.str() << std::endl;
+  if (!ytr_) return;
+  // the split's partition checks for this segment: each C2P item against its band/category sum
+  const char *ynm[8] = {"exc", "rf", "zone_rem", "zone_add", "floor", "crec", "nondense",
+                        "dense_chk"};
+  auto ysum = [&](const KSum *a, int q0, int q1) {
+    KSum t;
+    for (int b = 0; b < kYBand; ++b) for (int q = q0; q < q1; ++q) t.Join(a[b*kYCat + q]);
+    return t;
+  };
+  KSum ex5;
+  for (int n = iExc0; n <= iExc4; ++n) ex5.Join(seg[n]);
+  KSum oth = ysum(yseg, yNonDense, kYCat);
+  std::ostringstream y;
+  y << std::setprecision(10) << "YCLOSE_SPLIT cycles=" << cycle0 << "-" << cycle
+    << " exc=" << ex5.Val() << " vs " << ysum(yseg, yExc, yExc + 1).Val()
+    << " rf=" << seg[iRf].Val() << " vs " << ysum(yseg, yRf, yRf + 1).Val()
+    << " zone=" << seg[iZoneRem].Val() + seg[iZoneAdd].Val() << " vs "
+    << ysum(yseg, yZoneRem, yZoneAdd + 1).Val()
+    << " floor=" << seg[iFloorStage].Val() << " vs " << ysum(yseg, yFloor, yFloor + 1).Val()
+    << " crec=" << seg[iCrec].Val() << " vs " << ysum(yseg, yCrec, yCrec + 1).Val()
+    << " other=" << seg[iOther].Val() << " vs " << oth.Val()
+    << " flagged_up=" << ysum(yseg, yUp0, yUp0 + kYV).Val()
+    << " flagged_dn=" << ysum(yseg, yDn0, yDn0 + kYV).Val()
+    << " nondense=" << ysum(yseg, yNonDense, yNonDense + 1).Val()
+    << " dense_chk=" << ysum(yseg, yDenseChk, yDenseChk + 1).Val();
+  std::cout << y.str() << std::endl;
+  for (int p = 0; p < kYPh; ++p) {
+    std::ostringstream o2;
+    o2 << std::setprecision(10) << "YCLOSE_PH_RUN cycle=" << cycle << " ph=" << p << " t=["
+       << ((p > 0) ? y_ph[p-1] : -1.0) << "," << ((p < kYPh - 1) ? y_ph[p] : 1.0e30) << ")";
+    for (int n = 0; n < kNItem; ++n) o2 << " " << nm[n] << "=" << phcum[p][n].Val();
+    std::cout << o2.str() << std::endl;
+    for (int b = 0; b < kYBand; ++b) {
+      const KSum *a = &ycum[p][b*kYCat];
+      std::ostringstream o3;
+      o3 << std::setprecision(10) << "YCLOSE_BAND_RUN cycle=" << cycle << " ph=" << p
+         << " band=" << b;
+      for (int q = 0; q < 8; ++q) o3 << " " << ynm[q] << "=" << a[q].Val();
+      o3 << " up=";
+      for (int v = 0; v < kYV; ++v) o3 << (v ? "," : "") << a[yUp0 + v].Val();
+      o3 << " dn=";
+      for (int v = 0; v < kYV; ++v) o3 << (v ? "," : "") << a[yDn0 + v].Val();
+      std::cout << o3.str() << std::endl;
+    }
+  }
 }
 
 void MassClosure::Save(ParameterInput *pin) const {
@@ -511,6 +720,18 @@ void MassClosure::Save(ParameterInput *pin) const {
     pin->SetReal("mhd", k + "c", cum[n].c);
   }
   if (var_ == IDN) pin->SetReal("mhd", "mass_closure_m0", mstar);
+  for (int p = 0; p < kYPh && ytr_; ++p) {
+    for (int n = 0; n < kNItem; ++n) {
+      const std::string k = key_ + "_ph" + std::to_string(p) + "_" + std::to_string(n);
+      pin->SetReal("mhd", k + "s", phcum[p][n].s);
+      pin->SetReal("mhd", k + "c", phcum[p][n].c);
+    }
+    for (int n = 0; n < kYN; ++n) {
+      const std::string k = key_ + "_yc" + std::to_string(p) + "_" + std::to_string(n);
+      pin->SetReal("mhd", k + "s", ycum[p][n].s);
+      pin->SetReal("mhd", k + "c", ycum[p][n].c);
+    }
+  }
 }
 
 }  // namespace mclose

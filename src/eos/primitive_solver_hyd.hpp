@@ -276,6 +276,11 @@ class PrimitiveSolverHydro {
   // per window), and the last full C2P call's census: recovered mass bound / unbound (the
   // BH-frame Killing energy, as the zone's), all bound mass, sum m (P/rho)_previous
   Real crec_ddy = 0.0, crec_ddy_total = 0.0, crec_hot = 0.0;
+  // the tracer change of the C2P calls since the last flush, unweighted: an RK stage's change
+  // reaches the cycle's end state times w_s = prod_{q>s} gam0_q (as MCLOSE/YCLOSE's items), so
+  // MassLedgerPost adds w_s times it to crec_ddy(_total); a regrid's or the start-up's C2P
+  // with weight 1 (CrecFlush). Before R-140 item 4 every stage was summed unweighted.
+  Real crec_ddy_stage = 0.0;
   Real crec_mb = 0.0, crec_mu = 0.0, crec_mball = 0.0, crec_tm = 0.0;
   DvceArray4D<Real> crec_cnt;   // per-cell count since the last regrid (re-triggers)
   // FOFC tally (DynGRMHDPS::FOFC, R-087 item 11), per window: interior cells hydro-flagged,
@@ -666,7 +671,13 @@ class PrimitiveSolverHydro {
 
   //! cold recovery (crec_on): reset the per-window tallies (and, at a regrid, where block
   //! indices move, the per-cell counts)
+  void CrecFlush(Real w) {
+    crec_ddy += w*crec_ddy_stage;
+    crec_ddy_total += w*crec_ddy_stage;
+    crec_ddy_stage = 0.0;
+  }
   void CrecReset(bool cells) {
+    CrecFlush(1.0);   // C2Ps outside the RK stages (start-up, ghost-only calls): weight 1
     crec_n = crec_dtau = crec_ds = crec_ddy = crec_hot = 0.0;
     if (fofc_tl.extent_int(0) > 0) Kokkos::deep_copy(fofc_tl, 0.0);
     if (cells && crec_cnt.extent(0) > 0) Kokkos::deep_copy(crec_cnt, 0.0);
@@ -832,6 +843,11 @@ class PrimitiveSolverHydro {
   //! last stage combine, reduce over ranks and print (rank 0)
   void MassLedgerPost(int stage, int ns, const Real *gam0, const Real *gam1,
                       const Real *beta, Real dt, Real time, int cycle) {
+    if (stage >= 1 && stage <= ns) {   // the stage's cold-recovery tracer change, RK-weighted
+      Real w = 1.0;
+      for (int q = stage; q < ns; ++q) w *= gam0[q];
+      CrecFlush(w);
+    }
     if (stage == ns) CrecPrint("steps");   // independent of mass_ledger
     if (!ml_on || stage < 1 || stage > ns || ns > 4) return;
     auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -1065,6 +1081,7 @@ class PrimitiveSolverHydro {
     ml0_armed = true;
   }
   void MassLedgerRegridPost(const char *path) {
+    CrecFlush(1.0);    // the regrid's C2P: weight 1
     CrecPrint(path);   // independent of mass_ledger
     if (!ml_on || !ml0_armed) return;
     ml0_armed = false;
@@ -2743,7 +2760,7 @@ class PrimitiveSolverHydro {
        Kokkos::Sum<Real>(cmt_c), Kokkos::Sum<Real>(cmh_c), Kokkos::Sum<Real>(mrf_c));
     if (crec_) {
       crec_n += crn_c; crec_dtau += crt_c; crec_ds += crx_c; crec_dtau_total += crt_c;
-      crec_ddy += cdy_c; crec_ddy_total += cdy_c; crec_hot += cmh_c;
+      crec_ddy_stage += cdy_c; crec_hot += cmh_c;
       if (il == 0 && jl == 0 && kl == 0) {   // the full-array call: this C2P's census
         crec_mb = cmb_c; crec_mu = cmu_c; crec_mball = mba_c;
         crec_tm = (cmb_c + cmu_c > 0.0) ? cmt_c : 0.0;

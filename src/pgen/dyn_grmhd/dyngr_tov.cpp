@@ -65,6 +65,11 @@ struct TDERefineParams {
                     // above the cut (0 = off, the block's own maximum only)
   Real deref_frac;  // hysteresis: a debris-level block derefines only once nothing
                     // within buffer exceeds deref_frac*rho_max (= rho_frac: off)
+  // <problem> amr_pin_level / amr_pin_box (R-145 item 2, default off): every block that
+  // overlaps the grid-fixed box |x_i| < amr_pin_box wants at least amr_pin_level, so a
+  // resolution floor (dx 1 over the old +-64 box in the +-128 mesh) is never derefined.
+  int  pin_level = -1;
+  Real pin_box = 0.0;
 };
 TDERefineParams tde_ref;
 } // namespace
@@ -783,6 +788,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     // new fine blocks are prolongated from near-floor gas, not across the steep edge.
     tde_ref.buffer      = pin->GetOrAddReal("problem", "amr_buffer", 0.0);
     tde_ref.deref_frac  = pin->GetOrAddReal("problem", "amr_deref_frac", tde_ref.rho_frac);
+    if (pin->DoesParameterExist("problem", "amr_pin_level")) {
+      tde_ref.pin_level = pin->GetInteger("problem", "amr_pin_level");
+      tde_ref.pin_box   = pin->GetReal("problem", "amr_pin_box");
+    }
     if (tde_ref.deref_frac > tde_ref.rho_frac) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "amr_deref_frac must not exceed amr_density_frac" << std::endl;
@@ -1325,6 +1334,11 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
       }
     }
     if (deb_hot) { want = std::max(want, tde_ref.lev_debris); }
+    if (tde_ref.pin_level >= 0 && x1min < tde_ref.pin_box && x1max > -tde_ref.pin_box &&
+        x2min < tde_ref.pin_box && x2max > -tde_ref.pin_box &&
+        x3min < tde_ref.pin_box && x3max > -tde_ref.pin_box) {
+      want = std::max(want, tde_ref.pin_level);
+    }
 
     int flag;
     if (want < 0)             { flag = -1; }        // outside every target

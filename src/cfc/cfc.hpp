@@ -103,6 +103,21 @@ class CFC {
   // so the fluid update never sees a negative lapse. See DEVELOPMENT.md item 59.
   Real alpha_floor_;
 
+  // <cfc> residual_scale (R-140 item 6, D7): the hydro sees psi0 + f*delta_psi etc., the
+  // solves are unchanged. f = residual_scale (constant), or a C^1 smoothstep from
+  // residual_scale_f0 (default 1) at residual_scale_t0 to residual_scale_f1 at
+  // residual_scale_t1. No key = off (f = 1, bitwise-neutral: the scaled kernels never
+  // run while f == 1). f == 0 skips the four multigrid solves: background only.
+  bool rs_on_ = false;
+  bool rs_ramp_ = false;
+  Real rs_const_ = 1.0, rs_f0_ = 1.0, rs_f1_ = 1.0, rs_t0_ = 0.0, rs_t1_ = 0.0;
+  int rs_log_ = 0;           // <cfc> residual_scale_log_interval (cycles; 0 = no log)
+  Real rs_f_ = 1.0;          // f of the state the current stage's CFC tasks see
+  bool rs_bg_only_ = false;  // rs_f_ == 0: skip the MG solves
+  Real ResidualScale(Real t) const;
+  void SetResidualScale(Real t, int stage, bool last_stage);
+  void AssemblePsiMetric(bool with_ghosts);
+
   // Running totals of what excision has removed from the grid over the whole run.
   // accreted_mass_ is ADM-weighted (int psi^5 E dV) and is what Step 3 hands to
   // puncture_mass_; accreted_mom_ is a DIAGNOSTIC only -- the puncture is fixed at

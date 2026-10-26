@@ -703,7 +703,10 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   // pack/restrict fluxes at fine/coarse boundaries into boundary buffers and send
   TaskStatus PackAndSendMG(const DvceArray5D<Real> &u);
   TaskStatus RecvAndUnpackMG(DvceArray5D<Real> &u);
+  // InitRecvMG switches to this level's rank-packed state (StartReceive); PostRecvMG posts
+  // the receives, called by SendBoundary right after PackAndSendMG (see unpack_unfenced_)
   TaskStatus InitRecvMG(const int nvars);
+  TaskStatus PostRecvMG();
   TaskStatus ClearSendMG();
   TaskStatus ClearRecvMG();
   TaskStatus FillFineCoarseMGGhosts(DvceArray5D<Real> &u);
@@ -719,6 +722,15 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
 
  private:
   Multigrid *pmy_mg;
+  // The aggregate recv buffer is read by UnpackMG, which RecvAndUnpackMG only launches
+  // (asynchronous); re-posting MPI_Irecv into it while that kernel may still run lets MPI
+  // overwrite it mid-read (a write-after-read race that made runs non-deterministic with
+  // GPU-aware MPI). The receives are therefore posted after PackAndSendMG's pre-send
+  // fence, which completes every earlier kernel. unpack_unfenced_ records an UnpackMG
+  // launch not yet followed by a fence; PostRecvMG fences itself (and counts it) if a
+  // fence is ever missing, e.g. receives without a cross-rank send.
+  bool unpack_unfenced_ = false;
+  long fallback_fences_ = 0;
   std::vector<RankPackedVarEntry> mg_send_var_entries_;
   std::vector<RankPackedVarEntry> mg_recv_var_entries_;
   std::vector<RankPackedVarMessage> mg_send_var_msgs_;

@@ -45,6 +45,8 @@ TaskStatus MultigridDriver::ClearSend(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
+  // only switches the level's state; the receives are posted in SendBoundary after the
+  // pre-send fence, so the previous round's UnpackMG no longer reads their buffer
   TaskStatus tstat = pmg->pbval->InitRecvMG(pmg->nvar_);
   return tstat;
 }
@@ -52,6 +54,9 @@ TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
 TaskStatus MultigridDriver::SendBoundary(Driver *pdrive, int stage) {
   DvceArray5D<Real> u = pmg->GetCurrentData();
   TaskStatus tstat = pmg->pbval->PackAndSendMG(u);
+  if (tstat == TaskStatus::complete) {
+    tstat = pmg->pbval->PostRecvMG();
+  }
   return tstat;
 }
 
@@ -561,8 +566,9 @@ void MultigridDriver::SetMGTaskListToFiner(int nsmooth, int ngh, int flag) {
           &MultigridDriver::StartReceive, this, id.fc_ghostsR);
       id.sendB    = tl["mg_to_finer"]->AddTask(
           &MultigridDriver::SendBoundary, this, id.fill_coarseB);
+      TaskID dep_recvB = id.ircvB | id.sendB;  // receives are posted in SendBoundary
       id.recvB    = tl["mg_to_finer"]->AddTask(
-          &MultigridDriver::RecvBoundary, this, id.ircvB);
+          &MultigridDriver::RecvBoundary, this, dep_recvB);
       id.physbB   = tl["mg_to_finer"]->AddTask(
           &MultigridDriver::PhysicalBoundary, this, id.recvB);
       id.fc_ghostsB = tl["mg_to_finer"]->AddTask(
@@ -577,8 +583,9 @@ void MultigridDriver::SetMGTaskListToFiner(int nsmooth, int ngh, int flag) {
           &MultigridDriver::StartReceive, this, id.fc_ghostsB);
       id.sendR2    = tl["mg_to_finer"]->AddTask(
           &MultigridDriver::SendBoundary, this, id.fill_coarseR2);
+      TaskID dep_recvR2 = id.ircvR2 | id.sendR2;  // receives are posted in SendBoundary
       id.recvR2    = tl["mg_to_finer"]->AddTask(
-          &MultigridDriver::RecvBoundary, this, id.ircvR2);
+          &MultigridDriver::RecvBoundary, this, dep_recvR2);
       id.physbR2   = tl["mg_to_finer"]->AddTask(
           &MultigridDriver::PhysicalBoundary, this, id.recvR2);
       id.fc_ghostsR2 = tl["mg_to_finer"]->AddTask(

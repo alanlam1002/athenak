@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "../athena.hpp"
+#include "../globals.hpp"
 #include "../coordinates/coordinates.hpp"
 #include "../coordinates/cell_locations.hpp"
 #include "../mesh/mesh.hpp"
@@ -2382,7 +2383,10 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
       }
     }
   }
-  if (has_cross_rank) Kokkos::fence();
+  if (has_cross_rank) {
+    Kokkos::fence();
+    unpack_unfenced_ = false;   // also completes any earlier UnpackMG (PostRecvMG)
+  }
 
   bool no_errors = true;
   // PackMG already wrote every off-rank payload directly into
@@ -2473,6 +2477,7 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
 
   {
   int nmnv = nmb * nnghbr * nvar;
+  unpack_unfenced_ = true;   // reads aggrbuf asynchronously: see PostRecvMG
   Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
   Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank() / (nnghbr * nvar);
@@ -2627,6 +2632,29 @@ TaskStatus MultigridBoundaryValues::InitRecvMG(const int nvars) {
     // out-of-range level (should not happen): rebuild bare each call
     BuildRankPackedMGMetadata(nvars, lev_, skip_fc_ir);
     mg_rp_active_level_ = -1;
+  }
+
+#endif
+  return TaskStatus::complete;   // the receives are posted by PostRecvMG
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus MultigridBoundaryValues::PostRecvMG()
+//! \brief Posts this level's rank-packed receives into the aggregate recv buffer. Called by
+//! SendBoundary right after PackAndSendMG, whose pre-send fence has completed the previous
+//! round's UnpackMG (which reads that buffer); fences itself if no fence followed the last
+//! UnpackMG launch.
+
+TaskStatus MultigridBoundaryValues::PostRecvMG() {
+#if MPI_PARALLEL_ENABLED
+  if (unpack_unfenced_ && !mg_recv_var_msgs_.empty()) {
+    Kokkos::fence();
+    unpack_unfenced_ = false;
+    if (fallback_fences_++ == 0) {
+      std::cout << "### WARNING MultigridBoundaryValues::PostRecvMG: no fence since the last "
+                << "UnpackMG on rank " << global_variable::my_rank << "; fenced here (further "
+                << "cases not reported)" << std::endl;
+    }
   }
 
   // Payload-only Irecv: the receiver derives the payload layout from its own

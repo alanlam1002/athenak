@@ -6,7 +6,9 @@ the mass-weighted mean of K/K0 - 1 (K = P/rho^Gamma, K0 = kappa; weights rho dV_
 omits W psi^6 ~ 1 + O(1e-2) across the star: argued adequate for comparing arms), the mass
 fractions with K/K0 - 1 > +5% / < -5%, rho_max/rho_c and K/K0 at rho_max. From the user
 history: rho_max(t). From out.log (dual energy on): the last DESHK / CRECOV lines' counters.
-    c122_b1.py OUTDIR RUNROOT"""
+    c122_b1.py OUTDIR RUNROOT [--arms DIR,DIR,...]
+--arms: run directories (absolute, or relative to RUNROOT) instead of the six B.1 arms; the
+label is the directory's basename and its deck is <dir>/../<basename>.par (c131)."""
 import glob
 import os
 import re
@@ -52,9 +54,13 @@ def dump(f, rhoc, k0):
 
 def main():
     od, root = sys.argv[1], sys.argv[2]
+    arms = [f'{root}/{a}' for a in ARMS]
+    if '--arms' in sys.argv:
+        arms = [a if os.path.isabs(a) else f'{root}/{a}'
+                for a in sys.argv[sys.argv.index('--arms') + 1].split(',')]
     rows = []
-    for a in ARMS:
-        d = f'{root}/{a}'
+    for d in arms:
+        a = os.path.basename(d.rstrip('/'))
         rhoc, k0 = par(d, 'rhoc'), par(d, 'kappa')
         for f in sorted(glob.glob(f'{d}/bin/{B}.prim_3d.*.bin')):
             o = dump(f, rhoc, k0)
@@ -69,10 +75,11 @@ def main():
             fo.write(a + ',' + ','.join(f'{o[k]:.6g}' for k in keys) + '\n')
     # dual-energy counters (last DESHK / CRECOV line of each DE-on arm)
     with open(f'{od}/c122_b1_de.txt', 'w') as fo:
-        for a in ARMS:
+        for d in arms:
+            a = os.path.basename(d.rstrip('/'))
             if not a.startswith('B1D'):
                 continue
-            L = open(f'{root}/{a}/out.log', errors='replace').read().split('\n')
+            L = open(f'{d}/out.log', errors='replace').read().split('\n')
             for tag in ('DESHK', 'CRECOV'):
                 ll = [l for l in L if l.startswith(tag)]
                 fo.write(f'{a} {ll[-1] if ll else "(none)"}\n')

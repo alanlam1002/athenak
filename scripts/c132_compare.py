@@ -10,7 +10,10 @@ Per dump, over gas with rho > 1e-8 rho_c, about the centre of mass:
   stream length and sigma_major/minor, the fraction of mass with N_perp >= N_w, the core
   mass (rho > 0.01 rho_c), the mass-weighted <K/K0> over rho >= 0.1 rho_c, and rho_max.
 Argued caveat: the local run's quadratic tide is exact only near the core (~L/R error).
-    c132_compare.py OUT.csv CD=DIR [L_newt=DIR] [L_marck=DIR] [--dt 20,50,100]"""
+With --tau-table (a Marck table), every local run is matched to CD's actual dump time at EQUAL PROPER TIME
+since periapsis (R-146 (iii): the Newtonian run's tau is the star's clock too) and interpolated linearly between
+its two bracketing dumps (every 6 M); CD itself is not interpolated (its dump time is the epoch).
+    c132_compare.py OUT.csv CD=DIR [L_newt=DIR] [L_marck=DIR] [--dt 20,50,100] [--tau-table FILE]"""
 import argparse
 import glob
 import os
@@ -82,28 +85,54 @@ def stats(f, nw=4.0, ds=0.25):
                 rhomax=rho.max()/RHOC, ridge_median=np.median(ridge)/RHOC)
 
 
+def interp_stats(fs, ts, target):
+    """the dump statistics linearly interpolated in time between the two dumps bracketing target"""
+    k = int(np.clip(np.searchsorted(ts, target), 1, len(ts) - 1))
+    a, b = stats(fs[k - 1]), stats(fs[k])
+    w = (target - ts[k - 1])/(ts[k] - ts[k - 1])
+    o = {q: (1 - w)*a[q] + w*b[q] for q in a}
+    o['t'] = target
+    return o
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out'); ap.add_argument('runs', nargs='+')
     ap.add_argument('--dt', default='20,50,100')
+    ap.add_argument('--tau-table', default=None,
+                    help='a Marck table (Schwarzschild t(tau)): match every local run at equal proper time')
     a = ap.parse_args()
     R = dict(x.split('=', 1) for x in a.runs)
     rows = []
+    # CD's epochs: its nearest 3D dump (every 12 M) to t_p + dt; with --tau-table the local runs are then matched
+    # to CD's actual dump time, at equal proper time from periapsis (R-146 (iii); dt/dtau = 1.25 at r_p = 10)
+    fcd = dumps(R['CD'])
+    tcd = np.array([float(bc.read_binary(f)['time']) for f in fcd])
+    S = None
+    if a.tau_table:
+        S = np.loadtxt(a.tau_table)
+        kps = np.argmin(S[:, 2])
     for lab, d in R.items():
         fs = dumps(d)
         ts = np.array([float(bc.read_binary(f)['time']) for f in fs])
         for dtp in [float(x) for x in a.dt.split(',')]:
+            icd = int(np.argmin(np.abs(tcd - (TP_CD + dtp))))
             if lab == 'CD':
-                target = TP_CD + dtp
+                target = TP_CD + dtp if S is None else tcd[icd]
             else:
                 T = np.loadtxt(glob.glob(f'{d}/tidal_*.txt')[0])
                 kp = np.argmin(T[:, 2])
-                if 'marck' in lab:          # CD's t_p + dt in the full run's time -> tau
+                if S is not None:           # proper time since periapsis of CD's dump, from the Schwarzschild table
+                    dtau = np.interp(S[kps, 1] + (tcd[icd] - TP_CD), S[:, 1], S[:, 0]) - S[kps, 0]
+                    target = T[kp, 0] + dtau
+                elif 'marck' in lab:        # CD's t_p + dt in the full run's time -> tau
                     target = np.interp(T[kp, 1] + dtp, T[:, 1], T[:, 0])
                 else:
                     target = T[kp, 0] + dtp
-            i = int(np.argmin(np.abs(ts - target)))
-            o = stats(fs[i])
+            if S is not None and lab != 'CD':
+                o = interp_stats(fs, ts, target)
+            else:
+                o = stats(fs[int(np.argmin(np.abs(ts - target)))])
             rows.append(f'{lab},{dtp:g},{target:.4g},' + ','.join(f'{o[k]:.6g}' for k in
                         ('t', 'M', 'length', 'sig_major', 'sig_minor', 'frac_nperp', 'core_mass',
                          'K_over_K0', 'rhomax', 'ridge_median')))

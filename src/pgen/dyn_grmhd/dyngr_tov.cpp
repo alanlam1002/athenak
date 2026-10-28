@@ -836,6 +836,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                 << "level caps assume L_core >= L_stream; the Jeans cap stays L_core)"
                 << std::endl;
     }
+    // the grid-fixed resolution floor (R-145 item 2), as tde_track reads it (R-150 item 5:
+    // the tde_debris full-run acceptance test keeps the production dx 1 over |x_i| < 64)
+    if (pin->DoesParameterExist("problem", "amr_pin_level")) {
+      tde_ref.pin_level = pin->GetInteger("problem", "amr_pin_level");
+      tde_ref.pin_box   = pin->GetReal("problem", "amr_pin_box");
+    }
     user_ref_func = &TDERefineDebris;
   }
 

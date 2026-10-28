@@ -227,6 +227,14 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
     int want_bh = -1;
     if (d2 < r2_bh) want_bh = tde_ref.lev_bh;
     if (r2_bh_fine > 0.0 && d2 < r2_bh_fine) want_bh = std::max(want_bh, tde_ref.lev_bh_fine);
+    // amr_pin_level over |x_i| < amr_pin_box (grid-fixed, as TDERefineTracker), counted
+    // under the "bh" criterion in the diagnostics (both are geometric floors)
+    if (tde_ref.pin_level >= 0 &&
+        size.h_view(m).x1min < tde_ref.pin_box && size.h_view(m).x1max > -tde_ref.pin_box &&
+        size.h_view(m).x2min < tde_ref.pin_box && size.h_view(m).x2max > -tde_ref.pin_box &&
+        size.h_view(m).x3min < tde_ref.pin_box && size.h_view(m).x3max > -tde_ref.pin_box) {
+      want_bh = std::max(want_bh, tde_ref.pin_level);
+    }
 
     n_nan += red(m, kDebNRed - 1);
     const Real bmax = red(m, 0);

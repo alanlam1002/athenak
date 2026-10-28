@@ -25,6 +25,11 @@
 //!                rho0 (1 + amp sin(2 pi x1/L1)), P = p0 (rho/rho0)^gamma (isentropic), and
 //!                the rapidity atanh(v) = atanh(v1) + c_s0 amp sin(...) (the relativistic
 //!                Riemann invariant to first order in amp; periodic box).
+//!   gaussian_bump (R-150 item 4, A4') a non-self-gravitating structured flow: rho =
+//!                rho_atm + rho0 exp(-r^2/(2 bump_sigma^2)), r the distance from the box
+//!                centre (over the active dimensions), uniform p0 (pressure equilibrium) and
+//!                uniform Eulerian v (an entropy bump); with frame_vel = v it sits at grid
+//!                rest, so the only error source is the KE-dominated energy partition.
 //! The pgen writes no error file: compare outputs offline (scripts/frame_shift_tests.py).
 
 #include <cmath>
@@ -80,6 +85,8 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     itype = 4;
   } else if (type == "sound_wave") {
     itype = 5;
+  } else if (type == "gaussian_bump") {
+    itype = 6;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "unknown <problem> type = " << type << std::endl;
@@ -111,6 +118,10 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
   const Real lx1 = pmy_mesh_->mesh_size.x1max - x1m;
   const Real x1c = 0.5*(pmy_mesh_->mesh_size.x1max + pmy_mesh_->mesh_size.x1min);
   const Real x2c = 0.5*(pmy_mesh_->mesh_size.x2max + pmy_mesh_->mesh_size.x2min);
+  const Real x3c = 0.5*(pmy_mesh_->mesh_size.x3max + pmy_mesh_->mesh_size.x3min);
+  // gaussian_bump: the bump's Gaussian width (rho_atm, rho0, p0, v1-v3 as above)
+  const Real bump_sigma = pin->GetOrAddReal("problem", "bump_sigma", 0.3);
+  const bool multi_d2 = pmy_mesh_->multi_d, multi_d3 = pmy_mesh_->three_d;
   const Real lorentz = 1.0/std::sqrt(1.0 - (v1*v1 + v2*v2 + v3*v3));
 
   auto &indcs = pmy_mesh_->mb_indcs;
@@ -140,6 +151,13 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     if (itype == 4) {
       u1 = (x1v < xshock) ? vl : vr;
       lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
+    }
+    if (itype == 6) {
+      Real &x3min = size.d_view(m).x3min, &x3max = size.d_view(m).x3max;
+      Real dx = x1v - x1c;
+      Real dy = multi_d2 ? CellCenterX(j-js, indcs.nx2, x2min, x2max) - x2c : 0.0;
+      Real dz = multi_d3 ? CellCenterX(k-ks, indcs.nx3, x3min, x3max) - x3c : 0.0;
+      rho = rho_atm + rho0*exp(-(dx*dx + dy*dy + dz*dz)/(2.0*bump_sigma*bump_sigma));
     }
     if (itype == 5) {
       Real ph = amp*sin(2.0*M_PI*(x1v - x1m)/lx1);

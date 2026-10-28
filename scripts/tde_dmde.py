@@ -40,8 +40,8 @@ def header(fn):
     with open(fn, 'rb') as f:
         head = f.read(1 << 20)
         k = head.index(b'<par_end>') + len('<par_end>')
-        while head[k:k + 1] in (b'\n', b'\r'):
-            k += 1
+        if head[k:k + 1] == b'\n':   # exactly the one newline the writer emits (parameter_input.cpp:792);
+            k += 1                      # the int32 nmb_total that follows can itself start with 0x0a or 0x0d
         off = k + 8 + 72 + 2 * 76 + 16 + 4 + t['nmb'] * 20   # through lloc + cost lists
         f.seek(off)
         dsize, = struct.unpack('Q', f.read(8))

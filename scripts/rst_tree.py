@@ -22,8 +22,8 @@ def read_tree(fn):
     with open(fn, 'rb') as f:
         head = f.read(1 << 20)
         k = head.index(b'<par_end>') + len('<par_end>')
-        while head[k:k + 1] in (b'\n', b'\r'):
-            k += 1
+        if head[k:k + 1] == b'\n':   # exactly the one newline the writer emits (parameter_input.cpp:792);
+            k += 1                      # the int32 nmb_total that follows can itself start with 0x0a or 0x0d
         f.seek(k)
         nmb, root = struct.unpack('2i', f.read(8))
         size = struct.unpack('9d', f.read(72))

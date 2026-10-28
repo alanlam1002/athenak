@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 
-sys.path.insert(0, os.path.expanduser('~/athenak_tde/scripts'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # this tree's tde_dmde (header fix)
 import tde_dmde as D   # noqa: E402
 
 B = 'cfc_tde_wd_imbh_parabolic_tracker'

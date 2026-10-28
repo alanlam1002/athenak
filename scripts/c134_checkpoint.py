@@ -3,7 +3,7 @@
 plus the output set and write a manifest (binary hash, deck, stage, t, cycle, the transition criterion's values).
 The restart and the bin outputs are hard links (no extra quota; rst_keep.py may then delete RUN/rst copies), the
 history files, deck and logs are copied (they keep growing).
-    c134_checkpoint.py RUN STAGE TP BINARY [--crit NAME=VALUE ...]
+    c134_checkpoint.py RUN STAGE TP BINARY [--crit NAME=VALUE ...]   (STAGE: C0..C4 or a hold point S<k>_tp<dt>)
 RUN is a pilot directory (parfile.par, rst/, bin/, *.hst, out.log); STAGE is C0..C4; TP the geodesic periapsis
 time. The checkpoint goes to RUN/checkpoints/STAGE; an existing one is never overwritten.
 """
@@ -45,11 +45,13 @@ def hst_row(fn, t):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('run')
-    ap.add_argument('stage', choices=['C0', 'C1', 'C2', 'C3', 'C4'])
+    ap.add_argument('stage', help='C0..C4, or a hold point such as S3_tp600 (an arm stopped before its stage criterion)')
     ap.add_argument('tp', type=float)
     ap.add_argument('binary')
     ap.add_argument('--crit', action='append', default=[], help='NAME=VALUE: a transition-criterion value')
     a = ap.parse_args()
+    if not re.fullmatch(r'C[0-4]|S[0-9]_tp[0-9]+', a.stage):
+        sys.exit(f'stage {a.stage}: expected C0..C4 or S<k>_tp<dt>')
     run = os.path.abspath(a.run)
     out = f'{run}/checkpoints/{a.stage}'
     if os.path.exists(f'{out}/MANIFEST.json'):

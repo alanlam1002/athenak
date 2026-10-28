@@ -470,6 +470,12 @@ class CFC {
   // re-derive the metric from the pgen's static t=0 ID, discarding CFC's own
   // dynamical evolution).
   void ReinitializeMetricForAMR(Driver *pdriver);
+  // R1 embedding at load (restart_state::EmbedFill): set padm->adm in the blocks with
+  // newmb(m) = 1 (ghosts included) to the zero-residual metric, i.e. what AssembleADM gives
+  // there with delta_psi = delta_alpha_psi = 0, b = 0 and Ahat = Ahat0: psi = psi0,
+  // alpha = (alpha psi)0/psi0 (alpha_floor), beta = beta0 + xidot, K_ij = psi0^-2 Ahat0_ij.
+  // Provisional: ReinitializeMetricForAMR re-solves it.
+  void FillEmbedADM(const DvceArray1D<int> &newmb, Real time);
 
   // Task-graph entry points (TaskStatus(Driver*, int), required by
   // NumericalRelativity::QueueTask). Each wraps the like-named private Step method

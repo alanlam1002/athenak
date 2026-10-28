@@ -326,8 +326,21 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // state (w0, flags, MG warm starts) restores it here and skips the MHD ghost exchange
   // and init C2P (the file holds u0's and w0's ghosts as the run left them), so it
   // continues bitwise (C-100)
-  const bool mhd_restored = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
-  InitBoundaryValuesAndPrimitives(pmesh, false, mhd_restored);
+  const bool staged = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
+  // <job> restart_embed_fill (R1, restart_state.hpp): the new outer blocks are filled, then
+  // the load runs the regrid path once (ghost exchange, CFC::ReinitializeMetricForAMR's
+  // re-solve and C2P), not the restored path; MCLOSE books it as regrid_embed (EmbedMark)
+  const bool embed = res_flag && restart_state::EmbedFill(pmesh, pin);
+  const bool mhd_restored = staged && !embed;
+  if (embed) {
+    embed_load_ = true;
+    InitBoundaryValuesAndPrimitives(pmesh, true, false);
+    embed_load_ = false;
+    auto *pdg = pmesh->pmb_pack->pdyngr;
+    if (pdg != nullptr && pdg->pmclose != nullptr) pdg->pmclose->EmbedMark(2);
+  } else {
+    InitBoundaryValuesAndPrimitives(pmesh, false, mhd_restored);
+  }
   // <job> seed_tau_eps (R-115 Q3): seeds u0 (ghosts included); the next stage's C2P
   // carries the seed into the primitives
   (void) restart_state::Seed(pmesh, pin, res_flag);
@@ -807,12 +820,14 @@ void Driver::InitBoundaryValuesAndPrimitives(Mesh *pm, bool is_amr_regrid,
       // inline, instead of ConToPrim -- CFC's own regrid refresh handles its
       // own interior/ghost con2prim split internally (see cfc.hpp's comment
       // on ReinitializeMetricForAMR).
+      // (an R1 embed load, embed_load_: before M_start, booked by EmbedMark instead)
+      const bool mc = pdyngr->pmclose != nullptr && !embed_load_;
       pdyngr->MassLedgerRegridPre();    // <mhd> mass_ledger: stage-0 entry (R-078)
-      if (pdyngr->pmclose != nullptr) pdyngr->pmclose->RegridProlongated();   // MCLOSE 6
+      if (mc) pdyngr->pmclose->RegridProlongated();   // MCLOSE 6
       pcfc->ReinitializeMetricForAMR(this);
       pdyngr->UpdateShockFlags();   // dual_energy_flag_exchange: owner flags (R-069)
-      pdyngr->MassLedgerRegridPost("regrid");
-      if (pdyngr->pmclose != nullptr) pdyngr->pmclose->MarkAfter(mclose::iFloorInit);
+      pdyngr->MassLedgerRegridPost(embed_load_ ? "embed" : "regrid");
+      if (mc) pdyngr->pmclose->MarkAfter(mclose::iFloorInit);
     } else {
       pdyngr->MassLedgerRegridPre();
       // MCLOSE: only the regrid path is inside a segment (the init path precedes M_start)

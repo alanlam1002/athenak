@@ -173,6 +173,13 @@ class MassClosure {
   void SegmentEnd(int cycle, Real time);
   // into the restart's parameter copy: M_end, the run's cumulative items, M*
   void Save(ParameterInput *pin) const;
+  // R1 embedding at load (<job> restart_embed_fill, restart_state::EmbedFill): the grid
+  // mass after the restart is staged (k = 0: the old domain only, the new blocks are
+  // zero), after the atmosphere fill (1) and after the load's metric re-solve and C2P
+  // (2). SegmentStart then reports them (TAG_EMBED: old domain - saved M_end, which must
+  // be exactly 0; the atmosphere added; the load C2P's change) and books their sum as
+  // regrid_embed instead of in the restart item.
+  void EmbedMark(int k);
 
  private:
   MeshBlockPack *pmy_pack;
@@ -205,6 +212,9 @@ class MassClosure {
   bool have_last_end = false;
   Real m_prev_end = 0.0;      // the previous segment's M_end (restart), NaN if unknown
   int ncyc = 0, cycle0 = 0;
+  KSum e_mark_[3];            // EmbedMark(0..2)
+  bool embed_ = false;        // EmbedMark(2) done: SegmentStart books regrid_embed
+  KSum embed_cum_;            // the run's cumulative regrid_embed (parameter copy)
   KSum Mass() const;          // global (rank-ordered) M of u0
 };
 

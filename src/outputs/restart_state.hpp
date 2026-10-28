@@ -74,6 +74,17 @@ bool ApplyStaged(MeshBlockPack *pmbp);
 // seed_applied = true (carried by later restarts, so a chain seeds once). Returns true
 // if applied.
 bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag);
+// <job> restart_embed_fill (R1, R-150 item 6; research REGRID_SPEC §2): a restart written by
+// scripts/r1_embed.py, the old box (<job> restart_embed_box = x1min,x1max,...,x3max)
+// embedded bitwise into a box twice as wide, its new outer blocks zero. Once (sets <job>
+// restart_embed_done = ncycle, kept by later restarts; a deck cannot unset it): the
+// blocks outside the old box get the zero-residual CFC metric (CFC::FillEmbedADM) and the
+// floor atmosphere at rest (rho = dfloor, P = rho tfloor, u^i = 0, as the pgen's vacuum
+// branch) converted with that metric, every other block's u0 and w0 unchanged bitwise;
+// the excision masks are rebuilt. MCLOSE marks the mass before (the old domain) and after
+// (EmbedMark 0, 1). Must follow ApplyStaged; the caller then runs the regrid path's
+// re-solve and C2P (Driver::Initialize). Returns true if applied.
+bool EmbedFill(Mesh *pm, ParameterInput *pin);
 }  // namespace restart_state
 
 #endif  // OUTPUTS_RESTART_STATE_HPP_

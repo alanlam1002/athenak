@@ -595,12 +595,38 @@ void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
     // S_i, tau: the same M* (their tolerance is in mass units too)
     for (auto &x : extra_) { x->mstar = mstar; x->SegmentStart(pin, cycle); }
   }
+  if (pin->DoesParameterExist("mhd", key_ + "_embed_cums")) {
+    embed_cum_.s = pin->GetReal("mhd", key_ + "_embed_cums");
+    embed_cum_.c = pin->GetReal("mhd", key_ + "_embed_cumc");
+  }
   if (pin->DoesParameterExist("mhd", key_ + "_mend")) {
     m_prev_end = pin->GetReal("mhd", key_ + "_mend");
     const Real pc = pin->DoesParameterExist("mhd", key_ + "_mend_c") ?
                     pin->GetReal("mhd", key_ + "_mend_c") : 0.0;
     KSum d;
     d.Add(m_start.s); d.Add(m_start.c); d.Add(-m_prev_end); d.Add(-pc);
+    if (embed_) {
+      // R1: the load changed the grid outside the stages; e0 (old domain, new blocks zero)
+      // against the saved M_end is the bitwise check, e1 - e0 the atmosphere added, e2 - e1
+      // the load's C2P; their sum (e2 - e0) is regrid_embed, the rest stays the restart item
+      auto diff = [](const KSum &a, const KSum &b, Real bc = 0.0) {
+        KSum r; r.Add(a.s); r.Add(a.c); r.Add(-b.s); r.Add(-b.c); r.Add(-bc); return r;
+      };
+      KSum old0;
+      old0.Add(e_mark_[0].s); old0.Add(e_mark_[0].c); old0.Add(-m_prev_end); old0.Add(-pc);
+      const KSum atm = diff(e_mark_[1], e_mark_[0]), lc2p = diff(e_mark_[2], e_mark_[1]);
+      const KSum emb = diff(e_mark_[2], e_mark_[0]);
+      d.Add(-emb.s); d.Add(-emb.c);
+      embed_cum_.Join(emb);
+      if (global_variable::my_rank == 0) {
+        std::cout << std::setprecision(17) << tag_ << "_EMBED cycle=" << cycle
+                  << " old_domain_minus_prev_end=" << old0.Val() << " atmosphere="
+                  << atm.Val() << " load_c2p=" << lc2p.Val() << " regrid_embed="
+                  << emb.Val() << " start_minus_e2=" << diff(m_start, e_mark_[2]).Val()
+                  << " regrid_embed_cum=" << embed_cum_.Val() << std::endl;
+      }
+      embed_ = false;
+    }
     seg[iRestart].Join(d); cum[iRestart].Join(d);
     if (ytr_) phcum[Phase(y_tlast)][iRestart].Join(d);
   }
@@ -707,9 +733,20 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   }
 }
 
+void MassClosure::EmbedMark(int k) {
+  if (!on) return;
+  for (auto &x : extra_) x->EmbedMark(k);
+  e_mark_[k] = Mass();
+  if (k == 2) embed_ = true;
+}
+
 void MassClosure::Save(ParameterInput *pin) const {
   if (!on) return;
   for (auto &x : extra_) x->Save(pin);
+  if (embed_cum_.s != 0.0 || embed_cum_.c != 0.0) {
+    pin->SetReal("mhd", key_ + "_embed_cums", embed_cum_.s);
+    pin->SetReal("mhd", key_ + "_embed_cumc", embed_cum_.c);
+  }
   if (have_last_end) {   // both parts: the value is exact beyond a double (Fix sums)
     pin->SetReal("mhd", key_ + "_mend", m_last_end.s);
     pin->SetReal("mhd", key_ + "_mend_c", m_last_end.c);

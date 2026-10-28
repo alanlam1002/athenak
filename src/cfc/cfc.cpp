@@ -2884,6 +2884,43 @@ void CFC::AssembleADM(Real time) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::FillEmbedADM(const DvceArray1D<int> &newmb, Real time)
+//! \brief see cfc.hpp
+
+void CFC::FillEmbedADM(const DvceArray1D<int> &newmb, Real time) {
+  Real xd[3] = {0.0, 0.0, 0.0};
+  if (frame_enabled_) { FrameVel(time, xd); }
+  const Real xd0 = xd[0], xd1 = xd[1], xd2 = xd[2];
+  const Real afl = alpha_floor_;
+  auto &adm = pmy_pack->padm->adm;
+  auto &psi0 = u_psi0;
+  auto &ap0 = u_alpha0_psi0;
+  auto &b0 = beta0_u;
+  auto &a0 = a0_dd;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int n1 = indcs.nx1 + 2*indcs.ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+  par_for("cfc_embed_adm", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, 0, n3-1, 0, n2-1,
+          0, n1-1, KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    if (newmb(m) == 0) return;
+    const Real p = psi0(m,0,k,j,i);
+    const Real p2 = p*p, p4 = p2*p2;
+    adm.psi4(m,k,j,i) = p4;
+    adm.g_dd(m,0,0,k,j,i) = p4; adm.g_dd(m,1,1,k,j,i) = p4; adm.g_dd(m,2,2,k,j,i) = p4;
+    adm.g_dd(m,0,1,k,j,i) = 0.0; adm.g_dd(m,0,2,k,j,i) = 0.0; adm.g_dd(m,1,2,k,j,i) = 0.0;
+    adm.alpha(m,k,j,i) = fmax(ap0(m,0,k,j,i)/p, afl);
+    adm.beta_u(m,0,k,j,i) = b0(m,0,k,j,i) + xd0;
+    adm.beta_u(m,1,k,j,i) = b0(m,1,k,j,i) + xd1;
+    adm.beta_u(m,2,k,j,i) = b0(m,2,k,j,i) + xd2;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) { adm.vK_dd(m,a,b,k,j,i) = a0(m,a,b,k,j,i)/p2; }
+    }
+  });
+  for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real CFC::StageTime(Driver *pdriver, int stage) const
 //! \brief see cfc.hpp. For the SSP-RK integrators u0 <- gam0*u0 + gam1*u1 + beta*dt*L
 //! (u1 = start-of-step state, mhd_update.cpp), so the stage-s state sits at

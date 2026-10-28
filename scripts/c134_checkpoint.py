@@ -52,16 +52,19 @@ def main():
     a = ap.parse_args()
     run = os.path.abspath(a.run)
     out = f'{run}/checkpoints/{a.stage}'
-    if os.path.exists(out):
+    if os.path.exists(f'{out}/MANIFEST.json'):
         sys.exit(f'{out} exists')
+    resume = os.path.exists(out)          # an interrupted checkpoint: link/copy what is missing, then the manifest
     rst = sorted(glob.glob(f'{run}/rst/*.rst'))[-1]
     h = D.header(rst)
     t, cyc = float(h['time']), int(h['ncycle'])
-    os.makedirs(f'{out}/bin')
-    os.link(rst, f'{out}/{os.path.basename(rst)}')
+    os.makedirs(f'{out}/bin', exist_ok=resume)
+    if not os.path.exists(f'{out}/{os.path.basename(rst)}'):
+        os.link(rst, f'{out}/{os.path.basename(rst)}')
     nb = 0
     for f in sorted(glob.glob(f'{run}/bin/*.bin')):
-        os.link(f, f'{out}/bin/{os.path.basename(f)}')
+        if not os.path.exists(f'{out}/bin/{os.path.basename(f)}'):
+            os.link(f, f'{out}/bin/{os.path.basename(f)}')
         nb += 1
     for f in glob.glob(f'{run}/*.hst') + [f'{run}/parfile.par', f'{run}/out.log', f'{run}/err.log']:
         shutil.copy2(f, out)
@@ -79,7 +82,7 @@ def main():
         'deck': deck, 'deck_sha256': sha256(deck),
         'restart': os.path.basename(rst), 'restart_sha256': sha256(rst),
         't': t, 'cycle': cyc, 't_p': a.tp, 't_minus_tp': t - a.tp, 'n_bin_outputs': nb,
-        'criterion': dict(kv.split('=', 1) for kv in a.crit),
+        'criterion': dict((kv.split('=', 1) if '=' in kv else (f'note{i}', kv)) for i, kv in enumerate(a.crit)),
         'values (measured; hst rows at t)': {
             'rho-max': u['rho-max'], 'rho-max/rho-max(0)': u['rho-max'] / u0['rho-max'],
             'alpha-min': u['alpha-min'], 'fc_mass': u.get('fc_mass'),

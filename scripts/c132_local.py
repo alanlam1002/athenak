@@ -115,7 +115,8 @@ def main():
                         f'{rho[m][k].max()/RHOC:.5e},{fwhm:.5e},{dxb:.5e},{nperp:.4g}')
         lev = np.round(np.log2(hs.max()/hs)).astype(int)
         nl = np.bincount(lev)
-        q = np.quantile(eps, [0.05, 0.25, 0.5, 0.75, 0.95])
+        o = np.argsort(eps)                                # mass-weighted (was per cell; c136 fix)
+        q = np.interp([0.05, 0.25, 0.5, 0.75, 0.95], np.cumsum(w[o])/w.sum(), eps[o])
         h, e_ = np.histogram(eps, bins=60, weights=w)
         np.savetxt(f'{a.out}/{lab}_dMdE_t{t:07.2f}.csv',
                    np.stack([0.5*(e_[1:] + e_[:-1]), h], axis=1), delimiter=',',

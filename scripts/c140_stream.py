@@ -7,7 +7,7 @@ the mass, the in-plane radial and the vertical mass-weighted spreads (Gaussian F
 mass-weighted cell size dx and N_perp = FWHM_z/dx (the stream's thin direction). The bins within +-10 deg of the
 density maximum (the remnant) are left out of the stream statistics. Reported: the stream mass, its mass-weighted
 median FWHM_z and FWHM_R, the stream-mass fraction with N_perp >= N_w (4), rho_max, and the blocks per level.
-    c140_stream.py OUT.csv ARMDIR [ARMDIR ...] [--thr 1e-8] [--nw 4]
+    c140_stream.py OUT.csv ARMDIR [ARMDIR ...] [--thr 1e-8] [--nw 4] [--common]
 An argued-adequate measure for an A/B comparison of refinement criteria (the same method on both arms); not the
 local runs' principal-axis width (c132_local.py), which assumes a straight stream."""
 import argparse
@@ -30,6 +30,8 @@ def par_text(f):
 
 
 def wmed(x, w):
+    if not np.isfinite(w).all():
+        return float('nan')
     o = np.argsort(x)
     c = np.cumsum(w[o])
     return float(np.interp(0.5 * c[-1], c, x[o]))
@@ -78,6 +80,8 @@ def dump(f, thr, nw):
         if Fz / dxb >= nw:
             np_ok += w.sum()
     ms = np.array(ms)
+    if not len(ms):                               # no gas outside the remnant wedge (pre-disruption dumps)
+        ms, fz, fr = np.array([np.nan]), [np.nan], [np.nan]
     out.update(M_stream=float(ms.sum()), FWHM_z_med=wmed(np.array(fz), ms), FWHM_R_med=wmed(np.array(fr), ms),
                frac_Nperp_ok=float(np_ok / ms.sum()))
     for dxv, cnt in sorted(lev.items(), reverse=True):
@@ -91,10 +95,15 @@ def main():
     ap.add_argument('arms', nargs='+')
     ap.add_argument('--thr', type=float, default=1e-8)
     ap.add_argument('--nw', type=float, default=4.0)
+    ap.add_argument('--common', action='store_true', help='only the dump numbers present in every arm')
     a = ap.parse_args()
     rows = []
+    fs = {d: sorted(glob.glob(f'{d}/bin/*.prim_3d.*.bin')) for d in a.arms}
+    common = set.intersection(*[{f.split('.')[-2] for f in v} for v in fs.values()]) if a.common else None
     for d in a.arms:
-        for f in sorted(glob.glob(f'{d}/bin/*.prim_3d.*.bin')):
+        for f in fs[d]:
+            if common is not None and f.split('.')[-2] not in common:
+                continue
             o = dump(f, a.thr, a.nw)
             o['arm'] = os.path.basename(d.rstrip('/'))
             rows.append(o)

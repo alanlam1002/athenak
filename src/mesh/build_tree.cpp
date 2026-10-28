@@ -6,6 +6,7 @@
 //! \file build_tree.cpp
 //! \brief Functions to build MeshBlock, both for new runs and restarts
 
+#include <cmath>
 #include <iostream>
 #include <cinttypes>
 #include <limits> // numeric_limits<>
@@ -368,6 +369,28 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
   hdos += sizeof(Real);
   std::memcpy(&ncycle, &(headerdata[hdos]), sizeof(int));
   delete [] headerdata;
+
+  // the restart's mesh extent must be the input's <mesh> one: the header's extent is what
+  // the tree is built from, while other modules read <mesh> from the parameters, so a
+  // mismatch (e.g. an R1-embedded deck with the un-embedded restart, C-125) runs silently
+  // wrong (R-152 item 5)
+  {
+    const Real rs[6] = {mesh_size.x1min, mesh_size.x1max, mesh_size.x2min,
+                        mesh_size.x2max, mesh_size.x3min, mesh_size.x3max};
+    const char *key[6] = {"x1min", "x1max", "x2min", "x2max", "x3min", "x3max"};
+    for (int n = 0; n < 6; ++n) {
+      if (!pin->DoesParameterExist("mesh", key[n])) continue;
+      const Real dk = pin->GetReal("mesh", key[n]);
+      const Real w = std::abs(rs[2*(n/2) + 1] - rs[2*(n/2)]);
+      if (std::abs(dk - rs[n]) > 1.0e-12*w) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "the restart file's mesh " << key[n] << " = " << rs[n]
+                  << " differs from the input's <mesh> " << key[n] << " = " << dk
+                  << " (wrong restart for this deck?)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+  }
 
   // calculate the number of MeshBlocks at root level in each dir
   nmb_rootx1 = mesh_indcs.nx1/mb_indcs.nx1;

@@ -282,6 +282,17 @@ bool EmbedFill(Mesh *pm, ParameterInput *pin) {
                     cz < box[4] || cz > box[5]) ? 1 : 0;
     nnew += nm.h_view(m);
   }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &nnew, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  // an embedded restart has new blocks outside the old box; none means the deck asks for
+  // an embedding the restart does not have (C-125: the un-embedded restart was loaded)
+  if (nnew == 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<job> restart_embed_fill is set but the restart has no MeshBlock outside "
+              << "restart_embed_box (not the r1_embed.py output?)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   nm.template modify<HostMemSpace>();
   nm.template sync<DevExeSpace>();
   auto newmb = nm.d_view;
@@ -334,9 +345,6 @@ bool EmbedFill(Mesh *pm, ParameterInput *pin) {
     pmbp->pcoord->UpdateExcisionMasks();
   }
   pin->SetInteger("job", "restart_embed_done", pm->ncycle);
-#if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, &nnew, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
-#endif
   if (global_variable::my_rank == 0) {
     std::cout << "restart_state: R1 embed: " << nnew << " new MeshBlocks outside the old box "
               << box[0] << "," << box[1] << "," << box[2] << "," << box[3] << "," << box[4]

@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -420,6 +421,17 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
+  // <cfc> solve_every_stages (see cfc.hpp). Read without GetOrAdd, as residual_scale.
+  if (pin->DoesParameterExist("cfc", "solve_every_stages")) {
+    solve_every_ = pin->GetInteger("cfc", "solve_every_stages");
+    // a restart written in this mode carries the held potentials and a pending forced
+    // solve; a fresh start or any other restart solves at its first stage
+    if (solve_every_ > 1) {
+      force_solve_ = !pin->DoesParameterExist("cfc", "restart_cfc_held") ||
+                     !pin->GetBoolean("cfc", "restart_cfc_held") ||
+                     pin->GetBoolean("cfc", "restart_cfc_force_solve");
+    }
+  }
   // <cfc> residual_scale (see cfc.hpp). Read without GetOrAdd, so an input without the
   // keys leaves the parameter block (and the restart files) unchanged.
   if (pin->DoesParameterExist("cfc", "residual_scale")) {
@@ -445,6 +457,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
                 << "residual_scale_t0" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+  }
+  if (rs_on_ && solve_every_ > 1) {
+    std::cout << "### FATAL ERROR in CFC: <cfc> residual_scale and solve_every_stages > 1 "
+              << "are not combined" << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   if (rs_on_) {
     rs_log_ = pin->DoesParameterExist("cfc", "residual_scale_log_interval") ?
@@ -570,6 +587,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Delta-n-cycle solve cadence; see cfc.hpp. <=0 (default) is a no-op.
   cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
+  if (solve_every_ > 0 && cfc_solve_interval_ > 0) {
+    std::cout << "### FATAL ERROR in CFC: <cfc> solve_every_stages and solve_interval > 0 "
+              << "are exclusive" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
 
   // Comoving gauge (uniform shift xidot(t)); see cfc.hpp and DEVELOPMENT.md item 68.
   // All zero (default) leaves every run bit-for-bit unchanged.
@@ -842,6 +864,9 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   // on ~/athenak_cfc; DEVELOPMENT.md item 61).
   if (stage < 1) {
     return true;
+  }
+  if (solve_every_ > 0) {
+    return solve_now_;
   }
   if (cfc_solve_interval_ <= 0) {
     return true;
@@ -1526,6 +1551,10 @@ TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
 }
 
 TaskStatus CFC::AssemblePsiGhostsTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) {   // the held delta_psi (ghosts as last exchanged)
+    AssemblePsiMetric(true);
+    return TaskStatus::complete;
+  }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   AssemblePsiMetric(true);
   return TaskStatus::complete;
@@ -1606,7 +1635,9 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
 // and z4c::Z4c; ADMBCs/ADMBCsCoarse (adm_bcs.cpp) are applied below by
 // ProlongADMTask/BCSADMTask.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefreshThisStage(stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
                                       true);
@@ -1614,15 +1645,21 @@ TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefreshThisStage(stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefreshThisStage(stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefreshThisStage(stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     // Step 1: apply physical BCs to the coarse array so the prolongation stencil
     // reads valid data in coarse ghost zones at a physical boundary.
@@ -1642,7 +1679,9 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
 //! (no neighbor block). Runs after ProlongADMTask so corner ghost zones between a
 //! coarse neighbor and a physical boundary read valid, already-prolongated data.
 TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefreshThisStage(stage)) {
+    return TaskStatus::complete;
+  }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
@@ -1654,6 +1693,18 @@ TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
 // z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
 // over CFC's 5 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
+  // solve_every_stages: this stage's decision, latched here (the first CFC task of the
+  // stage) so that every task of the stage sees the same one
+  if (solve_every_ > 0 && stage >= 1) {
+    const int64_t k = static_cast<int64_t>(pmy_pack->pmesh->ncycle)*pdriver->nexp_stages
+                      + (stage - 1);
+    solve_now_ = force_solve_ || (k % solve_every_ == 0);
+    if (solve_now_) { force_solve_ = false; }
+    if (!solve_now_) {   // a refresh stage exchanges u_adm only
+      pbval_adm->InitRecv(adm::ADM::nadm);
+      return TaskStatus::complete;
+    }
+  }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->InitRecv(4);
   pbval_psi->InitRecv(1);
@@ -1663,6 +1714,7 @@ TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) { pbval_adm->ClearSend(); return TaskStatus::complete; }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->ClearSend();
   pbval_psi->ClearSend();
@@ -1672,6 +1724,7 @@ TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) { pbval_adm->ClearRecv(); return TaskStatus::complete; }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   pbval_pietax->ClearRecv();
   pbval_psi->ClearRecv();
@@ -1687,6 +1740,10 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 // AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) {   // the background at this stage's x_BH(t)
+    if (puncture_moving_) { RefillMovingPuncture(StageTime(pdriver, stage)); }
+    return TaskStatus::complete;
+  }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   // Phase 2 M1: the analytic background follows the puncture; refilled once per solve
   // (the solved delta fields are re-solved right after, so nothing needs re-anchoring)
@@ -1717,6 +1774,10 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 // ghost exchange (CFC_BCSPiEtaX) completes -- X^i is never materialized.
 
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) {   // the held X^i potentials against the new background
+    ComputeADual();
+    return TaskStatus::complete;
+  }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (rs_bg_only_) { return TaskStatus::complete; }   // scaled by f = 0
   ComputeADual();
@@ -1795,6 +1856,10 @@ TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
 // exchange has completed.
 
 TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) {   // the held shift potentials
+    ReconstructShift();
+    return TaskStatus::complete;
+  }
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (rs_bg_only_) { return TaskStatus::complete; }   // scaled by f = 0
   ReconstructShift();
@@ -1804,6 +1869,16 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 // final step: vK_dd/alpha/beta_u -> padm->u_adm.
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
+  if (RefreshThisStage(stage)) {
+    const Real m0 = puncture_mass_;
+    AssembleADM(StageTime(pdriver, stage));
+    AccreteExcisedMass(pdriver, stage);   // drains this stage's tally (disjoint slots)
+    if (puncture_mass_ != m0) { force_solve_ = true; }
+    if (frame_ctrl_ && stage == pdriver->nexp_stages) {
+      FrameControlStep(StageTime(pdriver, stage));
+    }
+    return TaskStatus::complete;
+  }
   if (!DoSolveThisStage(pdriver, stage)) {
     // The solved part of adm.beta_u is reused; keep the gauge part current.
     ApplyFrameShiftUpdate(StageTime(pdriver, stage));
@@ -1813,7 +1888,10 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
     return TaskStatus::complete;
   }
   AssembleADM(StageTime(pdriver, stage));
+  const Real m0 = puncture_mass_;
   AccreteExcisedMass(pdriver, stage);
+  // solve_every_stages > 1: the background was re-anchored, so the next stage solves
+  if (solve_every_ > 1 && puncture_mass_ != m0) { force_solve_ = true; }
   if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
   // Phase 2 M2: next step's xidot (before CFC_RestADM packs adm.beta_u's ghosts)
   if (frame_ctrl_ && stage == pdriver->nexp_stages) {
@@ -3193,14 +3271,15 @@ void CFC::InitFrameControl(Driver *pdriver) {
 
 int CFC::RestartStateVars() const {
   return 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
-           + pmgd_pietabeta->NumVars();
+           + pmgd_pietabeta->NumVars() + (solve_every_ > 1 ? 8 : 0);
 }
 
 std::string CFC::RestartStateLayout() const {
   return "cfc.dpsi:1,cfc.dap:1,cfc.mg_psi:" + std::to_string(pmgd_psi->NumVars())
          + ",cfc.mg_alpha:" + std::to_string(pmgd_alpha->NumVars())
          + ",cfc.mg_pietax:" + std::to_string(pmgd_pietax->NumVars())
-         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars());
+         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars())
+         + (solve_every_ > 1 ? ",cfc.upx:4,cfc.upbeta:4" : "");
 }
 
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
@@ -3218,6 +3297,12 @@ void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
                              static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
     d->SaveFinestState(dst, n, ng);
     n += d->NumVars();
+  }
+  if (solve_every_ > 1) {   // the held potentials (ghosts included), see cfc.hpp
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 4), all, all, all),
+                      Kokkos::subview(u_p_x, mb, all, all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n + 4, n + 8), all, all, all),
+                      Kokkos::subview(u_p_beta, mb, all, all, all, all));
   }
 }
 
@@ -3237,6 +3322,12 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
     d->LoadFinestState(src, n, ng);
     n += d->NumVars();
   }
+  if (solve_every_ > 1) {
+    Kokkos::deep_copy(Kokkos::subview(u_p_x, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n, n + 4), all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(u_p_beta, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n + 4, n + 8), all, all, all));
+  }
   // as the restarted run left them: false after a step that accreted, so the next solves
   // re-seed from adm exactly as the continuous run does (C-100, c100_rst7)
   psi_seeded_ = rst_psi_seeded_;
@@ -3246,6 +3337,15 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
 void CFC::SaveRestartScalars(ParameterInput *pin) const {
   pin->SetBoolean("cfc", "restart_psi_seeded", psi_seeded_);
   pin->SetBoolean("cfc", "restart_alpha_psi_seeded", alpha_psi_seeded_);
+  // solve_every_stages > 1: the file carries the held potentials (cfc.upx/upbeta) and the
+  // pending forced solve; a file written otherwise must not claim them (a later N > 1
+  // restart from it then solves first)
+  if (solve_every_ > 1) {
+    pin->SetBoolean("cfc", "restart_cfc_held", true);
+    pin->SetBoolean("cfc", "restart_cfc_force_solve", force_solve_);
+  } else if (pin->DoesParameterExist("cfc", "restart_cfc_held")) {
+    pin->SetBoolean("cfc", "restart_cfc_held", false);
+  }
 }
 
 //----------------------------------------------------------------------------------------

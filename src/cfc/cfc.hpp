@@ -318,6 +318,26 @@ class CFC {
   // from ~/athenak_cfc; see DEVELOPMENT.md item 6.
   int cfc_solve_interval_;
 
+  // <cfc> solve_every_stages = N (R-152 item 6; absent/0 = off, the cadence above applies):
+  // the elliptic solves run on every Nth RK stage, counted k = ncycle*nstages + stage - 1
+  // (solve iff k % N == 0, or a solve is forced). The stages in between are REFRESH stages:
+  // the solved residuals are held -- delta_psi, delta_alpha_psi and the X^i and shift
+  // potentials u_p_x/u_p_beta, with the ghosts of their last exchange -- while the
+  // analytic background is refilled at the stage's x_BH(t) (RefillMovingPuncture), Adual
+  // and the shift re-derived from the held potentials against it (ComputeADual,
+  // ReconstructShift), the metric re-assembled (psi4 with ghosts, then lapse/shift/K) and
+  // u_adm ghost-exchanged, so every ghost holds its owner's metric bitwise as on a solve
+  // stage. N = 1 solves every stage: the solve_interval = 0 path, bitwise. A solve is
+  // forced at the stage after the puncture mass changed (AccreteExcisedMass re-anchors the
+  // background; holding the old residual over it would step the metric) and at the first
+  // stage after a restart that does not carry the held potentials (restart_cfc_held).
+  int solve_every_ = 0;
+  bool solve_now_ = true;      // this stage's decision, latched by InitRecvTask (Task_Start)
+  bool force_solve_ = false;   // solve at the next stage
+  bool RefreshThisStage(int stage) const {
+    return solve_every_ > 0 && stage >= 1 && !solve_now_;
+  }
+
   // Comoving gauge (DEVELOPMENT.md item 68): x' = x - xi(t) with the slicing
   // unchanged, i.e. a spatially uniform xidot^i(t) added to the shift that the fluid
   // sees (adm.beta_u), never to the solved beta_u. <cfc> frame_vel1/2/3 and

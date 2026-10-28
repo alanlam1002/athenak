@@ -127,6 +127,7 @@ def cells(fn, rcut=3.0, nscal=1):
     w = np.array([x1max - x1min, x2max - x2min, x3max - x3min])
     lo = np.array([x1min, x2min, x3min])
     Es, EBs, dMs, rhos, Ps = [], [], [], [], []
+    Bxs, Bys, Bzs = [], [], []   # the stored shift beta'^i (grid coordinates; carries xidot)
     Xs, Ys, Zs, Vx, Vy, Vz = [], [], [], [], [], []
     Ls, Ux, Uy, Uz = [], [], [], []
     Ps4, Als, dVs = [], [], []
@@ -181,11 +182,13 @@ def cells(fn, rcut=3.0, nscal=1):
         Ux.append(uj[0]); Uy.append(uj[1]); Uz.append(uj[2])
         Ls.append(np.full(len(uj[0]), lev[b] - root))
         Ps4.append(adm[12][ok]); Als.append(alpha); dVs.append(np.full(len(alpha), dx.prod()))
+        Bxs.append(adm[14][ok]); Bys.append(adm[15][ok]); Bzs.append(adm[16][ok])
     cat = np.concatenate
     return dict(t=t['time'], E=cat(Es), EB=cat(EBs), dM=cat(dMs), rho=cat(rhos), P=cat(Ps),
                 par=t['par'], x=cat(Xs), y=cat(Ys), z=cat(Zs), vx=cat(Vx), vy=cat(Vy),
                 vz=cat(Vz), ux=cat(Ux), uy=cat(Uy), uz=cat(Uz), lev=cat(Ls), xbh=xbh,
-                psi4=cat(Ps4), alpha=cat(Als), dV=cat(dVs))
+                psi4=cat(Ps4), alpha=cat(Als), dV=cat(dVs), betax=cat(Bxs), betay=cat(Bys),
+                betaz=cat(Bzs), xdot=xdot)
 
 
 def hist(E, dM, dE, edges):

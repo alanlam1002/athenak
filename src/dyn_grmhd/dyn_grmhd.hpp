@@ -162,6 +162,7 @@ class DynGRMHD {
   // the members below is used, and no kernel of the default path is changed.
   EnergyVariable energy_variable = EnergyVariable::valencia;
   DvceArray5D<Real> kill_res;       // the residual (delta alpha, delta beta^i, psi^4 - psi0^4)
+  bool kill_boost = false;          // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
   void KillingFaceFluxes();         // the tau slot's face flux -> the T face flux
   int kill_probe_cycles = 0, kill_probe_c0 = -1, kill_probe_stage = 0;   // ghost/owner probe
   void KillingFaceProbe();          // <dyn_grmhd> killing_probe_cycles, face_probe_box

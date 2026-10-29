@@ -187,6 +187,9 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
       kill_ = k;
     }
     if (kill_) {
+      // <mhd> killing_weights = boost (R-158): (alpha0, beta0) = (1, xidot)
+      kboost_ = pin->DoesParameterExist("mhd", "killing_weights") &&
+                pin->GetString("mhd", "killing_weights") == "boost";
       tag_ = "KCLOSE"; key_ = "closure_kill";
       dyngr::BuildTrumpetTable(ktab_, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                                pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
@@ -320,7 +323,9 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
   auto &size = pmy_pack->pmb->mb_size;
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
-  const bool ta = (kill_ == 2);
+  const bool ta = (kill_ == 2), kb = kboost_;
+  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
+  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
   auto &td = ktab_.d;
   const Real th = ktab_.h, tih = ktab_.ih;
   const int nt = ktab_.n;
@@ -332,9 +337,11 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
     const Real x = CellCenterX(i - is, nx1, sz.x1min, sz.x1max) - cx;
     const Real y = CellCenterX(j - js, nx2, sz.x2min, sz.x2max) - cy;
     const Real z = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max) - cz;
-    Real psi0, ap0, b0[3], dpsi0, dal0, b, db;
-    dyngr::TrumpetTableBackground(td, th, tih, nt, m_bh, x, y, z, psi0, ap0, b0, dpsi0,
-                                  dal0, b, db);
+    Real psi0 = 1.0, ap0 = 1.0, b0[3] = {fv0, fv1, fv2}, dpsi0, dal0, b, db;
+    if (!kb) {
+      dyngr::TrumpetTableBackground(td, th, tih, nt, m_bh, x, y, z, psi0, ap0, b0, dpsi0,
+                                    dal0, b, db);
+    }
     const Real al0 = ap0/psi0;
     const Real d = u(m, IDN, k, j, i);
     kv(m, 0, k, j, i) = al0*(u(m, IEN, k, j, i) + d)
@@ -439,7 +446,9 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   const Real mx1 = ms.x1min, Mx1 = ms.x1max, mx2 = ms.x2min, Mx2 = ms.x2max;
   const Real mx3 = ms.x3min, Mx3 = ms.x3max;
   // KCLOSE of a Valencia run: T's face flux from the D, S, tau fluxes (weights at the face)
-  const bool kf = kill_face_, kta = (kill_ == 2);
+  const bool kf = kill_face_, kta = (kill_ == 2), kb = kboost_;
+  const Real kv0 = pp->padm->frame_vel_u[0], kv1 = pp->padm->frame_vel_u[1];
+  const Real kv2 = pp->padm->frame_vel_u[2];
   const Real kcx = kf ? pp->pcfc->bg_xbh_[0] : 0.0, kcy = kf ? pp->pcfc->bg_xbh_[1] : 0.0;
   const Real kcz = kf ? pp->pcfc->bg_xbh_[2] : 0.0, kmbh = kf ? pp->pcfc->puncture_mass_ : 1.0;
   auto &ktd = ktab_.d;
@@ -449,9 +458,11 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
                                  const int j, const int i, const Real x, const Real y,
                                  const Real z) {
     if (!kf) return fl(m, nv, k, j, i);
-    Real psi0, ap0, b0[3], dpsi0, dal0, b, db;
-    dyngr::TrumpetTableBackground(ktd, kth, ktih, knt, kmbh, x - kcx, y - kcy, z - kcz, psi0,
-                                  ap0, b0, dpsi0, dal0, b, db);
+    Real psi0 = 1.0, ap0 = 1.0, b0[3] = {kv0, kv1, kv2}, dpsi0, dal0, b, db;
+    if (!kb) {
+      dyngr::TrumpetTableBackground(ktd, kth, ktih, knt, kmbh, x - kcx, y - kcy, z - kcz,
+                                    psi0, ap0, b0, dpsi0, dal0, b, db);
+    }
     const Real al0 = ap0/psi0, fd = fl(m, IDN, k, j, i);
     return al0*(fl(m, IEN, k, j, i) + fd) - (b0[0]*fl(m, IM1, k, j, i)
            + b0[1]*fl(m, IM2, k, j, i) + b0[2]*fl(m, IM3, k, j, i)) - (kta ? al0 : 1.0)*fd;

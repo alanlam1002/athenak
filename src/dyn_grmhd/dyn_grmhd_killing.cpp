@@ -89,6 +89,23 @@ void KillingBackground(const DvceArray2D<Real> &d, const Real h, const Real ih, 
   db = -3.0*b*alpha0/r;
 }
 
+//! the weights: the trumpet background, or (killing_weights = boost) the flat comoving frame's
+//! d_t': alpha0 = 1, beta0 = xidot (constant), psi0 = 1, K0 = 0, no gradients
+KOKKOS_INLINE_FUNCTION
+void KWeights(const bool boost, const Real fv0, const Real fv1, const Real fv2,
+              const DvceArray2D<Real> &d, const Real h, const Real ih, const int n,
+              const Real m_bh, const Real x1, const Real x2, const Real x3,
+              Real &alpha0, Real beta0[3], Real &psi0, Real K0[6], Real &dal0,
+              Real &b, Real &db) {
+  if (boost) {
+    alpha0 = 1.0; psi0 = 1.0; dal0 = 0.0; b = 0.0; db = 0.0;
+    beta0[0] = fv0; beta0[1] = fv1; beta0[2] = fv2;
+    for (int q = 0; q < 6; ++q) K0[q] = 0.0;
+    return;
+  }
+  KillingBackground(d, h, ih, n, m_bh, x1, x2, x3, alpha0, beta0, psi0, K0, dal0, b, db);
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -106,6 +123,9 @@ void DynGRMHD::KillingFaceFluxes() {
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
   const bool ta = (energy_variable == EnergyVariable::killing_ta);
+  const bool boost = kill_boost;
+  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
+  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
   auto &td = ttab.d;
   const Real th = ttab.h, tih = ttab.ih;
   const int nt = ttab.n;
@@ -123,7 +143,8 @@ void DynGRMHD::KillingFaceFluxes() {
       const Real z = (sk ? LeftEdgeX(k-ks, nx3, sz.x3min, sz.x3max)
                          : CellCenterX(k-ks, nx3, sz.x3min, sz.x3max)) - cz;
       Real al0, b0[3], psi0, K0[6], dal0, b, db;
-      KillingBackground(td, th, tih, nt, m_bh, x, y, z, al0, b0, psi0, K0, dal0, b, db);
+      KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, x, y, z, al0, b0, psi0, K0, dal0,
+               b, db);
       const Real fD = f(m, IDN, k, j, i);
       const Real w = ta ? al0 : 1.0;
       f(m, IEN, k, j, i) = al0*(f(m, IEN, k, j, i) + fD)
@@ -226,6 +247,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
   const bool ta = (energy_variable == EnergyVariable::killing_ta);
+  const bool boost = kill_boost;
+  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
+  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
   const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
   auto &xfloor = pmy_pack->pcoord->excision_floor;
   auto &td = ttab.d;
@@ -250,7 +274,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     const Real y = CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy;
     const Real z = CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz;
     Real al0, b0[3], psi0, K0[6], dal0, b, db;
-    KillingBackground(td, th, tih, nt, m_bh, x, y, z, al0, b0, psi0, K0, dal0, b, db);
+    KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, x, y, z, al0, b0, psi0, K0, dal0,
+             b, db);
     const Real p2 = psi0*psi0;
     res(m, 0, k, j, i) = adm.alpha(m, k, j, i) - al0;
     for (int a = 0; a < 3; ++a) res(m, 1 + a, k, j, i) = adm.beta_u(m, a, k, j, i) - b0[a];
@@ -265,8 +290,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
                         CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
                         CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
     Real al0, b0[3], psi0, K0[6], dal0, bb, db;
-    KillingBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], al0, b0, psi0, K0, dal0,
-                      bb, db);
+    KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], al0, b0, psi0,
+             K0, dal0, bb, db);
     if (!(al0 >= 1.0e-3)) return;
     const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
     Real dal0_d[3], dB0[3][3];   // d_a alpha0, d_a beta0^b

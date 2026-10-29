@@ -291,10 +291,25 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto flag = [&](const char *key) {
       return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
     };
-    need(flag("puncture_enabled"), "<cfc> puncture_enabled = true (the trumpet background)");
-    need(!flag("puncture_moving"), "the BH frame (<cfc> puncture_moving = false)");
-    need(!flag("frame_controller"), "the BH frame (<cfc> frame_controller = false)");
-    need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+    // <mhd> killing_weights (R-158): trumpet (default: the hole's static background) or
+    // boost, (alpha0, beta0) = (1, xidot) with xidot the constant frame velocity
+    // (<cfc> frame_vel*): d_t' of flat comoving coordinates, T = sqrt(g)(E - xidot.S - D)
+    const std::string kw = pin->DoesParameterExist("mhd", "killing_weights") ?
+                           pin->GetString("mhd", "killing_weights") : "trumpet";
+    need(kw == "trumpet" || kw == "boost", "<mhd> killing_weights = trumpet or boost");
+    kill_boost = (kw == "boost");
+    need(!flag("frame_controller"), "a constant frame (<cfc> frame_controller = false)");
+    if (kill_boost) {
+      need(!flag("puncture_enabled"), "no puncture (killing_weights = boost: flat background)");
+      need(!pin->DoesParameterExist("cfc", "frame_accel1") &&
+           !pin->DoesParameterExist("cfc", "frame_accel2") &&
+           !pin->DoesParameterExist("cfc", "frame_accel3"),
+           "a constant frame velocity (no <cfc> frame_accel*)");
+    } else {
+      need(flag("puncture_enabled"), "<cfc> puncture_enabled = true (the trumpet background)");
+      need(!flag("puncture_moving"), "the BH frame (<cfc> puncture_moving = false)");
+      need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+    }
     need(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
     need(pmy_pack->pmesh->three_d, "a 3D mesh");
     auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -313,8 +328,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       }
     }
     if (global_variable::my_rank == 0) {
-      std::cout << "<mhd> energy_variable = " << ev << " (trumpet table n = " << ttab.n
-                << ")" << std::endl;
+      std::cout << "<mhd> energy_variable = " << ev << ", killing_weights = " << kw
+                << " (trumpet table n = " << ttab.n << ")" << std::endl;
     }
   }
 }

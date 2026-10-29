@@ -222,6 +222,7 @@ class MassClosure {
   // (densitized; w = 1 or alpha0; line KCLOSE), whose face flux is the tau slot's flux there
   // (dyn_grmhd_killing.cpp). Its item "source" is then the RK-weighted residual-order source.
   int kill_ = 0;              // 0: off, 1: killing_t1, 2: killing_ta
+  bool kboost_ = false;       // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
   bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
   mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)
   dyngr::TrumpetTable ktab_;

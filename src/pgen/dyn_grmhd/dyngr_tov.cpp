@@ -569,8 +569,9 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 //                  rho -> test_hs_rhoinf at infinity.
 // Cells with r_iso >= test_hold_rout (both) or R <= test_hold_Rin (hydrostatic) are HELD:
 // the user source (TestFlowHold) resets their conserved state every stage to the initial
-// primitives' conserved state in the evolved (background) metric. Inside R < test_R_floor (default 2.05 M) the floor at rest is used. Fresh starts
-// only (no restart, static refinement: the held state is not regridded).
+// primitives' conserved state in the evolved (background) metric. Inside R < test_R_floor (default 2.05 M) the floor at rest is used. Static
+// refinement only (the held state is not regridded). On a restart (TestFlowRestart) the held
+// state is the restart's u0 in the held cells: the hold is the last write to them in a stage.
 namespace {
 struct TestFlowState {
   DvceArray5D<Real> hold;   // the initial primitives, then (first TestFlowHold) the conserved
@@ -656,6 +657,40 @@ void TestFlowHold(Mesh *pm, const Real bdt) {
       for (int n = 0; n < nv; ++n) u0(m,n,k,j,i) = h(m,n,k,j,i);
     }
   });
+}
+
+//! restart: rebuild the hold mask (as SetupTestFlow) and take the held conserved state from
+//! the restart's u0 (read before UserProblem; ghosts included). Held ghost values are
+//! overwritten by the exchange and the BCs before any flux reads them.
+void TestFlowRestart(ParameterInput *pin, MeshBlockPack *pmbp) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &u0 = pmbp->pmhd->u0;
+  auto &size = pmbp->pmb->mb_size;
+  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3), n3 = u0.extent_int(2);
+  const int nmb = pmbp->nmb_thispack;
+  const Real m_bh = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  const Real r_out = pin->GetOrAddReal("problem", "test_hold_rout", 40.0);
+  const Real R_in = pin->GetOrAddReal("problem", "test_hold_Rin", 0.0);
+  ptf = new TestFlowState;
+  ptf->nvar = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+  Kokkos::realloc(ptf->hold, nmb, ptf->nvar, n3, n2, n1);
+  Kokkos::realloc(ptf->mask, nmb, n3, n2, n1);
+  auto &mk = ptf->mask;
+  auto &h = ptf->hold;
+  const int nv = ptf->nvar;
+  par_for("pgen_test_flow_rst", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    const Real r = sqrt(x*x + y*y + z*z);
+    const Real R = m_bh*cfc::TrumpetIsoToAreal(r/m_bh);
+    mk(m,k,j,i) = (r >= r_out || R <= R_in) ? 1.0 : 0.0;
+    for (int n = 0; n < nv; ++n) h(m,n,k,j,i) = u0(m,n,k,j,i);
+  });
+  ptf->cons_ready = true;
 }
 
 //! fill w0 with the test flow and build the hold mask (fresh start; before PrimToConInit)
@@ -841,6 +876,12 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   // initialize primitive variables for restart
   if (restart) {
+    // <problem> test_flow (B.2/B.3): the hold resumes from the restart's u0
+    const std::string tflow_r = pin->GetOrAddString("problem", "test_flow", "none");
+    if (tflow_r == "michel" || tflow_r == "hydrostatic") {
+      TestFlowRestart(pin, pmbp);
+      user_srcs_func = &TestFlowHold;
+    }
     if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_ideal) {
       SolveTOV<tov::PolytropeEOS>(pin, pmy_mesh_);
     } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_compose) {

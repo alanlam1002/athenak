@@ -102,8 +102,10 @@ def edit_par(text, old, new_box, deck=False):
                 nv = str(int(val) + 1)
             elif block == 'problem' and key in LEVEL_KEYS:
                 nv = str(int(val) + 1)
-            elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box'):
-                continue                      # an earlier embedding's keys (replaced above)
+            elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box', 'restart_embed_done'):
+                continue                      # an earlier embedding's keys (replaced above); restart_embed_done
+                                              # (set at the earlier fill, restart_state.cpp:347) would make the
+                                              # load hook skip this fill (restart_state.cpp:250-251; C-136)
             if nv is not None:
                 line = f'{ind}{key}{eq}{nv}{rest}'
                 seen.add((block, key))

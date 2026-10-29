@@ -332,6 +332,43 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                 << " (trumpet table n = " << ttab.n << ")" << std::endl;
     }
   }
+
+  // <mhd> killing_source_diag (R-165 item 3(a), dyn_grmhd_killing.cpp): trumpet weights only;
+  // a Valencia run takes w from <mhd> killing_closure (t1 | ta)
+  kill_diag = pin->DoesParameterExist("mhd", "killing_source_diag") &&
+              pin->GetBoolean("mhd", "killing_source_diag");
+  if (kill_diag) {
+    auto dneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> killing_source_diag needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto dflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    dneed(!kill_boost, "trumpet weights (not killing_weights = boost)");
+    dneed(dflag("puncture_enabled") && !dflag("puncture_moving"),
+          "the BH frame (<cfc> puncture_enabled = true, puncture_moving = false)");
+    dneed(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    dneed(pmy_pack->pmesh->three_d && indcs.ng >= 2, "a 3D mesh with nghost >= 2");
+    if (energy_variable == EnergyVariable::valencia) {
+      const std::string kc = pin->DoesParameterExist("mhd", "killing_closure") ?
+                             pin->GetString("mhd", "killing_closure") : "";
+      dneed(kc == "t1" || kc == "ta", "<mhd> killing_closure = t1 | ta (a Valencia run)");
+      kill_diag_ta = (kc == "ta");
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(kill_res, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+      BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                        pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    } else {
+      kill_diag_ta = (energy_variable == EnergyVariable::killing_ta);
+    }
+    kill_diag_every = pin->GetOrAddInteger("mhd", "killing_source_diag_every", 25);
+    kdiag = DvceArray2D<Real>("kdiag", kKdBins, kKdComp);
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -766,7 +803,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
     case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
             break;
   }
-  if (energy_variable != EnergyVariable::valencia && !fixed_evolution) {
+  if ((energy_variable != EnergyVariable::valencia || kill_diag) && !fixed_evolution) {
     switch (nghost) {   // dyn_grmhd_killing.cpp
       case 2: AddKillingTerms<2>(prim, bcc, dt, rhs);
               break;

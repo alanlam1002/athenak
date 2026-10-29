@@ -45,6 +45,7 @@
 
 #include <cstdio>
 #include <iostream>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -246,10 +247,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
   const Real mb = eos.ps.GetEOS().GetBaryonMass();
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
-  const bool ta = (energy_variable == EnergyVariable::killing_ta);
+  // apply: killing_t1/ta; otherwise (valencia + killing_source_diag) the diagnostic only
+  const bool apply = (energy_variable != EnergyVariable::valencia);
+  const bool ta = apply ? (energy_variable == EnergyVariable::killing_ta) : kill_diag_ta;
   const bool boost = kill_boost;
   const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
   const Real fv2 = pmy_pack->padm->frame_vel_u[2];
+  const bool dg = kill_diag;
+  auto &kd = kdiag;
+  const Real kd_lr0 = log(kKdR0), kd_ilr = static_cast<Real>(kKdBins - 2)/log(kKdR1/kKdR0);
   const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
   auto &xfloor = pmy_pack->pcoord->excision_floor;
   auto &td = ttab.d;
@@ -292,8 +298,20 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     Real al0, b0[3], psi0, K0[6], dal0, bb, db;
     KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], al0, b0, psi0,
              K0, dal0, bb, db);
-    if (!(al0 >= 1.0e-3)) return;
     const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
+    // killing_source_diag: the r_iso bin and the cell-time weight
+    int kb = 0;
+    if (r >= kKdR1) {
+      kb = kKdBins - 1;
+    } else if (r >= kKdR0) {
+      kb = 1 + static_cast<int>((log(r) - kd_lr0)*kd_ilr);
+      kb = (kb < 1) ? 1 : ((kb > kKdBins - 2) ? kKdBins - 2 : kb);
+    }
+    const Real kwgt = dt*sz.dx1*sz.dx2*sz.dx3;
+    if (!(al0 >= 1.0e-3)) {
+      if (dg) Kokkos::atomic_add(&kd(kb, 6), kwgt);
+      return;
+    }
     Real dal0_d[3], dB0[3][3];   // d_a alpha0, d_a beta0^b
     for (int a = 0; a < 3; ++a) {
       dal0_d[a] = dal0*xr[a]/r;
@@ -415,13 +433,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
       sB -= S_d[a]*lie_b;
     }
     sE *= E;
-    Real sT = sK + sA + sE + sB;
+    Real sTa = 0.0;
     if (ta) {   // -D V^j d_j alpha0, V^j = alpha v^j - beta^j
       const Real D = prim(m, IDN, k, j, i)*W;
       for (int a = 0; a < 3; a++) {
-        sT -= D*(alpha*prim_pt[PVX + a]/W - adm.beta_u(m, a, k, j, i))*dal0_d[a];
+        sTa -= D*(alpha*prim_pt[PVX + a]/W - adm.beta_u(m, a, k, j, i))*dal0_d[a];
       }
     }
+    const Real sT = sK + sA + sE + sB + sTa;
 
     // the flux divergences (densitized, flux-corrected: the update's own)
     auto divf = [&](int n) {
@@ -436,8 +455,90 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     const Real w = ta ? al0 : 1.0;
     const Real dtau = (dT + b0dS + w*dD)/al0 - dD;
     const Real dtau_applied = -divf(IEN) + vol*src_tau;
-    rhs(m, IEN, k, j, i) += dt*(dtau - dtau_applied);
+    if (apply) rhs(m, IEN, k, j, i) += dt*(dtau - dtau_applied);
+    if (!dg) return;
+
+    // killing_source_diag: this cell's effective T source, dT + div F_T. Applied: sqrt(g) s_T.
+    // Valencia: from the update the RK step applied, with F_T formed at the cell's six faces
+    // from the Valencia fluxes (the weights at the face, as KillingFaceFluxes).
+    Real eff = vol*sT;
+    if (!apply) {
+      auto fT = [&](const DvceArray5D<Real> &fl, const int kk, const int jj, const int ii,
+                    const Real fx, const Real fy, const Real fz) {
+        Real a0, bf[3], p0, Kf[6], d0, b_, db_;
+        KWeights(false, 0.0, 0.0, 0.0, td, th, tih, nt, m_bh, fx, fy, fz, a0, bf, p0, Kf,
+                 d0, b_, db_);
+        const Real fD = fl(m, IDN, kk, jj, ii);
+        return a0*(fl(m, IEN, kk, jj, ii) + fD) - (bf[0]*fl(m, IM1, kk, jj, ii)
+               + bf[1]*fl(m, IM2, kk, jj, ii) + bf[2]*fl(m, IM3, kk, jj, ii))
+               - (ta ? a0 : 1.0)*fD;
+      };
+      const Real xl = LeftEdgeX(i-is, nx1, sz.x1min, sz.x1max) - cx;
+      const Real xh = LeftEdgeX(i+1-is, nx1, sz.x1min, sz.x1max) - cx;
+      const Real yl = LeftEdgeX(j-js, nx2, sz.x2min, sz.x2max) - cy;
+      const Real yh = LeftEdgeX(j+1-js, nx2, sz.x2min, sz.x2max) - cy;
+      const Real zl = LeftEdgeX(k-ks, nx3, sz.x3min, sz.x3max) - cz;
+      const Real zh = LeftEdgeX(k+1-ks, nx3, sz.x3min, sz.x3max) - cz;
+      const Real divT =
+          (fT(fx1_, k, j, i+1, xh, xr[1], xr[2]) - fT(fx1_, k, j, i, xl, xr[1], xr[2]))/sz.dx1
+        + (fT(fx2_, k, j+1, i, xr[0], yh, xr[2]) - fT(fx2_, k, j, i, xr[0], yl, xr[2]))/sz.dx2
+        + (fT(fx3_, k+1, j, i, xr[0], xr[1], zh) - fT(fx3_, k, j, i, xr[0], xr[1], zl))/sz.dx3;
+      eff = al0*(dtau_applied + dD) - b0dS - w*dD + divT;
+    }
+    const Real sv[6] = {eff, vol*sK, vol*sA, vol*sE, vol*sB, vol*sTa};
+    for (int q = 0; q < 6; ++q) Kokkos::atomic_add(&kd(kb, q), kwgt*sv[q]);
+    Kokkos::atomic_add(&kd(kb, 7), kwgt*fabs(dal));
+    Kokkos::atomic_add(&kd(kb, 13), kwgt);
+    Kokkos::atomic_max(&kd(kb, 8), fabs(dal));
+    Kokkos::atomic_max(&kd(kb, 9), fabs(dal/al0));
+    Kokkos::atomic_max(&kd(kb, 10), sqrt(dbe[0]*dbe[0] + dbe[1]*dbe[1] + dbe[2]*dbe[2]));
+    Kokkos::atomic_max(&kd(kb, 11), fabs(Hr));
+    Kokkos::atomic_max(&kd(kb, 12), sqrt(dda[0]*dda[0] + dda[1]*dda[1] + dda[2]*dda[2]));
   });
+  if (kill_diag) {
+    const int cyc = pmy_pack->pmesh->ncycle;
+    if (cyc != kill_diag_last && cyc % kill_diag_every == 0) {
+      kill_diag_last = cyc;
+      ReportKillingDiag();
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! n void DynGRMHD::ReportKillingDiag
+//! rief <mhd> killing_source_diag: one KDIAG line per non-empty r_iso bin (rank 0), the sums
+//! cumulative since the run's start (this process: a restart starts them again)
+void DynGRMHD::ReportKillingDiag() {
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), kdiag);
+  std::vector<Real> s(kKdBins*kKdComp);
+  for (int b = 0; b < kKdBins; ++b) {
+    for (int q = 0; q < kKdComp; ++q) s[b*kKdComp + q] = h(b, q);
+  }
+#if MPI_PARALLEL_ENABLED
+  std::vector<Real> mx(s);
+  MPI_Allreduce(MPI_IN_PLACE, s.data(), kKdBins*kKdComp, MPI_ATHENA_REAL, MPI_SUM,
+                MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, mx.data(), kKdBins*kKdComp, MPI_ATHENA_REAL, MPI_MAX,
+                MPI_COMM_WORLD);
+  for (int b = 0; b < kKdBins; ++b) {
+    for (int q = 8; q < 13; ++q) s[b*kKdComp + q] = mx[b*kKdComp + q];
+  }
+#endif
+  if (global_variable::my_rank != 0) return;
+  const char *nm[kKdComp] = {"eff", "sK", "sA", "sE", "sB", "sTa", "skip_dtdV", "dal_dtdV",
+                             "max_dal", "max_dal_rel", "max_dbeta", "max_dpsi4", "max_ddal",
+                             "dtdV"};
+  const Real q = pow(kKdR1/kKdR0, 1.0/static_cast<Real>(kKdBins - 2));
+  for (int b = 0; b < kKdBins; ++b) {
+    if (s[b*kKdComp + 13] == 0.0 && s[b*kKdComp + 6] == 0.0) continue;
+    const Real rlo = (b == 0) ? 0.0 : kKdR0*pow(q, b - 1);
+    const Real rhi = (b == kKdBins - 1) ? 1.0e30 : kKdR0*pow(q, b);
+    std::printf("KDIAG cycle=%d time=%.10g bin=%d rlo=%.6g rhi=%.6g", pmy_pack->pmesh->ncycle,
+                pmy_pack->pmesh->time, b, rlo, rhi);
+    for (int c = 0; c < kKdComp; ++c) std::printf(" %s=%.10e", nm[c], s[b*kKdComp + c]);
+    std::printf("\n");
+  }
+  std::fflush(stdout);
 }
 
 // instantiations (as AddCoordTermsEOS)

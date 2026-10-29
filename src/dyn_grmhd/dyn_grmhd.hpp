@@ -73,6 +73,15 @@ namespace dyngr {
 // <mhd> energy_variable (R-155 item 1): the energy equation evolved
 enum class EnergyVariable {valencia, killing_t1, killing_ta};
 
+// <mhd> killing_source_diag (R-165 item 3(a)): r_iso bins (0: r < kKdR0, kKdBins-1: r >= kKdR1,
+// geometric in between) x components (sums: dt dV x, cumulative; maxima: over the run)
+constexpr int kKdBins = 42, kKdComp = 14, kKdNSum = 8;
+constexpr Real kKdR0 = 0.25, kKdR1 = 40.0;
+// sums: 0 eff (the effective T source), 1-5 dt dV sqrt(g) (s_K, s_alpha, s_E, s_beta, s_ta),
+// 6 eff of the cells left on the Valencia update (alpha0 < 1e-3), 7 dt dV |delta alpha|;
+// maxima: 8 |delta alpha|, 9 |delta alpha/alpha0|, 10 |delta beta|, 11 |psi^4 - psi0^4|,
+// 12 |d delta alpha|, 13 dt dV (the cell-time weight, a sum)
+
 class DynGRMHD {
  public:
   DynGRMHD(MeshBlockPack *ppack, ParameterInput *pin);
@@ -166,6 +175,14 @@ class DynGRMHD {
   void KillingFaceFluxes();         // the tau slot's face flux -> the T face flux
   int kill_probe_cycles = 0, kill_probe_c0 = -1, kill_probe_stage = 0;   // ghost/owner probe
   void KillingFaceProbe();          // <dyn_grmhd> killing_probe_cycles, face_probe_box
+  // <mhd> killing_source_diag (R-165 item 3(a)): the effective T source of every stage update
+  // (killing_t1/ta: dt sqrt(g) s_T; valencia + killing_closure: the Valencia update's T
+  // violation) and the residual's size, binned in r_iso, cumulative; KDIAG lines every
+  // killing_source_diag_every cycles. Diagnostic only: the update is unchanged.
+  bool kill_diag = false, kill_diag_ta = false;
+  int kill_diag_every = 25, kill_diag_last = -1;
+  DvceArray2D<Real> kdiag;
+  void ReportKillingDiag();
 
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;

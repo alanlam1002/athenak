@@ -106,11 +106,15 @@ def main():
         Rg = areal(rg)
         alg = np.sqrt(np.maximum(1 - 2*M/Rg + CC**2/Rg**4, 0))
         if test == 'michel':
-            rho_e, ur_e, _ = michel_profile(par(d, 'problem', 'test_michel_rc', 8.0),
+            rho_e, ur_e, kE = michel_profile(par(d, 'problem', 'test_michel_rc', 8.0),
                                             par(d, 'problem', 'test_michel_rhoc', 1e-8), rg)
             rhoE = np.exp(CubicSpline(np.log(rg), np.log(rho_e))(np.log(r)))
             urE = CubicSpline(np.log(rg), ur_e)(np.log(r))
         alc = np.interp(np.log(r), np.log(rg), alg)
+        pk = 'eint' if 'eint' in D0 else 'press'
+        Kof = lambda Dd: (Dd[pk]*(GAM - 1.0) if pk == 'eint' else Dd[pk])/Dd['dens']**GAM
+        if test == 'hydrostatic':
+            kE = Kof(D0)
         ev = (alc > exl) & (r < rout - 1.0) & (r >= 1.0)
         for f in fs:
             t, X, Y, Z, Dd = cells(f)
@@ -124,9 +128,11 @@ def main():
                     continue
                 er = np.abs(rho[m] - rhoE[m])/rhoE[m]
                 eu = np.abs(ur[m] - urE[m])/np.maximum(np.abs(urE[m]), 1e-3 if test == 'hydrostatic' else 1e-30)
+                kk = Kof(Dd)[m]/(kE[m] if np.ndim(kE) else kE) - 1.0
                 rows.append(f'{lab},{t:.4g},{a:g}-{b:g},{m.sum()},{er.mean():.3e},{er.max():.3e},'
-                            f'{eu.mean():.3e},{eu.max():.3e},{np.abs(ur[m]-urE[m]).max():.3e}')
-    hdr = 'run,t,shell_r_iso,ncell,rho_L1rel,rho_Linf_rel,ur_L1rel,ur_Linf_rel,ur_Linf_abs'
+                            f'{eu.mean():.3e},{eu.max():.3e},{np.abs(ur[m]-urE[m]).max():.3e},'
+                            f'{kk.mean():.3e},{np.abs(kk).mean():.3e},{np.abs(kk).max():.3e}')
+    hdr = 'run,t,shell_r_iso,ncell,rho_L1rel,rho_Linf_rel,ur_L1rel,ur_Linf_rel,ur_Linf_abs,K_mean,K_L1,K_Linf'
     open(out, 'w').write(hdr + '\n' + '\n'.join(rows) + '\n')
     print(hdr); print('\n'.join(rows))
 

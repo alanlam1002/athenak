@@ -170,7 +170,7 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
     // <mhd> energy_variable (R-155 item 1): close T instead (mass_closure.hpp)
     const std::string ev = pin->DoesParameterExist("mhd", "energy_variable") ?
                            pin->GetString("mhd", "energy_variable") : "valencia";
-    kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 : 0);
+    kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 : ((ev == "killing_full") ? 3 : 0));
     // <mhd> killing_closure = t1 | ta (diagnostic, valencia only): the same T closure for a
     // Valencia run, its face flux formed from the stored D, S, tau fluxes (as the killing
     // options' KillingFaceFluxes), so the two formulations' T drifts are booked alike
@@ -330,6 +330,18 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
   const Real th = ktab_.h, tih = ktab_.ih;
   const int nt = ktab_.n;
   auto kv = kv_;
+  if (kill_ == 3) {   // killing_full: T = alpha (tau + D) - beta^k S_k, this stage's metric
+    auto &adm = pmy_pack->padm->adm;
+    par_for("kclose_tfull", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
+            0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      kv(m, 0, k, j, i) = adm.alpha(m, k, j, i)*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
+                          - (adm.beta_u(m, 0, k, j, i)*u(m, IM1, k, j, i)
+                             + adm.beta_u(m, 1, k, j, i)*u(m, IM2, k, j, i)
+                             + adm.beta_u(m, 2, k, j, i)*u(m, IM3, k, j, i));
+    });
+    return kv_;
+  }
   par_for("kclose_t", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
           0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -573,6 +585,16 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   cyc[iUpdate].Add(Yd.lo);
   cyc[iUpdate].Add(-cyc[iOut].s);
   cyc[iUpdate].Add(-cyc[iOut].c);
+  if (kill_ == 3) {   // killing_full: the weights item (KillWeights), out of "source"
+    KSum wc;
+    wc.Add(kw_st_[0]);   // stage 1: the gap since the last stage (outside the stages)
+    for (int q = 1; q < ns; ++q) {
+      wc.Add(w[q]*kw_st_[q]);
+      cyc[iUpdate].Add(-w[q]*kw_st_[q]);
+    }
+    kw_seg_.Join(wc); kw_cum_.Join(wc);
+    for (int q = 0; q < 4; ++q) kw_st_[q] = 0.0;
+  }
   for (int n = 0; n < kNItem; ++n) { seg[n].Join(cyc[n]); cum[n].Join(cyc[n]); }
   if (ytr_) {   // the split, RK-weighted like the class items; the cycle's phase
     const int ph = Phase(time);
@@ -609,6 +631,13 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     for (int n = 0; n < kNItem; ++n) std::cout << " " << cyc[n].Val();
     std::cout << std::endl;
   }
+}
+
+void MassClosure::KillWeights(int stage, Real g) {
+  if (!on) return;
+  for (auto &x : extra_) x->KillWeights(stage, g);
+  if (kill_ != 3 || stage < 1 || stage > 4) return;
+  kw_st_[stage-1] = g;
 }
 
 void MassClosure::MarkBefore() {
@@ -756,6 +785,7 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     if (n == iRestart || n == iFexc) continue;
     sum.Join(seg[n]);
   }
+  if (kill_ == 3) sum.Join(kw_seg_);
   KSum rr = dm;
   rr.Add(-sum.s); rr.Add(-sum.c);
   const Real R = rr.Val(), mg = me.Val();
@@ -786,6 +816,7 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     << m_start.Val() << " M_end=" << mg << " M_last_end=" << m_last_end.Val()
     << std::setprecision(10) << " dM=" << dm.Val();
   for (int n = 0; n < kNItem; ++n) o << " " << nm[n] << "=" << seg[n].Val();
+  if (kill_ == 3) o << " weights=" << kw_seg_.Val();
   o << " R=" << R << " R/M*=" << R/mstar << " R/M_grid=" << R/mg << " roundoff=" << rnd
     << " " << (pass ? "PASS" : "FAIL") << " flags=" << (flags.empty() ? "none" : flags);
   std::cout << o.str() << std::endl;
@@ -793,6 +824,7 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   c << std::setprecision(10) << tag_ << "_RUN cycle=" << cycle << " (cumulative since the run's"
     << " start, restarts included)";
   for (int n = 0; n < kNItem; ++n) c << " " << nm[n] << "=" << cum[n].Val();
+  if (kill_ == 3) c << " weights=" << kw_cum_.Val() << " (this process only)";
   std::cout << c.str() << std::endl;
   if (!ytr_) return;
   // the split's partition checks for this segment: each C2P item against its band/category sum

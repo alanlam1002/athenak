@@ -181,6 +181,10 @@ class MassClosure {
   // be exactly 0; the atmosphere added; the load C2P's change) and books their sum as
   // regrid_embed instead of in the restart item.
   void EmbedMark(int k);
+  // energy_variable = killing_full (dyn_grmhd_killing.cpp KillingFullStage): the T change from
+  // the weights' change at fixed u of this stage (stage 1: since the last stage), booked as
+  // KCLOSE's "weights" (not in the restart's parameter copy: its _RUN value is this process's)
+  void KillWeights(int stage, Real g);
 
  private:
   MeshBlockPack *pmy_pack;
@@ -221,7 +225,9 @@ class MassClosure {
   // the closure of the evolved Killing energy T = alpha0 (tau + D) - beta0^k S_k - w D
   // (densitized; w = 1 or alpha0; line KCLOSE), whose face flux is the tau slot's flux there
   // (dyn_grmhd_killing.cpp). Its item "source" is then the RK-weighted residual-order source.
-  int kill_ = 0;              // 0: off, 1: killing_t1, 2: killing_ta
+  int kill_ = 0;              // 0: off, 1: killing_t1, 2: killing_ta, 3: killing_full
+  Real kw_st_[4] = {0.0, 0.0, 0.0, 0.0};   // killing_full: KillWeights per stage
+  KSum kw_seg_, kw_cum_;
   bool kboost_ = false;       // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
   bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
   mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)

@@ -477,6 +477,9 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
   // <mhd> energy_variable != valencia: the tau slot's final face flux (after FOFC, before the
   // fine/coarse flux correction) becomes the T flux (dyn_grmhd_killing.cpp)
   if (energy_variable != EnergyVariable::valencia && !fixed_evolution) {
+    // killing_full: the stage time (arm ii) and KCLOSE's weights item, while u0 is still
+    // this stage's input state
+    if (energy_variable == EnergyVariable::killing_full) KillingFullStage(pdriver, stage);
     KillingFaceFluxes();
   }
 

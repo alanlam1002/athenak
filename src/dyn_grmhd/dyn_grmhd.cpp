@@ -273,13 +273,40 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     energy_variable = EnergyVariable::killing_t1;
   } else if (ev == "killing_ta") {
     energy_variable = EnergyVariable::killing_ta;
+  } else if (ev == "killing_full") {
+    energy_variable = EnergyVariable::killing_full;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1 or "
-              << "killing_ta)" << std::endl;
+              << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
+              << "killing_ta or killing_full)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  if (energy_variable != EnergyVariable::valencia) {
+  if (energy_variable == EnergyVariable::killing_full) {
+    // R-165 item 4: the weights are the current CFC metric's (alpha, beta'), at faces the
+    // Riemann solver's own face metric, so no background, frame or puncture condition
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> energy_variable = killing_full needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    need(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    need(pmy_pack->pmesh->three_d, "a 3D mesh");
+    need(pin->DoesBlockExist("cfc"), "CFC (the source assumes gamma_ij = psi^4 delta_ij)");
+    need(!pin->DoesParameterExist("mhd", "killing_weights"),
+         "no <mhd> killing_weights (its weights are the metric's)");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    need(indcs.ng >= 2, "nghost >= 2");
+    kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(kf_prev, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                    indcs.nx1 + 2*indcs.ng);
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> energy_variable = killing_full, killing_full_dtg = "
+                << (kf_dtg ? "true (arm ii: d_t' g from the previous stage)"
+                           : "false (arm i: d_t' g = 0)") << std::endl;
+    }
+  } else if (energy_variable != EnergyVariable::valencia) {
     // the weights (alpha0, beta0) are the BH-frame Killing vector of a stationary background:
     // the hole at rest on the grid and its mass frozen (the comoving version is not approved)
     auto need = [&](bool ok, const char *what) {

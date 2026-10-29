@@ -71,7 +71,8 @@ struct DynGRMHDTaskIDs {
 namespace dyngr {
 
 // <mhd> energy_variable (R-155 item 1): the energy equation evolved
-enum class EnergyVariable {valencia, killing_t1, killing_ta};
+// (killing_full, R-165 item 4: the full-metric comoving form, weights (alpha, beta') of the CFC metric)
+enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
 
 // <mhd> killing_source_diag (R-165 item 3(a)): r_iso bins (0: r < kKdR0, kKdBins-1: r >= kKdR1,
 // geometric in between) x components (sums: dt dV x, cumulative; maxima: over the run)
@@ -183,6 +184,16 @@ class DynGRMHD {
   int kill_diag_every = 25, kill_diag_last = -1;
   DvceArray2D<Real> kdiag;
   void ReportKillingDiag();
+  // energy_variable = killing_full (R-165 item 4): weights (alpha, beta') of the current CFC
+  // metric, at faces the Riemann solver's face metric (adm::Face?Metric averages).
+  // <mhd> killing_full_dtg: false = arm (i), d_t' g = 0; true = arm (ii), the source
+  // -1/2 alpha sqrt(gamma) T^{mu nu} d_t' g_{mu nu} and the weights' rate, both from the
+  // previous stage's metric (kf_prev: alpha, beta^i, psi^4 at every cell, ghosts included).
+  bool kf_dtg = false, kf_have_prev = false;
+  DvceArray5D<Real> kf_prev;
+  Real kf_tprev = 0.0, kf_tstage = 0.0, kf_m1u1 = 0.0;
+  int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
+  void KillingFullStage(Driver *pdriver, int stage);   // stage time + KCLOSE weights item
 
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
@@ -307,6 +318,10 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddKillingTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                        const Real dt, DvceArray5D<Real> &u0);
+  // energy_variable = killing_full (R-165 item 4; dyn_grmhd_killing.cpp)
+  template<int NGHOST>
+  void AddKillingFullTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                           const Real dt, DvceArray5D<Real> &u0);
 };
 
 // Factory function for generating DynGRMHD based on parameter input.

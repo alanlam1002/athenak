@@ -585,7 +585,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
 
   par_for("kill_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    if (exc && xfloor(m, k, j, i)) return;
+    // excision-floor cells (reset by the C2P) get the rebuild too: RKUpdate gave their tau
+    // slot the T face flux, so without it their T change is not -div F_T, and KCLOSE booked
+    // that as a "source" cancelled by the reset's "excision" item (C-136: the non-converging
+    // pair of R-155 3(a)); the diagnostic below counts evolved cells only
+    const bool xcell = exc && xfloor(m, k, j, i);
     const auto &sz = size.d_view(m);
     const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
                         CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
@@ -604,7 +608,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     }
     const Real kwgt = dt*sz.dx1*sz.dx2*sz.dx3;
     if (!(al0 >= 1.0e-3)) {
-      if (dg) Kokkos::atomic_add(&kd(kb, 6), kwgt);
+      if (dg && !xcell) Kokkos::atomic_add(&kd(kb, 6), kwgt);
       return;
     }
     Real dal0_d[3], dB0[3][3];   // d_a alpha0, d_a beta0^b
@@ -751,7 +755,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     const Real dtau = (dT + b0dS + w*dD)/al0 - dD;
     const Real dtau_applied = -divf(IEN) + vol*src_tau;
     if (apply) rhs(m, IEN, k, j, i) += dt*(dtau - dtau_applied);
-    if (!dg) return;
+    if (!dg || xcell) return;
 
     // killing_source_diag: this cell's effective T source, dT + div F_T. Applied: sqrt(g) s_T.
     // Valencia: from the update the RK step applied, with F_T formed at the cell's six faces

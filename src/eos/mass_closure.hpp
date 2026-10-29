@@ -58,6 +58,7 @@
 #include <vector>
 
 #include "athena.hpp"
+#include "dyn_grmhd/metric_faces.hpp"
 
 class MeshBlockPack;
 class ParameterInput;
@@ -216,6 +217,16 @@ class MassClosure {
   bool embed_ = false;        // EmbedMark(2) done: SegmentStart books regrid_embed
   KSum embed_cum_;            // the run's cumulative regrid_embed (parameter copy)
   KSum Mass() const;          // global (rank-ordered) M of u0
+  // <mhd> energy_variable = killing_t1 | killing_ta (R-155 item 1): the tau closure becomes
+  // the closure of the evolved Killing energy T = alpha0 (tau + D) - beta0^k S_k - w D
+  // (densitized; w = 1 or alpha0; line KCLOSE), whose face flux is the tau slot's flux there
+  // (dyn_grmhd_killing.cpp). Its item "source" is then the RK-weighted residual-order source.
+  int kill_ = 0;              // 0: off, 1: killing_t1, 2: killing_ta
+  bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
+  mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)
+  dyngr::TrumpetTable ktab_;
+  const DvceArray5D<Real> &KSrc(const DvceArray5D<Real> &u) const;   // u, or T(u) into kv_
+  int KVar() const { return kill_ ? 0 : var_; }
 };
 
 }  // namespace mclose

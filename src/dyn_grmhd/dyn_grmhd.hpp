@@ -70,6 +70,9 @@ struct DynGRMHDTaskIDs {
 
 namespace dyngr {
 
+// <mhd> energy_variable (R-155 item 1): the energy equation evolved
+enum class EnergyVariable {valencia, killing_t1, killing_ta};
+
 class DynGRMHD {
  public:
   DynGRMHD(MeshBlockPack *ppack, ParameterInput *pin);
@@ -154,6 +157,14 @@ class DynGRMHD {
   void ComputeFaceMetric(int stage);   // once per stage, at the start of CalcFluxes
   void FaceMetricProbe(int stage);
   void TrumpetTableTest(int npts);     // <dyn_grmhd> metric_table_test (host and device)
+
+  // <mhd> energy_variable (R-155 item 1; dyn_grmhd_killing.cpp). Default valencia: none of
+  // the members below is used, and no kernel of the default path is changed.
+  EnergyVariable energy_variable = EnergyVariable::valencia;
+  DvceArray5D<Real> kill_res;       // the residual (delta alpha, delta beta^i, psi^4 - psi0^4)
+  void KillingFaceFluxes();         // the tau slot's face flux -> the T face flux
+  int kill_probe_cycles = 0, kill_probe_c0 = -1, kill_probe_stage = 0;   // ghost/owner probe
+  void KillingFaceProbe();          // <dyn_grmhd> killing_probe_cycles, face_probe_box
 
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
@@ -272,6 +283,11 @@ class DynGRMHDPS : public DynGRMHD {
   // metric_terms = analytic_bg | wellbalanced (dyn_grmhd_metric.cpp)
   template<int NGHOST>
   void AddCoordTermsFM(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                       const Real dt, DvceArray5D<Real> &u0);
+  // energy_variable = killing_t1 | killing_ta (dyn_grmhd_killing.cpp): after
+  // AddCoordTermsEOS, the tau slot's update replaced by the one implied by the T update
+  template<int NGHOST>
+  void AddKillingTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                        const Real dt, DvceArray5D<Real> &u0);
 };
 

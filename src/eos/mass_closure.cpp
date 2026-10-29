@@ -28,6 +28,7 @@
 #include "coordinates/cell_locations.hpp"
 #include "eos/mass_closure.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -166,6 +167,30 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
     }
   } else if (var_ == IEN) {
     tag_ = "ECLOSE"; key_ = "closure_tau";
+    // <mhd> energy_variable (R-155 item 1): close T instead (mass_closure.hpp)
+    const std::string ev = pin->DoesParameterExist("mhd", "energy_variable") ?
+                           pin->GetString("mhd", "energy_variable") : "valencia";
+    kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 : 0);
+    // <mhd> killing_closure = t1 | ta (diagnostic, valencia only): the same T closure for a
+    // Valencia run, its face flux formed from the stored D, S, tau fluxes (as the killing
+    // options' KillingFaceFluxes), so the two formulations' T drifts are booked alike
+    if (pin->DoesParameterExist("mhd", "killing_closure")) {
+      const std::string kc = pin->GetString("mhd", "killing_closure");
+      const int k = (kc == "t1") ? 1 : ((kc == "ta") ? 2 : 0);
+      if (k == 0 || (kill_ != 0 && k != kill_)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "<mhd> killing_closure = '" << kc << "' (t1 or ta; with energy_variable "
+                  << ev << ")" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      kill_face_ = (kill_ == 0);
+      kill_ = k;
+    }
+    if (kill_) {
+      tag_ = "KCLOSE"; key_ = "closure_kill";
+      dyngr::BuildTrumpetTable(ktab_, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                               pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    }
   } else {
     tag_ = "SCLOSE" + std::to_string(var_ - IM1 + 1);
     key_ = "closure_s" + std::to_string(var_ - IM1 + 1);
@@ -278,8 +303,50 @@ void MassClosure::YStage(int stage, const DvceArray4D<Real> &cls,
   }
 }
 
+//! energy_variable != valencia: T = alpha0 (tau + D) - beta0^k S_k - w D of u (densitized,
+//! every cell) into kv_, with the weights of dyn_grmhd_killing.cpp (the trumpet table at the
+//! cell centre, relative to the background centre CFC::bg_xbh_); otherwise u itself
+const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
+  if (!kill_) return u;
+  if (kv_.extent_int(0) != u.extent_int(0) || kv_.extent_int(2) != u.extent_int(2) ||
+      kv_.extent_int(3) != u.extent_int(3) || kv_.extent_int(4) != u.extent_int(4)) {
+    kv_ = DvceArray5D<Real>("kclose_t", u.extent_int(0), 1, u.extent_int(2),
+                            u.extent_int(3), u.extent_int(4));
+  }
+  auto *pcfc = pmy_pack->pcfc;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &size = pmy_pack->pmb->mb_size;
+  const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
+  const Real m_bh = pcfc->puncture_mass_;
+  const bool ta = (kill_ == 2);
+  auto &td = ktab_.d;
+  const Real th = ktab_.h, tih = ktab_.ih;
+  const int nt = ktab_.n;
+  auto kv = kv_;
+  par_for("kclose_t", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
+          0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const auto &sz = size.d_view(m);
+    const Real x = CellCenterX(i - is, nx1, sz.x1min, sz.x1max) - cx;
+    const Real y = CellCenterX(j - js, nx2, sz.x2min, sz.x2max) - cy;
+    const Real z = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max) - cz;
+    Real psi0, ap0, b0[3], dpsi0, dal0, b, db;
+    dyngr::TrumpetTableBackground(td, th, tih, nt, m_bh, x, y, z, psi0, ap0, b0, dpsi0,
+                                  dal0, b, db);
+    const Real al0 = ap0/psi0;
+    const Real d = u(m, IDN, k, j, i);
+    kv(m, 0, k, j, i) = al0*(u(m, IEN, k, j, i) + d)
+                        - (b0[0]*u(m, IM1, k, j, i) + b0[1]*u(m, IM2, k, j, i)
+                           + b0[2]*u(m, IM3, k, j, i))
+                        - (ta ? al0 : 1.0)*d;
+  });
+  return kv_;
+}
+
 KSum MassClosure::Mass() const {
-  Fix loc = LocalMass(pmy_pack, pmy_pack->pmhd->u0, var_);
+  Fix loc = LocalMass(pmy_pack, KSrc(pmy_pack->pmhd->u0), KVar());
   KSum g;
   GlobalSum(&loc, 1, &g);
   return g;
@@ -295,11 +362,11 @@ void MassClosure::StagePre(int stage) {
       x0_ = DvceArray4D<Real>("mclose_x0", u0.extent_int(0), u0.extent_int(2),
                               u0.extent_int(3), u0.extent_int(4));
     }
-    Kokkos::deep_copy(DevExeSpace(), x0_, Kokkos::subview(u0, Kokkos::ALL, var_,
+    Kokkos::deep_copy(DevExeSpace(), x0_, Kokkos::subview(KSrc(u0), Kokkos::ALL, KVar(),
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
   }
-  st_pre[stage-1] = LocalMass(pmy_pack, u0, var_);
-  if (stage == 1) st_u1 = LocalMass(pmy_pack, pmy_pack->pmhd->u1, var_);
+  st_pre[stage-1] = LocalMass(pmy_pack, KSrc(u0), KVar());
+  if (stage == 1) st_u1 = LocalMass(pmy_pack, KSrc(pmy_pack->pmhd->u1), KVar());
 }
 
 void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam1,
@@ -319,7 +386,8 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   const int nmb = pp->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
   auto &size = pp->pmb->mb_size;
-  auto &u0 = pp->pmhd->u0;
+  const DvceArray5D<Real> u0 = KSrc(pp->pmhd->u0);   // (KCLOSE: T, one variable)
+  const int nu = KVar();
   auto &adm = pp->padm->adm;
   auto &cd = pp->pcoord->coord_data;
   const bool exdyn = cd.bh_excise && cd.excision_dynamic &&
@@ -338,9 +406,9 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
     auto &sz = size.d_view(m);
     const Real dv = sz.dx1*sz.dx2*sz.dx3;
-    acc.v[kMend].Add(u0(m, nv, k, j, i)*dv);
+    acc.v[kMend].Add(u0(m, nu, k, j, i)*dv);
     acc.v[kMd0].Add(x0(m, k, j, i)*dv);
-    const Real dm = u0(m, nv, k, j, i)*dv - x0(m, k, j, i)*dv;
+    const Real dm = u0(m, nu, k, j, i)*dv - x0(m, k, j, i)*dv;
     if (dm == 0.0) return;
     const Real c = cls(m, k, j, i);
     if (c < 1.5) {          // excision floor (0: and flux mask; 1: floor mask only)
@@ -370,6 +438,24 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   auto &ms = pp->pmesh->mesh_size;
   const Real mx1 = ms.x1min, Mx1 = ms.x1max, mx2 = ms.x2min, Mx2 = ms.x2max;
   const Real mx3 = ms.x3min, Mx3 = ms.x3max;
+  // KCLOSE of a Valencia run: T's face flux from the D, S, tau fluxes (weights at the face)
+  const bool kf = kill_face_, kta = (kill_ == 2);
+  const Real kcx = kf ? pp->pcfc->bg_xbh_[0] : 0.0, kcy = kf ? pp->pcfc->bg_xbh_[1] : 0.0;
+  const Real kcz = kf ? pp->pcfc->bg_xbh_[2] : 0.0, kmbh = kf ? pp->pcfc->puncture_mass_ : 1.0;
+  auto &ktd = ktab_.d;
+  const Real kth = ktab_.h, ktih = ktab_.ih;
+  const int knt = ktab_.n;
+  auto fT = [=] KOKKOS_FUNCTION (const DvceArray5D<Real> &fl, const int m, const int k,
+                                 const int j, const int i, const Real x, const Real y,
+                                 const Real z) {
+    if (!kf) return fl(m, nv, k, j, i);
+    Real psi0, ap0, b0[3], dpsi0, dal0, b, db;
+    dyngr::TrumpetTableBackground(ktd, kth, ktih, knt, kmbh, x - kcx, y - kcy, z - kcz, psi0,
+                                  ap0, b0, dpsi0, dal0, b, db);
+    const Real al0 = ap0/psi0, fd = fl(m, IDN, k, j, i);
+    return al0*(fl(m, IEN, k, j, i) + fd) - (b0[0]*fl(m, IM1, k, j, i)
+           + b0[1]*fl(m, IM2, k, j, i) + b0[2]*fl(m, IM3, k, j, i)) - (kta ? al0 : 1.0)*fd;
+  };
   FixArr<kNFace> f;
   Kokkos::parallel_reduce("mclose_faces", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
   KOKKOS_LAMBDA(const int idx, FixArr<kNFace> &acc) {
@@ -380,19 +466,30 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
     auto &sz = size.d_view(m);
     const Real a1f = sz.dx2*sz.dx3, a2f = sz.dx1*sz.dx3, a3f = sz.dx1*sz.dx2;
     const Real tol = 1.0e-6*sz.dx1;
-    if (i == is && sz.x1min <= mx1 + tol) acc.v[kFout].Add(-flx.x1f(m, nv, k, j, i)*a1f);
-    if (i == ie && sz.x1max >= Mx1 - tol) acc.v[kFout].Add(flx.x1f(m, nv, k, j, i+1)*a1f);
-    if (j == js && sz.x2min <= mx2 + tol) acc.v[kFout].Add(-flx.x2f(m, nv, k, j, i)*a2f);
-    if (j == je && sz.x2max >= Mx2 - tol) acc.v[kFout].Add(flx.x2f(m, nv, k, j+1, i)*a2f);
-    if (k == ks && sz.x3min <= mx3 + tol) acc.v[kFout].Add(-flx.x3f(m, nv, k, j, i)*a3f);
-    if (k == ke && sz.x3max >= Mx3 - tol) acc.v[kFout].Add(flx.x3f(m, nv, k+1, j, i)*a3f);
+    // the cell's centre and its six faces (KCLOSE of a Valencia run needs the face positions)
+    const Real xc = CellCenterX(i - is, nx1, sz.x1min, sz.x1max);
+    const Real yc = CellCenterX(j - js, nx2, sz.x2min, sz.x2max);
+    const Real zc = CellCenterX(k - ks, nx3, sz.x3min, sz.x3max);
+    const Real xl = LeftEdgeX(i - is, nx1, sz.x1min, sz.x1max);
+    const Real xr = LeftEdgeX(i + 1 - is, nx1, sz.x1min, sz.x1max);
+    const Real yl = LeftEdgeX(j - js, nx2, sz.x2min, sz.x2max);
+    const Real yr = LeftEdgeX(j + 1 - js, nx2, sz.x2min, sz.x2max);
+    const Real zl = LeftEdgeX(k - ks, nx3, sz.x3min, sz.x3max);
+    const Real zr = LeftEdgeX(k + 1 - ks, nx3, sz.x3min, sz.x3max);
+    const auto &f1 = flx.x1f, &f2 = flx.x2f, &f3 = flx.x3f;
+    if (i == is && sz.x1min <= mx1 + tol) acc.v[kFout].Add(-fT(f1, m, k, j, i, xl, yc, zc)*a1f);
+    if (i == ie && sz.x1max >= Mx1 - tol) acc.v[kFout].Add(fT(f1, m, k, j, i+1, xr, yc, zc)*a1f);
+    if (j == js && sz.x2min <= mx2 + tol) acc.v[kFout].Add(-fT(f2, m, k, j, i, xc, yl, zc)*a2f);
+    if (j == je && sz.x2max >= Mx2 - tol) acc.v[kFout].Add(fT(f2, m, k, j+1, i, xc, yr, zc)*a2f);
+    if (k == ks && sz.x3min <= mx3 + tol) acc.v[kFout].Add(-fT(f3, m, k, j, i, xc, yc, zl)*a3f);
+    if (k == ke && sz.x3max >= Mx3 - tol) acc.v[kFout].Add(fT(f3, m, k+1, j, i, xc, yc, zr)*a3f);
     if (exc && xf(m, k, j, i)) {
-      if (!xf(m, k, j, i-1)) acc.v[kFexc].Add(flx.x1f(m, nv, k, j, i)*a1f);
-      if (!xf(m, k, j, i+1)) acc.v[kFexc].Add(-flx.x1f(m, nv, k, j, i+1)*a1f);
-      if (!xf(m, k, j-1, i)) acc.v[kFexc].Add(flx.x2f(m, nv, k, j, i)*a2f);
-      if (!xf(m, k, j+1, i)) acc.v[kFexc].Add(-flx.x2f(m, nv, k, j+1, i)*a2f);
-      if (!xf(m, k-1, j, i)) acc.v[kFexc].Add(flx.x3f(m, nv, k, j, i)*a3f);
-      if (!xf(m, k+1, j, i)) acc.v[kFexc].Add(-flx.x3f(m, nv, k+1, j, i)*a3f);
+      if (!xf(m, k, j, i-1)) acc.v[kFexc].Add(fT(f1, m, k, j, i, xl, yc, zc)*a1f);
+      if (!xf(m, k, j, i+1)) acc.v[kFexc].Add(-fT(f1, m, k, j, i+1, xr, yc, zc)*a1f);
+      if (!xf(m, k, j-1, i)) acc.v[kFexc].Add(fT(f2, m, k, j, i, xc, yl, zc)*a2f);
+      if (!xf(m, k, j+1, i)) acc.v[kFexc].Add(-fT(f2, m, k, j+1, i, xc, yr, zc)*a2f);
+      if (!xf(m, k-1, j, i)) acc.v[kFexc].Add(fT(f3, m, k, j, i, xc, yc, zl)*a3f);
+      if (!xf(m, k+1, j, i)) acc.v[kFexc].Add(-fT(f3, m, k+1, j, i, xc, yc, zr)*a3f);
     }
   }, FixArrReducer<kNFace>(f));
   for (int q = 0; q < kNFace; ++q) st_f[stage-1][q] = f.v[q];

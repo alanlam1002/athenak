@@ -262,6 +262,61 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     const int nt = pin->GetOrAddInteger("dyn_grmhd", "metric_table_test", 0);
     if (nt > 0) TrumpetTableTest(nt);
   }
+
+  // <mhd> energy_variable (R-155 item 1, user-approved 2026-10-29; dyn_grmhd_killing.cpp).
+  // Read without GetOrAdd, so a default (valencia) input's parameter copy is unchanged.
+  std::string ev = pin->DoesParameterExist("mhd", "energy_variable") ?
+                   pin->GetString("mhd", "energy_variable") : "valencia";
+  if (ev == "valencia") {
+    energy_variable = EnergyVariable::valencia;
+  } else if (ev == "killing_t1") {
+    energy_variable = EnergyVariable::killing_t1;
+  } else if (ev == "killing_ta") {
+    energy_variable = EnergyVariable::killing_ta;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1 or "
+              << "killing_ta)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (energy_variable != EnergyVariable::valencia) {
+    // the weights (alpha0, beta0) are the BH-frame Killing vector of a stationary background:
+    // the hole at rest on the grid and its mass frozen (the comoving version is not approved)
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> energy_variable = " << ev << " needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto flag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    need(flag("puncture_enabled"), "<cfc> puncture_enabled = true (the trumpet background)");
+    need(!flag("puncture_moving"), "the BH frame (<cfc> puncture_moving = false)");
+    need(!flag("frame_controller"), "the BH frame (<cfc> frame_controller = false)");
+    need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+    need(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    need(pmy_pack->pmesh->three_d, "a 3D mesh");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    need(indcs.ng >= 2, "nghost >= 2");
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(kill_res, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                    indcs.nx1 + 2*indcs.ng);
+    BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                      pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> energy_variable = " << ev << " (trumpet table n = " << ttab.n
+                << ")" << std::endl;
+    }
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -695,6 +750,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
             break;
     case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
             break;
+  }
+  if (energy_variable != EnergyVariable::valencia && !fixed_evolution) {
+    switch (nghost) {   // dyn_grmhd_killing.cpp
+      case 2: AddKillingTerms<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddKillingTerms<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddKillingTerms<4>(prim, bcc, dt, rhs);
+              break;
+    }
   }
 }
 

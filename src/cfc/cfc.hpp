@@ -138,6 +138,7 @@ class CFC {
   // M_BH by the swallowed energy.  Set false to keep the tally as a pure diagnostic,
   // which is how the psi^5-vs-psi^6 weighting A/B is run.
   bool accrete_to_puncture_;
+  bool freeze_puncture_mass_ = false;   // <cfc> freeze_puncture_mass (R-155 item 2)
   Real puncture_mass_init_ = 0.0;  // for reporting M_BH growth
 
   // ADM-mass surface integral (<cfc> adm_mass_r0, adm_mass_r1, ... ; adm_mass_dr,

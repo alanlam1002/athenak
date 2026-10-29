@@ -52,6 +52,7 @@ add_executable(
         dyn_grmhd/dyn_grmhd_fofc.cpp
         dyn_grmhd/dyn_grmhd_newdt.cpp
         dyn_grmhd/dyn_grmhd_metric.cpp
+        dyn_grmhd/dyn_grmhd_killing.cpp
 
         eos/eos.cpp
         eos/mass_closure.cpp

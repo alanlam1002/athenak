@@ -461,7 +461,18 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on psi at the psi solve's output; see ApplyPsiFloor. Default 0.0
   // (disabled) so every existing fixture is bitwise unchanged.
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.0);
+  // <cfc> freeze_puncture_mass (R-155 item 2, user-approved 2026-10-29; default false): M_BH
+  // stays at its initial value, so the background is exactly stationary (the Killing-energy
+  // option needs it) and no roundoff-level accretion re-anchors the residuals (C-129). The
+  // excision tally is still drained and accreted_mass_ booked; MCLOSE books the removed mass
+  // as before. It is accrete_to_puncture = false under its R-155 name, and it wins over an
+  // accrete_to_puncture = true (e.g. the GetOrAdd default in a restart's parameter copy).
+  freeze_puncture_mass_ = pin->GetOrAddBoolean("cfc", "freeze_puncture_mass", false);
   accrete_to_puncture_ = pin->GetOrAddBoolean("cfc", "accrete_to_puncture", true);
+  if (freeze_puncture_mass_) {
+    accrete_to_puncture_ = false;
+    pin->SetBoolean("cfc", "accrete_to_puncture", false);
+  }
   puncture_mass_init_ = puncture_mass_;
 
   // ADM-mass extraction radii, discovered by existence (<cfc> adm_mass_r0, _r1, ...).

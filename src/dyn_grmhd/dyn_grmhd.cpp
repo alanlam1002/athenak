@@ -298,6 +298,14 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {   // the ghost/owner probe of the T face flux
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
     int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
     Kokkos::realloc(kf_prev, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
                     indcs.nx1 + 2*indcs.ng);

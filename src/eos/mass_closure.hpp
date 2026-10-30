@@ -169,6 +169,12 @@ class MassClosure {
   void MarkAfter(int item);
   // the regrid path: M_prol after prolongation (item 6 against the last M_end)
   void RegridProlongated();
+  // killing_full (R-177 item 1): before a regrid (MeshRefinement::AdaptiveMeshRefinement),
+  // the jump from the last stage's weights (kf_prev) to the current metric's, booked as
+  // "weights"; the regrid items then measure T with one set of weights on both sides
+  // (RegridProlongated: the transferred metric; MarkAfter: those, saved, then the re-solved
+  // metric's change booked as "weights")
+  void RegridPre();
   // after Driver::Initialize (M_start, the restart item) and at the end (the MCLOSE line)
   void SegmentStart(ParameterInput *pin, int cycle);
   void SegmentEnd(int cycle, Real time);
@@ -239,6 +245,11 @@ class MassClosure {
   Real km_st_[4] = {0.0, 0.0, 0.0, 0.0};   // KillMotion per stage (the stage's applied amount)
   KSum km_seg_, km_cum_;
   bool KWt() const { return kill_ == 3 || kcomov_; }
+  // killing_full's weights in KSrc: 0 kf_prev while valid, else adm; 1 adm; 2 kws_ (the
+  // metric RegridProlongated saw, alpha and beta^i, every cell)
+  mutable int kwmode_ = 0;
+  DvceArray5D<Real> kws_;
+  bool kregrid_ = false;      // RegridProlongated done, its MarkAfter not yet
   bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
   mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)
   dyngr::TrumpetTable ktab_;

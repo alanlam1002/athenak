@@ -396,8 +396,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                     indcs.nx1 + 2*indcs.ng);
     if (kf_split_every > 0) {
       // KFSPLIT: s_T background, residual (all cells, then the masked set), the background's
-      // chord effect (all, masked), and the masked L1 of (chord effect - analytic), of analytic
-      Kokkos::realloc(kill_scr, nmb, 8, indcs.nx3, indcs.nx2, indcs.nx1);
+      // chord effect (all, masked), and the masked L1 of (chord effect - analytic), of analytic;
+      // 8-16: the residual's d_t on the masked set (R-177 item 2); 17-22: the hole's work
+      // against its force (R-177 addendum; ReportKillingStage)
+      Kokkos::realloc(kill_scr, nmb, 23, indcs.nx3, indcs.nx2, indcs.nx1);
     }
     if (global_variable::my_rank == 0) {
       std::cout << "<mhd> energy_variable = killing_full, killing_full_dtg = "

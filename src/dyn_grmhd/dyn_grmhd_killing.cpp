@@ -267,7 +267,10 @@ void DynGRMHD::KillingFaceProbe() {
 //! KCLOSE evaluates T with each stage's own weights, so its RK identity mixes weights:
 //!   stage 1: the gap M_1(u0) - M_prev(u0) since the last stage (outside the stages);
 //!   stage s > 1: gam0 [M_s - M_{s-1}](u0) + gam1 [M_s(u1) - M_1(u1)] (inside its Y).
-//! Both are booked as "weights" (mass_closure.cpp), the latter out of "source".
+//! Both are booked as "weights" (mass_closure.cpp), the latter out of "source". Each is summed
+//! per cell as a difference (R-177 item 1: two sums of T, then subtracted, left KCLOSE an
+//! R ~ eps |T|), the u1 part telescoped stage by stage: [M_s - M_1](u1) = sum over q <= s of
+//! [M_q - M_{q-1}](u1) (kf_m1u1, from kf_prev = the previous stage's weights).
 void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   // the time of the metric this stage's fluxes use: solved from the previous stage's state,
   // t + tau_{s-1} dt with tau_s = gam0 tau_{s-1} + beta (as CFC::StageTime, cfc.cpp:2945)
@@ -316,9 +319,9 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   auto &u1 = pmy_pack->pmhd->u1;
   auto &pv = kf_prev;
   const bool hp = kf_have_prev, s1 = (stage == 1);
-  Real a = 0.0, b = 0.0, c = 0.0;
+  Real a = 0.0, c = 0.0;
   Kokkos::parallel_reduce("kill_full_w", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
-  KOKKOS_LAMBDA(const int idx, Real &sa, Real &sb, Real &sc) {
+  KOKKOS_LAMBDA(const int idx, Real &sa, Real &sc) {
     const int m = idx/nkji;
     const int k = (idx - m*nkji)/nji + ks;
     const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
@@ -333,21 +336,23 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
     const Real al = adm.alpha(m, k, j, i);
     const Real b0 = adm.beta_u(m, 0, k, j, i), b1 = adm.beta_u(m, 1, k, j, i);
     const Real b2 = adm.beta_u(m, 2, k, j, i);
-    sa += tw(u0, al, b0, b1, b2)*dv;
-    if (hp) sb += tw(u0, pv(m, 0, k, j, i), pv(m, 1, k, j, i), pv(m, 2, k, j, i),
-                     pv(m, 3, k, j, i))*dv;
-    if (!s1) sc += tw(u1, al, b0, b1, b2)*dv;
-  }, Kokkos::Sum<Real>(a), Kokkos::Sum<Real>(b), Kokkos::Sum<Real>(c));
-  Real v[3] = {a, b, c};
+    if (!hp) return;
+    const Real p0 = pv(m, 0, k, j, i), p1 = pv(m, 1, k, j, i), p2 = pv(m, 2, k, j, i);
+    const Real p3 = pv(m, 3, k, j, i);
+    sa += (tw(u0, al, b0, b1, b2) - tw(u0, p0, p1, p2, p3))*dv;
+    if (!s1) sc += (tw(u1, al, b0, b1, b2) - tw(u1, p0, p1, p2, p3))*dv;
+  }, Kokkos::Sum<Real>(a), Kokkos::Sum<Real>(c));
+  Real v[2] = {a, c};
 #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, v, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, v, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
   Real g = 0.0;
   if (s1) {
-    if (hp) g = v[0] - v[1];
-    kf_m1u1 = v[0];
+    if (hp) g = v[0];
+    kf_m1u1 = 0.0;
   } else if (hp) {
-    g = pdriver->gam0[stage-1]*(v[0] - v[1]) + pdriver->gam1[stage-1]*(v[2] - kf_m1u1);
+    kf_m1u1 += v[1];
+    g = pdriver->gam0[stage-1]*v[0] + pdriver->gam1[stage-1]*kf_m1u1;
   }
   pmclose->KillWeights(stage, g);
 }
@@ -435,9 +440,23 @@ void DynGRMHD::ReportKillingStage(int stage, Real dt) {
   const int nmb = pmy_pack->nmb_thispack;
   const int n3 = scr.extent_int(2), n2 = scr.extent_int(3), n1 = scr.extent_int(4);
   const int nkji = n3*n2*n1, nji = n2*n1;
-  Real v[8] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
-  for (int c = 0; c < nc && c < 8; ++c) {
+  // components 0-11, 15-22 summed; 12-14 (the residual rates' |.|) maximized
+  constexpr int nv = 23;
+  Real v[nv] = {}, vx[3] = {0.0, 0.0, 0.0};
+  for (int c = 0; c < nc && c < nv; ++c) {
     Real s = 0.0;
+    if (c >= 12 && c <= 14) {
+      Kokkos::parallel_reduce("kill_scr_max", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+      KOKKOS_LAMBDA(const int idx, Real &acc) {
+        const int m = idx/nkji;
+        const int k = (idx - m*nkji)/nji;
+        const int j = (idx - m*nkji - k*nji)/n1;
+        const int i = idx - m*nkji - k*nji - j*n1;
+        acc = fmax(acc, scr(m, c, k, j, i));
+      }, Kokkos::Max<Real>(s));
+      vx[c - 12] = s;
+      continue;
+    }
     Kokkos::parallel_reduce("kill_scr_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
     KOKKOS_LAMBDA(const int idx, Real &acc) {
       const int m = idx/nkji;
@@ -449,7 +468,8 @@ void DynGRMHD::ReportKillingStage(int stage, Real dt) {
     v[c] = s;
   }
 #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, v, 8, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, v, nv, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  if (nc > 12) MPI_Allreduce(MPI_IN_PLACE, vx, 3, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
   if (kill_comov) {
     if (pmclose != nullptr) pmclose->KillMotion(stage, dt*v[0]);
@@ -458,11 +478,22 @@ void DynGRMHD::ReportKillingStage(int stage, Real dt) {
   const int cyc = pmy_pack->pmesh->ncycle;
   if (kf_split_every <= 0 || cyc % kf_split_every != 0) return;
   if (global_variable::my_rank != 0) return;
+  // R-177 item 2: the residual's d_t over the masked (dense) set, rms (coordinate-volume
+  // weighted) and max, and the fraction of its cells whose residual chord is nonzero
+  const Real iv = (v[11] > 0.0) ? 1.0/v[11] : 0.0;
+  const Real *fv = pmy_pack->padm->frame_vel_u;
   std::printf("KFSPLIT cycle=%d stage=%d tstage=%.12g dtm=%.10e beta_dt=%.10e bg_all=%.10e "
               "res_all=%.10e bg_dense=%.10e res_dense=%.10e bgchord_all=%.10e "
-              "bgchord_dense=%.10e l1_chord_minus_bg=%.10e l1_bg=%.10e have_prev=%d\n", cyc,
+              "bgchord_dense=%.10e l1_chord_minus_bg=%.10e l1_bg=%.10e have_prev=%d "
+              "rms_dpsi=%.6e rms_dap=%.6e rms_dbres=%.6e max_dpsi=%.6e max_dap=%.6e "
+              "max_dbres=%.6e nz_frac=%.6e n_dense=%.0f vdS_src=%.10e vdS_flux=%.10e "
+              "bg_tau=%.10e val_work=%.10e Deps_dense=%.12e D_dense=%.12e "
+              "xidot=%.12e,%.12e,%.12e xidd=%.6e,%.6e,%.6e\n", cyc,
               stage, kf_tstage, kf_tstage - kf_tprev, dt, v[0], v[1], v[2], v[3], v[4], v[5], v[6],
-              v[7], static_cast<int>(kf_have_prev));
+              v[7], static_cast<int>(kf_have_prev), sqrt(v[8]*iv), sqrt(v[9]*iv),
+              sqrt(v[10]*iv), vx[0], vx[1], vx[2], (v[16] > 0.0) ? v[15]/v[16] : 0.0, v[16],
+              v[17], v[18], v[19], v[20], v[21], v[22], fv[0], fv[1], fv[2], kf_xdd[0],
+              kf_xdd[1], kf_xdd[2]);
   std::fflush(stdout);
 }
 
@@ -666,6 +697,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
     // - (S^i beta^j + S^j beta^i)/alpha + S^ij; g_00 = -alpha^2 + psi^4 beta.beta,
     // g_0i = psi^4 beta^i, g_ij = psi^4 delta_ij
     Real sT = 0.0, dal = 0.0, dbe[3] = {0.0, 0.0, 0.0}, sTb = 0.0, sTc = 0.0;
+    // KFSPLIT (R-177 item 2): the residual's chord rates, d_t dpsi, d_t d(alpha psi), |d_t
+    // beta_res|_coord (moving background only), and whether the chord is nonzero
+    Real rrp = 0.0, rra = 0.0, rrb = 0.0;
+    bool rnz = false;
+    // KFSPLIT (R-177 addendum): the background rate's net tau deposit, (sTb - E dalb + S.bd)/alpha
+    Real bgt = 0.0;
     if (dtg) {
       // the chord's ends (an, bn, p4n: this stage; alp, bp, p4p: the previous one). A fixed
       // background: the stored metric (kf_prev 0-4) against this stage's, the R-165 arm (ii) (the
@@ -695,6 +732,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
         const Real rp[3] = {pv(m, 7, k, j, i), pv(m, 8, k, j, i), pv(m, 9, k, j, i)};
         asm_(dps(m, 0, k, j, i), dap(m, 0, k, j, i), rn, an, bn, p4n);
         asm_(pv(m, 5, k, j, i), pv(m, 6, k, j, i), rp, alp, bp, p4p);
+        if (split) {
+          rrp = (dps(m, 0, k, j, i) - pv(m, 5, k, j, i))*idtm;
+          rra = (dap(m, 0, k, j, i) - pv(m, 6, k, j, i))*idtm;
+          Real b2 = 0.0;
+          for (int a = 0; a < 3; ++a) b2 += (rn[a] - rp[a])*(rn[a] - rp[a]);
+          rrb = sqrt(b2)*fabs(idtm);
+          rnz = (dps(m, 0, k, j, i) != pv(m, 5, k, j, i)) ||
+                (dap(m, 0, k, j, i) != pv(m, 6, k, j, i)) || (b2 != 0.0);
+        }
       }
       dal = (an - alp)*idtm;
       for (int a = 0; a < 3; ++a) dbe[a] = (bn[a] - bp[a])*idtm;
@@ -764,10 +810,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
           qb += 0.5*dp4b*(E*beta[a]*beta[a]*ia*ia - 2.0*S_u[a]*beta[a]*ia + S_uu[a][a]);
         }
         sTb = -alpha*vol*qb;
+        Real bS = 0.0;
+        for (int a = 0; a < 3; ++a) bS += S_d[a]*bd[a];
+        bgt = (sTb - vol*E*dalb + vol*bS)/alpha;
         dal += dalb;
         for (int a = 0; a < 3; ++a) dbe[a] += bd[a];
       }
     }
+    auto divf = [&](int n) {
+      return (fx1_(m, n, k, j, i+1) - fx1_(m, n, k, j, i))/sz.dx1
+           + (fx2_(m, n, k, j+1, i) - fx2_(m, n, k, j, i))/sz.dx2
+           + (fx3_(m, n, k+1, j, i) - fx3_(m, n, k, j, i))/sz.dx3;
+    };
     if (split) {   // KFSPLIT (R-174 (e)): vol s_T dV, background and residual parts
       const Real dv = sz.dx1*sz.dx2*sz.dx3;
       // the masked set: rho >= killing_full_split_rho and |x - x_BH| >= killing_full_split_rmin
@@ -783,14 +837,37 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       scr(m, 3, k-ks, j-js, i-is) = dn ? sT*dv : 0.0;
       scr(m, 4, k-ks, j-js, i-is) = sTc*dv;
       scr(m, 5, k-ks, j-js, i-is) = dn ? sTc*dv : 0.0;
+      // the residual's rates over the masked set: squares x dV and dV (rms), |.| (max), counts
+      scr(m, 8, k-ks, j-js, i-is) = dn ? rrp*rrp*dv : 0.0;
+      scr(m, 9, k-ks, j-js, i-is) = dn ? rra*rra*dv : 0.0;
+      scr(m, 10, k-ks, j-js, i-is) = dn ? rrb*rrb*dv : 0.0;
+      scr(m, 11, k-ks, j-js, i-is) = dn ? dv : 0.0;
+      scr(m, 12, k-ks, j-js, i-is) = dn ? fabs(rrp) : 0.0;
+      scr(m, 13, k-ks, j-js, i-is) = dn ? fabs(rra) : 0.0;
+      scr(m, 14, k-ks, j-js, i-is) = dn ? rrb : 0.0;
+      scr(m, 15, k-ks, j-js, i-is) = (dn && rnz) ? 1.0 : 0.0;
+      scr(m, 16, k-ks, j-js, i-is) = dn ? 1.0 : 0.0;
+      // R-177 addendum (the hole's work against its force), on the masked set: v^k dS_k/dt
+      // (Eulerian v^k = u^k/W) from the Valencia momentum source and from the fluxes; the
+      // background rate's net tau deposit; Valencia's own work, -sqrt(g) S^k d_k alpha; D eps; D
+      Real vS = 0.0, vF = 0.0, vw = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        const Real va = prim_pt[PVX + a]/W;
+        vS += va*vol*src_S[a];
+        vF -= va*divf(IM1 + a);
+        for (int b = 0; b < 3; ++b) vw -= g3u[imap[a][b]]*S_d[a]*dalpha_d[b];
+      }
+      const Real ein = eos_.GetEnergy(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF])
+                       - prim(m, IDN, k, j, i);
+      scr(m, 17, k-ks, j-js, i-is) = dn ? vS*dv : 0.0;
+      scr(m, 18, k-ks, j-js, i-is) = dn ? vF*dv : 0.0;
+      scr(m, 19, k-ks, j-js, i-is) = dn ? bgt*dv : 0.0;
+      scr(m, 20, k-ks, j-js, i-is) = dn ? vol*vw*dv : 0.0;
+      scr(m, 21, k-ks, j-js, i-is) = dn ? vol*W*ein*dv : 0.0;
+      scr(m, 22, k-ks, j-js, i-is) = dn ? vol*W*prim(m, IDN, k, j, i)*dv : 0.0;
     }
     sT += sTb;
 
-    auto divf = [&](int n) {
-      return (fx1_(m, n, k, j, i+1) - fx1_(m, n, k, j, i))/sz.dx1
-           + (fx2_(m, n, k, j+1, i) - fx2_(m, n, k, j, i))/sz.dx2
-           + (fx3_(m, n, k+1, j, i) - fx3_(m, n, k, j, i))/sz.dx3;
-    };
     const Real dT = -divf(IEN) + sT;
     const Real dD = -divf(IDN);
     Real bdS = 0.0, Sdb = 0.0;

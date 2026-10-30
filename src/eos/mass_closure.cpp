@@ -352,19 +352,22 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
     auto &adm = pmy_pack->padm->adm;
     const auto *pdg = pmy_pack->pdyngr;
     auto *pmr = pmy_pack->pmesh->pmr;   // kf_prev's MeshBlock order must still be this pack's
-    const bool kp = (pdg != nullptr) && pdg->kf_have_prev &&
+    const bool kp = (kwmode_ == 0) && (pdg != nullptr) && pdg->kf_have_prev &&
                     pdg->kf_key[0] == ((pmr != nullptr) ? pmr->nmb_created : 0) &&
                     pdg->kf_key[1] == ((pmr != nullptr) ? pmr->nmb_deleted : 0) &&
                     pdg->kf_key[2] == pmy_pack->nmb_thispack;
     DvceArray5D<Real> pv;
     if (kp) pv = pdg->kf_prev;
+    const bool ks = (kwmode_ == 2);   // the saved set: 0-3 as kf_prev's
+    if (ks) pv = kws_;
     par_for("kclose_tfull", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
             0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      const Real al = kp ? pv(m, 0, k, j, i) : adm.alpha(m, k, j, i);
-      const Real b0 = kp ? pv(m, 1, k, j, i) : adm.beta_u(m, 0, k, j, i);
-      const Real b1 = kp ? pv(m, 2, k, j, i) : adm.beta_u(m, 1, k, j, i);
-      const Real b2 = kp ? pv(m, 3, k, j, i) : adm.beta_u(m, 2, k, j, i);
+      const bool q = kp || ks;
+      const Real al = q ? pv(m, 0, k, j, i) : adm.alpha(m, k, j, i);
+      const Real b0 = q ? pv(m, 1, k, j, i) : adm.beta_u(m, 0, k, j, i);
+      const Real b1 = q ? pv(m, 2, k, j, i) : adm.beta_u(m, 1, k, j, i);
+      const Real b2 = q ? pv(m, 3, k, j, i) : adm.beta_u(m, 2, k, j, i);
       kv(m, 0, k, j, i) = al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
                           - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
     });
@@ -693,20 +696,64 @@ void MassClosure::MarkBefore() {
 void MassClosure::MarkAfter(int item) {
   if (!on) return;
   for (auto &x : extra_) x->MarkAfter(item);
-  const KSum a = Mass();
+  // killing_full after a regrid: the C2P's change with the weights RegridProlongated measured
+  // (saved), then the re-solved metric's change at fixed u as "weights"
+  const bool kr = kregrid_;
+  if (kr) kwmode_ = 2;
+  const KSum a2 = Mass();
   KSum d;
-  d.Add(a.s); d.Add(a.c); d.Add(-m_mark.s); d.Add(-m_mark.c);
+  d.Add(a2.s); d.Add(a2.c); d.Add(-m_mark.s); d.Add(-m_mark.c);
   seg[item].Join(d); cum[item].Join(d);
   if (ytr_) phcum[Phase(y_tlast)][item].Join(d);
+  KSum a = a2;
+  if (kr) {
+    kwmode_ = 1;
+    a = Mass();
+    KSum w;
+    w.Add(a.s); w.Add(a.c); w.Add(-a2.s); w.Add(-a2.c);
+    kw_seg_.Join(w); kw_cum_.Join(w);
+    kwmode_ = 0;
+    kregrid_ = false;
+  }
   // a booked change outside the stages (the F1 unmask, the regrid path's C2P) moves the
   // reference the next cycle's start (and a restart's saved M_end) is compared with
   if (have_last_end) m_last_end = a;
 }
 
+void MassClosure::RegridPre() {
+  if (!on) return;
+  for (auto &x : extra_) x->RegridPre();
+  if (kill_ != 3 || !have_last_end) return;
+  kwmode_ = 1;
+  const KSum a = Mass();
+  kwmode_ = 0;
+  KSum w;
+  w.Add(a.s); w.Add(a.c); w.Add(-m_last_end.s); w.Add(-m_last_end.c);
+  kw_seg_.Join(w); kw_cum_.Join(w);
+  m_last_end = a;
+}
+
 void MassClosure::RegridProlongated() {
   if (!on) return;
   for (auto &x : extra_) x->RegridProlongated();
+  // killing_full: the transferred metric's weights (as RegridPre's), saved for MarkAfter
+  if (kill_ == 3) {
+    kwmode_ = 1;
+    auto &u0 = pmy_pack->pmhd->u0;
+    auto &adm = pmy_pack->padm->adm;
+    Kokkos::realloc(kws_, u0.extent_int(0), 4, u0.extent_int(2), u0.extent_int(3),
+                    u0.extent_int(4));
+    auto ws = kws_;
+    par_for("kclose_wsave", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0,
+            u0.extent_int(2) - 1, 0, u0.extent_int(3) - 1, 0, u0.extent_int(4) - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      ws(m, 0, k, j, i) = adm.alpha(m, k, j, i);
+      for (int c = 0; c < 3; ++c) ws(m, 1 + c, k, j, i) = adm.beta_u(m, c, k, j, i);
+    });
+    kregrid_ = true;
+  }
   const KSum a = Mass();
+  kwmode_ = 0;
   if (have_last_end) {
     KSum d;
     d.Add(a.s); d.Add(a.c); d.Add(-m_last_end.s); d.Add(-m_last_end.c);

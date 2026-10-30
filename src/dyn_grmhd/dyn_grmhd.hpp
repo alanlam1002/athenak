@@ -16,7 +16,8 @@
 #include "eos/primitive_solver_hyd.hpp"
 #include "dyn_grmhd/metric_faces.hpp"
 
-enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr};   // Riemann solvers for dynamical GR
+// Riemann solvers for dynamical GR; hlle_frame_dyngr: <mhd> riemann_frame = boosted (R-168)
+enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr, hlle_frame_dyngr};
 enum class DynGRMHD_EOS {eos_ideal, eos_piecewise_poly,
                       eos_compose, eos_hybrid};        // EOS policies for dynamical GR
 enum class DynGRMHD_Error {reset_floor};               // Error policies for dynamical GR
@@ -195,6 +196,19 @@ class DynGRMHD {
   int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
   void KillingFullStage(Driver *pdriver, int stage);   // stage time + KCLOSE weights item
 
+  // <mhd> riemann_frame = boosted (R-168, "level R"; rsolvers/hlle_frame_dyn_grmhd.hpp,
+  // dyn_grmhd_riemann_frame.cpp): HLLE in the frame of U at each face. rsolver_method is
+  // then hlle_frame_dyngr; the default (eulerian) leaves every kernel unchanged.
+  bool rf_on = false;               // riemann_frame = boosted
+  bool rf_ugrid = false;            // riemann_frame_U = grid_rest (else eulerian, U = n)
+  bool rf_r2 = false;               // riemann_frame_recon = R2 (else R1)
+  bool rf_bchecked = false;         // the B = 0 check done
+  DvceArray1D<int> rf_err;          // (0): faces where grid_rest U is not timelike
+  DvceArray5D<Real> rf_vsave;       // R2: w0's velocity during the sweeps
+  void RFrameCellVelocities(int dir);   // R2: w0 velocity -> u^(a) of dir's cell tetrad
+  void RFrameRestoreVelocities();       // R2: w0 velocity back (bitwise)
+  void RFrameStageCheck(bool after);    // before: B = 0 (once), err reset; after: err
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;
@@ -305,6 +319,8 @@ class DynGRMHDPS : public DynGRMHD {
 
   // dyn_grmhd_newdt.cpp
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage);
+  // riemann_frame = boosted: the CFL from the frame speeds (dyn_grmhd_riemann_frame.cpp)
+  TaskStatus NewTimeStepFrame(Driver *pdrive, int stage);
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,

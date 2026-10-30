@@ -18,6 +18,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "dyn_grmhd/rsolvers/llf_dyn_grmhd.hpp"
 #include "dyn_grmhd/rsolvers/hlle_dyn_grmhd.hpp"
+#include "dyn_grmhd/rsolvers/hlle_frame_dyn_grmhd.hpp"
 #include "dyn_grmhd/dyn_grmhd_util.hpp"
 #include "mhd/mhd.hpp"
 #include "coordinates/adm.hpp"
@@ -223,6 +224,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
   if (three_d) { kl = ks-1, ku = ke+1; }
 
   const bool scons_ = fofc_scalar_consistent;
+  const bool rfu_ = rf_ugrid;   // <mhd> riemann_frame_U = grid_rest (frame solver only)
+  auto &rfe_ = rf_err;
   // FOFC tally (with <mhd> cold_recovery; printed on the CRECOV line, R-087 item 11):
   // interior cells hydro-flagged / excision-flux / scalar-only, and on the lower faces of
   // hydro-flagged or excised cells the scalar flux written vs the upwind F_D Y it replaces
@@ -287,6 +290,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           SingleStateHLLE_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
                                     g3d, beta_u, alpha, flux, bflux,
                                     scons_ ? fsc : nullptr);
+        } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+          // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+          if (!SingleStateFrameHLLE<IVX>(eos_, wli, wri, nscal_, g3d, beta_u, alpha,
+                                         rfu_, flux, scons_ ? fsc : nullptr)) {
+            Kokkos::atomic_add(&rfe_(0), 1);
+          }
+          bflux[IBY] = 0.0;
+          bflux[IBZ] = 0.0;
         }
 
         // Store 1st-order fluxes at i-1/2
@@ -344,6 +355,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             SingleStateHLLE_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
                                       g3d, beta_u, alpha, flux, bflux,
                                       scons_ ? fsc : nullptr);
+          } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+            // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+            if (!SingleStateFrameHLLE<IVY>(eos_, wlj, wrj, nscal_, g3d, beta_u, alpha,
+                                           rfu_, flux, scons_ ? fsc : nullptr)) {
+              Kokkos::atomic_add(&rfe_(0), 1);
+            }
+            bflux[IBY] = 0.0;
+            bflux[IBZ] = 0.0;
           }
 
           // Store 1st-order fluxes at j-1/2
@@ -402,6 +421,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             SingleStateHLLE_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
                                       g3d, beta_u, alpha, flux, bflux,
                                       scons_ ? fsc : nullptr);
+          } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+            // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+            if (!SingleStateFrameHLLE<IVZ>(eos_, wmk, wpk, nscal_, g3d, beta_u, alpha,
+                                           rfu_, flux, scons_ ? fsc : nullptr)) {
+              Kokkos::atomic_add(&rfe_(0), 1);
+            }
+            bflux[IBY] = 0.0;
+            bflux[IBZ] = 0.0;
           }
 
           // Store 1st-order fluxes at k-1/2
@@ -487,6 +514,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
           SingleStateHLLE_DYNGR<IVX>(eos_, wli, wri, bli, bri, nmhd_, nscal_,
                                g3d, beta_u, alpha, flux, bflux,
                                scons_ ? fsc : nullptr);
+        } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+          // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+          if (!SingleStateFrameHLLE<IVX>(eos_, wli, wri, nscal_, g3d, beta_u, alpha,
+                                         rfu_, flux, scons_ ? fsc : nullptr)) {
+            Kokkos::atomic_add(&rfe_(0), 1);
+          }
+          bflux[IBY] = 0.0;
+          bflux[IBZ] = 0.0;
         }
 
         // Store 1st-order fluxes at i+1/2
@@ -541,6 +576,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             SingleStateHLLE_DYNGR<IVY>(eos_, wlj, wrj, blj, brj, nmhd_, nscal_,
                                       g3d, beta_u, alpha, flux, bflux,
                                       scons_ ? fsc : nullptr);
+          } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+            // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+            if (!SingleStateFrameHLLE<IVY>(eos_, wlj, wrj, nscal_, g3d, beta_u, alpha,
+                                           rfu_, flux, scons_ ? fsc : nullptr)) {
+              Kokkos::atomic_add(&rfe_(0), 1);
+            }
+            bflux[IBY] = 0.0;
+            bflux[IBZ] = 0.0;
           }
 
           // Store 1st-order fluxes at j+1/2
@@ -596,6 +639,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::FOFC(Driver *pdriver, int stage) {
             SingleStateHLLE_DYNGR<IVZ>(eos_, wmk, wpk, bmk, bpk, nmhd_, nscal_,
                                       g3d, beta_u, alpha, flux, bflux,
                                       scons_ ? fsc : nullptr);
+          } else if constexpr (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr) {
+            // <mhd> riemann_frame = boosted: the same frame solver (R-168)
+            if (!SingleStateFrameHLLE<IVZ>(eos_, wmk, wpk, nscal_, g3d, beta_u, alpha,
+                                           rfu_, flux, scons_ ? fsc : nullptr)) {
+              Kokkos::atomic_add(&rfe_(0), 1);
+            }
+            bflux[IBY] = 0.0;
+            bflux[IBZ] = 0.0;
           }
 
           // Store 1st-order fluxes at k+1/2
@@ -875,7 +926,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
   FOFC<DynGRMHD_RSolver::llf_dyngr, true>(Driver *pdriver, int stage);\
 template \
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
-  FOFC<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);
+  FOFC<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);\
+template \
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+  FOFC<DynGRMHD_RSolver::hlle_frame_dyngr>(Driver *pdriver, int stage);\
+template \
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+  FOFC<DynGRMHD_RSolver::hlle_frame_dyngr, true>(Driver *pdriver, int stage);
 
 INSTANTIATE_FOFC(Primitive::IdealGas, Primitive::ResetFloor)
 INSTANTIATE_FOFC(Primitive::PiecewisePolytrope, Primitive::ResetFloor)

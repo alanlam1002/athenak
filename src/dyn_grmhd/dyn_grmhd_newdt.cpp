@@ -69,6 +69,10 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   if (stage != (pdrive->nexp_stages)) {
     return TaskStatus::complete;  // only execute last stage
   }
+  // <mhd> riemann_frame = boosted with <time> gr_dt: the frame speeds (R-168)
+  if (rf_on && gr_dt && pdrive->time_evolution != TimeEvolution::kinematic) {
+    return NewTimeStepFrame(pdrive, stage);
+  }
 
   mhd::MHD *pmhd = pmy_pack->pmhd;
   auto &indcs = pmy_pack->pmesh->mb_indcs;

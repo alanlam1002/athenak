@@ -25,6 +25,10 @@
 //!                rho0 (1 + amp sin(2 pi x1/L1)), P = p0 (rho/rho0)^gamma (isentropic), and
 //!                the rapidity atanh(v) = atanh(v1) + c_s0 amp sin(...) (the relativistic
 //!                Riemann invariant to first order in amp; periodic box).
+//!   riemann      (R-168 U1/U2) a 1D Riemann problem: (rhol, pl, vl) for x1 < xshock and
+//!                (rhor, pr, vr) beyond, Eulerian v1 (outflow boundaries). With frame_vel1
+//!                = the tube's velocity it sits at grid rest, and <mhd> riemann_frame_U =
+//!                grid_rest solves its Riemann problems in the tube's rest frame.
 //! The pgen writes no error file: compare outputs offline (scripts/frame_shift_tests.py).
 
 #include <cmath>
@@ -80,6 +84,8 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     itype = 4;
   } else if (type == "sound_wave") {
     itype = 5;
+  } else if (type == "riemann") {
+    itype = 6;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "unknown <problem> type = " << type << std::endl;
@@ -105,6 +111,11 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
   const Real vl = pin->GetOrAddReal("problem", "vl", 0.0);
   const Real vr = pin->GetOrAddReal("problem", "vr", 0.0);
   const Real xshock = pin->GetOrAddReal("problem", "xshock", 0.0);
+  // riemann: the left/right density and pressure (default rho0, p0)
+  const Real rhol = (itype == 6) ? pin->GetOrAddReal("problem", "rhol", rho0) : rho0;
+  const Real rhor = (itype == 6) ? pin->GetOrAddReal("problem", "rhor", rho0) : rho0;
+  const Real pl = (itype == 6) ? pin->GetOrAddReal("problem", "pl", p0) : p0;
+  const Real pr = (itype == 6) ? pin->GetOrAddReal("problem", "pr", p0) : p0;
   // sound_wave: the unperturbed sound speed (h = 1 + gamma/(gamma-1) p0/rho0)
   const Real cs0 = std::sqrt(gam*p0/(rho0 + gam/(gam - 1.0)*p0));
   const Real x1m = pmy_mesh_->mesh_size.x1min;
@@ -139,6 +150,13 @@ void ProblemGenerator::DynGRFrameShift(ParameterInput *pin, const bool restart) 
     }
     if (itype == 4) {
       u1 = (x1v < xshock) ? vl : vr;
+      lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
+    }
+    if (itype == 6) {
+      const bool left = (x1v < xshock);
+      rho = left ? rhol : rhor;
+      p = left ? pl : pr;
+      u1 = left ? vl : vr;
       lor = 1.0/sqrt(1.0 - (u1*u1 + u2*u2 + u3*u3));
     }
     if (itype == 5) {

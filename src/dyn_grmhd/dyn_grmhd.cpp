@@ -137,6 +137,54 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
               << "' not implemented for GR dynamics" << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  // <mhd> riemann_frame (R-168, user-approved 2026-10-30): eulerian (default, HLLE_DYNGR) |
+  // boosted (HLLE in U's frame at each face, rsolvers/hlle_frame_dyn_grmhd.hpp). Read without
+  // GetOrAdd, so a default input's parameter copy is unchanged.
+  const std::string rfr = pin->DoesParameterExist("mhd", "riemann_frame") ?
+                          pin->GetString("mhd", "riemann_frame") : "eulerian";
+  if (rfr == "boosted") {
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> riemann_frame = boosted needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    need(rsolver_method == DynGRMHD_RSolver::hlle_dyngr, "<mhd> rsolver = hlle");
+    const std::string ru = pin->DoesParameterExist("mhd", "riemann_frame_U") ?
+                           pin->GetString("mhd", "riemann_frame_U") : "eulerian";
+    const std::string rr = pin->DoesParameterExist("mhd", "riemann_frame_recon") ?
+                           pin->GetString("mhd", "riemann_frame_recon") : "R1";
+    need(ru == "eulerian" || ru == "grid_rest", "riemann_frame_U = eulerian | grid_rest");
+    need(rr == "R1" || rr == "R2", "riemann_frame_recon = R1 | R2");
+    rf_on = true;
+    rf_ugrid = (ru == "grid_rest");
+    rf_r2 = (rr == "R2");
+    rsolver_method = DynGRMHD_RSolver::hlle_frame_dyngr;
+    rf_err = DvceArray1D<int>("rf_err", 2);
+    if (rf_r2) {
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(rf_vsave, nmb, 3, (indcs.nx3 > 1) ? indcs.nx3 + 2*indcs.ng : 1,
+                      (indcs.nx2 > 1) ? indcs.nx2 + 2*indcs.ng : 1, indcs.nx1 + 2*indcs.ng);
+    }
+    // U3: the ghost/owner probe of the face fluxes (KillingFaceProbe, Valencia rows)
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> riemann_frame = boosted, riemann_frame_U = " << ru
+                << ", riemann_frame_recon = " << rr << std::endl;
+    }
+  } else if (rfr != "eulerian") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> riemann_frame = '" << rfr << "' (eulerian or boosted)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   std::string fofc = pin->GetOrAddString("mhd", "fofc_method", "llf");
   if (fofc.compare("llf") == 0) {
     fofc_method = DynGRMHD_RSolver::llf_dyngr;
@@ -437,6 +485,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
       pnr->QueueTask(
         &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>,
         this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else if (rsolver_method == DynGRMHD_RSolver::hlle_frame_dyngr) {
+      pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<
+                       DynGRMHD_RSolver::hlle_frame_dyngr, true>,
+                     this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
     } else {
       abort();
     }
@@ -447,6 +499,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   } else if (rsolver_method == DynGRMHD_RSolver::hlle_dyngr) {
     pnr->QueueTask(
            &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_dyngr>,
+           this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+  } else if (rsolver_method == DynGRMHD_RSolver::hlle_frame_dyngr) {
+    pnr->QueueTask(
+           &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_frame_dyngr>,
            this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
   } else { // put more rsolvers here
     abort();

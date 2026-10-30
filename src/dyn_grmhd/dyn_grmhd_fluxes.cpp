@@ -25,6 +25,7 @@
 #include "reconstruct/wenoz.hpp"
 #include "dyn_grmhd/rsolvers/llf_dyn_grmhd.hpp"
 #include "dyn_grmhd/rsolvers/hlle_dyn_grmhd.hpp"
+#include "dyn_grmhd/rsolvers/hlle_frame_dyn_grmhd.hpp"
 // include PrimitiveSolver stuff
 #include "eos/primitive-solver/idealgas.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
@@ -74,17 +75,29 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
   // Y; Y_face = A_p,face/rho_face is formed after each reconstruction below and w0 is
   // restored before FOFC. de_hll: the tracer flux is computed by HLLE_DYNGR itself.
   const bool de_rhoy = eos.de_on && eos.de_recon_rhoy;
+  constexpr bool rframe = (rsolver_method_ == DynGRMHD_RSolver::hlle_frame_dyngr);
   const bool de_hll = eos.de_on && eos.de_flux_hll &&
-                      rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr;
+                      (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr || rframe);
   const int de_n = nhyd + eos.de_idx;
   // <mhd> scalar_flux_hll: HLLE_DYNGR writes every scalar flux (no upwind kernels)
-  const bool sf_hll = eos.sf_hll && rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr;
+  const bool sf_hll = eos.sf_hll &&
+                      (rsolver_method_ == DynGRMHD_RSolver::hlle_dyngr || rframe);
   if (de_rhoy) {
     par_for("de_rhoy_fwd", DevExeSpace(), 0, nmb1, 0, w0_.extent_int(2) - 1,
             0, w0_.extent_int(3) - 1, 0, w0_.extent_int(4) - 1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       w0_(m, de_n, k, j, i) *= w0_(m, IDN, k, j, i);
     });
+  }
+
+  // <mhd> riemann_frame = boosted (R-168; rsolvers/hlle_frame_dyn_grmhd.hpp): the field
+  // check (once) and, for riemann_frame_recon = R2, w0's velocity replaced by its frame
+  // components for each direction's reconstruction (restored bitwise after the k sweep)
+  const bool rfu_ = rf_ugrid, rfr2_ = rf_r2;
+  auto &rfe_ = rf_err;
+  if constexpr (rframe) {
+    RFrameStageCheck(false);
+    if (rf_r2) RFrameCellVelocities(0);
   }
 
   //--------------------------------------------------------------------------------------
@@ -185,6 +198,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
                 wl, wr, bl, br, bx, nhyd_, nscal_, adm_,
                 flx1, e31, e21);
       }
+    } else if constexpr (rframe) {
+      if constexpr (FM) {
+        HLLE_FRAME_DYNGR<IVX>(member, dyn_eos, m, k, j, il, iu, wl, wr,
+              nhyd_, nscal_, adm_, flx1, e31, e21, rfu_, rfr2_, rfe_, fmx1_);
+      } else {
+        HLLE_FRAME_DYNGR<IVX>(member, dyn_eos, m, k, j, il, iu, wl, wr,
+              nhyd_, nscal_, adm_, flx1, e31, e21, rfu_, rfr2_, rfe_);
+      }
     }
     member.team_barrier();
 
@@ -203,6 +224,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     }
     member.team_barrier();
   });
+
+  if constexpr (rframe) { if (rf_r2 && pmy_pack->pmesh->multi_d) RFrameCellVelocities(1); }
 
   //--------------------------------------------------------------------------------------
   // j-direction
@@ -314,6 +337,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
               HLLE_DYNGR<IVY>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, by, nhyd_, nscal_, adm_, flx2, e12, e32);
             }
+          } else if constexpr (rframe) {
+            if constexpr (FM) {
+              HLLE_FRAME_DYNGR<IVY>(member, dyn_eos, m, k, j, is-1, ie+1, wl, wr,
+                    nhyd_, nscal_, adm_, flx2, e12, e32, rfu_, rfr2_, rfe_, fmx2_);
+            } else {
+              HLLE_FRAME_DYNGR<IVY>(member, dyn_eos, m, k, j, is-1, ie+1, wl, wr,
+                    nhyd_, nscal_, adm_, flx2, e12, e32, rfu_, rfr2_, rfe_);
+            }
           }
         }
         member.team_barrier();
@@ -335,6 +366,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
       member.team_barrier();
     });
   }
+
+  if constexpr (rframe) { if (rf_r2 && pmy_pack->pmesh->three_d) RFrameCellVelocities(2); }
 
   //--------------------------------------------------------------------------------------
   // k-direction. Note order of k,j loops switched
@@ -440,6 +473,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
               HLLE_DYNGR<IVZ>(member, dyn_eos, indcs, size, coord, m, k, j, is-1, ie+1,
                       wl, wr, bl, br, bz, nhyd_, nscal_, adm_, flx3, e23, e13);
             }
+          } else if constexpr (rframe) {
+            if constexpr (FM) {
+              HLLE_FRAME_DYNGR<IVZ>(member, dyn_eos, m, k, j, is-1, ie+1, wl, wr,
+                    nhyd_, nscal_, adm_, flx3, e23, e13, rfu_, rfr2_, rfe_, fmx3_);
+            } else {
+              HLLE_FRAME_DYNGR<IVZ>(member, dyn_eos, m, k, j, is-1, ie+1, wl, wr,
+                    nhyd_, nscal_, adm_, flx3, e23, e13, rfu_, rfr2_, rfe_);
+            }
           }
         }
         member.team_barrier();
@@ -462,6 +503,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     });
   }
 
+  if constexpr (rframe) { if (rf_r2) RFrameRestoreVelocities(); }
+
   if (de_rhoy) {
     par_for("de_rhoy_bwd", DevExeSpace(), 0, nmb1, 0, w0_.extent_int(2) - 1,
             0, w0_.extent_int(3) - 1, 0, w0_.extent_int(4) - 1,
@@ -482,6 +525,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     if (energy_variable == EnergyVariable::killing_full) KillingFullStage(pdriver, stage);
     KillingFaceFluxes();
   }
+  if constexpr (rframe) {
+    RFrameStageCheck(true);   // grid_rest U not timelike at some face: stop
+    // U3: the ghost/owner probe of the final face fluxes (Valencia; killing modes probe
+    // in KillingFaceFluxes)
+    if (energy_variable == EnergyVariable::valencia && kill_probe_cycles > 0) {
+      KillingFaceProbe();
+    }
+  }
 
   return TaskStatus::complete;
 }
@@ -500,7 +551,13 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
             CalcFluxes<DynGRMHD_RSolver::llf_dyngr, true>(Driver *pdriver, int stage); \
 template \
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
-            CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);
+            CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>(Driver *pdriver, int stage);\
+template \
+TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+            CalcFluxes<DynGRMHD_RSolver::hlle_frame_dyngr>(Driver *pdriver, int stage); \
+template \
+TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::\
+            CalcFluxes<DynGRMHD_RSolver::hlle_frame_dyngr, true>(Driver *pdriver, int stage);
 
 INSTANTIATE_CALC_FLUXES(Primitive::IdealGas, Primitive::ResetFloor)
 INSTANTIATE_CALC_FLUXES(Primitive::PiecewisePolytrope, Primitive::ResetFloor)

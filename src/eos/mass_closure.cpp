@@ -22,6 +22,7 @@
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/meshblock_pack.hpp"
+#include "mesh/mesh_refinement.hpp"
 #include "mhd/mhd.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/coordinates.hpp"
@@ -190,6 +191,10 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
       // <mhd> killing_weights = boost (R-158): (alpha0, beta0) = (1, xidot)
       kboost_ = pin->DoesParameterExist("mhd", "killing_weights") &&
                 pin->GetString("mhd", "killing_weights") == "boost";
+      kcomov_ = pin->DoesParameterExist("mhd", "killing_weights") &&
+                pin->GetString("mhd", "killing_weights") == "comoving";
+      kcflat_ = kcomov_ && !(pin->DoesParameterExist("cfc", "puncture_enabled") &&
+                             pin->GetBoolean("cfc", "puncture_enabled"));
       tag_ = "KCLOSE"; key_ = "closure_kill";
       dyngr::BuildTrumpetTable(ktab_, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                                pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
@@ -321,24 +326,47 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   auto &size = pmy_pack->pmb->mb_size;
-  const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
+  // comoving (R-175): the centre the current stage's T fluxes use (DynGRMHD::KillingT1Stage), not
+  // bg_xbh_: CFC refills the background at the next stage's centre before the C2P, where the stage
+  // is measured (cfc.cpp SolveVecXTask); so the weights change between stages, as killing_full's
+  // (AssembleFinal, after the C2P), and KillingT1Stage books that change as "weights"
+  const auto *pdg = pmy_pack->pdyngr;
+  const bool kxp = kcomov_ && (pdg != nullptr) && pdg->kill_have_xprev;
+  const Real cx = kxp ? pdg->kill_xprev[0] : pcfc->bg_xbh_[0];
+  const Real cy = kxp ? pdg->kill_xprev[1] : pcfc->bg_xbh_[1];
+  const Real cz = kxp ? pdg->kill_xprev[2] : pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
-  const bool ta = (kill_ == 2), kb = kboost_;
-  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
-  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
+  // comoving: the weights exclude xidot ((1, 0) without a puncture: the boost form at rest)
+  const bool ta = (kill_ == 2), kb = kboost_ || kcflat_;
+  const Real fv0 = kboost_ ? pmy_pack->padm->frame_vel_u[0] : 0.0;
+  const Real fv1 = kboost_ ? pmy_pack->padm->frame_vel_u[1] : 0.0;
+  const Real fv2 = kboost_ ? pmy_pack->padm->frame_vel_u[2] : 0.0;
   auto &td = ktab_.d;
   const Real th = ktab_.h, tih = ktab_.ih;
   const int nt = ktab_.n;
   auto kv = kv_;
   if (kill_ == 3) {   // killing_full: T = alpha (tau + D) - beta^k S_k, this stage's metric
+    // c154: the weights of the last stage whose fluxes used them (kf_prev 0-3, stored by
+    // AddKillingFullTerms; equal to adm's until CFC::AssembleFinal, after the C2P), so the run's
+    // final Mass() does not take the next stage's metric (an unbooked weights gap, R-174 moving bed)
     auto &adm = pmy_pack->padm->adm;
+    const auto *pdg = pmy_pack->pdyngr;
+    auto *pmr = pmy_pack->pmesh->pmr;   // kf_prev's MeshBlock order must still be this pack's
+    const bool kp = (pdg != nullptr) && pdg->kf_have_prev &&
+                    pdg->kf_key[0] == ((pmr != nullptr) ? pmr->nmb_created : 0) &&
+                    pdg->kf_key[1] == ((pmr != nullptr) ? pmr->nmb_deleted : 0) &&
+                    pdg->kf_key[2] == pmy_pack->nmb_thispack;
+    DvceArray5D<Real> pv;
+    if (kp) pv = pdg->kf_prev;
     par_for("kclose_tfull", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
             0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      kv(m, 0, k, j, i) = adm.alpha(m, k, j, i)*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
-                          - (adm.beta_u(m, 0, k, j, i)*u(m, IM1, k, j, i)
-                             + adm.beta_u(m, 1, k, j, i)*u(m, IM2, k, j, i)
-                             + adm.beta_u(m, 2, k, j, i)*u(m, IM3, k, j, i));
+      const Real al = kp ? pv(m, 0, k, j, i) : adm.alpha(m, k, j, i);
+      const Real b0 = kp ? pv(m, 1, k, j, i) : adm.beta_u(m, 0, k, j, i);
+      const Real b1 = kp ? pv(m, 2, k, j, i) : adm.beta_u(m, 1, k, j, i);
+      const Real b2 = kp ? pv(m, 3, k, j, i) : adm.beta_u(m, 2, k, j, i);
+      kv(m, 0, k, j, i) = al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
+                          - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
     });
     return kv_;
   }
@@ -585,7 +613,16 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   cyc[iUpdate].Add(Yd.lo);
   cyc[iUpdate].Add(-cyc[iOut].s);
   cyc[iUpdate].Add(-cyc[iOut].c);
-  if (kill_ == 3) {   // killing_full: the weights item (KillWeights), out of "source"
+  if (kcomov_) {   // comoving t1: the weight-motion item (KillMotion), out of "source"
+    KSum mc;
+    for (int q = 0; q < ns; ++q) {
+      mc.Add(w[q]*km_st_[q]);
+      cyc[iUpdate].Add(-w[q]*km_st_[q]);
+    }
+    km_seg_.Join(mc); km_cum_.Join(mc);
+    for (int q = 0; q < 4; ++q) km_st_[q] = 0.0;
+  }
+  if (KWt()) {   // killing_full, comoving t1: the weights item (KillWeights), out of "source"
     KSum wc;
     wc.Add(kw_st_[0]);   // stage 1: the gap since the last stage (outside the stages)
     for (int q = 1; q < ns; ++q) {
@@ -636,8 +673,15 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
 void MassClosure::KillWeights(int stage, Real g) {
   if (!on) return;
   for (auto &x : extra_) x->KillWeights(stage, g);
-  if (kill_ != 3 || stage < 1 || stage > 4) return;
+  if (!KWt() || stage < 1 || stage > 4) return;
   kw_st_[stage-1] = g;
+}
+
+void MassClosure::KillMotion(int stage, Real g) {
+  if (!on) return;
+  for (auto &x : extra_) x->KillMotion(stage, g);
+  if (!kcomov_ || stage < 1 || stage > 4) return;
+  km_st_[stage-1] = g;
 }
 
 void MassClosure::MarkBefore() {
@@ -785,7 +829,8 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     if (n == iRestart || n == iFexc) continue;
     sum.Join(seg[n]);
   }
-  if (kill_ == 3) sum.Join(kw_seg_);
+  if (KWt()) sum.Join(kw_seg_);
+  if (kcomov_) sum.Join(km_seg_);
   KSum rr = dm;
   rr.Add(-sum.s); rr.Add(-sum.c);
   const Real R = rr.Val(), mg = me.Val();
@@ -816,7 +861,8 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
     << m_start.Val() << " M_end=" << mg << " M_last_end=" << m_last_end.Val()
     << std::setprecision(10) << " dM=" << dm.Val();
   for (int n = 0; n < kNItem; ++n) o << " " << nm[n] << "=" << seg[n].Val();
-  if (kill_ == 3) o << " weights=" << kw_seg_.Val();
+  if (KWt()) o << " weights=" << kw_seg_.Val();
+  if (kcomov_) o << " motion=" << km_seg_.Val();
   o << " R=" << R << " R/M*=" << R/mstar << " R/M_grid=" << R/mg << " roundoff=" << rnd
     << " " << (pass ? "PASS" : "FAIL") << " flags=" << (flags.empty() ? "none" : flags);
   std::cout << o.str() << std::endl;
@@ -824,7 +870,8 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
   c << std::setprecision(10) << tag_ << "_RUN cycle=" << cycle << " (cumulative since the run's"
     << " start, restarts included)";
   for (int n = 0; n < kNItem; ++n) c << " " << nm[n] << "=" << cum[n].Val();
-  if (kill_ == 3) c << " weights=" << kw_cum_.Val() << " (this process only)";
+  if (KWt()) c << " weights=" << kw_cum_.Val() << " (this process only)";
+  if (kcomov_) c << " motion=" << km_cum_.Val() << " (this process only)";
   std::cout << c.str() << std::endl;
   if (!ytr_) return;
   // the split's partition checks for this segment: each C2P item against its band/category sum

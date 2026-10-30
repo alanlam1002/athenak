@@ -174,6 +174,15 @@ class DynGRMHD {
   EnergyVariable energy_variable = EnergyVariable::valencia;
   DvceArray5D<Real> kill_res;       // the residual (delta alpha, delta beta^i, psi^4 - psi0^4)
   bool kill_boost = false;          // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
+  // <mhd> killing_weights = comoving (R-175; KILLING_ENERGY_NOTE Sec. 5): the trumpet weights at
+  // the comoving hole (CFC::bg_xbh_, refilled every stage), excluding xidot, or (1, 0) without a
+  // puncture; delta beta = beta' - xidot - beta_BH; the frozen weights' rate
+  // -xidot^j (E d_j alpha0 - S_k d_j beta_BH^k) added to the T source (KCLOSE item "motion")
+  bool kill_comov = false, kill_flat = false;
+  bool kill_have_xprev = false;     // KCLOSE: the weights' centre of the previous stage
+  Real kill_xprev[3] = {0.0, 0.0, 0.0}, kill_m1u1 = 0.0;
+  DvceArray5D<Real> kill_scr;       // per-cell stage values reduced after the source kernel
+  void KillingT1Stage(Driver *pdriver, int stage);   // comoving: KCLOSE's weights item
   void KillingFaceFluxes();         // the tau slot's face flux -> the T face flux
   int kill_probe_cycles = 0, kill_probe_c0 = -1, kill_probe_stage = 0;   // ghost/owner probe
   void KillingFaceProbe();          // <dyn_grmhd> killing_probe_cycles, face_probe_box
@@ -190,11 +199,29 @@ class DynGRMHD {
   // <mhd> killing_full_dtg: false = arm (i), d_t' g = 0; true = arm (ii), the source
   // -1/2 alpha sqrt(gamma) T^{mu nu} d_t' g_{mu nu} and the weights' rate, both from the
   // previous stage's metric (kf_prev: alpha, beta^i, psi^4 at every cell, ghosts included).
+  // R-174 (arm (ii) extended): kf_prev also holds the previous stage's CFC residual (delta psi,
+  // delta(alpha psi), beta_res: slots 5-9), the source differences the residual only, against
+  // the previous residual on the CURRENT background (and xidot), and adds the background's rate
+  // analytically (comoving: -xdot_BH . grad g0 from the trumpet table; xi-ddot in beta');
+  // kf_prev and the stage bookkeeping are restart state (dyngr.kfprev, <mhd> kf_*).
   bool kf_dtg = false, kf_have_prev = false;
   DvceArray5D<Real> kf_prev;
   Real kf_tprev = 0.0, kf_tstage = 0.0, kf_m1u1 = 0.0;
   int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
+  bool kf_rst_loaded = false;     // kf_prev restored: keep it across the restart's new key
+  bool kf_bgmove = false;         // <cfc> puncture_moving: the background's analytic rate
+  bool kf_have_xd = false;        // xi-ddot: xidot of the last step (frame controller)
+  Real kf_xdstep[3] = {0.0, 0.0, 0.0}, kf_xdd[3] = {0.0, 0.0, 0.0};
+  // <mhd> killing_full_split_every (R-174 (e)): KFSPLIT lines, each stage's s_T integrals
+  // (background / residual part; rho >= killing_full_split_rho and all cells)
+  int kf_split_every = 0;
+  Real kf_split_rho = 0.0, kf_split_rmin = 0.0;   // the masked ("dense") set
   void KillingFullStage(Driver *pdriver, int stage);   // stage time + KCLOSE weights item
+  void ReportKillingStage(int stage, Real dt);   // reduce kill_scr: KFSPLIT / KCLOSE motion
+  void SaveKillingScalars(ParameterInput *pin);  // arm (ii)'s stage bookkeeping -> <mhd> kf_*
+  void LoadKillingScalars(ParameterInput *pin);  // (the constructor, on a restart)
+  bool KfRst() const { return energy_variable == EnergyVariable::killing_full && kf_dtg; }
+  int kill_stage = 0;             // the RK stage of the current killing source call
 
   // <mhd> riemann_frame = boosted (R-168, "level R"; rsolvers/hlle_frame_dyn_grmhd.hpp,
   // dyn_grmhd_riemann_frame.cpp): HLLE in the frame of U at each face. rsolver_method is
@@ -305,6 +332,7 @@ class DynGRMHDPS : public DynGRMHD {
   void SaveRestartScalars(ParameterInput *pin) override {
     eos.SaveTier3State(pin);
     eos.SaveDualEnergyTotal(pin);
+    SaveKillingScalars(pin);
   }
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;

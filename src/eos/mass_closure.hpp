@@ -185,6 +185,8 @@ class MassClosure {
   // the weights' change at fixed u of this stage (stage 1: since the last stage), booked as
   // KCLOSE's "weights" (not in the restart's parameter copy: its _RUN value is this process's)
   void KillWeights(int stage, Real g);
+  // killing_weights = comoving: the stage's weight-motion source, beta_dt sum sqrt(g) s_W dV
+  void KillMotion(int stage, Real g);
 
  private:
   MeshBlockPack *pmy_pack;
@@ -229,6 +231,14 @@ class MassClosure {
   Real kw_st_[4] = {0.0, 0.0, 0.0, 0.0};   // killing_full: KillWeights per stage
   KSum kw_seg_, kw_cum_;
   bool kboost_ = false;       // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
+  // <mhd> killing_weights = comoving (R-175): the weights move with the hole (bg_xbh_), so the
+  // stage gaps are booked as "weights" (as killing_full); the frozen weights' rate added to the
+  // source, xidot^j (E d_j alpha0 - S_k d_j beta_BH^k), is its own item "motion" (out of
+  // "source"). kcflat_: no puncture, weights (1, 0).
+  bool kcomov_ = false, kcflat_ = false;
+  Real km_st_[4] = {0.0, 0.0, 0.0, 0.0};   // KillMotion per stage (the stage's applied amount)
+  KSum km_seg_, km_cum_;
+  bool KWt() const { return kill_ == 3 || kcomov_; }
   bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
   mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)
   dyngr::TrumpetTable ktab_;

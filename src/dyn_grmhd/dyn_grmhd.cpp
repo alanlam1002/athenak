@@ -359,6 +359,29 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
+    auto cflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    if (kf_dtg) {
+      // R-174: the residual differenced between stage solves needs a solve every stage, a
+      // constant residual scale (the assembly CFC::AssembleADM uses; no ramp), and a
+      // background that moves only analytically (no puncture-mass update)
+      need(pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
+           "<cfc> solve_interval <= 0 with killing_full_dtg (a metric solve every stage)");
+      need(!pin->DoesParameterExist("cfc", "residual_scale_t1"),
+           "a constant <cfc> residual_scale (no residual_scale_t1 ramp) with killing_full_dtg");
+      need(!cflag("puncture_enabled") || cflag("freeze_puncture_mass"),
+           "<cfc> freeze_puncture_mass = true with a puncture and killing_full_dtg");
+      kf_bgmove = cflag("puncture_enabled") && cflag("puncture_moving");
+      if (kf_bgmove) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+      kf_split_every = pin->GetOrAddInteger("mhd", "killing_full_split_every", 0);
+      kf_split_rho = pin->GetOrAddReal("mhd", "killing_full_split_rho", 0.0);
+      kf_split_rmin = pin->GetOrAddReal("mhd", "killing_full_split_rmin", 0.0);
+      LoadKillingScalars(pin);
+    }
     kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
     if (kill_probe_cycles > 0) {   // the ghost/owner probe of the T face flux
       const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
@@ -368,12 +391,19 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       }
     }
     int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
-    Kokkos::realloc(kf_prev, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+    Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
                     indcs.nx1 + 2*indcs.ng);
+    if (kf_split_every > 0) {
+      // KFSPLIT: s_T background, residual (all cells, then the masked set), the background's
+      // chord effect (all, masked), and the masked L1 of (chord effect - analytic), of analytic
+      Kokkos::realloc(kill_scr, nmb, 8, indcs.nx3, indcs.nx2, indcs.nx1);
+    }
     if (global_variable::my_rank == 0) {
       std::cout << "<mhd> energy_variable = killing_full, killing_full_dtg = "
-                << (kf_dtg ? "true (arm ii: d_t' g from the previous stage)"
-                           : "false (arm i: d_t' g = 0)") << std::endl;
+                << (kf_dtg ? "true (arm ii: d_t' g, the residual from the previous stage"
+                           : "false (arm i: d_t' g = 0")
+                << ((kf_dtg && kf_bgmove) ? ", the moving background analytic)" : ")")
+                << std::endl;
     }
   } else if (energy_variable != EnergyVariable::valencia) {
     // the weights (alpha0, beta0) are the BH-frame Killing vector of a stationary background:
@@ -392,10 +422,26 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     // (<cfc> frame_vel*): d_t' of flat comoving coordinates, T = sqrt(g)(E - xidot.S - D)
     const std::string kw = pin->DoesParameterExist("mhd", "killing_weights") ?
                            pin->GetString("mhd", "killing_weights") : "trumpet";
-    need(kw == "trumpet" || kw == "boost", "<mhd> killing_weights = trumpet or boost");
+    need(kw == "trumpet" || kw == "boost" || kw == "comoving",
+         "<mhd> killing_weights = trumpet, boost or comoving");
     kill_boost = (kw == "boost");
-    need(!flag("frame_controller"), "a constant frame (<cfc> frame_controller = false)");
-    if (kill_boost) {
+    kill_comov = (kw == "comoving");
+    if (kill_comov) {
+      // R-175: the trumpet weights at the comoving hole (any frame: constant, accelerated or
+      // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1)
+      need(energy_variable == EnergyVariable::killing_t1,
+           "energy_variable = killing_t1 with killing_weights = comoving");
+      kill_flat = !flag("puncture_enabled");
+      if (!kill_flat) {
+        need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+        need(metric_terms == MetricTerms::analytic_bg,
+             "<dyn_grmhd> metric_terms = analytic_bg with killing_weights = comoving");
+      }
+    } else {
+      need(!flag("frame_controller"), "a constant frame (<cfc> frame_controller = false)");
+    }
+    if (kill_comov) {
+    } else if (kill_boost) {
       need(!flag("puncture_enabled"), "no puncture (killing_weights = boost: flat background)");
       need(!pin->DoesParameterExist("cfc", "frame_accel1") &&
            !pin->DoesParameterExist("cfc", "frame_accel2") &&
@@ -416,6 +462,9 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
     Kokkos::realloc(kill_res, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
                     indcs.nx1 + 2*indcs.ng);
+    if (kill_comov) {   // the weight-motion source per cell (KCLOSE item "motion")
+      Kokkos::realloc(kill_scr, nmb, 1, indcs.nx3, indcs.nx2, indcs.nx1);
+    }
     BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                       pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
     kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
@@ -428,6 +477,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
     if (global_variable::my_rank == 0) {
       std::cout << "<mhd> energy_variable = " << ev << ", killing_weights = " << kw
+                << (kill_flat ? " (no puncture: weights (1, 0))" : "")
                 << " (trumpet table n = " << ttab.n << ")" << std::endl;
     }
   }
@@ -761,7 +811,7 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
   auto *pmhd = pmy_pack->pmhd;
   const int nw = pmhd->w0.extent_int(1);
   const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
-  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0);
+  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 10 : 0);
 }
 
 //! the same variables as named groups (restart_state.hpp: the file's layout, so a later
@@ -775,6 +825,7 @@ std::string DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateLayout() {
   if (nflag > 0) s += ",dyngr.flag:" + std::to_string(nflag);
   s += ",dyngr.bcc0:3,dyngr.temp:1";
   if (eos.de_persist > 1) s += ",dyngr.streak:1";
+  if (KfRst()) s += ",dyngr.kfprev:10";   // killing_full arm (ii), R-174 (b)
   return s;
 }
 
@@ -814,6 +865,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       dst(m, nn, k, j, i) = have ? static_cast<Real>(stk(m, k, j, i)) : 0.0;
     });
+    n += 1;
+  }
+  if (KfRst()) {   // kf_prev (zero before the first stage: kf_have_prev says so)
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 10), all, all, all),
+                      Kokkos::subview(kf_prev, mb, all, all, all, all));
   }
 }
 
@@ -853,6 +909,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       stk(m, k, j, i) = static_cast<int>(src(m, nn, k, j, i));
     });
+    n += 1;
+  }
+  if (KfRst()) {   // a restart from before R-174 has no group: zero-filled, and kf_have_prev
+    Kokkos::deep_copy(Kokkos::subview(kf_prev, mb, all, all, all, all),   // (absent) = false
+                      Kokkos::subview(src, all, std::make_pair(n, n + 10), all, all, all));
+    kf_rst_loaded = true;
   }
 }
 

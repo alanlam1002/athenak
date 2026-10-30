@@ -520,6 +520,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
     // killing_full: the stage time (arm ii) and KCLOSE's weights item, while u0 is still
     // this stage's input state
     if (energy_variable == EnergyVariable::killing_full) KillingFullStage(pdriver, stage);
+    if (kill_comov) KillingT1Stage(pdriver, stage);   // R-175: the moving weights' KCLOSE gap
     KillingFaceFluxes();
   }
   if constexpr (rframe) {

@@ -38,8 +38,8 @@ slot() {   # node-line arms...
       touch $E/PASS_$a.$PBS_JOBID
       continue ;;
     WAIT_*)   # WAIT_<gate>: wait (<= 20 min) for the other slot's gate of this job; stop if it failed
-      local gw=${a#WAIT_} n=0
-      while [ ! -e $E/PASS_$gw.$PBS_JOBID ] && [ ! -e $E/FAILED_$gw.$PBS_JOBID ] && [ $n -lt 120 ]; do sleep 10; n=$((n + 1)); done
+      local gw=${a#WAIT_} wn=0
+      while [ ! -e $E/PASS_$gw.$PBS_JOBID ] && [ ! -e $E/FAILED_$gw.$PBS_JOBID ] && [ $wn -lt 120 ]; do sleep 10; wn=$((wn + 1)); done
       [ -e $E/PASS_$gw.$PBS_JOBID ] || { echo "$a: no pass, slot stops $(date -u +%FT%TZ)" >> $E/runs.log; return; }
       continue ;;
     esac

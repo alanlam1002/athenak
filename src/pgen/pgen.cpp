@@ -260,6 +260,19 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     data_size_ += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
   }
 
+  // optional trailing edge vector potential (<mhd> evolve_avec): detected from the size
+  // recorded in the file, so restarts written with or without it load either way
+  IOWrapperSizeT avec_size = 0;
+  if (pmhd != nullptr) {
+    avec_size = (nout1*(nout2+1)*(nout3+1) + (nout1+1)*nout2*(nout3+1) +
+                 (nout1+1)*(nout2+1)*nout3)*sizeof(Real);
+  }
+  bool file_has_avec = false;
+  if (pmhd != nullptr && data_size_ + avec_size == data_size) {
+    file_has_avec = true;
+    data_size_ += avec_size;
+  }
+
   if (data_size_ != data_size) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "CC data size read from restart file not equal to size "
@@ -625,6 +638,49 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
     offset_myrank += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
     myoffset = offset_myrank;
+  }
+
+  if (pmhd != nullptr && pmhd->evolve_avec) {
+    if (!file_has_avec) {
+      pmhd->avec_valid = false;
+      if (global_variable::my_rank == 0) {
+        std::cout << "WARNING: <mhd> evolve_avec is set but the restart file holds no "
+                  << "avec; the helicity diagnostic is disabled for this run" << std::endl;
+      }
+    } else {
+      HostArray4D<Real> ain[3];
+      DvceArray4D<Real> *dst[3] = {&pmhd->avec.x1e, &pmhd->avec.x2e, &pmhd->avec.x3e};
+      int d3[3] = {nout3+1, nout3+1, nout3}, d2[3] = {nout2+1, nout2, nout2+1};
+      int d1[3] = {nout1, nout1+1, nout1+1};
+      for (int c = 0; c < 3; ++c) {
+        Kokkos::realloc(ain[c], nmb, d3[c], d2[c], d1[c]);
+      }
+      for (int m=0;  m<noutmbs_max; ++m) {
+        if (m >= pm->nmb_thisrank && m >= noutmbs_min) { continue; }
+        IOWrapperSizeT off = myoffset;
+        for (int c = 0; c < 3; ++c) {
+          auto ptr = Kokkos::subview(ain[c], m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+          size_t cnt = ptr.size();
+          // every rank has a MB to read: collective read; otherwise non-collective
+          size_t nr = (m < noutmbs_min)
+              ? resfile.Read_Reals_at_all(ptr.data(), cnt, off, single_file_per_rank)
+              : resfile.Read_Reals_at(ptr.data(), cnt, off, single_file_per_rank);
+          if (nr != cnt) {
+            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                      << std::endl << "avec data not read correctly from rst file, "
+                      << "restart file is broken." << std::endl;
+            exit(EXIT_FAILURE);
+          }
+          off += cnt*sizeof(Real);
+        }
+        myoffset += data_size;
+      }
+      for (int c = 0; c < 3; ++c) {
+        Kokkos::deep_copy(Kokkos::subview(*dst[c], std::make_pair(0,nmb), Kokkos::ALL,
+                          Kokkos::ALL, Kokkos::ALL), ain[c]);
+      }
+      pmhd->avec_valid = true;
+    }
   }
 
   // call problem generator again to re-initialize data, fn ptrs, as needed

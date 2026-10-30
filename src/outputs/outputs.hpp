@@ -387,6 +387,10 @@ class RestartOutput : public BaseTypeOutput {
   RestartOutput(ParameterInput *pin, Mesh *pm, OutputParameters oparams);
   void LoadOutputData(Mesh *pm) override;
   void WriteOutputFile(Mesh *pm, ParameterInput *pin) override;
+ private:
+  // edge vector potential of <mhd> evolve_avec (helicity diagnostic), appended after all
+  // other per-MeshBlock data; the reader detects it from the recorded data size
+  HostArray4D<Real> outavec1, outavec2, outavec3;
 };
 
 // Forward declaration

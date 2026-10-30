@@ -367,6 +367,12 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Kokkos::deep_copy(b0.x2f, 0.0);
     Kokkos::deep_copy(b0.x3f, 0.0);
     Kokkos::deep_copy(bcc0, 0.0);
+    if (pmbp->pmhd->evolve_avec) {
+      Kokkos::deep_copy(pmbp->pmhd->avec.x1e, 0.0);
+      Kokkos::deep_copy(pmbp->pmhd->avec.x2e, 0.0);
+      Kokkos::deep_copy(pmbp->pmhd->avec.x3e, 0.0);
+      pmbp->pmhd->avec_valid = true;
+    }
     return;
   }
 
@@ -1256,6 +1262,61 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                           (d_fa1(m,k+1,j+1,i)-d_fa1(m,k+1,j,i))/dx2;
     }
   });
+  // ==== Edge vector potential for the helicity diagnostic (<mhd> evolve_avec, R-051) ==
+  // avec(t=0) = the same edge potential whose curl built b0 above, so curl(avec) = b0
+  // exactly at t=0. Validation (b): <problem> avec_gauge_amp != 0 adds the discrete
+  // gradient of chi = amp*exp(-(r/avec_gauge_sigma)^2), chi at the cell corners, which
+  // leaves curl(avec) unchanged to round-off and must leave H unchanged.
+  if (pmbp->pmhd->evolve_avec) {
+    const Real g_amp = pin->GetOrAddReal("problem", "avec_gauge_amp", 0.0);
+    const Real g_sig = pin->GetOrAddReal("problem", "avec_gauge_sigma", 4.0);
+    auto av = pmbp->pmhd->avec;
+    auto h1 = Kokkos::create_mirror_view(av.x1e);
+    auto h2 = Kokkos::create_mirror_view(av.x2e);
+    auto h3 = Kokkos::create_mirror_view(av.x3e);
+    Kokkos::deep_copy(h1, 0.0); Kokkos::deep_copy(h2, 0.0); Kokkos::deep_copy(h3, 0.0);
+    auto chi = [&](Real x, Real y, Real z) {
+      return g_amp*std::exp(-(x*x + y*y + z*z)/(g_sig*g_sig));
+    };
+    for (int m = 0; m < nmb; ++m) {
+      Real x1min = size.h_view(m).x1min, x1max = size.h_view(m).x1max;
+      Real x2min = size.h_view(m).x2min, x2max = size.h_view(m).x2max;
+      Real x3min = size.h_view(m).x3min, x3max = size.h_view(m).x3max;
+      Real dx1 = size.h_view(m).dx1, dx2 = size.h_view(m).dx2, dx3 = size.h_view(m).dx3;
+      for (int k = ks; k <= ke+1; ++k) {
+        Real zf = LeftEdgeX(k-ks, indcs.nx3, x3min, x3max);
+        for (int j = js; j <= je+1; ++j) {
+          Real yf = LeftEdgeX(j-js, indcs.nx2, x2min, x2max);
+          for (int i = is; i <= ie+1; ++i) {
+            Real xf = LeftEdgeX(i-is, indcs.nx1, x1min, x1max);
+            h1(m,k,j,i) = final_a1(m,k,j,i);
+            h2(m,k,j,i) = final_a2(m,k,j,i);
+            h3(m,k,j,i) = final_a3(m,k,j,i);
+            if (g_amp != 0.0) {
+              // corner coordinates from LeftEdgeX throughout, so every corner value of chi
+              // is the same number wherever it is used and curl(grad chi) cancels exactly
+              Real xp = LeftEdgeX(i+1-is, indcs.nx1, x1min, x1max);
+              Real yp = LeftEdgeX(j+1-js, indcs.nx2, x2min, x2max);
+              Real zp = LeftEdgeX(k+1-ks, indcs.nx3, x3min, x3max);
+              Real c0 = chi(xf, yf, zf);
+              h1(m,k,j,i) += (chi(xp, yf, zf) - c0)/dx1;
+              h2(m,k,j,i) += (chi(xf, yp, zf) - c0)/dx2;
+              h3(m,k,j,i) += (chi(xf, yf, zp) - c0)/dx3;
+            }
+          }
+        }
+      }
+    }
+    Kokkos::deep_copy(av.x1e, h1); Kokkos::deep_copy(av.x2e, h2);
+    Kokkos::deep_copy(av.x3e, h3);
+    pmbp->pmhd->avec_valid = true;
+    if (global_variable::my_rank == 0) {
+      std::cout << "GRASS helicity diagnostic: avec initialized from the field's edge "
+                << "potential" << ((g_amp != 0.0) ? " plus a gauge gradient (test)" : "")
+                << std::endl;
+    }
+  }
+
   par_for("grass_final_bcc", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     bcc0(m,IBX,k,j,i) = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
@@ -1514,9 +1575,182 @@ struct GrassDiagConfig {
   int map_count = 0;
   std::string basename;
   bool header_done = false;
+  Real hel_box = 10.0;   // half-width [M] of the cube for the boxed helicity/energy
 };
 GrassDiagConfig grass_diag;
 }  // namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn void GrassHelicityDiag
+//! \brief Magnetic-helicity diagnostics from the evolved edge vector potential
+//  (<mhd> evolve_avec, R-051). b0 is densitized (Btilde = sqrt(gamma) B) and CT is
+//  A <- A - dt*efld (Weyl gauge), so H = int A_i Btilde^i d^3x with coordinate volume.
+//  Discrete pairing: per cell, the four edge A_i of each direction averaged to the cell
+//  centre times the two face Btilde^i averaged to the centre -- identical to pairing each
+//  edge A_i with Btilde^i averaged over the 8 faces around it, for which a discrete
+//  gradient added to A changes H by -sum chi div(Btilde) = 0 exactly (summation by parts
+//  within uniform-resolution regions, field away from the domain boundary).
+//  out: 0 H (all cells), 1 H (|x|,|y|,|z| < hel_box), 2 current helicity
+//  C = int sqrt(gamma) J.B d^3x = int B_i [ijk] d_j B_k d^3x (physical B, lowered with
+//  gamma_ij, central differences of cell-centred values), 3 -2 int efld.Btilde (edge EMFs
+//  of the last stage averaged to the centre; the discrete dH/dt), 4 -2 int e_ideal.Btilde
+//  with the cell-centred ideal e_ideal = -(vtilde x Btilde), vtilde = alpha v - beta
+//  (zero to round-off), 5 max|A|, 6 E_mag in the box (as webdiag column 2), 7-9
+//  max|curl A - Btilde| over all faces / faces on MeshBlock boundaries / faces on
+//  boundaries to a neighbour at another level, each over max|Btilde| (faces).
+
+void GrassHelicityDiag(Mesh *pm, Real *out) {
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto *pmhd = pmbp->pmhd;
+  auto &indcs = pm->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int ie = indcs.ie, je = indcs.je, ke = indcs.ke;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmkji = pmbp->nmb_thispack*nx3*nx2*nx1;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &b0 = pmhd->b0;
+  auto &bcc0 = pmhd->bcc0;
+  auto &w0 = pmhd->w0;
+  auto &ef = pmhd->efld;
+  auto a1 = pmhd->avec.x1e, a2 = pmhd->avec.x2e, a3 = pmhd->avec.x3e;
+  auto &adm = pmbp->padm->adm;
+  auto &size = pmbp->pmb->mb_size;
+  auto &nghbr = pmbp->pmb->nghbr;
+  auto &mblev = pmbp->pmb->mb_lev;
+  const Real hb = grass_diag.hel_box;
+
+  // physical B lowered with gamma_ij at a cell centre
+  auto lowered = KOKKOS_LAMBDA(int m, int k, int j, int i, Real bd[3]) {
+    Real g0 = adm.g_dd(m,0,0,k,j,i), g1 = adm.g_dd(m,0,1,k,j,i), g2 = adm.g_dd(m,0,2,k,j,i);
+    Real g3 = adm.g_dd(m,1,1,k,j,i), g4 = adm.g_dd(m,1,2,k,j,i), g5 = adm.g_dd(m,2,2,k,j,i);
+    Real sd = Kokkos::sqrt(fmax(adm::SpatialDet(g0, g1, g2, g3, g4, g5), 1.0e-300));
+    Real bx = bcc0(m,IBX,k,j,i)/sd, by = bcc0(m,IBY,k,j,i)/sd, bz = bcc0(m,IBZ,k,j,i)/sd;
+    bd[0] = g0*bx + g1*by + g2*bz;
+    bd[1] = g1*bx + g3*by + g4*bz;
+    bd[2] = g2*bx + g4*by + g5*bz;
+  };
+
+  Real h_all = 0.0, h_box = 0.0, c_cur = 0.0, dh_emf = 0.0, dh_ideal = 0.0;
+  Real e_box = 0.0, amax = 0.0, bmax = 0.0, err_all = 0.0, err_mb = 0.0, err_cf = 0.0;
+  Kokkos::parallel_reduce("GrassHelicityDiag", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+  KOKKOS_LAMBDA(const int &idx, Real &rh, Real &rhb, Real &rc, Real &re, Real &ri,
+                Real &reb, Real &ram, Real &rbm, Real &rea, Real &rem, Real &rec) {
+    int m = idx/nkji;
+    int k = (idx - m*nkji)/nji;
+    int j = (idx - m*nkji - k*nji)/nx1;
+    int i = (idx - m*nkji - k*nji - j*nx1) + is;
+    k += ks; j += js;
+    Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2, dx3 = size.d_view(m).dx3;
+    Real vol = dx1*dx2*dx3;
+    Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    bool inbox = (fabs(x) < hb && fabs(y) < hb && fabs(z) < hb);
+
+    // cell-centred A and Btilde (Btilde from the faces)
+    Real ac1 = 0.25*(a1(m,k,j,i) + a1(m,k,j+1,i) + a1(m,k+1,j,i) + a1(m,k+1,j+1,i));
+    Real ac2 = 0.25*(a2(m,k,j,i) + a2(m,k,j,i+1) + a2(m,k+1,j,i) + a2(m,k+1,j,i+1));
+    Real ac3 = 0.25*(a3(m,k,j,i) + a3(m,k,j,i+1) + a3(m,k,j+1,i) + a3(m,k,j+1,i+1));
+    Real bc1 = 0.5*(b0.x1f(m,k,j,i) + b0.x1f(m,k,j,i+1));
+    Real bc2 = 0.5*(b0.x2f(m,k,j,i) + b0.x2f(m,k,j+1,i));
+    Real bc3 = 0.5*(b0.x3f(m,k,j,i) + b0.x3f(m,k+1,j,i));
+    Real hc = (ac1*bc1 + ac2*bc2 + ac3*bc3)*vol;
+    rh += hc;
+    if (inbox) { rhb += hc; }
+
+    // discrete dH/dt from the edge EMFs
+    Real ec1 = 0.25*(ef.x1e(m,k,j,i) + ef.x1e(m,k,j+1,i) + ef.x1e(m,k+1,j,i) +
+                     ef.x1e(m,k+1,j+1,i));
+    Real ec2 = 0.25*(ef.x2e(m,k,j,i) + ef.x2e(m,k,j,i+1) + ef.x2e(m,k+1,j,i) +
+                     ef.x2e(m,k+1,j,i+1));
+    Real ec3 = 0.25*(ef.x3e(m,k,j,i) + ef.x3e(m,k,j,i+1) + ef.x3e(m,k,j+1,i) +
+                     ef.x3e(m,k,j+1,i+1));
+    re += -2.0*(ec1*bc1 + ec2*bc2 + ec3*bc3)*vol;
+
+    // ideal cell-centred EMF, e = -(vtilde x Btilde)
+    Real g0 = adm.g_dd(m,0,0,k,j,i), g1 = adm.g_dd(m,0,1,k,j,i), g2 = adm.g_dd(m,0,2,k,j,i);
+    Real g3 = adm.g_dd(m,1,1,k,j,i), g4 = adm.g_dd(m,1,2,k,j,i), g5 = adm.g_dd(m,2,2,k,j,i);
+    Real ux = w0(m,IVX,k,j,i), uy = w0(m,IVY,k,j,i), uz = w0(m,IVZ,k,j,i);
+    Real wl = Kokkos::sqrt(1.0 + g0*ux*ux + g3*uy*uy + g5*uz*uz +
+                           2.0*(g1*ux*uy + g2*ux*uz + g4*uy*uz));
+    Real al = adm.alpha(m,k,j,i);
+    Real vx = al*ux/wl - adm.beta_u(m,0,k,j,i), vy = al*uy/wl - adm.beta_u(m,1,k,j,i);
+    Real vz = al*uz/wl - adm.beta_u(m,2,k,j,i);
+    Real bx = bcc0(m,IBX,k,j,i), by = bcc0(m,IBY,k,j,i), bz = bcc0(m,IBZ,k,j,i);
+    Real ex = -(vy*bz - vz*by), ey = -(vz*bx - vx*bz), ez = -(vx*by - vy*bx);
+    ri += -2.0*(ex*bx + ey*by + ez*bz)*vol;
+
+    // current helicity, B_i [ijk] d_j B_k with central differences
+    Real bd[3], bxp[3], bxm[3], byp[3], bym[3], bzp[3], bzm[3];
+    lowered(m, k, j, i, bd);
+    lowered(m, k, j, i+1, bxp); lowered(m, k, j, i-1, bxm);
+    lowered(m, k, j+1, i, byp); lowered(m, k, j-1, i, bym);
+    lowered(m, k+1, j, i, bzp); lowered(m, k-1, j, i, bzm);
+    Real cx = (byp[2] - bym[2])/(2.0*dx2) - (bzp[1] - bzm[1])/(2.0*dx3);
+    Real cy = (bzp[0] - bzm[0])/(2.0*dx3) - (bxp[2] - bxm[2])/(2.0*dx1);
+    Real cz = (bxp[1] - bxm[1])/(2.0*dx1) - (byp[0] - bym[0])/(2.0*dx2);
+    rc += (bd[0]*cx + bd[1]*cy + bd[2]*cz)*vol;   // [ijk] carries no sqrt(gamma)
+    if (inbox) {
+      Real sd = Kokkos::sqrt(fmax(adm::SpatialDet(g0, g1, g2, g3, g4, g5), 1.0e-300));
+      reb += 0.5*(bd[0]*bx + bd[1]*by + bd[2]*bz)/sd*vol;   // 0.5 |B|^2 sqrt(gamma)
+    }
+
+    // max|A| over the edges this cell owns (lower edges; upper ones at block ends)
+    ram = fmax(ram, fmax(fabs(a1(m,k,j,i)), fmax(fabs(a2(m,k,j,i)), fabs(a3(m,k,j,i)))));
+
+    // curl(A) - Btilde on the cell's lower faces, plus the upper faces at block ends
+    auto lev = mblev.d_view(m);
+    auto cf_at = [&](int n0) {   // any existing neighbour across this face at another level
+      bool cf = false;
+      for (int n = n0; n < n0 + 4; ++n) {
+        if (nghbr.d_view(m,n).gid >= 0 && nghbr.d_view(m,n).lev != lev) { cf = true; }
+      }
+      return cf;
+    };
+    auto face = [&](Real d, Real b, bool on_mb, int n0) {
+      rbm = fmax(rbm, fabs(b));
+      rea = fmax(rea, fabs(d));
+      if (on_mb) {
+        rem = fmax(rem, fabs(d));
+        if (cf_at(n0)) { rec = fmax(rec, fabs(d)); }
+      }
+    };
+    for (int s = 0; s < 2; ++s) {
+      int ii = i + s;
+      if (s == 1 && i != ie) { break; }
+      Real c1 = (a3(m,k,j+1,ii) - a3(m,k,j,ii))/dx2 - (a2(m,k+1,j,ii) - a2(m,k,j,ii))/dx3;
+      face(c1 - b0.x1f(m,k,j,ii), b0.x1f(m,k,j,ii), ii == is || ii == ie+1,
+           (ii == is) ? 0 : 4);
+    }
+    for (int s = 0; s < 2; ++s) {
+      int jj = j + s;
+      if (s == 1 && j != je) { break; }
+      Real c2 = (a1(m,k+1,jj,i) - a1(m,k,jj,i))/dx3 - (a3(m,k,jj,i+1) - a3(m,k,jj,i))/dx1;
+      face(c2 - b0.x2f(m,k,jj,i), b0.x2f(m,k,jj,i), jj == js || jj == je+1,
+           (jj == js) ? 8 : 12);
+    }
+    for (int s = 0; s < 2; ++s) {
+      int kk = k + s;
+      if (s == 1 && k != ke) { break; }
+      Real c3 = (a2(m,kk,j,i+1) - a2(m,kk,j,i))/dx1 - (a1(m,kk,j+1,i) - a1(m,kk,j,i))/dx2;
+      face(c3 - b0.x3f(m,kk,j,i), b0.x3f(m,kk,j,i), kk == ks || kk == ke+1,
+           (kk == ks) ? 24 : 28);
+    }
+  }, Kokkos::Sum<Real>(h_all), Kokkos::Sum<Real>(h_box), Kokkos::Sum<Real>(c_cur),
+     Kokkos::Sum<Real>(dh_emf), Kokkos::Sum<Real>(dh_ideal), Kokkos::Sum<Real>(e_box),
+     Kokkos::Max<Real>(amax), Kokkos::Max<Real>(bmax), Kokkos::Max<Real>(err_all),
+     Kokkos::Max<Real>(err_mb), Kokkos::Max<Real>(err_cf));
+  Real sums[6] = {h_all, h_box, c_cur, dh_emf, dh_ideal, e_box};
+  Real maxs[5] = {amax, bmax, err_all, err_mb, err_cf};
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, sums, 6, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, maxs, 5, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  Real bm = (maxs[1] > 0.0) ? maxs[1] : 1.0;
+  out[0] = sums[0]; out[1] = sums[1]; out[2] = sums[2]; out[3] = sums[3];
+  out[4] = sums[4]; out[5] = maxs[0]; out[6] = sums[5];
+  out[7] = maxs[2]/bm; out[8] = maxs[3]/bm; out[9] = maxs[4]/bm;
+}
 
 void GrassWebDiagnostics(Mesh *pm) {
   MeshBlockPack *pmbp = pm->pmb_pack;
@@ -1669,6 +1903,11 @@ void GrassWebDiagnostics(Mesh *pm) {
   MPI_Allreduce(MPI_IN_PLACE, shell_h.data(), static_cast<int>(shell_h.size()),
                 MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
+  // helicity block (columns 29-38) when <mhd> evolve_avec is on
+  const bool hel_on = pmbp->pmhd->evolve_avec;
+  Real hel[10];
+  for (int q = 0; q < 10; ++q) { hel[q] = std::numeric_limits<Real>::quiet_NaN(); }
+  if (hel_on && pmbp->pmhd->avec_valid) { GrassHelicityDiag(pm, hel); }
   if (global_variable::my_rank != 0) { return; }
 
   // ---- host post-processing of the bins (rank 0) ----
@@ -1774,18 +2013,24 @@ void GrassWebDiagnostics(Mesh *pm) {
                    "5:E_out 6:Bbar_varpi_rms 7:bbar_phi_rms 8:alpha 9:Bbar_R_rms 10:alpha_R "
                    "11:W1_2d 12:W2_2d 13:W3_2d 14:W3_eq 15:mono_2d 16:tqM_2km 17:tqM_4km "
                    "18:tqM_6km 19:tqR_2km 20:tqR_4km 21:tqR_6km 22:C1 23:C2 24:rho_c 25:Mb "
-                   "26:tqM0_2km 27:tqM0_4km 28:tqM0_6km (m=0 Maxwell)\n",
-                   rho_lo, rho_hi);
+                   "26:tqM0_2km 27:tqM0_4km 28:tqM0_6km (m=0 Maxwell)%s\n",
+                   rho_lo, rho_hi, hel_on ? " 29:H 30:H_box 31:C_cur 32:dHdt_emf "
+                   "33:dHdt_ideal 34:Amax 35:E_mag_box 36:curlA_err_all 37:curlA_err_mb "
+                   "38:curlA_err_cf (helicity, R-051; box half-width hel_box_half)" : "");
       grass_diag.header_done = true;
     }
     std::fprintf(fp, "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
                  "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
-                 "%.10e %.10e %.10e %.10e %.10e\n", pm->time, e_mag, e_m0, e_bins - e_m0, sums_h(1), rms_bv,
+                 "%.10e %.10e %.10e %.10e %.10e", pm->time, e_mag, e_m0, e_bins - e_m0, sums_h(1), rms_bv,
                  rms_bp, (rms_bv > 0.0) ? rms_bp/rms_bv : 0.0, rms_br,
                  (rms_br > 0.0) ? rms_bp/rms_br : 0.0, w1, w2, w3, w3eq,
                  (mono_all > 0.0) ? mono_bad/mono_all : 0.0, sums_h(2), sums_h(3), sums_h(4),
                  sums_h(5), sums_h(6), sums_h(7), c1, c2, rho_c, sums_h(15), tq_m0[0],
                  tq_m0[1], tq_m0[2]);
+    if (hel_on) {
+      for (int q = 0; q < 10; ++q) { std::fprintf(fp, " %.10e", hel[q]); }
+    }
+    std::fprintf(fp, "\n");
     std::fclose(fp);
   }
 
@@ -1850,6 +2095,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     grass_diag.rmax = pin->GetOrAddReal("problem", "web_diag_rmax", 9.0);
     grass_diag.map_dt = pin->GetOrAddReal("problem", "web_map_dt", 0.0);
     grass_diag.basename = pin->GetString("job", "basename");
+    grass_diag.hel_box = pin->GetOrAddReal("problem", "hel_box_half", 10.0);
   }
 
   // No restart-path special-casing: this pgen only ever sets initial data once --

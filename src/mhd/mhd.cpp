@@ -39,6 +39,8 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     b1("B_fc1",1,1,1,1),
     uflx("uflx",1,1,1,1,1),
     efld("efld",1,1,1,1),
+    avec("avec",1,1,1,1),
+    avec1("avec1",1,1,1,1),
     e3x1("e3x1",1,1,1,1),
     e2x1("e2x1",1,1,1,1),
     e1x2("e1x2",1,1,1,1),
@@ -344,6 +346,23 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
       Kokkos::realloc(efld.x1e, nmb, ncells3+1, ncells2+1, ncells1);
       Kokkos::realloc(efld.x2e, nmb, ncells3+1, ncells2, ncells1+1);
       Kokkos::realloc(efld.x3e, nmb, ncells3, ncells2+1, ncells1+1);
+
+      // optional edge vector potential for the helicity diagnostic (R-051)
+      evolve_avec = pin->GetOrAddBoolean("mhd","evolve_avec",false);
+      if (evolve_avec) {
+        if (pmy_pack->pmesh->adaptive) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<mhd> evolve_avec needs a static mesh: AMR would "
+                    << "require a prolongation of avec consistent with b0" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+        Kokkos::realloc(avec.x1e, nmb, ncells3+1, ncells2+1, ncells1);
+        Kokkos::realloc(avec.x2e, nmb, ncells3+1, ncells2, ncells1+1);
+        Kokkos::realloc(avec.x3e, nmb, ncells3, ncells2+1, ncells1+1);
+        Kokkos::realloc(avec1.x1e, nmb, ncells3+1, ncells2+1, ncells1);
+        Kokkos::realloc(avec1.x2e, nmb, ncells3+1, ncells2, ncells1+1);
+        Kokkos::realloc(avec1.x3e, nmb, ncells3, ncells2+1, ncells1+1);
+      }
 
       // allocate scratch arrays for face- and cell-centered E used in CornerE
       Kokkos::realloc(e3x1, nmb, ncells3, ncells2, ncells1);

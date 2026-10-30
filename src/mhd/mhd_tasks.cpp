@@ -165,6 +165,11 @@ TaskStatus MHD::CopyCons(Driver *pdrive, int stage) {
     Kokkos::deep_copy(DevExeSpace(), b1.x1f, b0.x1f);
     Kokkos::deep_copy(DevExeSpace(), b1.x2f, b0.x2f);
     Kokkos::deep_copy(DevExeSpace(), b1.x3f, b0.x3f);
+    if (evolve_avec) {
+      Kokkos::deep_copy(DevExeSpace(), avec1.x1e, avec.x1e);
+      Kokkos::deep_copy(DevExeSpace(), avec1.x2e, avec.x2e);
+      Kokkos::deep_copy(DevExeSpace(), avec1.x3e, avec.x3e);
+    }
   }
   return TaskStatus::complete;
 }

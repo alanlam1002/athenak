@@ -123,6 +123,18 @@ void RestartOutput::LoadOutputData(Mesh *pm) {
                       Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
   }
 
+  if (pmhd != nullptr && pmhd->evolve_avec) {
+    Kokkos::realloc(outavec1, nmb, nout3+1, nout2+1, nout1);
+    Kokkos::deep_copy(outavec1, Kokkos::subview(pmhd->avec.x1e, std::make_pair(0,nmb),
+                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::realloc(outavec2, nmb, nout3+1, nout2, nout1+1);
+    Kokkos::deep_copy(outavec2, Kokkos::subview(pmhd->avec.x2e, std::make_pair(0,nmb),
+                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::realloc(outavec3, nmb, nout3, nout2+1, nout1+1);
+    Kokkos::deep_copy(outavec3, Kokkos::subview(pmhd->avec.x3e, std::make_pair(0,nmb),
+                      Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+  }
+
   // calculate max/min number of MeshBlocks across all ranks
   noutmbs_max = pm->nmb_eachrank[0];
   noutmbs_min = pm->nmb_eachrank[0];
@@ -289,6 +301,12 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     data_size += nout1*nout2*nout3*nz4c*sizeof(Real);   // z4c u0
   } else if (padm != nullptr) {
     data_size += nout1*nout2*nout3*nadm*sizeof(Real);   // adm u_adm
+  }
+  const bool write_avec = (pmhd != nullptr && pmhd->evolve_avec);
+  if (write_avec) {
+    data_size += nout1*(nout2+1)*(nout3+1)*sizeof(Real);  // mhd avec.x1e
+    data_size += (nout1+1)*nout2*(nout3+1)*sizeof(Real);  // mhd avec.x2e
+    data_size += (nout1+1)*(nout2+1)*nout3*sizeof(Real);  // mhd avec.x3e
   }
   if (global_variable::my_rank == 0 || single_file_per_rank) {
     resfile.Write_any_type(&(data_size), sizeof(IOWrapperSizeT), "byte",
@@ -620,6 +638,36 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       }
     }
     offset_myrank += nout1*nout2*nout3*nadm*sizeof(Real); // adm u_adm
+    myoffset = offset_myrank;
+  }
+
+  if (write_avec) {
+    for (int m=0;  m<noutmbs_max; ++m) {
+      if (m >= pm->nmb_thisrank && m >= noutmbs_min) { continue; }
+      IOWrapperSizeT off = myoffset;
+      HostArray4D<Real> *arrs[3] = {&outavec1, &outavec2, &outavec3};
+      for (int c = 0; c < 3; ++c) {
+        auto ptr = Kokkos::subview(*arrs[c], m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+        size_t cnt = ptr.size();
+        // every rank has a MB to write: collective write; otherwise non-collective
+        size_t nw = (m < noutmbs_min)
+            ? resfile.Write_any_type_at_all(ptr.data(), cnt, off, "Real",
+                                            single_file_per_rank)
+            : resfile.Write_any_type_at(ptr.data(), cnt, off, "Real",
+                                        single_file_per_rank);
+        if (nw != cnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "avec data not written correctly to rst file, "
+                    << "restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        off += cnt*sizeof(Real);
+      }
+      myoffset += data_size;
+    }
+    offset_myrank += nout1*(nout2+1)*(nout3+1)*sizeof(Real);  // mhd avec.x1e
+    offset_myrank += (nout1+1)*nout2*(nout3+1)*sizeof(Real);  // mhd avec.x2e
+    offset_myrank += (nout1+1)*(nout2+1)*nout3*sizeof(Real);  // mhd avec.x3e
     myoffset = offset_myrank;
   }
 

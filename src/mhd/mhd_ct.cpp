@@ -76,6 +76,27 @@ TaskStatus MHD::CT(Driver *pdriver, int stage) {
     }
   });
 
+  //---- edge vector potential (helicity diagnostic, <mhd> evolve_avec): the same
+  // stage-weighted update with the same (already flux-corrected) edge EMFs, so that
+  // curl(avec) tracks b0 exactly; separate kernels keep the B update above unchanged
+  if (evolve_avec) {
+    auto a1 = avec.x1e, a1_old = avec1.x1e;
+    auto a2 = avec.x2e, a2_old = avec1.x2e;
+    auto a3 = avec.x3e, a3_old = avec1.x3e;
+    par_for("CT-a1", DevExeSpace(), 0, nmb1, ks, ke+1, js, je+1, is, ie,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      a1(m,k,j,i) = gam0*a1(m,k,j,i) + gam1*a1_old(m,k,j,i) - beta_dt*e1(m,k,j,i);
+    });
+    par_for("CT-a2", DevExeSpace(), 0, nmb1, ks, ke+1, js, je, is, ie+1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      a2(m,k,j,i) = gam0*a2(m,k,j,i) + gam1*a2_old(m,k,j,i) - beta_dt*e2(m,k,j,i);
+    });
+    par_for("CT-a3", DevExeSpace(), 0, nmb1, ks, ke, js, je+1, is, ie+1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      a3(m,k,j,i) = gam0*a3(m,k,j,i) + gam1*a3_old(m,k,j,i) - beta_dt*e3(m,k,j,i);
+    });
+  }
+
   return TaskStatus::complete;
 }
 } // namespace mhd

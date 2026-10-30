@@ -127,6 +127,13 @@ class MHD {
   DvceFaceFld4D<Real> b1;     // face-centered magnetic fields, second register
   DvceFaceFld5D<Real> uflx;   // fluxes of conserved quantities on cell faces
   DvceEdgeFld4D<Real> efld;   // edge-centered electric fields (fluxes of B)
+  // Optional edge vector potential evolved alongside b0 for the magnetic-helicity
+  // diagnostic (<mhd> evolve_avec, R-051): CT is equivalent to A <- A - dt*efld in the
+  // Weyl gauge, so curl(avec) = b0 to round-off when avec(t=0) built b0. Diagnostic only.
+  bool evolve_avec = false;
+  bool avec_valid = false;    // false if a restart file carried no avec
+  DvceEdgeFld4D<Real> avec;   // edge-centered vector potential (densitized-B convention)
+  DvceEdgeFld4D<Real> avec1;  // second register (copy at the start of the step)
   // temporary variables used to store face-centered electric fields returned by RS
   DvceArray4D<Real> e3x1, e2x1;
   DvceArray4D<Real> e1x2, e3x2;

@@ -30,6 +30,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "z4c/tmunu.hpp"
+#include "cfc/cfc.hpp"
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
 
@@ -811,7 +812,7 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
   auto *pmhd = pmy_pack->pmhd;
   const int nw = pmhd->w0.extent_int(1);
   const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
-  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 10 : 0);
+  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 13 : 0);
 }
 
 //! the same variables as named groups (restart_state.hpp: the file's layout, so a later
@@ -825,7 +826,7 @@ std::string DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateLayout() {
   if (nflag > 0) s += ",dyngr.flag:" + std::to_string(nflag);
   s += ",dyngr.bcc0:3,dyngr.temp:1";
   if (eos.de_persist > 1) s += ",dyngr.streak:1";
-  if (KfRst()) s += ",dyngr.kfprev:10";   // killing_full arm (ii), R-174 (b)
+  if (KfRst()) s += ",dyngr.kfprev:10,dyngr.kfbres:3";   // killing_full arm (ii), R-174 (b)
   return s;
 }
 
@@ -870,6 +871,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst
   if (KfRst()) {   // kf_prev (zero before the first stage: kf_have_prev says so)
     Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 10), all, all, all),
                       Kokkos::subview(kf_prev, mb, all, all, all, all));
+    n += 10;
+    // CFC's residual shift u_beta (the moving-background chord's current end): CFC keeps only
+    // its multigrid potentials, and a restart has no solve before the first stage (driver.cpp)
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 3), all, all, all),
+                      Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all));
   }
 }
 
@@ -914,6 +920,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
   if (KfRst()) {   // a restart from before R-174 has no group: zero-filled, and kf_have_prev
     Kokkos::deep_copy(Kokkos::subview(kf_prev, mb, all, all, all, all),   // (absent) = false
                       Kokkos::subview(src, all, std::make_pair(n, n + 10), all, all, all));
+    n += 10;
+    Kokkos::deep_copy(Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
     kf_rst_loaded = true;
   }
 }

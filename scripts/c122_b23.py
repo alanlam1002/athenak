@@ -28,6 +28,9 @@ M, GAM = 1.0, 5.0/3.0
 N = 1.0/(GAM - 1.0)
 CC = 0.75*np.sqrt(3.0)*M*M
 SHELLS = [(2.0, 3.0), (3.0, 5.0), (5.0, 10.0), (10.0, 20.0), (20.0, 38.0)]
+# c157 (R-184 item 4): C122_SHELLS="a:b,c:d,..." overrides the shells (the 1/alpha0 regression's finer r_iso shells)
+if os.environ.get('C122_SHELLS'):
+    SHELLS = [tuple(float(v) for v in s.split(':')) for s in os.environ['C122_SHELLS'].split(',')]
 
 
 def chi(rho):    # areal (M = 1) -> isotropic, TrumpetArealToIso

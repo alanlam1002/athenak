@@ -1,14 +1,14 @@
 #!/bin/bash
 # R-174/R-175: killing_full arm (ii) extended + comoving killing_t1 (wip/killing-dtg), and the
 # e7ac4704 reference (wip/riemann-frame), PROBLEM dyngr_tov.
-#   build_kdtg.sh cpu|gpu new|ref|mombg [strict]   (mombg: R-178, wip/killing-mombg; cpu: serial, MPI off -- the logic gates without PVC codegen;
+#   build_kdtg.sh cpu|gpu new|ref|mombg|tb [strict]   (mombg: R-178, wip/killing-mombg; tb: R-184, wip/tau-budget; cpu: serial, MPI off -- the logic gates without PVC codegen;
 #   strict: -fp-model=precise, so the same arithmetic compiles to the same results in every kernel)
 set -e
 module load oneapi/release/2025.3.1 >/dev/null 2>&1; hash -r; module load cmake >/dev/null 2>&1
 S=/lus/flare/projects/CompactBinaryMerger/tlam/home_builds/athenak_tde
 T=/lus/flare/projects/CompactBinaryMerger/tlam/athenak_tde_worktrees
-case "$2" in new) W=$T/killing_dtg ;; ref) W=$T/riemann_frame ;; mombg) W=$T/killing_mombg ;;
-  *) echo "new|ref|mombg"; exit 1 ;; esac
+case "$2" in new) W=$T/killing_dtg ;; ref) W=$T/riemann_frame ;; mombg) W=$T/killing_mombg ;; tb) W=$T/tau_budget ;;
+  *) echo "new|ref|mombg|tb"; exit 1 ;; esac
 if [ "$1" = cpu ]; then
   B=build_cpu_pe2626_kdtg_$2${3:+_$3}${ARCH:+_${ARCH,,}}
   FPF=""; [ "${3:-}" = strict ] && FPF="-fp-model=precise"

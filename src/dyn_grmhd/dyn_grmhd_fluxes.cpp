@@ -40,6 +40,7 @@ template<class EOSPolicy, class ErrorPolicy>
 template <DynGRMHD_RSolver rsolver_method_, bool FM>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int stage) {
   eos.MetricProbe(1, stage);   // R-072 item 1 (debug; off unless the probe is set)
+  tb_stage = stage;            // <mhd> tau_budget_every (dyn_grmhd_taubudget.cpp)
   // <dyn_grmhd> metric_terms != cell: this stage's face metric (metric_faces.hpp)
   if constexpr (FM) { if (!fixed_evolution) ComputeFaceMetric(stage); }
   auto fmx1_ = fm_x1, fmx2_ = fm_x2, fmx3_ = fm_x3;

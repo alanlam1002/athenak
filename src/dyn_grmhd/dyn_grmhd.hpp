@@ -75,6 +75,11 @@ namespace dyngr {
 // (killing_full, R-165 item 4: the full-metric comoving form, weights (alpha, beta') of the CFC metric)
 enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
 
+// <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): per-cell components (tb_c), the
+// first kTbNr summed per bin (x dV); bins: star = 4 density bands x (interior, surface),
+// shells = r_iso about the hole between the kTbShell edges
+constexpr int kTbNc = 22, kTbNr = 16, kTbStarBins = 8, kTbShellBins = 12;
+
 // <mhd> killing_source_diag (R-165 item 3(a)): r_iso bins (0: r < kKdR0, kKdBins-1: r >= kKdR1,
 // geometric in between) x components (sums: dt dV x, cumulative; maxima: over the run)
 constexpr int kKdBins = 42, kKdComp = 14, kKdNSum = 8;
@@ -229,6 +234,22 @@ class DynGRMHD {
   bool KfRst() const { return energy_variable == EnergyVariable::killing_full && kf_dtg; }
   int kill_stage = 0;             // the RK stage of the current killing source call
 
+  // <mhd> tau_budget_every (R-184 items 1-4; dyn_grmhd_taubudget.cpp): the per-cell tau
+  // budget against Valencia's update from the same state, binned (density band x surface /
+  // interior, or r_iso shells), one KTB line per stage. Diagnostic only: separate kernels
+  // around the unchanged source kernels; 0 (default) allocates and runs nothing.
+  int tb_every = 0;
+  bool tb_shells = false;           // tau_budget_bins = shells (else star)
+  Real tb_rhoc = 3.24e-4, tb_rstar = 0.677, tb_tmin = -1.0e30, tb_tmax = 1.0e30;
+  int tb_stage = 0;                 // the RK stage (CalcFluxes)
+  int tb_key = -1;                  // nmb_created + nmb_deleted at the last stage-1 report
+  bool tb_regrid = false;           // a regrid since the last stage-1 report
+  DvceArray5D<Real> tb_c;           // per-cell values (interior)
+  DvceArray5D<Real> tb_fv;          // the Valencia tau face flux, per direction (copy)
+  DvceArray5D<Real> tb_u;           // sqrt(g) E, sqrt(g) S_k at cells, ghosts included
+  bool TauBudgetOn() const;         // this cycle reports (tau_budget_every, the t window)
+  void TauBudgetFaceCopy();         // KillingFaceFluxes, before the T transform
+
   // <mhd> riemann_frame = boosted (R-168, "level R"; rsolvers/hlle_frame_dyn_grmhd.hpp,
   // dyn_grmhd_riemann_frame.cpp): HLLE in the frame of U at each face. rsolver_method is
   // then hlle_frame_dyngr; the default (eulerian) leaves every kernel unchanged.
@@ -373,6 +394,13 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddKillingFullTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                            const Real dt, DvceArray5D<Real> &u0);
+  // <mhd> tau_budget_every (dyn_grmhd_taubudget.cpp): before AddKillingTerms (the tau slot
+  // snapshot; killing_full: the ADM-consistency term A; comoving t1: sqrt(g) E, S_k), and
+  // after it (the per-cell budget, binned and reported)
+  template<int NGHOST>
+  void TauBudgetPre(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                    const DvceArray5D<Real> &u0);
+  void TauBudgetPost(const DvceArray5D<Real> &w0, const Real dt, const DvceArray5D<Real> &u0);
 };
 
 // Factory function for generating DynGRMHD based on parameter input.

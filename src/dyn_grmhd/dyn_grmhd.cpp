@@ -541,6 +541,56 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     kill_diag_every = pin->GetOrAddInteger("mhd", "killing_source_diag_every", 25);
     kdiag = DvceArray2D<Real>("kdiag", kKdBins, kKdComp);
   }
+
+  // <mhd> tau_budget_every (R-184 items 1-4, user-approved 2026-10-30; diagnostics only,
+  // dyn_grmhd_taubudget.cpp). Read without GetOrAdd: an input without it is unchanged.
+  if (pin->DoesParameterExist("mhd", "tau_budget_every")) {
+    tb_every = pin->GetInteger("mhd", "tau_budget_every");
+  }
+  if (tb_every > 0) {
+    auto tneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> tau_budget_every needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto tflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    const std::string bins = pin->GetOrAddString("mhd", "tau_budget_bins", "star");
+    tneed(bins == "star" || bins == "shells", "<mhd> tau_budget_bins = star | shells");
+    tb_shells = (bins == "shells");
+    tb_rhoc = pin->GetOrAddReal("mhd", "tau_budget_rhoc", 3.24e-4);
+    tb_rstar = pin->GetOrAddReal("mhd", "tau_budget_rstar", 0.677);
+    tb_tmin = pin->GetOrAddReal("mhd", "tau_budget_tmin", -1.0e30);
+    tb_tmax = pin->GetOrAddReal("mhd", "tau_budget_tmax", 1.0e30);
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    tneed(pmy_pack->pmesh->three_d, "a 3D mesh");
+    tneed(!kill_boost && !kill_flat, "trumpet weights (not killing_weights = boost / flat)");
+    tneed(energy_variable != EnergyVariable::killing_ta, "valencia, killing_t1 or killing_full");
+    tneed(!tb_shells || tflag("puncture_enabled"), "a puncture with tau_budget_bins = shells");
+    if (energy_variable == EnergyVariable::killing_full) {
+      // A's background part: the trumpet table (built for a moving background already)
+      tneed(tflag("puncture_enabled"), "a puncture with killing_full");
+      if (ttab.n == 0) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+    }
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(tb_c, nmb, kTbNc, indcs.nx3, indcs.nx2, indcs.nx1);
+    if (energy_variable != EnergyVariable::valencia) {
+      Kokkos::realloc(tb_fv, nmb, 3, indcs.nx3 + 1, indcs.nx2 + 1, indcs.nx1 + 1);
+    }
+    if (kill_comov) {
+      Kokkos::realloc(tb_u, nmb, 4, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> tau_budget_every = " << tb_every << ", bins = " << bins
+                << ", t in [" << tb_tmin << ", " << tb_tmax << "]" << std::endl;
+    }
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -1004,6 +1054,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
               break;
     }
   }
+  // <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): diagnostic kernels around the source
+  const bool tb = !fixed_evolution && TauBudgetOn();
+  if (tb) {
+    switch (nghost) {
+      case 2: TauBudgetPre<2>(prim, bcc, rhs);
+              break;
+      case 3: TauBudgetPre<3>(prim, bcc, rhs);
+              break;
+      case 4: TauBudgetPre<4>(prim, bcc, rhs);
+              break;
+    }
+  }
   if ((energy_variable != EnergyVariable::valencia || kill_diag) && !fixed_evolution) {
     switch (nghost) {   // dyn_grmhd_killing.cpp
       case 2: AddKillingTerms<2>(prim, bcc, dt, rhs);
@@ -1014,6 +1076,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
               break;
     }
   }
+  if (tb) TauBudgetPost(prim, dt, rhs);
 }
 
 //----------------------------------------------------------------------------------------

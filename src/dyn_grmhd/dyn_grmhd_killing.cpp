@@ -117,6 +117,7 @@ void KWeights(const bool boost, const Real fv0, const Real fv1, const Real fv2,
 //! \brief the tau slot's face flux -> F_T = alpha0_f (F_tau + F_D) - beta0_f^k F_Sk - w_f F_D on
 //! every face the update reads (the interior faces, the block's boundary faces included)
 void DynGRMHD::KillingFaceFluxes() {
+  if (TauBudgetOn()) TauBudgetFaceCopy();   // R-184: Valencia's tau flux, before the transform
   if (energy_variable == EnergyVariable::killing_full) {
     // R-165 item 4: the weights at the face are the Riemann solver's face metric (cell
     // metric_terms: adm::Face?Metric, the average of the two cells, same order), so F_T is

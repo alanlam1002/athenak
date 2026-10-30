@@ -198,7 +198,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(temperature, nmb, 1, ncells3, ncells2, ncells1);
     if (pin->GetOrAddBoolean("mhd", "dual_energy_diag", false)) {
-      Kokkos::realloc(de_diag, nmb, 13, ncells3, ncells2, ncells1);
+      // <mhd> shell_counters: 13 = the flag sensor's compression theta, 14/15 = the sensor
+      // ratio and theta that the last C2P's flag came from (mass_closure.hpp)
+      const bool shc = pin->GetOrAddBoolean("mhd", "shell_counters", false);
+      Kokkos::realloc(de_diag, nmb, shc ? 16 : 13, ncells3, ncells2, ncells1);
     }
   }
   pmclose = new mclose::MassClosure(pp, pin);

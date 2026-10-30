@@ -51,6 +51,28 @@
 //! by density band (rho/rho_c, <mhd> tracer_closure_rhoc); and every item accumulated per phase
 //! (<mhd> tracer_closure_phase_t = t1,t2,t3: phases t < t1, [t1,t2), [t2,t3), >= t3). Printed
 //! per segment (YCLOSE, YCLOSE_RUN) and cumulatively per phase (YCLOSE_PH_RUN, YCLOSE_BAND_RUN).
+//! <mhd> shell_counters (default false; R-177 item 3, user-approved 2026-10-30; needs
+//! tracer_closure): the DY budget per mass shell about the remnant's centre (lines SHELL, every
+//! <mhd> shell_counters_dt), diagnostic only (reads the state). At each output the centre x_c
+//! (the D-weighted centroid of the cells with rho >= shell_counters_fc rho_max), r_H =
+//! |x_c - x_BH| (M_rem/(3 M_BH))^(1/3) (M_rem = shell_counters_mrem M*, M_BH =
+//! shell_counters_mbh, x_BH = adm bc_center) and the radii of the enclosed-mass edges m = 0,
+//! 0.01, ..., 0.20 M* (all gas within r of x_c, as scripts/c153_de_branch.py) are set and held
+//! until the next output: shells 0-19, 20 = beyond m = 0.2 inside r_H, 21 = outside r_H. Per
+//! shell, with the cycle's RK weights (as YCLOSE):
+//!   transport: -sum beta dt div F_DY dV (the fluxes MHD::RKUpdate applies), split into the
+//!     part following the mass flux, Y_up F_D (Y = DY/D of the upwind cell of each face by the
+//!     sign of F_D, in the stage's input state), and the excess F_DY - Y_up F_D (mixing);
+//!   the C2P's change by channel (YCLOSE's categories): excision + r_f, zone, floor, cold
+//!     recovery, non-dense resync (dbr 0), dense entropy/bad (dbr 1/2/3/5; a check), flagged-
+//!     dense resync (dbr 4) up and down;
+//!   counts per C2P (unweighted): flag events (dbr 4), guard releases (dbr 2), rho_sw crossings
+//!     in and out (dbr 0 <-> != 0 since the last C2P; DY of those cells after it); per flag
+//!     event the flag sensor's ratio to its threshold (de_diag 1 at the flag computation) and
+//!     the compression theta = -div v dx_min/c_s (|.|_coord, the sensor's div v), each
+//!     histogrammed with the event's DY change (RK-weighted);
+//!   the update's non-closure (sum w_s Y_s - transport), the RK rounding, and the gap between
+//!     cycles (regrid, unmask), so that R = dM_shell - sum(items) is round-off.
 
 #include <cstdint>
 #include <memory>
@@ -132,6 +154,25 @@ constexpr int kYN = kYBand*kYCat;
 constexpr int kYG = 16;         // reduced in groups of 16 sums
 constexpr int kYNG = (kYN + kYG - 1)/kYG;
 
+// shell_counters: shells, per-shell per-stage slots, histogram bins
+constexpr int kShM = 20;                 // m = 0, 0.01, ..., 0.20 M*
+constexpr int kShN = kShM + 2;           // + beyond 0.2 inside r_H, + outside r_H
+constexpr int kShH = 6;                  // histogram bins (sensor ratio; theta)
+constexpr int kShC = 8;                  // C2P channels
+enum ShSlot {
+  sMpre = 0, sMpost,                     // DY before / after the C2P
+  sX0,                                   // C2P channels (kShC)
+  sTY = sX0 + kShC, sTG,                 // transport: total; following the mass flux
+  sFlagN, sGuardN, sCrIn, sCrOut,        // counts
+  sCrInY, sCrOutY,                       // DY of the crossing cells (after the C2P)
+  sHrN, sHrY = sHrN + kShH,              // per flag event: sensor-ratio bins (count, dDY)
+  sHtN = sHrY + kShH, sHtY = sHtN + kShH,   // compression-theta bins (count, dDY)
+  sMD = sHtY + kShH,                     // rest mass D sqrt(gamma) dV after the C2P
+  kShSlot
+};
+// derived per-cycle items (after the slots in the interval sums)
+enum ShItem { qDM = kShSlot, qUpdNc, qRk, qGap, kShItem };
+
 // face sums: F_out (outer faces) and F_exc (into the excision-flux mask)
 enum FaceIdx { kFout = 0, kFexc, kNFace };
 
@@ -180,6 +221,8 @@ class MassClosure {
   // be exactly 0; the atmosphere added; the load C2P's change) and books their sum as
   // regrid_embed instead of in the restart item.
   void EmbedMark(int k);
+  // shell_counters: MHD::RKUpdate, before the stage's update (u0 = its input, uflx final)
+  void StageFlux(int stage, Real beta_dt);
 
  private:
   MeshBlockPack *pmy_pack;
@@ -200,6 +243,26 @@ class MassClosure {
   KSum yseg[kYN], ycum[kYPh][kYN], phcum[kYPh][kNItem];
   int Phase(Real t) const;
   void YStage(int stage, const DvceArray4D<Real> &cls, const DvceArray4D<Real> &c2p);
+  // shell_counters (the DY closure only)
+  bool sh_on_ = false;
+  Real sh_dt_ = 1.0, sh_mrem_ = 0.15, sh_mbh_ = 1.0, sh_fc_ = 0.01;
+  Real sh_rhfix_ = 0.0;                     // shell_counters_rh > 0: r_H fixed (no hole)
+  Real sh_tnext_ = 0.0, sh_t0_ = 0.0;       // next output; this interval's start
+  Real sh_xc_[3] = {0.0, 0.0, 0.0}, sh_rh_ = 0.0, sh_rbh_ = 0.0, sh_mtot_ = 0.0;
+  Real sh_re_[kShM + 1] = {};               // radii of the m edges
+  bool sh_have_ = false;                    // a partition is set
+  bool sh_prev_ = false;                    // sh_mprev_ holds the last cycle's end
+  int sh_ncyc_ = 0;
+  DvceArray4D<int> sh_idx_;                 // per cell: shell
+  DvceArray4D<int> sh_den_;                 // per cell: dense at the last C2P (-1 unknown)
+  Kokkos::View<int64_t*> sh_acc_;           // (M(u1), then stage x slot) x shell: Fix limbs
+  KSum sh_ms_[kShN], sh_mprev_[kShN];       // interval start; last cycle's end
+  KSum sh_it_[kShN][kShItem];               // interval sums
+  void ShellPartition(Real time);
+  void ShellIndex();
+  void ShellStage(int stage);
+  void ShellCycle(int ns, const Real *gam0, const Real *gam1, const Real *w);
+  void ShellReport(Real time);
   int every = 0;              // <mhd> mass_closure_every: per-cycle MCLOSE_CYC lines
   Real tol = 1.0e-10;         // <mhd> mass_closure_tol (in M*)
   Real mstar = 0.0;           // <mhd> mass_closure_mstar (0: the grid mass at run start)

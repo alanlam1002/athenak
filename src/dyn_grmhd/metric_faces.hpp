@@ -102,6 +102,30 @@ void TrumpetTableBackground(const DvceArray2D<Real> &d, const Real h, const Real
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void TrumpetFaceDiff
+//! \brief <dyn_grmhd> killing_momentum_bg = face_diff (R-178): the background's centred face
+//! difference along one direction, (g0(xp) - g0(xm))*idx, of alpha0, beta0^b and psi0^4, with
+//! xm, xp the cell's two faces (relative to the hole). The values are killing_t1's face
+//! weights' (dyn_grmhd_killing.cpp KillingBackground: the same table and closed-form calls)
+KOKKOS_INLINE_FUNCTION
+void TrumpetFaceDiff(const DvceArray2D<Real> &d, const Real h, const Real ih, const int n,
+                     const Real m_bh, const Real xm[3], const Real xp[3], const Real idx,
+                     Real &dal0, Real db0[3], Real &dp40) {
+  Real ps[2], al[2], be[2][3];
+  for (int s = 0; s < 2; ++s) {
+    const Real *x = s ? xp : xm;
+    const Real r = sqrt(x[0]*x[0] + x[1]*x[1] + x[2]*x[2] + 1.0e-30);
+    const Real rho = TrumpetTableRho(d, h, ih, n, r/m_bh);
+    Real A0[6], a2, dpsi0, dalpha0;
+    cfc::TrumpetBackground(m_bh, x[0], x[1], x[2], m_bh*rho, &ps[s], &al[s], be[s], A0, &a2,
+                           &dpsi0, &dalpha0);
+  }
+  dal0 = (al[1] - al[0])*idx;
+  for (int b = 0; b < 3; ++b) db0[b] = (be[1][b] - be[0][b])*idx;
+  dp40 = ((ps[1]*ps[1])*(ps[1]*ps[1]) - (ps[0]*ps[0])*(ps[0]*ps[0]))*idx;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void FaceMetricFromArrays
 //! \brief the Riemann solvers' face metric from the per-stage face arrays (direction
 //! ivx - IVX); same outputs as adm::Face1Metric etc.

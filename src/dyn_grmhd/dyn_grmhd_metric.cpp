@@ -414,6 +414,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
   }
 
   const bool wb = (metric_terms == MetricTerms::wellbalanced);
+  const bool mfd = kill_mom_fd;
   auto &fm1 = fm_x1;
   auto &fm2 = fm_x2;
   auto &fm3 = fm_x3;
@@ -448,6 +449,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
     Real dalpha_d[3] = {0.};
     Real dbeta_du[3][3] = {};
     Real dg_ddd[3][3][3] = {};
+    // the momentum rows' (killing_momentum_bg = face_diff: their own, below; else these)
+    Real dam[3] = {0.}, dbm[3][3] = {}, dgm[3][3][3] = {};
     if (wb) {
       for (int a = 0; a < ndim; a++) {
         const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
@@ -482,6 +485,38 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
           dbeta_du[a][b] = ((a == b) ? bb : 0.0) + db*xh[a]*xv[b] +
                            Dx<NGHOST>(a, idx, res, m, 2 + b, k, j, i);
           dg_ddd[a][b][b] = 4.0*p3*dpsi;
+        }
+      }
+      if (mfd) {
+        // R-178: the background part of the momentum rows' d alpha, d beta, d gamma -> the
+        // centred differences of killing_t1's face-weight values (TrumpetFaceDiff); the
+        // residual part as above (d alpha: the full minus alpha0' x^/r; d gamma: minus
+        // 4 psi0^3 psi0' x^/r); the energy row keeps dalpha_d
+        const int ic[3] = {i - is, j - js, k - ks}, nc[3] = {nx1, nx2, nx3};
+        const Real lo[3] = {sz.x1min, sz.x2min, sz.x3min};
+        const Real hi[3] = {sz.x1max, sz.x2max, sz.x3max};
+        const Real c0[3] = {cx, cy, cz};
+        const Real p03 = psi0*psi0*psi0;
+        for (int a = 0; a < ndim; a++) {
+          Real xm[3] = {x, y, z}, xp[3] = {x, y, z};
+          xm[a] = LeftEdgeX(ic[a], nc[a], lo[a], hi[a]) - c0[a];
+          xp[a] = LeftEdgeX(ic[a] + 1, nc[a], lo[a], hi[a]) - c0[a];
+          Real fa, fb[3], fg;
+          TrumpetFaceDiff(td, th, tih, nt, m_bh, xm, xp, idx[a], fa, fb, fg);
+          dam[a] = dalpha_d[a] - dal0*xh[a] + fa;
+          for (int b = 0; b < 3; b++) {
+            dbm[a][b] = fb[b] + Dx<NGHOST>(a, idx, res, m, 2 + b, k, j, i);
+            dgm[a][b][b] = dg_ddd[a][b][b] - 4.0*p03*dpsi0*xh[a] + fg;
+          }
+        }
+      }
+    }
+    if (!mfd) {
+      for (int a = 0; a < 3; a++) {
+        dam[a] = dalpha_d[a];
+        for (int b = 0; b < 3; b++) {
+          dbm[a][b] = dbeta_du[a][b];
+          for (int c = 0; c < 3; c++) dgm[a][b][c] = dg_ddd[a][b][c];
         }
       }
     }
@@ -555,11 +590,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
       dd_(m, 7, k, j, i) = src_da;
       Real srcS[3];
       for (int a = 0; a < 3; a++) {
-        srcS[a] = -E*dalpha_d[a];
+        srcS[a] = -E*dam[a];
         for (int b = 0; b < 3; b++) {
-          srcS[a] += S_d[b]*dbeta_du[a][b];
+          srcS[a] += S_d[b]*dbm[a][b];
           for (int c = 0; c < 3; c++) {
-            srcS[a] += 0.5*alpha*S_uu[b][c]*dg_ddd[a][b][c];
+            srcS[a] += 0.5*alpha*S_uu[b][c]*dgm[a][b][c];
           }
         }
       }
@@ -586,11 +621,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
     for (int a = 0; a < 3; a++) {
       for (int b = 0; b < 3; b++) {
         for (int c = 0; c < 3; c++) {
-          rhs(m,IM1+a, k, j, i) += 0.5*dt*alpha*vol*S_uu[b][c]*dg_ddd[a][b][c];
+          rhs(m,IM1+a, k, j, i) += 0.5*dt*alpha*vol*S_uu[b][c]*dgm[a][b][c];
         }
-        rhs(m, IM1+a, k, j, i) += dt*vol*S_d[b]*dbeta_du[a][b];
+        rhs(m, IM1+a, k, j, i) += dt*vol*S_d[b]*dbm[a][b];
       }
-      rhs(m, IM1+a, k, j, i) -= dt*vol*E*dalpha_d[a];
+      rhs(m, IM1+a, k, j, i) -= dt*vol*E*dam[a];
     }
 
     if (smoothing) {

@@ -160,6 +160,9 @@ class DynGRMHD {
   // Default cell: none of the members below is allocated or used.
   MetricTerms metric_terms = MetricTerms::cell;
   int face_residual_interp = 4;     // 4: (-1, 9, 9, -1)/16 of the residual; 2: the average
+  // <dyn_grmhd> killing_momentum_bg = face_diff (R-178; killing_t1 + analytic_bg): the momentum
+  // source's background derivatives -> centred differences of t1's face-weight values
+  bool kill_mom_fd = false;
   TrumpetTable ttab;
   DvceArray5D<Real> fm_res;         // the residual (delta psi, delta(alpha psi), beta_res)
   DvceArray5D<Real> fm_x1, fm_x2, fm_x3;   // the face metric per direction (kFm*)

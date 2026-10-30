@@ -280,6 +280,18 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
               << "wellbalanced)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  // <dyn_grmhd> killing_momentum_bg (R-178): cell (default: the momentum source as
+  // metric_terms gives it) or face_diff (killing_t1 + analytic_bg only, checked below)
+  if (pin->DoesParameterExist("dyn_grmhd", "killing_momentum_bg")) {
+    const std::string kmb = pin->GetString("dyn_grmhd", "killing_momentum_bg");
+    if (kmb != "cell" && kmb != "face_diff") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> killing_momentum_bg = '" << kmb << "' (cell or face_diff)"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    kill_mom_fd = (kmb == "face_diff");
+  }
   if (metric_terms != MetricTerms::cell) {
     face_residual_interp = pin->GetOrAddInteger("dyn_grmhd", "face_residual_interp", 4);
     if (face_residual_interp != 2 && face_residual_interp != 4) {
@@ -341,6 +353,13 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
               << "killing_ta or killing_full)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (kill_mom_fd && (energy_variable != EnergyVariable::killing_t1 ||
+                      metric_terms != MetricTerms::analytic_bg)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<dyn_grmhd> killing_momentum_bg = face_diff needs <mhd> energy_variable = "
+              << "killing_t1 and <dyn_grmhd> metric_terms = analytic_bg" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (energy_variable == EnergyVariable::killing_full) {
@@ -459,6 +478,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     // AddKillingTerms then takes the metric derivatives AddCoordTermsFM applied)
     need(metric_terms == MetricTerms::cell || !kill_boost,
          "<dyn_grmhd> metric_terms = cell with killing_weights = boost");
+    need(!kill_mom_fd || !(kill_boost || kill_flat),
+         "the trumpet weights with <dyn_grmhd> killing_momentum_bg = face_diff");
     need(pmy_pack->pmesh->three_d, "a 3D mesh");
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");

@@ -1500,7 +1500,10 @@ void GrassMagneticReport(ParameterInput *pin, Mesh *pm) {
 //   torque through cylinders varpi = 2, 4, 6 km, Maxwell (-alpha sqrt(gamma) b^varpi
 //   b_phi) and Reynolds (sqrt(gamma) S_phi alpha u^varpi/W = alpha sqrt(gamma) rho h
 //   u^varpi u_phi, from the conserved S_phi) parts, each int F^varpi varpi dphi dz from
-//   a one-cell shell, C1, C2 (rho0-weighted, varpi < 8 M), rho_c, Mb.
+//   a one-cell shell, C1, C2 (rho0-weighted, varpi < 8 M), rho_c, Mb, and the m=0
+//   (mean-field) part of the Maxwell torque from the same shells (C-039/R-047 3b):
+//   per z-bin of the shell (width dx_finest), -<alpha sqrt(gamma) b^varpi>_phi <b_phi>_phi,
+//   coordinate-volume averages, summed like the total; m!=0 = total - m=0.
 
 namespace {
 struct GrassDiagConfig {
@@ -1579,6 +1582,11 @@ void GrassWebDiagnostics(Mesh *pm) {
   // (varpi < 8 M), 13 rho_c sum, 14 rho_c count, 15 Mb
   constexpr int kS = 16;
   DvceArray1D<Real> sums("grass_diag_sums", kS);
+  // shell z-bins for the m=0 Maxwell torque: per cylinder, per z-bin of width dxf over the
+  // full mesh z-extent: 0 sum fac, 1 sum fac*alpha*sqrt(gamma)*b^varpi, 2 sum fac*b_phi
+  const Real zs0 = pm->mesh_size.x3min;
+  const int nzs = static_cast<int>(std::ceil((pm->mesh_size.x3max - zs0)/dxf));
+  DvceArray3D<Real> shell("grass_diag_shell", 3, nzs, 3);
   par_for("grass_diag_sums", DevExeSpace(), 0, pmbp->nmb_thispack-1, ks, ks+nx3-1,
           js, js+nx2-1, is, is+nx1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -1635,6 +1643,12 @@ void GrassWebDiagnostics(Mesh *pm) {
       Real b_phi = (x*(Byd + ab0*uyd) - y*(Bxd + ab0*uxd))/wl;   // b_phi
       Real fac = vol/dxf;                        // int F^varpi varpi dphi dz from the shell
       Kokkos::atomic_add(&sums(2 + c), -fac*a*sd*b_var*b_phi);
+      int izs = static_cast<int>(Kokkos::floor((z - zs0)/dxf));
+      if (izs >= 0 && izs < nzs) {
+        Kokkos::atomic_add(&shell(c,izs,0), fac);
+        Kokkos::atomic_add(&shell(c,izs,1), fac*a*sd*b_var);
+        Kokkos::atomic_add(&shell(c,izs,2), fac*b_phi);
+      }
       // Reynolds: alpha sqrt(gamma) rho h u^varpi u_phi = (sqrt(gamma) S_phi)(alpha v^varpi
       // - beta^varpi), S_phi from the conserved momentum (its small Poynting part included)
       Real s_phi = x*u0(m,IM2,k,j,i) - y*u0(m,IM1,k,j,i);
@@ -1646,10 +1660,14 @@ void GrassWebDiagnostics(Mesh *pm) {
   Kokkos::deep_copy(bins_h, bins);
   auto sums_h = Kokkos::create_mirror_view(sums);
   Kokkos::deep_copy(sums_h, sums);
+  auto shell_h = Kokkos::create_mirror_view(shell);
+  Kokkos::deep_copy(shell_h, shell);
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, bins_h.data(), static_cast<int>(bins_h.size()),
                 MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
   MPI_Allreduce(MPI_IN_PLACE, sums_h.data(), kS, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, shell_h.data(), static_cast<int>(shell_h.size()),
+                MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
   if (global_variable::my_rank != 0) { return; }
 
@@ -1741,6 +1759,12 @@ void GrassWebDiagnostics(Mesh *pm) {
   Real c1 = (sums_h(12) > 0.0) ? std::hypot(sums_h(8), sums_h(9))/sums_h(12) : 0.0;
   Real c2 = (sums_h(12) > 0.0) ? std::hypot(sums_h(10), sums_h(11))/sums_h(12) : 0.0;
   Real rho_c = (sums_h(14) > 0.0) ? sums_h(13)/sums_h(14) : 0.0;
+  Real tq_m0[3] = {0.0, 0.0, 0.0};
+  for (int c = 0; c < 3; ++c) {
+    for (int iz = 0; iz < nzs; ++iz) {
+      if (shell_h(c,iz,0) > 0.0) { tq_m0[c] -= shell_h(c,iz,1)*shell_h(c,iz,2)/shell_h(c,iz,0); }
+    }
+  }
   std::string fname = grass_diag.basename + ".webdiag.txt";
   FILE *fp = std::fopen(fname.c_str(), "a");
   if (fp != nullptr) {
@@ -1749,17 +1773,19 @@ void GrassWebDiagnostics(Mesh *pm) {
                    "field; window rho0 in [%.6e, %.6e] code\n# 1:t 2:E_mag 3:E_m0 4:E_mnz "
                    "5:E_out 6:Bbar_varpi_rms 7:bbar_phi_rms 8:alpha 9:Bbar_R_rms 10:alpha_R "
                    "11:W1_2d 12:W2_2d 13:W3_2d 14:W3_eq 15:mono_2d 16:tqM_2km 17:tqM_4km "
-                   "18:tqM_6km 19:tqR_2km 20:tqR_4km 21:tqR_6km 22:C1 23:C2 24:rho_c 25:Mb\n",
+                   "18:tqM_6km 19:tqR_2km 20:tqR_4km 21:tqR_6km 22:C1 23:C2 24:rho_c 25:Mb "
+                   "26:tqM0_2km 27:tqM0_4km 28:tqM0_6km (m=0 Maxwell)\n",
                    rho_lo, rho_hi);
       grass_diag.header_done = true;
     }
     std::fprintf(fp, "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
                  "%.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e %.10e "
-                 "%.10e %.10e\n", pm->time, e_mag, e_m0, e_bins - e_m0, sums_h(1), rms_bv,
+                 "%.10e %.10e %.10e %.10e %.10e\n", pm->time, e_mag, e_m0, e_bins - e_m0, sums_h(1), rms_bv,
                  rms_bp, (rms_bv > 0.0) ? rms_bp/rms_bv : 0.0, rms_br,
                  (rms_br > 0.0) ? rms_bp/rms_br : 0.0, w1, w2, w3, w3eq,
                  (mono_all > 0.0) ? mono_bad/mono_all : 0.0, sums_h(2), sums_h(3), sums_h(4),
-                 sums_h(5), sums_h(6), sums_h(7), c1, c2, rho_c, sums_h(15));
+                 sums_h(5), sums_h(6), sums_h(7), c1, c2, rho_c, sums_h(15), tq_m0[0],
+                 tq_m0[1], tq_m0[2]);
     std::fclose(fp);
   }
 

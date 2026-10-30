@@ -9,7 +9,8 @@
 #PBS -o /lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc/c150_rframe/tc150.out
 #PBS -e /lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc/c150_rframe/tc150.err
 # c150 (R-168, user-approved 2026-10-30): level R (riemann_frame) tests on wip/riemann-frame, plain debug.
-# An arm named GATE runs u1_gate.py (U1: boosted/eulerian vs default on ISO_A); if it fails, the slot stops.
+# An arm named GATE runs u1_gate.py, GATE_<name> runs gate_<name>.py; if a gate fails, the slot stops.
+# WAIT_<gate> waits for a gate of the other slot (PASS_/FAILED_<gate>.<jobid> markers).
 # SLOT1 / SLOT2 (qsub -v): space-separated arm lists, one per node (12 ranks); each slot runs its arms in turn, each
 # resuming from its latest restart (LC_ALL=C) or t = 0, with -t from the job's remaining walltime.
 # X (optional, qsub -v): the binary (default: the killing build copied here).
@@ -30,10 +31,17 @@ slot() {   # node-line arms...
   local n=$1; shift
   for a in "$@"; do
     local d=$E/$a r left
-    if [ "$a" = GATE ]; then
-      python3 $E/u1_gate.py $E >> $E/runs.log 2>&1 || { echo "GATE failed: slot stops $(date -u +%FT%TZ)" >> $E/runs.log; return; }
-      continue
-    fi
+    case $a in GATE*)   # GATE: u1_gate.py; GATE_<name>: gate_<name>.py; a failed gate stops the slot
+      local gs=$E/u1_gate.py; [ "$a" != GATE ] && gs=$E/gate_${a#GATE_}.py
+      python3 $gs $E >> $E/runs.log 2>&1 || { echo "$a failed: slot stops $(date -u +%FT%TZ)" >> $E/runs.log; touch $E/FAILED_$a.$PBS_JOBID; return; }
+      touch $E/PASS_$a.$PBS_JOBID
+      continue ;;
+    WAIT_*)   # WAIT_<gate>: wait (<= 20 min) for the other slot's gate of this job; stop if it failed
+      local gw=${a#WAIT_} n=0
+      while [ ! -e $E/PASS_$gw.$PBS_JOBID ] && [ ! -e $E/FAILED_$gw.$PBS_JOBID ] && [ $n -lt 120 ]; do sleep 10; n=$((n + 1)); done
+      [ -e $E/PASS_$gw.$PBS_JOBID ] || { echo "$a: no pass, slot stops $(date -u +%FT%TZ)" >> $E/runs.log; return; }
+      continue ;;
+    esac
     [ -e $E/DONE_$a ] && continue
     left=$(( 3420 - ($(date +%s) - T0) ))   # 57 min of the hour
     [ $left -lt 300 ] && { echo "$a deferred (no time left) $PBS_JOBID" >> $E/runs.log; continue; }

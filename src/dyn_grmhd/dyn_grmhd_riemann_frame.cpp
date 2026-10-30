@@ -7,11 +7,13 @@
 //! \brief <mhd> riemann_frame = boosted (R-168, user-approved 2026-10-30; "level R",
 //! research/notes/reference_congruence §8.2), the parts outside the Riemann solver
 //! (rsolvers/hlle_frame_dyn_grmhd.hpp):
-//!   - riemann_frame_recon = R2: before each direction's reconstruction, w0's velocity is
-//!     replaced by its frame components u^(a) = e^(a)_mu u^mu relative to that direction's
-//!     tetrad at the cell centre (the cell metric, ghosts included); the solver reads the
-//!     reconstructed u^(a) as components in the face tetrad. w0's velocity is saved first and
-//!     restored bitwise after the last sweep, so FOFC, the C2P and everything else see w0;
+//!   - riemann_frame_recon = R2 (R-168 addendum): before the sweeps, w0's velocity is
+//!     replaced by its components u^(i) = e^(i)_mu u^mu in the reference tetrad at the cell
+//!     centre (U, then Gram-Schmidt of d_x, d_y, d_z in the cell metric, ghosts included; the
+//!     same for every face direction); the solver reads the reconstructed u^(i) in the face's
+//!     reference tetrad and rotates into its Riemann tetrad. w0's velocity is saved first and
+//!     restored bitwise after the last sweep, so FOFC (the R1 route), the C2P and everything
+//!     else see w0;
 //!   - the checks: the magnetic field must vanish (the frame solver is hydrodynamic), and a
 //!     face where grid_rest U is not timelike (alpha^2 <= beta_i beta^i) stops the run;
 //!   - the CFL (<time> gr_dt): the coordinate speed k^j/k^t of k = U + lambda e_(1), lambda the
@@ -63,32 +65,32 @@ void CellMetric(const adm::ADM::ADM_vars &adm, const int m, const int k, const i
 
 //----------------------------------------------------------------------------------------
 //! \fn void DynGRMHD::RFrameCellVelocities
-//! \brief R2: w0(IVX..IVZ) <- u^(1..3) of direction dir's cell-centre tetrad, every cell
-//! (ghosts included); the first direction saves the velocity, the later ones read the save
+//! \brief R2: w0(IVX..IVZ) <- u^(1..3) in the cell-centre reference tetrad, every cell
+//! (ghosts included), the velocity saved first; called once per stage (dir unused)
 void DynGRMHD::RFrameCellVelocities(int dir) {
   auto &w0 = pmy_pack->pmhd->w0;
   auto &sv = rf_vsave;
   auto &adm = pmy_pack->padm->adm;
   auto &err = rf_err;
-  const bool ugrid = rf_ugrid, first = (dir == 0);
+  const bool ugrid = rf_ugrid;
   const int nmb = pmy_pack->nmb_thispack;
   par_for("rframe_r2_fwd", DevExeSpace(), 0, nmb-1, 0, w0.extent_int(2)-1,
           0, w0.extent_int(3)-1, 0, w0.extent_int(4)-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    if (first) {
-      for (int a = 0; a < 3; ++a) sv(m, a, k, j, i) = w0(m, IVX + a, k, j, i);
-    }
+    for (int a = 0; a < 3; ++a) sv(m, a, k, j, i) = w0(m, IVX + a, k, j, i);
     Real g3d[NSPMETRIC], beta_u[3], alpha;
     CellMetric(adm, m, k, j, i, g3d, beta_u, alpha);
     FrameFace f;
-    if (!BuildFrameFace(g3d, beta_u, alpha, dir, ugrid, f)) Kokkos::atomic_add(&err(0), 1);
+    if (!BuildFrameFace(g3d, beta_u, alpha, 0, ugrid, f)) Kokkos::atomic_add(&err(0), 1);
     Real prim[NPRIM];
     for (int a = 0; a < 3; ++a) prim[PVX + a] = sv(m, a, k, j, i);
     Real u[4];
     FourVelocity(prim, g3d, beta_u, alpha, u);
-    for (int a = 1; a < 4; ++a) {
+    for (int a = 1; a < 4; ++a) {   // e^(i)_mu = g_{mu nu} R[i][nu] (spatial)
       Real r = 0.0;
-      for (int mu = 0; mu < 4; ++mu) r += f.D[a][mu]*u[mu];
+      for (int mu = 0; mu < 4; ++mu) {
+        for (int nu = 0; nu < 4; ++nu) r += f.g[mu][nu]*f.R[a][nu]*u[mu];
+      }
       w0(m, IVX + a - 1, k, j, i) = r;
     }
   });

@@ -155,6 +155,11 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     const std::string rr = pin->DoesParameterExist("mhd", "riemann_frame_recon") ?
                            pin->GetString("mhd", "riemann_frame_recon") : "R1";
     need(ru == "eulerian" || ru == "grid_rest", "riemann_frame_U = eulerian | grid_rest");
+    // riemann_frame_solver (R-170 item 3): hlle (default) | hllc; FOFC's fallback stays hlle
+    const std::string rs = pin->DoesParameterExist("mhd", "riemann_frame_solver") ?
+                           pin->GetString("mhd", "riemann_frame_solver") : "hlle";
+    need(rs == "hlle" || rs == "hllc", "riemann_frame_solver = hlle | hllc");
+    rf_hllc = (rs == "hllc");
     need(rr == "R1" || rr == "R2", "riemann_frame_recon = R1 | R2");
     rf_on = true;
     rf_ugrid = (ru == "grid_rest");
@@ -178,9 +183,17 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
     if (global_variable::my_rank == 0) {
       std::cout << "<mhd> riemann_frame = boosted, riemann_frame_U = " << ru
-                << ", riemann_frame_recon = " << rr << std::endl;
+                << ", riemann_frame_recon = " << rr << ", riemann_frame_solver = " << rs
+                << std::endl;
     }
-  } else if (rfr != "eulerian") {
+  } else if (pin->DoesParameterExist("mhd", "riemann_frame_solver") ||
+             pin->DoesParameterExist("mhd", "riemann_frame_U") ||
+             pin->DoesParameterExist("mhd", "riemann_frame_recon")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> riemann_frame_solver/_U/_recon need riemann_frame = boosted" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (rfr != "eulerian" && rfr != "boosted") {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<mhd> riemann_frame = '" << rfr << "' (eulerian or boosted)" << std::endl;
     std::exit(EXIT_FAILURE);

@@ -202,10 +202,11 @@ class DynGRMHD {
   bool rf_on = false;               // riemann_frame = boosted
   bool rf_ugrid = false;            // riemann_frame_U = grid_rest (else eulerian, U = n)
   bool rf_r2 = false;               // riemann_frame_recon = R2 (else R1)
+  bool rf_hllc = false;             // riemann_frame_solver = hllc (else hlle; FOFC: hlle)
   bool rf_bchecked = false;         // the B = 0 check done
   DvceArray1D<int> rf_err;          // (0): faces where grid_rest U is not timelike
   DvceArray5D<Real> rf_vsave;       // R2: w0's velocity during the sweeps
-  void RFrameCellVelocities(int dir);   // R2: w0 velocity -> u^(a) of dir's cell tetrad
+  void RFrameCellVelocities(int dir);   // R2: w0 velocity -> u^(i), cell reference tetrad
   void RFrameRestoreVelocities();       // R2: w0 velocity back (bitwise)
   void RFrameStageCheck(bool after);    // before: B = 0 (once), err reset; after: err
 

@@ -406,7 +406,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       need(!flag("puncture_moving"), "the BH frame (<cfc> puncture_moving = false)");
       need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
     }
-    need(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    // R-171: metric_terms = analytic_bg | wellbalanced allowed (the analytic background at faces;
+    // AddKillingTerms then takes the metric derivatives AddCoordTermsFM applied)
+    need(metric_terms == MetricTerms::cell || !kill_boost,
+         "<dyn_grmhd> metric_terms = cell with killing_weights = boost");
     need(pmy_pack->pmesh->three_d, "a 3D mesh");
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");
@@ -446,7 +449,6 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     dneed(!kill_boost, "trumpet weights (not killing_weights = boost)");
     dneed(dflag("puncture_enabled") && !dflag("puncture_moving"),
           "the BH frame (<cfc> puncture_enabled = true, puncture_moving = false)");
-    dneed(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     dneed(pmy_pack->pmesh->three_d && indcs.ng >= 2, "a 3D mesh with nghost >= 2");
     if (energy_variable == EnergyVariable::valencia) {
@@ -897,15 +899,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
       case 4: AddCoordTermsFM<4>(prim, bcc, dt, rhs);
               break;
     }
-    return;
-  }
-  switch (nghost) {
-    case 2: AddCoordTermsEOS<2>(prim, bcc, dt, rhs);
-            break;
-    case 3: AddCoordTermsEOS<3>(prim, bcc, dt, rhs);
-            break;
-    case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
-            break;
+  } else {
+    switch (nghost) {
+      case 2: AddCoordTermsEOS<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddCoordTermsEOS<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
+              break;
+    }
   }
   if ((energy_variable != EnergyVariable::valencia || kill_diag) && !fixed_evolution) {
     switch (nghost) {   // dyn_grmhd_killing.cpp

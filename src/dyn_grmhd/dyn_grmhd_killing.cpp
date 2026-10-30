@@ -436,7 +436,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       }
     }
 
-    // tau's Valencia source (applied by AddCoordTermsEOS) and the momentum's
+    // tau's Valencia source (applied by AddCoordTermsEOS, or AddCoordTermsFM) and the momentum's
     Real src_tau = 0.0, src_S[3];
     for (int a = 0; a < 3; a++) {
       src_S[a] = -E*dalpha_d[a];
@@ -557,6 +557,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
   const Real th = ttab.h, tih = ttab.ih;
   const int nt = ttab.n;
   auto &res = kill_res;
+  // metric_terms != cell (R-171): the applied Valencia sources are AddCoordTermsFM's, so the
+  // metric derivatives below are its (dyn_grmhd_metric.cpp:440-485), not Dx of adm
+  const bool fmode = (metric_terms != MetricTerms::cell);
+  const bool fwb = (metric_terms == MetricTerms::wellbalanced);
+  auto &fm1 = fm_x1;
+  auto &fm2 = fm_x2;
+  auto &fm3 = fm_x3;
+  auto &fres = fm_res;
   auto &fx1_ = pmy_pack->pmhd->uflx.x1f;
   auto &fx2_ = pmy_pack->pmhd->uflx.x2f;
   auto &fx3_ = pmy_pack->pmhd->uflx.x3f;
@@ -645,6 +653,48 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
       }
     }
 
+    if (fmode) {   // AddCoordTermsFM's derivatives (killing_t1/ta need a 3D mesh)
+      for (int a = 0; a < 3; a++) {
+        for (int c = 0; c < 3; c++) {
+          for (int e = 0; e < 3; ++e) dg_ddd[a][c][e] = 0.0;
+        }
+      }
+      if (fwb) {
+        for (int a = 0; a < 3; a++) {
+          const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
+          const int ip = i + (a == 0), jp = j + (a == 1), kp = k + (a == 2);
+          dalpha_d[a] = (fm(m, kFmAlpha, kp, jp, ip) - fm(m, kFmAlpha, k, j, i))*idx[a];
+          for (int b = 0; b < 3; b++) {
+            dbeta_du[a][b] = (fm(m, kFmBeta + b, kp, jp, ip) - fm(m, kFmBeta + b, k, j, i))*
+                             idx[a];
+          }
+          const Real pp = fm(m, kFmPsi, kp, jp, ip), pm = fm(m, kFmPsi, k, j, i);
+          const Real dg = ((pp*pp)*(pp*pp) - (pm*pm)*(pm*pm))*idx[a];
+          for (int b = 0; b < 3; b++) dg_ddd[a][b][b] = dg;
+        }
+      } else {
+        Real psi0f, ap0f, b0f[3], dpsi0f, dal0f, bbf, dbf;
+        TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], psi0f, ap0f, b0f,
+                               dpsi0f, dal0f, bbf, dbf);
+        const Real rf = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
+        const Real xh[3] = {xr[0]/rf, xr[1]/rf, xr[2]/rf};
+        const Real al0f = ap0f/psi0f;
+        const Real pf = sqrt(sqrt(adm.psi4(m,k,j,i)));
+        const Real p3 = pf*pf*pf;
+        for (int a = 0; a < 3; a++) {
+          const Real dpsi = dpsi0f*xh[a] + Dx<NGHOST>(a, idx, fres, m, 0, k, j, i);
+          const Real dap = (dal0f*psi0f + al0f*dpsi0f)*xh[a] +
+                           Dx<NGHOST>(a, idx, fres, m, 1, k, j, i);
+          dalpha_d[a] = (dap - alpha*dpsi)/pf;
+          for (int b = 0; b < 3; b++) {
+            dbeta_du[a][b] = ((a == b) ? bbf : 0.0) + dbf*xh[a]*xr[b] +
+                             Dx<NGHOST>(a, idx, fres, m, 2 + b, k, j, i);
+            dg_ddd[a][b][b] = 4.0*p3*dpsi;
+          }
+        }
+      }
+    }
+
     // the fluid (as AddCoordTermsEOS)
     Real prim_pt[NPRIM] = {0.0};
     prim_pt[PRH] = prim(m, IDN, k, j, i)/mb;
@@ -691,7 +741,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
       }
     }
 
-    // tau's Valencia source (applied by AddCoordTermsEOS) and the momentum's
+    // tau's Valencia source (applied by AddCoordTermsEOS, or AddCoordTermsFM) and the momentum's
     Real src_tau = 0.0, src_S[3];
     for (int a = 0; a < 3; a++) {
       src_S[a] = -E*dalpha_d[a];

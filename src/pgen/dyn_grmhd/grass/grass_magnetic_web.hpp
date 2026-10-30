@@ -42,6 +42,9 @@
 //    Psi_T(x) = mu_star * sum_p k_p * a_p * sin(k_p . x + phi_p)     (k_p = |k_p|)
 //    d_j Psi_P = sum_p a_p * k_{p,j} * cos(k_p . x + phi_p)
 //
+//  (web_helicity_mode = zero multiplies each toroidal term by a sign s_p = +-1 chosen so
+//  that the net helicity vanishes, per log-k bin and in total; see BuildMagneticField.)
+//
 //  Psi_T reuses the SAME per-mode amplitudes/phases as Psi_P, only scaled by
 //  mu_star*k_p -- this is what makes helicity one-signed at every scale and
 //  collapses the toroidal/poloidal energy ratio to the single parameter
@@ -110,6 +113,10 @@ struct WebModeTable {
   Real k[kMaxModes];                                  // |k_p|
   Real amp[kMaxModes];                                // a_p = zeta_p * k_p^(-alpha)
   Real phase[kMaxModes];                              // phi_p
+  // toroidal sign s_p (web_helicity_mode): +1 for every mode in the default coherent web;
+  // web_helicity_mode = zero assigns +-1 in dyngr_grass.cpp's BuildMagneticField so that
+  // the net helicity vanishes (Psi_T -> mu_star sum_p s_p k_p a_p sin(...), R-052)
+  Real sign[kMaxModes];
 };
 
 //----------------------------------------------------------------------------------------
@@ -157,6 +164,7 @@ inline void GenerateWebModeTable(ParameterInput *pin, WebModeTable *table) {
     table->k[p] = k_p;
     table->amp[p] = amp;
     table->phase[p] = phase;
+    table->sign[p] = 1.0;
   }
 }
 
@@ -179,7 +187,8 @@ inline Real PsiT(Real x, Real y, Real z, const WebModeTable &table, Real mu_star
   Real sum = 0.0;
   for (int p = 0; p < table.nmodes; ++p) {
     Real kdotx = table.kx[p]*x + table.ky[p]*y + table.kz[p]*z;
-    sum += table.k[p] * table.amp[p] * std::sin(kdotx + table.phase[p]);
+    // s_p = +1 multiplies exactly, so the coherent web is unchanged bit for bit
+    sum += table.sign[p] * (table.k[p] * table.amp[p] * std::sin(kdotx + table.phase[p]));
   }
   return mu_star * sum;
 }

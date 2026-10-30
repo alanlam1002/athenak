@@ -431,6 +431,18 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     web_kmin = pin->GetReal("problem", "web_kmin");
     web_kmax = pin->GetReal("problem", "web_kmax");
   }
+  // web_helicity_mode = coherent (default; one-signed helicity at every scale) | zero
+  // (net helicity ~ 0 in every log-k bin and in total including the dipole cross term,
+  // by the toroidal sign s_p of each mode; R-052)
+  const std::string hel_mode = pin->GetOrAddString("problem", "web_helicity_mode",
+                                                   "coherent");
+  const int hel_nbins = pin->GetOrAddInteger("problem", "web_helicity_bins", 4);
+  if ((hel_mode != "coherent" && hel_mode != "zero") || hel_nbins < 1) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "web_helicity_mode must be coherent|zero and web_helicity_bins >= 1"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
   // Test-only switches for the spec's V3/V4 checks: h == 1 everywhere (no envelope on
   // the web), and lambda_T = lambda_P = 1 without the tor/pol solve.
   const bool web_test_h_one = pin->GetOrAddInteger("problem", "web_test_h_one", 0) != 0;
@@ -927,6 +939,77 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   Kokkos::deep_copy(final_a2, 0.0);
   Kokkos::deep_copy(final_a3, 0.0);
 
+  // ==== Dipole: current-loop A1/A2 (ported from lorene_bns.cpp), own normalization ===
+  // (built before the web since 2026-10-31: web_helicity_mode = zero balances the web's
+  // helicity against its cross term with the dipole; final_a = dipole + web is the same
+  // single IEEE addition either way, so the coherent field is unchanged bit for bit)
+  AzHost dip_az;
+  Real dip_scale = 0.0;
+  DvceArray4D<Real> d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz;
+  if (dipole_enable) {
+    // I_0 > 0 gives a dipole moment along +z (lorene_bns.cpp convention); the overall
+    // scale is fixed by the normalization below, which keeps that sign.
+    Real I_0 = 4.0*dipole_r0*dipole_target/(23.0*M_PI);
+    std::function<Real(Real, Real, Real)> fd1 = [&](Real x, Real y, Real z) -> Real {
+      Real a = grass::DipoleA1(x, y, z, I_0, dipole_r0);
+      if (dipole_confine) {
+        Real rho = data.InterpolateRho(x, y, z, eos_table);
+        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
+      }
+      return a;
+    };
+    std::function<Real(Real, Real, Real)> fd2 = [&](Real x, Real y, Real z) -> Real {
+      Real a = grass::DipoleA2(x, y, z, I_0, dipole_r0);
+      if (dipole_confine) {
+        Real rho = data.InterpolateRho(x, y, z, eos_table);
+        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
+      }
+      return a;
+    };
+    std::function<Real(Real, Real, Real)> fd3 = [](Real, Real, Real) -> Real { return 0.0; };
+
+    HostArray4D<Real> dip_a1, dip_a2, dip_a3;
+    Kokkos::realloc(dip_a1, nmb, n3, n2, n1); Kokkos::realloc(dip_a2, nmb, n3, n2, n1);
+    Kokkos::realloc(dip_a3, nmb, n3, n2, n1);
+    BuildAndCorrect(dip_a1, dip_a2, dip_a3, false, fd1, fd2, fd3);
+
+    Kokkos::realloc(d_dip_a1, nmb, n3, n2, n1); Kokkos::realloc(d_dip_a2, nmb, n3, n2, n1);
+    Kokkos::realloc(d_dip_a3, nmb, n3, n2, n1);
+    Kokkos::deep_copy(d_dip_a1, dip_a1); Kokkos::deep_copy(d_dip_a2, dip_a2);
+    Kokkos::deep_copy(d_dip_a3, dip_a3);
+    Kokkos::realloc(dbx, nmb, n3, n2, n1); Kokkos::realloc(dby, nmb, n3, n2, n1);
+    Kokkos::realloc(dbz, nmb, n3, n2, n1);
+    CurlToBcc(d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz);
+
+    Real dip_bmax_raw = 0.0, dip_brms_raw = 0.0, dip_bvm_raw = 0.0, dip_bvf_raw = 0.0;
+    BmaxRms(dbx, dby, dbz, &dip_bmax_raw, &dip_brms_raw);
+    AzimuthalSums(dbx, dby, dbz, &dip_az);
+    if (need_h) { BvarpiMeanRms(dbx, dby, dbz, dip_az, &dip_bvm_raw, &dip_bvf_raw); }
+    Real dip_norm_raw = (dipole_norm == "bvarpi_rms") ? dip_bvm_raw : dip_bmax_raw;
+    dip_scale = (dip_norm_raw > 0.0) ? (dipole_target/dip_norm_raw) : 0.0;
+    for (int m = 0; m < nmb; ++m) {
+      for (int k = ks; k <= ke+1; ++k) {
+        for (int j = js; j <= je+1; ++j) {
+          for (int i = is; i <= ie+1; ++i) {
+            final_a1(m,k,j,i) += dip_scale*dip_a1(m,k,j,i);
+            final_a2(m,k,j,i) += dip_scale*dip_a2(m,k,j,i);
+            // final_a3 untouched -- dipole's own a3 is identically zero.
+          }
+        }
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "GRASS dipole: normalized by " << dipole_norm << " (confine="
+                << dipole_confine << ", r0=" << dipole_r0 << " M) -> rms Bbar_varpi "
+                << "(h>=0.5) = " << dip_scale*dip_bvm_raw/gauss_to_code
+                << " G, rms of its non-axisymmetric part = "
+                << dip_scale*dip_bvf_raw/gauss_to_code << " G, rms|B| (h>=0.5) = "
+                << dip_scale*dip_brms_raw/gauss_to_code << " G, max|B| = "
+                << dip_scale*dip_bmax_raw/gauss_to_code << " G; moment along "
+                << ((I_0*dip_scale > 0.0) ? "+z" : "-z") << std::endl;
+    }
+  }
+
   // ==== Web: build P/T decomposition, enforce E_tor/E_pol exactly, rescale, combine ==
   Real web_scale = 0.0, web_bmax_raw = 0.0, web_brms_raw = 0.0, hel_web = 0.0;
   if (web_enable) {
@@ -1009,6 +1092,218 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     Kokkos::realloc(byT, nmb, n3, n2, n1); Kokkos::realloc(bzT, nmb, n3, n2, n1);
     CurlToBcc(d_a1P, d_a2P, d_a3P, bxP, byP, bzP);
     CurlToBcc(d_a1T, d_a2T, d_a3T, bxT, byT, bzT);
+
+    // ---- web_helicity_mode = zero: choose the toroidal signs s_q (R-052) -------------
+    // Pure poloidal and pure toroidal fields carry no self-helicity (A_T.B_T = 0 pointwise
+    // for A_T = h Psi_T x), so with the final field ws (A_P + lam A_T(s)) + ds A_D the
+    // total helicity is linear in the signs: H(s) = H_const + sum_q s_q (gw_q + gd_q), with
+    //   gw_q = 2 lam ws^2 int A_T,q.B_P   (web self-helicity of mode q),
+    //   gd_q = 2 lam ws ds int A_T,q.B_D  (its cross term with the dipole),
+    // A_T,q = h mu k_q a_q sin(k_q.x + phi_q) x (gauge identity int A.B' = int A'.B for
+    // confined fields). The coefficients use cell-centred h and A_T,q; H_const is taken
+    // from the discrete helicity of the coherent field so the model is exact at s = +1.
+    // lam and ws are the coherent web's (Chandrasekhar lam, the configured normalization);
+    // they only weight the two objectives. Signs: greedy over modes in descending
+    // |gw + gd| (ties by index), each sign minimizing
+    //   cost = sum_b (Hweb_b / Hweb_b,coherent)^2 + nbins (H_total / H_total,coherent)^2
+    // with log-k bins b of equal width in [web_kmin, web_kmax], then single-sign flips
+    // in index order while any flip lowers the cost. Deterministic; every rank gets the
+    // same MPI-reduced coefficients. Then the T pass is rebuilt with the signs and the
+    // tor/pol solve and normalization below proceed as for the coherent web.
+    if (hel_mode == "zero") {
+      const int nm = mode_table.nmodes;
+      // coherent lam (Chandrasekhar energies over rho > rho_lo, as in the solve below)
+      Real eP = 0.0, eT = 0.0;
+      Kokkos::parallel_reduce("GrassH0Energies",
+                              Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+      KOKKOS_LAMBDA(const int &idx, Real &rp, Real &rt) {
+        int m = idx/nkji;
+        int k = (idx - m*nkji)/nji;
+        int j = (idx - m*nkji - k*nji)/nx1;
+        int i = (idx - m*nkji - k*nji - j*nx1) + is;
+        k += ks; j += js;
+        if (w0d(m,IDN,k,j,i) <= rho_lo) { return; }
+        Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+        Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+        Real g0 = admd.g_dd(m,0,0,k,j,i), g1 = admd.g_dd(m,0,1,k,j,i);
+        Real g2 = admd.g_dd(m,0,2,k,j,i), g3 = admd.g_dd(m,1,1,k,j,i);
+        Real g4 = admd.g_dd(m,1,2,k,j,i), g5 = admd.g_dd(m,2,2,k,j,i);
+        GrassPhysB pP = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bxP(m,k,j,i), byP(m,k,j,i),
+                                       bzP(m,k,j,i), x1v, x2v);
+        GrassPhysB pT = GrassPhysicalB(g0, g1, g2, g3, g4, g5, bxT(m,k,j,i), byT(m,k,j,i),
+                                       bzT(m,k,j,i), x1v, x2v);
+        Real dV = pP.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        rp += pP.bsq*dV;
+        rt += pT.bsq*dV;
+      }, Kokkos::Sum<Real>(eP), Kokkos::Sum<Real>(eT));
+#if MPI_PARALLEL_ENABLED
+      {
+        Real l2[2] = {eP, eT};
+        MPI_Allreduce(MPI_IN_PLACE, l2, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+        eP = l2[0]; eT = l2[1];
+      }
+#endif
+      const Real lam0 = web_test_fixed_lambda ? 1.0
+                        : std::sqrt(web_tor_pol*eP/std::max(eT, 1.0e-300));
+      // coherent web potential and field, and its normalization
+      DvceArray4D<Real> ca1, ca2, ca3, cbx, cby, cbz;
+      Kokkos::realloc(ca1, nmb, n3, n2, n1); Kokkos::realloc(ca2, nmb, n3, n2, n1);
+      Kokkos::realloc(ca3, nmb, n3, n2, n1); Kokkos::realloc(cbx, nmb, n3, n2, n1);
+      Kokkos::realloc(cby, nmb, n3, n2, n1); Kokkos::realloc(cbz, nmb, n3, n2, n1);
+      par_for("grass_h0_coherent", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        ca1(m,k,j,i) = d_a1P(m,k,j,i) + lam0*d_a1T(m,k,j,i);
+        ca2(m,k,j,i) = d_a2P(m,k,j,i) + lam0*d_a2T(m,k,j,i);
+        ca3(m,k,j,i) = d_a3P(m,k,j,i) + lam0*d_a3T(m,k,j,i);
+        cbx(m,k,j,i) = bxP(m,k,j,i) + lam0*bxT(m,k,j,i);
+        cby(m,k,j,i) = byP(m,k,j,i) + lam0*byT(m,k,j,i);
+        cbz(m,k,j,i) = bzP(m,k,j,i) + lam0*bzT(m,k,j,i);
+      });
+      Real cbm = 0.0, cbr = 0.0;
+      BmaxRms(cbx, cby, cbz, &cbm, &cbr);
+      const Real ws0 = web_target/std::max((web_norm == "rms") ? cbr : cbm, 1.0e-300);
+      const Real ds = dipole_enable ? dip_scale : 0.0;
+      // coherent helicities: web self, web-dipole cross, dipole self
+      const Real h_w0 = ws0*ws0*Helicity(ca1, ca2, ca3, cbx, cby, cbz);
+      Real h_x0 = 0.0, h_dd = 0.0;
+      if (dipole_enable) {
+        h_x0 = ws0*ds*(Helicity(ca1, ca2, ca3, dbx, dby, dbz) +
+                       Helicity(d_dip_a1, d_dip_a2, d_dip_a3, cbx, cby, cbz));
+        h_dd = ds*ds*Helicity(d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz);
+      }
+      // F_w = h x.B_P dV, F_d = h x.B_D dV (cell-centred), then the per-mode sums
+      DvceArray4D<Real> fw, fd;
+      Kokkos::realloc(fw, nmb, n3, n2, n1); Kokkos::realloc(fd, nmb, n3, n2, n1);
+      const bool dip_on = dipole_enable;
+      par_for("grass_h0_f", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(int m, int k, int j, int i) {
+        Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+        Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+        Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+        Real h = web_test_h_one ? 1.0
+                 : grass::WebEnvelope(w0d(m,IDN,k,j,i), rho_lo, rho_hi, env_type);
+        Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        fw(m,k,j,i) = h*(x*bxP(m,k,j,i) + y*byP(m,k,j,i) + z*bzP(m,k,j,i))*vol;
+        fd(m,k,j,i) = dip_on ? h*(x*dbx(m,k,j,i) + y*dby(m,k,j,i) + z*dbz(m,k,j,i))*vol
+                             : 0.0;
+      });
+      std::vector<Real> cs(2*nm, 0.0);
+      for (int q = 0; q < nm; ++q) {
+        const Real kx = mode_table.kx[q], ky = mode_table.ky[q], kz = mode_table.kz[q];
+        const Real ph = mode_table.phase[q];
+        Real sw = 0.0, sd = 0.0;
+        Kokkos::parallel_reduce("GrassH0Mode", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+        KOKKOS_LAMBDA(const int &idx, Real &rw, Real &rd) {
+          int m = idx/nkji;
+          int k = (idx - m*nkji)/nji;
+          int j = (idx - m*nkji - k*nji)/nx1;
+          int i = (idx - m*nkji - k*nji - j*nx1) + is;
+          k += ks; j += js;
+          Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+          Real z = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+          Real sn = Kokkos::sin(kx*x + ky*y + kz*z + ph);
+          rw += sn*fw(m,k,j,i);
+          rd += sn*fd(m,k,j,i);
+        }, Kokkos::Sum<Real>(sw), Kokkos::Sum<Real>(sd));
+        cs[2*q] = sw; cs[2*q+1] = sd;
+      }
+#if MPI_PARALLEL_ENABLED
+      MPI_Allreduce(MPI_IN_PLACE, cs.data(), 2*nm, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+      std::vector<Real> gw(nm), gd(nm);
+      std::vector<int> bin(nm);
+      const Real lnk0 = std::log(web_kmin), lnk1 = std::log(web_kmax);
+      Real sum_gw = 0.0, sum_g = 0.0;
+      for (int q = 0; q < nm; ++q) {
+        Real c = mu_star*mode_table.k[q]*mode_table.amp[q];
+        gw[q] = 2.0*lam0*ws0*ws0*c*cs[2*q];
+        gd[q] = 2.0*lam0*ws0*ds*c*cs[2*q+1];
+        sum_gw += gw[q]; sum_g += gw[q] + gd[q];
+        int b = static_cast<int>(hel_nbins*(std::log(mode_table.k[q]) - lnk0)/(lnk1 - lnk0));
+        bin[q] = std::min(std::max(b, 0), hel_nbins - 1);
+      }
+      const Real hw_const = h_w0 - sum_gw;
+      const Real h_tot0 = h_w0 + h_x0 + h_dd;
+      const Real ht_const = h_tot0 - sum_g;
+      std::vector<Real> bref(hel_nbins, 0.0);
+      for (int q = 0; q < nm; ++q) { bref[bin[q]] += gw[q]; }
+      for (int b = 0; b < hel_nbins; ++b) {
+        bref[b] = std::max(std::abs(bref[b]), 1.0e-300);
+      }
+      const Real tref = std::max(std::abs(h_tot0), 1.0e-300);
+      std::vector<Real> sg(nm, 1.0);
+      auto cost_of = [&](const std::vector<Real> &bw, Real tot) {
+        Real c = hel_nbins*(tot/tref)*(tot/tref);
+        for (int b = 0; b < hel_nbins; ++b) { c += (bw[b]/bref[b])*(bw[b]/bref[b]); }
+        return c;
+      };
+      auto state_of = [&](std::vector<Real> *bw, Real *tot) {
+        bw->assign(hel_nbins, hw_const/hel_nbins);
+        *tot = ht_const;
+        for (int q = 0; q < nm; ++q) {
+          (*bw)[bin[q]] += sg[q]*gw[q];
+          *tot += sg[q]*(gw[q] + gd[q]);
+        }
+      };
+      // greedy, largest |gw + gd| first
+      std::vector<int> order(nm);
+      for (int q = 0; q < nm; ++q) { order[q] = q; }
+      std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+        return std::abs(gw[a] + gd[a]) > std::abs(gw[b] + gd[b]);
+      });
+      {
+        std::vector<Real> bw(hel_nbins, hw_const/hel_nbins);
+        Real tot = ht_const;
+        for (int q : order) {
+          std::vector<Real> bp = bw, bm = bw;
+          bp[bin[q]] += gw[q]; bm[bin[q]] -= gw[q];
+          Real cp = cost_of(bp, tot + gw[q] + gd[q]), cm = cost_of(bm, tot - gw[q] - gd[q]);
+          sg[q] = (cm < cp) ? -1.0 : 1.0;
+          bw[bin[q]] += sg[q]*gw[q];
+          tot += sg[q]*(gw[q] + gd[q]);
+        }
+      }
+      // single flips while any lowers the cost
+      int sweeps = 0;
+      for (bool improved = true; improved && sweeps < 100; ++sweeps) {
+        improved = false;
+        for (int q = 0; q < nm; ++q) {
+          std::vector<Real> bw; Real tot;
+          state_of(&bw, &tot);
+          Real c_old = cost_of(bw, tot);
+          sg[q] = -sg[q];
+          state_of(&bw, &tot);
+          if (cost_of(bw, tot) < c_old*(1.0 - 1.0e-12)) {
+            improved = true;
+          } else {
+            sg[q] = -sg[q];
+          }
+        }
+      }
+      std::vector<Real> bw; Real tot;
+      state_of(&bw, &tot);
+      for (int q = 0; q < nm; ++q) { mode_table.sign[q] = sg[q]; }
+      if (global_variable::my_rank == 0) {
+        int nneg = 0;
+        std::string sstr;
+        for (int q = 0; q < nm; ++q) { nneg += (sg[q] < 0.0); sstr += (sg[q] < 0.0) ? '-' : '+'; }
+        std::cout << "GRASS magnetic web (zero helicity): coherent estimate lam_T=" << lam0
+                  << ", H_web=" << h_w0 << ", H_web-dipole=" << h_x0 << ", H_dipole=" << h_dd
+                  << ", H_total=" << h_tot0 << "; " << nneg << " of " << nm
+                  << " modes with s=-1 after " << sweeps << " flip sweeps" << std::endl;
+        std::cout << "GRASS magnetic web (zero helicity): model H_total/H_total,coherent = "
+                  << tot/h_tot0 << "; web helicity per log-k bin / coherent bin:";
+        for (int b = 0; b < hel_nbins; ++b) { std::cout << " " << bw[b]/bref[b]; }
+        std::cout << std::endl << "GRASS magnetic web (zero helicity): signs (mode order) "
+                  << sstr << std::endl;
+      }
+      // rebuild the toroidal pass with the signs
+      BuildAndCorrect(a1T, a2T, a3T, true, f1T, f2T, f3T);
+      Kokkos::deep_copy(d_a1T, a1T); Kokkos::deep_copy(d_a2T, a2T);
+      Kokkos::deep_copy(d_a3T, a3T);
+      CurlToBcc(d_a1T, d_a2T, d_a3T, bxT, byT, bzT);
+    }
 
     // ---- Six-integral reduction (restricted to rho>rho_lo), quadratic solve --------
     // Physical field, proper volume; E_tor = int B_phi^2, E_pol = int (|B|^2 - B_phi^2).
@@ -1159,80 +1454,20 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
         }
       }
     }
+    // the web's own azimuthal-mean B_varpi (C4's measure; report only)
+    AzHost web_az;
+    Real web_bvm_raw = 0.0, web_bvf_raw = 0.0;
+    AzimuthalSums(wbx, wby, wbz, &web_az);
+    BvarpiMeanRms(wbx, wby, wbz, web_az, &web_bvm_raw, &web_bvf_raw);
     if (global_variable::my_rank == 0) {
       std::cout << "GRASS magnetic web: normalized by " << web_norm << " -> rms|B| (h>=0.5) = "
                 << web_scale*web_brms_raw/gauss_to_code << " G, max|B| = "
                 << web_scale*web_bmax_raw/gauss_to_code << " G; helicity H_web = " << hel_web
                 << " (code units; sign " << ((hel_web >= 0.0) ? "+" : "-") << ")"
                 << std::endl;
-    }
-  }
-
-  // ==== Dipole: current-loop A1/A2 (ported from lorene_bns.cpp), own normalization ===
-  AzHost dip_az;
-  Real dip_scale = 0.0;
-  if (dipole_enable) {
-    // I_0 > 0 gives a dipole moment along +z (lorene_bns.cpp convention); the overall
-    // scale is fixed by the normalization below, which keeps that sign.
-    Real I_0 = 4.0*dipole_r0*dipole_target/(23.0*M_PI);
-    std::function<Real(Real, Real, Real)> fd1 = [&](Real x, Real y, Real z) -> Real {
-      Real a = grass::DipoleA1(x, y, z, I_0, dipole_r0);
-      if (dipole_confine) {
-        Real rho = data.InterpolateRho(x, y, z, eos_table);
-        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
-      }
-      return a;
-    };
-    std::function<Real(Real, Real, Real)> fd2 = [&](Real x, Real y, Real z) -> Real {
-      Real a = grass::DipoleA2(x, y, z, I_0, dipole_r0);
-      if (dipole_confine) {
-        Real rho = data.InterpolateRho(x, y, z, eos_table);
-        a *= grass::WebEnvelope(rho, rho_lo, rho_hi, env_type);
-      }
-      return a;
-    };
-    std::function<Real(Real, Real, Real)> fd3 = [](Real, Real, Real) -> Real { return 0.0; };
-
-    HostArray4D<Real> dip_a1, dip_a2, dip_a3;
-    Kokkos::realloc(dip_a1, nmb, n3, n2, n1); Kokkos::realloc(dip_a2, nmb, n3, n2, n1);
-    Kokkos::realloc(dip_a3, nmb, n3, n2, n1);
-    BuildAndCorrect(dip_a1, dip_a2, dip_a3, false, fd1, fd2, fd3);
-
-    DvceArray4D<Real> d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz;
-    Kokkos::realloc(d_dip_a1, nmb, n3, n2, n1); Kokkos::realloc(d_dip_a2, nmb, n3, n2, n1);
-    Kokkos::realloc(d_dip_a3, nmb, n3, n2, n1);
-    Kokkos::deep_copy(d_dip_a1, dip_a1); Kokkos::deep_copy(d_dip_a2, dip_a2);
-    Kokkos::deep_copy(d_dip_a3, dip_a3);
-    Kokkos::realloc(dbx, nmb, n3, n2, n1); Kokkos::realloc(dby, nmb, n3, n2, n1);
-    Kokkos::realloc(dbz, nmb, n3, n2, n1);
-    CurlToBcc(d_dip_a1, d_dip_a2, d_dip_a3, dbx, dby, dbz);
-
-    Real dip_bmax_raw = 0.0, dip_brms_raw = 0.0, dip_bvm_raw = 0.0, dip_bvf_raw = 0.0;
-    BmaxRms(dbx, dby, dbz, &dip_bmax_raw, &dip_brms_raw);
-    AzimuthalSums(dbx, dby, dbz, &dip_az);
-    if (need_h) { BvarpiMeanRms(dbx, dby, dbz, dip_az, &dip_bvm_raw, &dip_bvf_raw); }
-    Real dip_norm_raw = (dipole_norm == "bvarpi_rms") ? dip_bvm_raw : dip_bmax_raw;
-    dip_scale = (dip_norm_raw > 0.0) ? (dipole_target/dip_norm_raw) : 0.0;
-    for (int m = 0; m < nmb; ++m) {
-      for (int k = ks; k <= ke+1; ++k) {
-        for (int j = js; j <= je+1; ++j) {
-          for (int i = is; i <= ie+1; ++i) {
-            final_a1(m,k,j,i) += dip_scale*dip_a1(m,k,j,i);
-            final_a2(m,k,j,i) += dip_scale*dip_a2(m,k,j,i);
-            // final_a3 untouched -- dipole's own a3 is identically zero.
-          }
-        }
-      }
-    }
-    if (global_variable::my_rank == 0) {
-      std::cout << "GRASS dipole: normalized by " << dipole_norm << " (confine="
-                << dipole_confine << ", r0=" << dipole_r0 << " M) -> rms Bbar_varpi "
-                << "(h>=0.5) = " << dip_scale*dip_bvm_raw/gauss_to_code
-                << " G, rms of its non-axisymmetric part = "
-                << dip_scale*dip_bvf_raw/gauss_to_code << " G, rms|B| (h>=0.5) = "
-                << dip_scale*dip_brms_raw/gauss_to_code << " G, max|B| = "
-                << dip_scale*dip_bmax_raw/gauss_to_code << " G; moment along "
-                << ((I_0*dip_scale > 0.0) ? "+z" : "-z") << std::endl;
+      std::cout << "GRASS magnetic web: its own rms Bbar_varpi (h>=0.5) = "
+                << web_scale*web_bvm_raw/gauss_to_code << " G (helicity mode " << hel_mode
+                << ")" << std::endl;
     }
   }
 

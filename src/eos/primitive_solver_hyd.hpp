@@ -1866,6 +1866,13 @@ class PrimitiveSolverHydro {
             ratio = fmax(psiv/(vcsh*cs0), psip/psijp);
           }
           dd_(m, 1, k, j, i) = ratio;
+          if (dd_.extent_int(1) > 15) {   // <mhd> shell_counters: theta = -div v dx_min/c_s
+            Real rho0 = prim(m, IDN, k, j, i);
+            Real h0 = 1.0 + gam_/(gam_ - 1.0)*p0/fmax(rho0, 1.0e-300);
+            Real cs0 = sqrt(fmax(gam_*p0/(fmax(rho0, 1.0e-300)*h0), 1.0e-300));
+            Real dxm = fmin(size.d_view(m).dx1, fmin(size.d_view(m).dx2, size.d_view(m).dx3));
+            dd_(m, 13, k, j, i) = -divv*dxm/cs0;
+          }
         }
       });
       if (probe_) {
@@ -2644,6 +2651,10 @@ class PrimitiveSolverHydro {
             dd_(m, 4, k, j, i) = ddk;
             dd_(m, 5, k, j, i) = ddtau;
             if (dstg_ >= 1 && dstg_ <= 3) dd_(m, 9 + dstg_, k, j, i) = dken;
+            if (dd_.extent_int(1) > 15) {   // shell_counters: what this C2P's flag came from
+              dd_(m, 14, k, j, i) = dd_(m, 1, k, j, i);
+              dd_(m, 15, k, j, i) = dd_(m, 13, k, j, i);
+            }
           }
           if (dcnt_) dbr_(m, k, j, i) = dbr;
         }

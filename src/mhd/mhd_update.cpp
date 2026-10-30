@@ -15,6 +15,7 @@
 #include "eos/eos.hpp"
 #include "mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/mass_closure.hpp"
 
 namespace mhd {
 //----------------------------------------------------------------------------------------
@@ -41,6 +42,10 @@ TaskStatus MHD::RKUpdate(Driver *pdriver, int stage) {
   auto flx2 = uflx.x2f;
   auto flx3 = uflx.x3f;
   auto &mbsize = pmy_pack->pmb->mb_size;
+  // <mhd> shell_counters (diagnostic): the stage's input state and its final fluxes
+  if (pmy_pack->pdyngr != nullptr && pmy_pack->pdyngr->pmclose != nullptr) {
+    pmy_pack->pdyngr->pmclose->StageFlux(stage, beta_dt);
+  }
 
   // hierarchical parallel loop that updates conserved variables to intermediate step
   // using weights and fractional time step appropriate to stages of time-integrator used

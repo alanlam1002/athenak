@@ -11,6 +11,7 @@
 # c155 (R-177 item 2, user-approved 2026-10-30): the B1K bundle, wip/killing-dtg with the KCLOSE regrid fix and the
 # residual-d_t KFSPLIT fields, one capacity job (16 nodes x 2 h): SLOTA nodes 1-8 (96 ranks) B1K8 (mg 1e-8), SLOTC nodes
 # 9-16 (96 ranks) B1K10 (mg 1e-10), both from B1N_cell's t = 41.78 restart (FROM_<arm>). Tokens and resume as c154's tc154.sh.
+# c156: SLOTA may start with "KG GATE_kg" (the KCLOSE regrid-fix gate on GPU, ~10 min): a failed gate stops SLOTA only.
 set -uo pipefail
 D=/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc
 E=$D/c155_b1k

@@ -924,6 +924,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
     Kokkos::deep_copy(Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all),
                       Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
     kf_rst_loaded = true;
+    kf_bres_stale = kf_pre_rst;   // the first stage's u_beta is no solve (KillingFull store)
   }
 }
 

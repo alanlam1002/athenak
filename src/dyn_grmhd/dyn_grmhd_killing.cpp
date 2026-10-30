@@ -481,7 +481,10 @@ void DynGRMHD::SaveKillingScalars(ParameterInput *pin) {
 }
 
 void DynGRMHD::LoadKillingScalars(ParameterInput *pin) {
-  if (!pin->DoesParameterExist("mhd", "kf_tprev")) return;
+  // absent: a fresh start, or a restart written without arm (ii) (no dyngr.kfbres group: CFC's
+  // u_beta comes back zero, LoadRestartState); kf_pre_rst marks the latter there
+  kf_pre_rst = !pin->DoesParameterExist("mhd", "kf_tprev");
+  if (kf_pre_rst) return;
   kf_tprev = pin->GetReal("mhd", "kf_tprev");
   kf_have_prev = pin->GetBoolean("mhd", "kf_have_prev");
   kf_have_xd = pin->GetBoolean("mhd", "kf_have_xd");
@@ -818,7 +821,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   }
   if (split) ReportKillingStage(kill_stage, dt);
   kf_tprev = kf_tstage;
-  kf_have_prev = true;
+  // after a restart without arm (ii)'s groups, the first stage's u_beta is the zero fill, not
+  // a solve: that stage's store is no chord end (the next stage has none, as after a regrid)
+  kf_have_prev = !kf_bres_stale;
+  kf_bres_stale = false;
   auto *pmr = pmy_pack->pmesh->pmr;
   kf_key[0] = (pmr != nullptr) ? pmr->nmb_created : 0;
   kf_key[1] = (pmr != nullptr) ? pmr->nmb_deleted : 0;

@@ -209,6 +209,8 @@ class DynGRMHD {
   Real kf_tprev = 0.0, kf_tstage = 0.0, kf_m1u1 = 0.0;
   int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
   bool kf_rst_loaded = false;     // kf_prev restored: keep it across the restart's new key
+  bool kf_pre_rst = false;        // the parameters have no kf_* (fresh start or pre-arm-(ii) rst)
+  bool kf_bres_stale = false;     // restarted without dyngr.kfbres: u_beta is the zero fill
   bool kf_bgmove = false;         // <cfc> puncture_moving: the background's analytic rate
   bool kf_have_xd = false;        // xi-ddot: xidot of the last step (frame controller)
   Real kf_xdstep[3] = {0.0, 0.0, 0.0}, kf_xdd[3] = {0.0, 0.0, 0.0};

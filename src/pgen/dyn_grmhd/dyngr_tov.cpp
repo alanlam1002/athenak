@@ -569,18 +569,14 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
 //                  rho -> test_hs_rhoinf at infinity.
 // Cells with r_iso >= test_hold_rout (both) or R <= test_hold_Rin (hydrostatic) are HELD:
 // the user source (TestFlowHold) resets their conserved state every stage to the initial
-// primitives' conserved state in the evolved (background) metric. Inside R < test_R_floor (default 2.05 M) the floor at rest is used. Static
-// refinement only (the held state is not regridded). On a restart (TestFlowRestart) the held
-// state is the restart's u0 in the held cells: the hold is the last write to them in a stage.
+// primitives' conserved state in the evolved (background) metric. Inside R < test_R_floor
+// (default 2.05 M) the floor at rest is used. On a restart (TestFlowRestart) the held state is
+// the restart's u0 in the held cells: the hold is the last write to them in a stage. After a
+// regrid (the MeshBlock key changes: R-186 item 2, the Mm decks' post-regrid NaN/page fault was
+// TestFlowHold reading the t = 0 arrays with the new MeshBlock count) the mask and the held
+// primitives are rebuilt from the analytic flow at the new cells (scalars: the current w0) and
+// converted again at first use, as at the start.
 namespace {
-struct TestFlowState {
-  DvceArray5D<Real> hold;   // the initial primitives, then (first TestFlowHold) the conserved
-  DvceArray4D<Real> mask;   // 1: held
-  int nvar = 0;
-  bool cons_ready = false;
-};
-TestFlowState *ptf = nullptr;
-
 struct MichelPars { Real m, n, k, c1, c2, rc; };
 
 KOKKOS_INLINE_FUNCTION
@@ -612,11 +608,160 @@ Real MichelT(const MichelPars &p, Real r) {
   }
   return sqrt(x0*x1);
 }
+
+//! the test flow's parameters (read once: SetupTestFlow, TestFlowRestart)
+struct TestFlowPars {
+  Real m_bh, gam, n, rho_fl, p_fl, r_out, R_in, R_fl, cC, hs_k, hs_hinf;
+  bool michel;
+  MichelPars mp;
+};
+
+//! the test flow's primitives at (x, y, z) (rho, P, u~^r) and whether the cell is held
+KOKKOS_INLINE_FUNCTION
+void TestFlowPrim(const TestFlowPars &tp, const Real x, const Real y, const Real z,
+                  Real &rho, Real &p, Real &ut, bool &held) {
+  const Real m_bh = tp.m_bh, n = tp.n, cC = tp.cC;
+  const Real r = sqrt(x*x + y*y + z*z);
+  const Real R = m_bh*cfc::TrumpetIsoToAreal(r/m_bh);
+  rho = tp.rho_fl; p = tp.p_fl; ut = 0.0;   // ut: u~^r (radial code primitive)
+  if (R > tp.R_fl) {
+    const Real al = sqrt(fmax(1.0 - 2.0*m_bh/R + cC*cC/(R*R*R*R), 0.0));
+    const Real bR = al*cC/(R*R);
+    if (tp.michel) {
+      const Real t = MichelT(tp.mp, R);
+      rho = pow(t/tp.mp.k, n);
+      p = rho*t;
+      const Real uR = -tp.mp.c1/(pow(t, n)*R*R);
+      // q - sqrt(1 + q^2/al^2) bR/al = uR (increasing in q for R > 2M): bisection
+      Real qa = uR - 10.0, qb = uR + 10.0;
+      for (int it = 0; it < 200; ++it) {
+        const Real qm = 0.5*(qa + qb);
+        const Real g = qm - sqrt(1.0 + qm*qm/(al*al))*bR/al - uR;
+        if (g > 0.0) { qb = qm; } else { qa = qm; }
+      }
+      const Real q = 0.5*(qa + qb);
+      const Real W = sqrt(1.0 + q*q/(al*al));
+      ut = W*(q/W)*r/(R*al);
+    } else {
+      const Real ak = sqrt(1.0 - 2.0*m_bh/R);
+      const Real h = tp.hs_hinf/ak;
+      rho = pow(fmax(h - 1.0, 0.0)/((n + 1.0)*tp.hs_k), n);
+      p = tp.hs_k*pow(rho, tp.gam);
+      // grid rest: v^r_iso = beta^r_iso/alpha, beta^r_iso = bR r/(R al)
+      const Real vr = (bR*r/(R*al))/al;
+      // gamma_ij v^i v^j = psi^4 (v^r)^2, psi^2 = R/r on the trumpet
+      const Real W = 1.0/sqrt(1.0 - SQR(R/r)*vr*vr);
+      ut = W*vr;
+    }
+    rho = fmax(rho, tp.rho_fl); p = fmax(p, tp.p_fl);
+  }
+  held = (r >= tp.r_out || R <= tp.R_in);
+}
+
+struct TestFlowState {
+  DvceArray5D<Real> hold;   // the initial primitives, then (first TestFlowHold) the conserved
+  DvceArray4D<Real> mask;   // 1: held
+  int nvar = 0;
+  bool cons_ready = false;
+  TestFlowPars par{};
+  int key[3] = {0, 0, 0};   // the MeshBlock layout the arrays belong to (TestFlowKey)
+};
+TestFlowState *ptf = nullptr;
+
+//! the MeshBlock layout key (as DynGRMHD::KillingFullStage): blocks created, deleted, in pack
+void TestFlowKey(MeshBlockPack *pmbp, int key[3]) {
+  auto *pmr = pmbp->pmesh->pmr;
+  key[0] = (pmr != nullptr) ? pmr->nmb_created : 0;
+  key[1] = (pmr != nullptr) ? pmr->nmb_deleted : 0;
+  key[2] = pmbp->nmb_thispack;
+}
+
+TestFlowPars TestFlowParams(ParameterInput *pin, const std::string &tf, const bool verbose) {
+  TestFlowPars tp{};
+  tp.m_bh = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
+  tp.gam = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
+  tp.n = 1.0/(tp.gam - 1.0);
+  tp.rho_fl = pin->GetReal("mhd", "dfloor");
+  tp.p_fl = tp.rho_fl*pin->GetReal("mhd", "tfloor");
+  tp.r_out = pin->GetOrAddReal("problem", "test_hold_rout", 40.0);
+  tp.R_in = pin->GetOrAddReal("problem", "test_hold_Rin", 0.0);
+  tp.R_fl = pin->GetOrAddReal("problem", "test_R_floor", 2.05*tp.m_bh);
+  tp.cC = 0.75*sqrt(3.0)*tp.m_bh*tp.m_bh;
+  tp.michel = (tf == "michel");
+  tp.hs_k = 0.0; tp.hs_hinf = 1.0;
+  const Real m_bh = tp.m_bh, n = tp.n;
+  if (tp.michel) {
+    MichelPars &mp = tp.mp;
+    mp.m = m_bh; mp.n = n;
+    mp.rc = pin->GetOrAddReal("problem", "test_michel_rc", 8.0*m_bh);
+    const Real rhoc = pin->GetOrAddReal("problem", "test_michel_rhoc", 1.0e-6);
+    const Real uc2 = m_bh/(2.0*mp.rc);                                  // HSW 71
+    const Real tc = n/(n + 1.0)*uc2/(1.0 - (n + 3.0)*uc2);              // HSW 74
+    mp.k = tc/pow(rhoc, 1.0/n);                                         // T = K rho^(1/n)
+    mp.c1 = pow(tc, n)*sqrt(uc2)*SQR(mp.rc);                            // HSW 68
+    mp.c2 = SQR(1.0 + (n + 1.0)*tc)*(1.0 - 3.0*m_bh/(2.0*mp.rc));       // HSW 69
+    if (verbose && global_variable::my_rank == 0) {
+      std::cout << "test_flow michel: r_c=" << mp.rc << " u_c=" << sqrt(uc2) << " T_c=" << tc
+                << " K=" << mp.k << " C1=" << mp.c1 << " C2=" << mp.c2 << std::endl;
+    }
+  } else {
+    tp.hs_k = pin->GetOrAddReal("problem", "test_hs_k", 1.0e-2);
+    const Real rinf = pin->GetOrAddReal("problem", "test_hs_rhoinf", 1.0e-8);
+    tp.hs_hinf = 1.0 + (n + 1.0)*tp.hs_k*pow(rinf, 1.0/n);
+  }
+  return tp;
+}
+
+//! after a regrid: the mask and the held primitives at the new MeshBlocks (the analytic flow;
+//! scalars from the current w0), converted at the next use (cons_ready = false)
+void TestFlowRebuild(MeshBlockPack *pmbp, const int key[3]) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  auto &w0 = pmbp->pmhd->w0;
+  auto &size = pmbp->pmb->mb_size;
+  const int n1 = w0.extent_int(4), n2 = w0.extent_int(3), n3 = w0.extent_int(2);
+  const int nmb = pmbp->nmb_thispack;
+  const int nv = ptf->nvar, nh = pmbp->pmhd->nmhd;
+  Kokkos::realloc(ptf->hold, nmb, nv, n3, n2, n1);
+  Kokkos::realloc(ptf->mask, nmb, n3, n2, n1);
+  auto &mk = ptf->mask;
+  auto &h = ptf->hold;
+  const TestFlowPars tp = ptf->par;
+  par_for("test_flow_rebuild", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    const Real r = sqrt(x*x + y*y + z*z);
+    Real rho, p, ut;
+    bool held;
+    TestFlowPrim(tp, x, y, z, rho, p, ut, held);
+    mk(m,k,j,i) = held ? 1.0 : 0.0;
+    h(m,IDN,k,j,i) = rho;
+    h(m,IPR,k,j,i) = p;
+    h(m,IVX,k,j,i) = (r > 0.0) ? ut*x/r : 0.0;
+    h(m,IVY,k,j,i) = (r > 0.0) ? ut*y/r : 0.0;
+    h(m,IVZ,k,j,i) = (r > 0.0) ? ut*z/r : 0.0;
+    for (int v = nh; v < nv; ++v) h(m,v,k,j,i) = w0(m,v,k,j,i);
+  });
+  ptf->cons_ready = false;
+  for (int q = 0; q < 3; ++q) ptf->key[q] = key[q];
+  if (global_variable::my_rank == 0) {
+    std::cout << "test_flow: regrid at cycle " << pmbp->pmesh->ncycle
+              << ", hold rebuilt (" << nmb << " MeshBlocks on rank 0)" << std::endl;
+  }
+}
 }  // namespace
 
 void TestFlowHold(Mesh *pm, const Real bdt) {
   if (ptf == nullptr) return;
   MeshBlockPack *pmbp = pm->pmb_pack;
+  int key[3];
+  TestFlowKey(pmbp, key);
+  if (key[0] != ptf->key[0] || key[1] != ptf->key[1] || key[2] != ptf->key[2]) {
+    TestFlowRebuild(pmbp, key);
+  }
   auto &u0 = pmbp->pmhd->u0;
   auto &w0 = pmbp->pmhd->w0;
   auto &h = ptf->hold;
@@ -675,6 +820,8 @@ void TestFlowRestart(ParameterInput *pin, MeshBlockPack *pmbp) {
   const Real R_in = pin->GetOrAddReal("problem", "test_hold_Rin", 0.0);
   ptf = new TestFlowState;
   ptf->nvar = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+  ptf->par = TestFlowParams(pin, pin->GetOrAddString("problem", "test_flow", "none"), false);
+  TestFlowKey(pmbp, ptf->key);
   Kokkos::realloc(ptf->hold, nmb, ptf->nvar, n3, n2, n1);
   Kokkos::realloc(ptf->mask, nmb, n3, n2, n1);
   auto &mk = ptf->mask;
@@ -702,86 +849,29 @@ void SetupTestFlow(ParameterInput *pin, MeshBlockPack *pmbp, const std::string &
   auto &size = pmbp->pmb->mb_size;
   const int n1 = w0.extent_int(4), n2 = w0.extent_int(3), n3 = w0.extent_int(2);
   const int nmb = pmbp->nmb_thispack;
-  const Real m_bh = pin->GetOrAddReal("cfc", "puncture_mass", 1.0);
-  const Real gam = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
-  const Real n = 1.0/(gam - 1.0);
-  const Real rho_fl = pin->GetReal("mhd", "dfloor");
-  const Real p_fl = rho_fl*pin->GetReal("mhd", "tfloor");
-  const Real r_out = pin->GetOrAddReal("problem", "test_hold_rout", 40.0);
-  const Real R_in = pin->GetOrAddReal("problem", "test_hold_Rin", 0.0);
-  const Real R_fl = pin->GetOrAddReal("problem", "test_R_floor", 2.05*m_bh);
-  const bool michel = (tf == "michel");
-  MichelPars mp{};
-  Real hs_k = 0.0, hs_hinf = 1.0;
-  if (michel) {
-    mp.m = m_bh; mp.n = n;
-    mp.rc = pin->GetOrAddReal("problem", "test_michel_rc", 8.0*m_bh);
-    const Real rhoc = pin->GetOrAddReal("problem", "test_michel_rhoc", 1.0e-6);
-    const Real uc2 = m_bh/(2.0*mp.rc);                                  // HSW 71
-    const Real tc = n/(n + 1.0)*uc2/(1.0 - (n + 3.0)*uc2);              // HSW 74
-    mp.k = tc/pow(rhoc, 1.0/n);                                         // T = K rho^(1/n)
-    mp.c1 = pow(tc, n)*sqrt(uc2)*SQR(mp.rc);                            // HSW 68
-    mp.c2 = SQR(1.0 + (n + 1.0)*tc)*(1.0 - 3.0*m_bh/(2.0*mp.rc));       // HSW 69
-    if (global_variable::my_rank == 0) {
-      std::cout << "test_flow michel: r_c=" << mp.rc << " u_c=" << sqrt(uc2) << " T_c=" << tc
-                << " K=" << mp.k << " C1=" << mp.c1 << " C2=" << mp.c2 << std::endl;
-    }
-  } else {
-    hs_k = pin->GetOrAddReal("problem", "test_hs_k", 1.0e-2);
-    const Real rinf = pin->GetOrAddReal("problem", "test_hs_rhoinf", 1.0e-8);
-    hs_hinf = 1.0 + (n + 1.0)*hs_k*pow(rinf, 1.0/n);
-  }
   ptf = new TestFlowState;
   ptf->nvar = pmbp->pmhd->nmhd + pmbp->pmhd->nscalars;
+  ptf->par = TestFlowParams(pin, tf, true);
+  TestFlowKey(pmbp, ptf->key);
   Kokkos::realloc(ptf->hold, nmb, ptf->nvar, n3, n2, n1);
   Kokkos::realloc(ptf->mask, nmb, n3, n2, n1);
   auto &mk = ptf->mask;
-  const Real cC = 0.75*sqrt(3.0)*m_bh*m_bh;
+  const TestFlowPars tp = ptf->par;
   par_for("pgen_test_flow", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
     const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
     const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
     const Real r = sqrt(x*x + y*y + z*z);
-    const Real R = m_bh*cfc::TrumpetIsoToAreal(r/m_bh);
-    Real rho = rho_fl, p = p_fl, ut = 0.0;   // ut: u~^r (radial code primitive)
-    if (R > R_fl) {
-      const Real al = sqrt(fmax(1.0 - 2.0*m_bh/R + cC*cC/(R*R*R*R), 0.0));
-      const Real bR = al*cC/(R*R);
-      if (michel) {
-        const Real t = MichelT(mp, R);
-        rho = pow(t/mp.k, n);
-        p = rho*t;
-        const Real uR = -mp.c1/(pow(t, n)*R*R);
-        // q - sqrt(1 + q^2/al^2) bR/al = uR (increasing in q for R > 2M): bisection
-        Real qa = uR - 10.0, qb = uR + 10.0;
-        for (int it = 0; it < 200; ++it) {
-          const Real qm = 0.5*(qa + qb);
-          const Real g = qm - sqrt(1.0 + qm*qm/(al*al))*bR/al - uR;
-          if (g > 0.0) { qb = qm; } else { qa = qm; }
-        }
-        const Real q = 0.5*(qa + qb);
-        const Real W = sqrt(1.0 + q*q/(al*al));
-        ut = W*(q/W)*r/(R*al);
-      } else {
-        const Real ak = sqrt(1.0 - 2.0*m_bh/R);
-        const Real h = hs_hinf/ak;
-        rho = pow(fmax(h - 1.0, 0.0)/((n + 1.0)*hs_k), n);
-        p = hs_k*pow(rho, gam);
-        // grid rest: v^r_iso = beta^r_iso/alpha, beta^r_iso = bR r/(R al)
-        const Real vr = (bR*r/(R*al))/al;
-        // gamma_ij v^i v^j = psi^4 (v^r)^2, psi^2 = R/r on the trumpet
-        const Real W = 1.0/sqrt(1.0 - SQR(R/r)*vr*vr);
-        ut = W*vr;
-      }
-      rho = fmax(rho, rho_fl); p = fmax(p, p_fl);
-    }
+    Real rho, p, ut;
+    bool held;
+    TestFlowPrim(tp, x, y, z, rho, p, ut, held);
     w0(m,IDN,k,j,i) = rho;
     w0(m,IPR,k,j,i) = p;
     w0(m,IVX,k,j,i) = (r > 0.0) ? ut*x/r : 0.0;
     w0(m,IVY,k,j,i) = (r > 0.0) ? ut*y/r : 0.0;
     w0(m,IVZ,k,j,i) = (r > 0.0) ? ut*z/r : 0.0;
-    mk(m,k,j,i) = (r >= r_out || R <= R_in) ? 1.0 : 0.0;
+    mk(m,k,j,i) = held ? 1.0 : 0.0;
   });
 }
 

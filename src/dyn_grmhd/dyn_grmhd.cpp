@@ -569,7 +569,6 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     tneed(pmy_pack->pmesh->three_d, "a 3D mesh");
     tneed(!kill_boost && !kill_flat, "trumpet weights (not killing_weights = boost / flat)");
-    tneed(energy_variable != EnergyVariable::killing_ta, "valencia, killing_t1 or killing_full");
     tneed(!tb_shells || tflag("puncture_enabled"), "a puncture with tau_budget_bins = shells");
     if (energy_variable == EnergyVariable::killing_full) {
       // A's background part: the trumpet table (built for a moving background already)

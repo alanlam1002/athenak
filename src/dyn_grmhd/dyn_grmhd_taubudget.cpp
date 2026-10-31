@@ -27,7 +27,9 @@
 //!     gamma-dot 4 psi0^3 xidot.grad psi0 where the code applies the rate; Dx<NGHOST> of the
 //!     table's psi0^4, beta0 at the stencil's cell centres), V^res = V - V^0; each split into
 //!     the trace part -1/6 sqrt(g) (gamma_ij S^ij)(gamma^ij V_ij) and the rest. B = Delta - A.
-//!   comoving killing_t1 (item 2): the frame-advection pairing at the T level,
+//!   comoving killing_t1 (item 2) and killing_ta (R-188 item 5: D's weight alpha0, so the E slot
+//!     of the pairing below holds sqrt(g)(E - D) and the face transform's w_f = alpha0_f): the
+//!     frame-advection pairing at the T level,
 //!     M_T = S_motion - S_motion,disc, S_motion = sqrt(g) s_W (kill_scr 0), S_motion,disc =
 //!     sum_a [(w_f - w_c) F^xi]_{f-}^{f+} / dx_a over the T weights (alpha0 on sqrt(g) E,
 //!     -beta0^k on sqrt(g) S_k), F^xi = -xidot^a (U_c + U_nb)/2 the central frame advection
@@ -201,6 +203,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
 
   if (kill_comov) {   // the frame pairing's cell values (the T source's own fluid)
     auto &tu = tb_u;
+    const bool ta = (energy_variable == EnergyVariable::killing_ta);
     par_for("tb_u", DevExeSpace(), 0, nmb-1, ks-1, ke+1, js-1, je+1, is-1, ie+1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
@@ -215,7 +218,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
       Real E, S_d[3], S_uu[3][3], W, ein;
       TbFluid(eos_, mb, nhyd, nscal, prim, bcc, g3d, g3u, vol, m, k, j, i, E, S_d, S_uu, W,
               ein);
-      tu(m, 0, k, j, i) = vol*E;
+      // killing_ta (R-188 item 5): D's weight alpha0 pairs with alpha0's E weight, so the slot
+      // holds sqrt(g) (E - D)
+      tu(m, 0, k, j, i) = vol*(ta ? E - prim(m, IDN, k, j, i)*W : E);
       for (int a = 0; a < 3; ++a) tu(m, 1 + a, k, j, i) = vol*S_d[a];
     });
   }
@@ -388,6 +393,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   const Real m_bh = pun ? pcfc->puncture_mass_ : 0.0;
   const bool val = (energy_variable == EnergyVariable::valencia);
   const bool kf = (energy_variable == EnergyVariable::killing_full);
+  const bool ta = (energy_variable == EnergyVariable::killing_ta);
   const bool comov = kill_comov;
   const Real rhoc = tb_rhoc, rs2 = 0.64*tb_rstar*tb_rstar;
   const bool shells = tb_shells;
@@ -511,7 +517,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
       Real p_, K_[6], dp_;
       TbBackground(td, th, tih, nt, m_bh, fx, fy, fz, al, b, p_, K_, dp_);
     };
-    const Real wd = kf ? 0.0 : 1.0;   // T's -w F_D (killing_t1: w = 1)
+    const Real wd = kf ? 0.0 : 1.0;   // T's -w F_D (killing_t1: w = 1; killing_ta: the face's)
     int nfb = 0;
     Real divT = 0.0, divV = 0.0, sdisc = 0.0;
     for (int dir = 0; dir < 3; ++dir) {
@@ -526,10 +532,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
         const Real bS = b[0]*f(m, IM1, k1, j1, i1) + b[1]*f(m, IM2, k1, j1, i1)
                         + b[2]*f(m, IM3, k1, j1, i1);
         Real fV = fv(m, dir, k1-ks, j1-js, i1-is);
-        const Real tr = al*(fV + fD) - bS - wd*fD;
-        const Real sc = fabs(al*(fV + fD)) + fabs(bS) + fabs(wd*fD) + 1.0e-300;
+        const Real wf = ta ? al : wd;
+        const Real tr = al*(fV + fD) - bS - wf*fD;
+        const Real sc = fabs(al*(fV + fD)) + fabs(bS) + fabs(wf*fD) + 1.0e-300;
         if (fabs(tr - fT) > 1.0e-10*sc && al >= 1.0e-3) {   // flux-corrected: invert
-          fV = (fT + bS + wd*fD)/al - fD;
+          fV = (fT + bS + wf*fD)/al - fD;
           nfb = 1;
         }
         divT += sg*fT*id;
@@ -563,7 +570,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
       tc(m, 11, kk, jj, ii) = (d - at)*dv;
       return;
     }
-    // t1: M_T = S_motion - S_motion,disc (0 in the BH frame and inside alpha0 < 1e-3, where
+    // t1/ta: M_T = S_motion - S_motion,disc (0 in the BH frame and inside alpha0 < 1e-3, where
     // the source kernel keeps Valencia), into tau as M_T/alpha0
     Real mt = 0.0, sm = 0.0;
     if (comov && alc >= 1.0e-3) {
@@ -604,7 +611,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
     tb_key = key;
   }
   if (global_variable::my_rank != 0) return;
-  const char *mode = val ? "valencia" : (kf ? "killing_full" : (comov ? "t1_comoving" : "t1"));
+  const char *mode = val ? "valencia" : (kf ? "killing_full" :
+                     (ta ? (comov ? "ta_comoving" : "ta") : (comov ? "t1_comoving" : "t1")));
   std::printf("KTB cycle=%d stage=%d time=%.12g dt=%.10e regrid=%d mode=%s bins=%s "
               "xc=%.8e,%.8e,%.8e nb=%d", pmy_pack->pmesh->ncycle, tb_stage,
               pmy_pack->pmesh->time, dt, static_cast<int>(tb_regrid), mode,

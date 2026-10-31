@@ -450,9 +450,11 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     kill_comov = (kw == "comoving");
     if (kill_comov) {
       // R-175: the trumpet weights at the comoving hole (any frame: constant, accelerated or
-      // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1)
-      need(energy_variable == EnergyVariable::killing_t1,
-           "energy_variable = killing_t1 with killing_weights = comoving");
+      // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1);
+      // killing_ta too (R-188 item 5: D's weight alpha0 moves with the hole)
+      need(energy_variable == EnergyVariable::killing_t1 ||
+           energy_variable == EnergyVariable::killing_ta,
+           "energy_variable = killing_t1 or killing_ta with killing_weights = comoving");
       kill_flat = !flag("puncture_enabled");
       if (!kill_flat) {
         need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");

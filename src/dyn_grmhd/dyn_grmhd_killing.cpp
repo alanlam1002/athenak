@@ -384,6 +384,7 @@ void DynGRMHD::KillingT1Stage(Driver *pdriver, int stage) {
   const Real th = ttab.h, tih = ttab.ih;
   const int nt = ttab.n;
   const bool hp = kill_have_xprev, s1 = (stage == 1);
+  const bool ta = (energy_variable == EnergyVariable::killing_ta);
   Real a = 0.0, b = 0.0, cc = 0.0;
   Kokkos::parallel_reduce("kill_t1_w", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
   KOKKOS_LAMBDA(const int idx, Real &sa, Real &sb, Real &sc) {
@@ -396,7 +397,8 @@ void DynGRMHD::KillingT1Stage(Driver *pdriver, int stage) {
     const Real x = CellCenterX(i-is, nx1, sz.x1min, sz.x1max);
     const Real y = CellCenterX(j-js, nx2, sz.x2min, sz.x2max);
     const Real z = CellCenterX(k-ks, nx3, sz.x3min, sz.x3max);
-    // T = alpha0 (tau + D) - beta0^k S_k - D (killing_t1), as MassClosure::KSrc
+    // T = alpha0 (tau + D) - beta0^k S_k - w D (w = 1 killing_t1, alpha0 killing_ta), as
+    // MassClosure::KSrc
     auto tw = [&](const DvceArray5D<Real> &u, const Real cx, const Real cy, const Real cz) {
       Real psi0, ap0, b0[3], dpsi0, dal0, bb, db;
       TrumpetTableBackground(td, th, tih, nt, m_bh, x - cx, y - cy, z - cz, psi0, ap0, b0,
@@ -405,7 +407,7 @@ void DynGRMHD::KillingT1Stage(Driver *pdriver, int stage) {
       const Real d = u(m, IDN, k, j, i);
       return al0*(u(m, IEN, k, j, i) + d)
              - (b0[0]*u(m, IM1, k, j, i) + b0[1]*u(m, IM2, k, j, i) + b0[2]*u(m, IM3, k, j, i))
-             - d;
+             - (ta ? al0 : 1.0)*d;
     };
     sa += tw(u0, c0, c1, c2)*dv;
     if (hp) sb += tw(u0, p0, p1, p2)*dv;
@@ -1237,10 +1239,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     Real sW = 0.0;
     if (comov) {   // -(d_t' G) q = -xidot^j (E d_j alpha0 - S_k d_j beta_BH^k) (NOTE Sec. 5)
       const Real fr[3] = {fr0, fr1, fr2};
+      // killing_ta (R-188 item 5): D's weight -alpha0 moves too, -(d_t' G_D) D = +xidot^j D
+      // d_j alpha0, i.e. E -> E - D
+      const Real Ew = ta ? E - prim(m, IDN, k, j, i)*W : E;
       for (int a = 0; a < 3; a++) {
         Real sdb = 0.0;
         for (int c = 0; c < 3; c++) sdb += S_d[c]*dB0[a][c];
-        sW -= fr[a]*(E*dal0_d[a] - sdb);
+        sW -= fr[a]*(Ew*dal0_d[a] - sdb);
       }
       scr(m, 0, k-ks, j-js, i-is) = vol*sW*sz.dx1*sz.dx2*sz.dx3;
     }

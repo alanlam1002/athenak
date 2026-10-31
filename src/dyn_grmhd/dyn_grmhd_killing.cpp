@@ -585,7 +585,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   const bool gauge = (gx[0] != 0.0) || (gx[1] != 0.0) || (gx[2] != 0.0);
   const bool bgm = kf_bgmove;
   const Real xdd[3] = {kf_xdd[0], kf_xdd[1], kf_xdd[2]};
-  const bool rate = dtg && (bgm || xdd[0] != 0.0 || xdd[1] != 0.0 || xdd[2] != 0.0);
+  // R-186 item 1: the background's analytic rate and xi-ddot need no previous stage, so they are
+  // kept where the residual chord is not (the first stage after a regrid or a run's start; C-148:
+  // dropping them there put -1/2 sqrt(g) S^ij gamma0-dot_ij's absence into B1K's tau)
+  const bool rate = kf_dtg && (bgm || xdd[0] != 0.0 || xdd[1] != 0.0 || xdd[2] != 0.0);
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
   auto &td = ttab.d;
@@ -704,6 +707,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
     bool rnz = false;
     // KFSPLIT (R-177 addendum): the background rate's net tau deposit, (sTb - E dalb + S.bd)/alpha
     Real bgt = 0.0;
+    const Real p4 = adm.psi4(m, k, j, i);
+    Real S_u[3];
+    for (int a = 0; a < 3; a++) {
+      S_u[a] = 0.0;
+      for (int b = 0; b < 3; b++) S_u[a] += g3u[imap[a][b]]*S_d[b];
+    }
+    const Real ia = 1.0/alpha;
     if (dtg) {
       // the chord's ends (an, bn, p4n: this stage; alp, bp, p4p: the previous one). A fixed
       // background: the stored metric (kf_prev 0-4) against this stage's, the R-165 arm (ii) (the
@@ -713,7 +723,6 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       // Both ends use the same arithmetic: the assembly kernels' own psi^4 differs from it by an
       // ulp under fast-fp codegen (c154: 172992 cells of 1 ulp on the CPU build), which would put
       // epsilon/dt noise into the chord.
-      const Real p4 = adm.psi4(m, k, j, i);
       Real an = alpha, bn[3] = {beta[0], beta[1], beta[2]}, p4n = p4;
       Real alp = pv(m, 0, k, j, i), p4p = pv(m, 4, k, j, i);
       Real bp[3] = {pv(m, 1, k, j, i), pv(m, 2, k, j, i), pv(m, 3, k, j, i)};
@@ -751,12 +760,6 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       const Real dg00 = -(an*an - alp*alp)*idtm + (p4n*bbn - p4p*bbp)*idtm;
       Real dg0[3];
       for (int a = 0; a < 3; ++a) dg0[a] = (p4n*bn[a] - p4p*bp[a])*idtm;
-      Real S_u[3];
-      for (int a = 0; a < 3; a++) {
-        S_u[a] = 0.0;
-        for (int b = 0; b < 3; b++) S_u[a] += g3u[imap[a][b]]*S_d[b];
-      }
-      const Real ia = 1.0/alpha;
       Real q = 0.5*E*ia*ia*dg00;
       for (int a = 0; a < 3; ++a) {
         q += (S_u[a] - E*beta[a]*ia)*ia*dg0[a];
@@ -781,42 +784,42 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
         }
         sTc = -alpha*vol*qq - sT;
       }
-      if (rate) {
-        // the background's analytic rate and xi-ddot, linear in the rates
-        Real psd = 0.0, vd = 0.0, bd[3] = {xdd[0], xdd[1], xdd[2]};
-        if (bgm) {
-          const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
-                              CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
-                              CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
-          Real pt, apt, b0t[3], dpsi0, dal0, bb0, db0;
-          TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t,
-                                 dpsi0, dal0, bb0, db0);
-          const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
-          // xidot^k d_k f(r) = (xidot . x/r) f'(r); d_k beta0^i = b delta_ki + b' x^k x^i/r
-          const Real vx = (gx[0]*xr[0] + gx[1]*xr[1] + gx[2]*xr[2])/r;
-          psd = vx*dpsi0;
-          vd = vx*(dal0*pt + (apt/pt)*dpsi0);
-          for (int a = 0; a < 3; ++a) bd[a] += bb0*gx[a] + db0*vx*xr[a];
-        }
-        const Real ps = sqrt(sqrt(p4));
-        const Real dalb = (alpha > afl) ? (vd - alpha*psd)/ps : 0.0;
-        const Real dp4b = 4.0*ps*ps*ps*psd;
-        Real bdb = 0.0;
-        for (int a = 0; a < 3; ++a) bdb += beta[a]*bd[a];
-        const Real bbc = beta[0]*beta[0] + beta[1]*beta[1] + beta[2]*beta[2];
-        const Real dg00b = -2.0*alpha*dalb + dp4b*bbc + 2.0*p4*bdb;
-        Real qb = 0.5*E*ia*ia*dg00b;
-        for (int a = 0; a < 3; ++a) {
-          qb += (S_u[a] - E*beta[a]*ia)*ia*(dp4b*beta[a] + p4*bd[a]);
-          qb += 0.5*dp4b*(E*beta[a]*beta[a]*ia*ia - 2.0*S_u[a]*beta[a]*ia + S_uu[a][a]);
-        }
-        sTb = -alpha*vol*qb;
-        Real bS = 0.0;
-        for (int a = 0; a < 3; ++a) bS += S_d[a]*bd[a];
-        bgt = (sTb - vol*E*dalb + vol*bS)/alpha;
-        dal += dalb;
-        for (int a = 0; a < 3; ++a) dbe[a] += bd[a];
+    }
+    if (rate) {
+      // the background's analytic rate and xi-ddot, linear in the rates
+      Real psd = 0.0, vd = 0.0, bd[3] = {xdd[0], xdd[1], xdd[2]};
+      if (bgm) {
+        const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
+                            CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
+                            CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
+        Real pt, apt, b0t[3], dpsi0, dal0, bb0, db0;
+        TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t,
+                               dpsi0, dal0, bb0, db0);
+        const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
+        // xidot^k d_k f(r) = (xidot . x/r) f'(r); d_k beta0^i = b delta_ki + b' x^k x^i/r
+        const Real vx = (gx[0]*xr[0] + gx[1]*xr[1] + gx[2]*xr[2])/r;
+        psd = vx*dpsi0;
+        vd = vx*(dal0*pt + (apt/pt)*dpsi0);
+        for (int a = 0; a < 3; ++a) bd[a] += bb0*gx[a] + db0*vx*xr[a];
       }
+      const Real ps = sqrt(sqrt(p4));
+      const Real dalb = (alpha > afl) ? (vd - alpha*psd)/ps : 0.0;
+      const Real dp4b = 4.0*ps*ps*ps*psd;
+      Real bdb = 0.0;
+      for (int a = 0; a < 3; ++a) bdb += beta[a]*bd[a];
+      const Real bbc = beta[0]*beta[0] + beta[1]*beta[1] + beta[2]*beta[2];
+      const Real dg00b = -2.0*alpha*dalb + dp4b*bbc + 2.0*p4*bdb;
+      Real qb = 0.5*E*ia*ia*dg00b;
+      for (int a = 0; a < 3; ++a) {
+        qb += (S_u[a] - E*beta[a]*ia)*ia*(dp4b*beta[a] + p4*bd[a]);
+        qb += 0.5*dp4b*(E*beta[a]*beta[a]*ia*ia - 2.0*S_u[a]*beta[a]*ia + S_uu[a][a]);
+      }
+      sTb = -alpha*vol*qb;
+      Real bS = 0.0;
+      for (int a = 0; a < 3; ++a) bS += S_d[a]*bd[a];
+      bgt = (sTb - vol*E*dalb + vol*bS)/alpha;
+      dal += dalb;
+      for (int a = 0; a < 3; ++a) dbe[a] += bd[a];
     }
     auto divf = [&](int n) {
       return (fx1_(m, n, k, j, i+1) - fx1_(m, n, k, j, i))/sz.dx1

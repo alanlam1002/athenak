@@ -198,6 +198,9 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
       kcflat_ = kcomov_ && !(pin->DoesParameterExist("cfc", "puncture_enabled") &&
                              pin->GetBoolean("cfc", "puncture_enabled"));
       tag_ = "KCLOSE"; key_ = "closure_kill";
+      // R-194 item 3 (killing_full_rest_mass = explicit): T = alpha tau - beta^k S_k
+      kfrm_ = (kill_ == 3) && pin->DoesParameterExist("mhd", "killing_full_rest_mass") &&
+              pin->GetString("mhd", "killing_full_rest_mass") == "explicit";
       dyngr::BuildTrumpetTable(ktab_, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                                pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
     }
@@ -362,6 +365,7 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
     if (kp) pv = pdg->kf_prev;
     const bool ks = (kwmode_ == 2);   // the saved set: 0-3 as kf_prev's
     if (ks) pv = kws_;
+    const bool rm = kfrm_;
     par_for("kclose_tfull", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
             0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -370,8 +374,10 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
       const Real b0 = q ? pv(m, 1, k, j, i) : adm.beta_u(m, 0, k, j, i);
       const Real b1 = q ? pv(m, 2, k, j, i) : adm.beta_u(m, 1, k, j, i);
       const Real b2 = q ? pv(m, 3, k, j, i) : adm.beta_u(m, 2, k, j, i);
-      kv(m, 0, k, j, i) = al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
-                          - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
+      Real t = al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
+               - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
+      if (rm) t -= al*u(m, IDN, k, j, i);
+      kv(m, 0, k, j, i) = t;
     });
     return kv_;
   }

@@ -38,6 +38,11 @@
 //!     R = Delta - M_T/alpha0_c.
 //!   item 4: |Delta|, its pre-division form alpha0 |Delta| (killing_full: alpha), <alpha0>.
 //!   valencia (item 3): D and D eps only.
+//!   valencia with <dyn_grmhd> tau_source_K != xcfc (R-194, modes valencia_keff | _kcfc | _ktr):
+//!     Delta = the source change AddTauSourceK applied (the fluxes are Valencia's); A0tr, A0tf
+//!     its trace and trace-free parts; B = Delta - A (round-off); w = alpha.
+//!   killing_full with killing_full_rest_mass = explicit (R-194 item 3, mode killing_full_rm):
+//!     the face inversion's w_f = alpha_f (T = alpha tau - beta'.S).
 //! Bins (one KTB line per stage, rank 0, sums x dV over the interior cells and the ranks):
 //!   star: rho/rho_c >= 0.5, [0.1, 0.5), [0.01, 0.1), [1e-3, 0.01) x (|x - x_c| <= 0.8 R*,
 //!     > 0.8 R*), x_c the rho dV centroid of rho >= 0.01 rho_c (this stage);
@@ -73,9 +78,6 @@
 namespace dyngr {
 
 namespace {
-
-// tb_c components: 0-15 reduced per bin (x dV), 16 the bin, 17-20 A (Pre), 21 the snapshot
-constexpr int kTbBin = 16, kTbA = 17, kTbSnap = 21;
 
 //! the trumpet about the hole through the table, as dyn_grmhd_killing.cpp KillingBackground
 //! (the same calls: t1's weights bitwise), plus dpsi0/dr
@@ -195,7 +197,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
   const int nscal = pmy_pack->pmhd->nscalars;
   const Real mb = eos.ps.GetEOS().GetBaryonMass();
   auto &tc = tb_c;
-  if (energy_variable == EnergyVariable::valencia) return;
+  // tau_source_K (R-194): the snapshot only (AddTauSourceK writes its parts)
+  if (energy_variable == EnergyVariable::valencia && tau_source_k == TauSourceK::xcfc) return;
   par_for("tb_snap", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     tc(m, kTbSnap, k-ks, j-js, i-is) = rhs(m, IEN, k, j, i);
@@ -390,7 +393,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   const Real cz = pun ? pcfc->bg_xbh_[2] : 0.0;
   const Real m_bh = pun ? pcfc->puncture_mass_ : 0.0;
   const bool val = (energy_variable == EnergyVariable::valencia);
+  const bool vk = val && (tau_source_k != TauSourceK::xcfc);   // R-194: Valencia, K replaced
   const bool kf = (energy_variable == EnergyVariable::killing_full);
+  const bool rm = kf_rm;   // R-194 item 3: the face's rest-mass weight alpha_f
   const bool ta = (energy_variable == EnergyVariable::killing_ta);
   const bool comov = kill_comov;
   const Real rhoc = tb_rhoc, rs2 = 0.64*tb_rstar*tb_rstar;
@@ -487,7 +492,21 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
     tc(m, 0, kk, jj, ii) = dv;
     tc(m, 1, kk, jj, ii) = vol*W*rho*dv;
     tc(m, 2, kk, jj, ii) = vol*W*ein*dv;
-    if (val) return;
+    if (val) {
+      if (!vk) return;
+      // tau_source_K: the fluxes are Valencia's, so Delta is the source change itself; A0tr /
+      // A0tf its trace / trace-free parts (AddTauSourceK), B = Delta - A (round-off)
+      const Real d = (rhs(m, IEN, k, j, i) - tc(m, kTbSnap, kk, jj, ii))*idt;
+      const Real w = adm.alpha(m, k, j, i);
+      tc(m, 3, kk, jj, ii) = d*dv;
+      tc(m, 4, kk, jj, ii) = fabs(d)*dv;
+      tc(m, 5, kk, jj, ii) = w*fabs(d)*dv;
+      tc(m, 6, kk, jj, ii) = w*dv;
+      tc(m, 7, kk, jj, ii) = tc(m, kTbA, kk, jj, ii)*dv;
+      tc(m, 8, kk, jj, ii) = tc(m, kTbA + 1, kk, jj, ii)*dv;
+      tc(m, 11, kk, jj, ii) = (d - tc(m, kTbA, kk, jj, ii) - tc(m, kTbA + 1, kk, jj, ii))*dv;
+      return;
+    }
 
     // the weights at the cell and at a face (killing_full: the average of the two cells, as
     // KillingFaceFluxes; t1: the trumpet at the face, KWeights' calls)
@@ -530,7 +549,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
         const Real bS = b[0]*f(m, IM1, k1, j1, i1) + b[1]*f(m, IM2, k1, j1, i1)
                         + b[2]*f(m, IM3, k1, j1, i1);
         Real fV = fv(m, dir, k1-ks, j1-js, i1-is);
-        const Real wf = ta ? al : wd;
+        const Real wf = (ta || rm) ? al : wd;
         const Real tr = al*(fV + fD) - bS - wf*fD;
         const Real sc = fabs(al*(fV + fD)) + fabs(bS) + fabs(wf*fD) + 1.0e-300;
         if (fabs(tr - fT) > 1.0e-10*sc && al >= 1.0e-3) {   // flux-corrected: invert
@@ -582,7 +601,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   });
 
   // per bin sums (components 0-2 for valencia, 0-15 otherwise)
-  const int nr = val ? 3 : kTbNr;
+  const int nr = (val && !vk) ? 3 : kTbNr;
   Real out[kTbShellBins*kTbNr] = {0.0};
   for (int b = 0; b < nb; ++b) {
     const Real bb = static_cast<Real>(b);
@@ -610,7 +629,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   }
   if (global_variable::my_rank != 0) return;
   const char *kfm = kf_fcfc ? "killing_fcfc" : (kf_fz ? "killing_fz" : "killing_full");
-  const char *mode = val ? "valencia" : (kf ? kfm :
+  const char *vkm[4] = {"valencia", "valencia_keff", "valencia_kcfc", "valencia_ktr"};
+  if (kf_rm) kfm = "killing_full_rm";
+  const char *mode = val ? vkm[static_cast<int>(tau_source_k)] : (kf ? kfm :
                      (ta ? (comov ? "ta_comoving" : "ta") : (comov ? "t1_comoving" : "t1")));
   std::printf("KTB cycle=%d stage=%d time=%.12g dt=%.10e regrid=%d mode=%s bins=%s "
               "xc=%.8e,%.8e,%.8e nb=%d", pmy_pack->pmesh->ncycle, tb_stage,

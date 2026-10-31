@@ -242,6 +242,7 @@ class MassClosure {
   // source, xidot^j (E d_j alpha0 - S_k d_j beta_BH^k), is its own item "motion" (out of
   // "source"). kcflat_: no puncture, weights (1, 0).
   bool kcomov_ = false, kcflat_ = false;
+  bool kfrm_ = false;         // R-194 item 3: killing_full_rest_mass = explicit (w_D = alpha)
   Real km_st_[4] = {0.0, 0.0, 0.0, 0.0};   // KillMotion per stage (the stage's applied amount)
   KSum km_seg_, km_cum_;
   bool KWt() const { return kill_ == 3 || kcomov_; }

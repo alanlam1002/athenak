@@ -127,6 +127,9 @@ void DynGRMHD::KillingFaceFluxes() {
     const int ks = indcs.ks, ke = indcs.ke;
     const int nmb = pmy_pack->nmb_thispack;
     auto &adm = pmy_pack->padm->adm;
+    // R-194 item 3 (killing_full_rest_mass = explicit): the rest-mass weight w_f = alpha_f, as
+    // killing_ta's (T = alpha tau - beta'.S), so F_D pairs with no weight gradient
+    const bool rm = kf_rm;
     for (int dir = 0; dir < 3; ++dir) {
       auto &f = (dir == 0) ? pmy_pack->pmhd->uflx.x1f :
                 ((dir == 1) ? pmy_pack->pmhd->uflx.x2f : pmy_pack->pmhd->uflx.x3f);
@@ -139,9 +142,11 @@ void DynGRMHD::KillingFaceFluxes() {
         for (int a = 0; a < 3; ++a) {
           b[a] = (adm.beta_u(m, a, k, j, i) + adm.beta_u(m, a, km, jm, im))*0.5;
         }
-        f(m, IEN, k, j, i) = al*(f(m, IEN, k, j, i) + f(m, IDN, k, j, i))
-                             - (b[0]*f(m, IM1, k, j, i) + b[1]*f(m, IM2, k, j, i)
-                                + b[2]*f(m, IM3, k, j, i));
+        Real ft = al*(f(m, IEN, k, j, i) + f(m, IDN, k, j, i))
+                  - (b[0]*f(m, IM1, k, j, i) + b[1]*f(m, IM2, k, j, i)
+                     + b[2]*f(m, IM3, k, j, i));
+        if (rm) ft -= al*f(m, IDN, k, j, i);
+        f(m, IEN, k, j, i) = ft;
       });
     }
     if (kill_probe_cycles > 0) KillingFaceProbe();
@@ -309,7 +314,8 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
     for (int a = 0; a < 3; ++a) kf_xdstep[a] = fv[a];
     kf_have_xd = true;
   }
-  if (pmclose == nullptr) return;
+  // tau_source_K = keff | ktr (R-194): Valencia, no T and no weights item
+  if (pmclose == nullptr || energy_variable != EnergyVariable::killing_full) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
@@ -320,6 +326,7 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   auto &u1 = pmy_pack->pmhd->u1;
   auto &pv = kf_prev;
   const bool hp = kf_have_prev, s1 = (stage == 1);
+  const bool rm = kf_rm;   // R-194 item 3: T's rest-mass weight alpha (T = alpha tau - beta'.S)
   Real a = 0.0, c = 0.0;
   Kokkos::parallel_reduce("kill_full_w", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
   KOKKOS_LAMBDA(const int idx, Real &sa, Real &sc) {
@@ -331,8 +338,10 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
     const Real dv = sz.dx1*sz.dx2*sz.dx3;
     auto tw = [&](const DvceArray5D<Real> &u, const Real al, const Real b0, const Real b1,
                   const Real b2) {
-      return al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
-             - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
+      Real t = al*(u(m, IEN, k, j, i) + u(m, IDN, k, j, i))
+               - (b0*u(m, IM1, k, j, i) + b1*u(m, IM2, k, j, i) + b2*u(m, IM3, k, j, i));
+      if (rm) t -= al*u(m, IDN, k, j, i);
+      return t;
     };
     const Real al = adm.alpha(m, k, j, i);
     const Real b0 = adm.beta_u(m, 0, k, j, i), b1 = adm.beta_u(m, 1, k, j, i);
@@ -600,6 +609,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   const bool split = (kf_split_every > 0);
   const bool fz = kf_fz;   // R-190 (KF_z)
   const bool fcfc = kf_fcfc;   // R-191 (KF_CFC)
+  const bool rm = kf_rm;   // R-194 item 3 (rest mass explicit)
   const Real srho = kf_split_rho, srmin2 = kf_split_rmin*kf_split_rmin;
   auto &scr = kill_scr;
   auto &fx1_ = pmy_pack->pmhd->uflx.x1f;
@@ -904,6 +914,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       sT += vol*0.5*alpha*sz;
     }
 
+    if (rm) {   // R-194 item 3: the rest-mass work -sqrt(g) D V^j d_j alpha, V^j = alpha v^j - beta^j
+      const Real D = prim(m, IDN, k, j, i)*W;
+      for (int a = 0; a < 3; a++) {
+        sT -= vol*D*(alpha*prim_pt[PVX + a]/W - beta[a])*dalpha_d[a];
+      }
+    }
     const Real dT = -divf(IEN) + sT;
     const Real dD = -divf(IDN);
     Real bdS = 0.0, Sdb = 0.0;
@@ -911,7 +927,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       bdS += beta[a]*(-divf(IM1 + a) + vol*src_S[a]);
       Sdb += vol*S_d[a]*dbe[a];
     }
-    const Real dtau = (dT - vol*E*dal + Sdb + bdS)/alpha - dD;
+    // rest mass explicit: T = alpha tau - beta'.S, so alpha dtau = dT - tau alpha-dot + S.beta-dot
+    // + beta'.dS with dT's -D alpha-dot (d_t of -alpha D, not the Killing identity's) folded in:
+    // -(tau + D) alpha-dot as below, and no -dD
+    const Real dtau = rm ? (dT - vol*E*dal + Sdb + bdS)/alpha
+                         : (dT - vol*E*dal + Sdb + bdS)/alpha - dD;
     const Real dtau_applied = -divf(IEN) + vol*src_tau;
     rhs(m, IEN, k, j, i) += dt*(dtau - dtau_applied);
   });
@@ -936,6 +956,229 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   kf_tprev = kf_tstage;
   // after a restart without arm (ii)'s groups, the first stage's u_beta is the zero fill, not
   // a solve: that stage's store is no chord end (the next stage has none, as after a regrid)
+  kf_have_prev = !kf_bres_stale;
+  kf_bres_stale = false;
+  auto *pmr = pmy_pack->pmesh->pmr;
+  kf_key[0] = (pmr != nullptr) ? pmr->nmb_created : 0;
+  kf_key[1] = (pmr != nullptr) ? pmr->nmb_deleted : 0;
+  kf_key[2] = nmb;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::AddTauSourceK
+//! \brief <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5): Valencia's tau source alpha S^ij K_ij
+//! (AddCoordTermsEOS, XCFC's K = adm.vK_dd) with K replaced; fluxes, momentum and the rebuild
+//! unchanged. rhs(tau) += dt sqrt(g) (s - alpha S^ij K^XCFC_ij) for
+//!   keff: s = alpha S^ij K^eff_ij = 1/2 S^ij [(Lie_beta' gamma)_ij - gamma-dot_ij],
+//!   kcfc: s = 1/2 S^ij (Lie_beta' gamma)^TF_ij (traceless; no time information),
+//! and for ktr rhs(tau) += dt sqrt(g) (S/3) (D_k beta'^k - 6 d_t ln psi), S = gamma_ij S^ij,
+//! D_k beta'^k = d_k beta'^k + beta'^k 1/2 gamma^ij d_k gamma_ij (= d_k(psi^6 beta'^k)/psi^6).
+//! Lie_beta' gamma and D_k beta'^k from Dx<NGHOST> of the full adm.g_dd, adm.beta_u (beta' =
+//! beta_BH + delta beta + xidot), as KF_z/KF_CFC (AddKillingFullTerms). gamma-dot_ij =
+//! (psi^4)-dot delta_ij, the actual rate, as arm (ii) evaluates it there: the residual chord
+//! between this stage's and the previous stage's CFC residual on this stage's background (kf_prev
+//! 5-9; with a fixed background the chord of psi^4 itself, kf_prev 4), dropped where kf_prev is
+//! not valid (the run's first stage, after a regrid, a restart without it), plus the moving
+//! background's analytic rate 4 psi^3 xidot.grad psi0 (kept on every stage). The same stage
+//! bookkeeping (KillingFullStage, kf_prev, restart state) as arm (ii).
+template<class EOSPolicy, class ErrorPolicy>
+template<int NGHOST>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &prim,
+    const DvceArray5D<Real> &bcc, const Real dt, DvceArray5D<Real> &rhs) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &adm = pmy_pack->padm->adm;
+  auto &eos_ = eos.ps.GetEOS();
+  const int nhyd = pmy_pack->pmhd->nmhd;
+  const int nscal = pmy_pack->pmhd->nscalars;
+  const Real mb = eos.ps.GetEOS().GetBaryonMass();
+  const int mode = static_cast<int>(tau_source_k);   // 1 keff, 2 kcfc, 3 ktr
+  const bool chord = TskChord();
+  auto &pv = kf_prev;
+  const Real dtm = kf_tstage - kf_tprev;
+  const bool dtg = chord && kf_have_prev && dtm != 0.0;
+  const Real idtm = dtg ? 1.0/dtm : 0.0;
+  auto *pcfc = pmy_pack->pcfc;
+  auto &psi0 = pcfc->u_psi0;
+  const bool rsc = pcfc->rs_on_ && pcfc->rs_f_ != 1.0;
+  const Real rsf = pcfc->rs_f_;
+  auto &dps = pcfc->delta_psi;
+  auto &dap = pcfc->delta_alpha_psi;
+  auto &bres = pcfc->beta_u;
+  const Real gx[3] = {pmy_pack->padm->frame_vel_u[0], pmy_pack->padm->frame_vel_u[1],
+                      pmy_pack->padm->frame_vel_u[2]};
+  const bool bgm = chord && kf_bgmove;
+  const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
+  const Real m_bh = pcfc->puncture_mass_;
+  auto &td = ttab.d;
+  const Real th = ttab.h, tih = ttab.ih;
+  const int nt = ttab.n;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const bool tb = TauBudgetOn();   // the change's trace / trace-free parts -> tb_c (kTbA, +1)
+  auto &tc = tb_c;
+  const int imap[3][3] = {
+    {S11, S12, S13},
+    {S12, S22, S23},
+    {S13, S23, S33}
+  };
+
+  par_for("tau_source_k", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const auto &sz = size.d_view(m);
+    // the metric and its derivatives (as AddCoordTermsEOS)
+    Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                           adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                           adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
+    const Real alpha = adm.alpha(m, k, j, i);
+    const Real beta[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
+                          adm.beta_u(m, 2, k, j, i)};
+    Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
+                                g3d[S22], g3d[S23], g3d[S33]);
+    Real vol = sqrt(detg);
+    Real g3u[NSPMETRIC] = {0.};
+    adm::SpatialInv(1.0/detg, g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
+                    &g3u[S11], &g3u[S12], &g3u[S13], &g3u[S22], &g3u[S23], &g3u[S33]);
+    Real idx[] = {1./sz.dx1, 1./sz.dx2, 1./sz.dx3};
+    Real dbeta_du[3][3], dg_ddd[3][3][3];
+    for (int a = 0; a < 3; a++) {
+      for (int c = 0; c < 3; c++) {
+        dbeta_du[a][c] = Dx<NGHOST>(a, idx, adm.beta_u, m, c, k, j, i);
+        for (int e = 0; e < 3; ++e) {
+          dg_ddd[a][c][e] = Dx<NGHOST>(a, idx, adm.g_dd, m, c, e, k, j, i);
+        }
+      }
+    }
+
+    // the fluid's S^ij (as AddCoordTermsEOS)
+    Real prim_pt[NPRIM] = {0.0};
+    prim_pt[PRH] = prim(m, IDN, k, j, i)/mb;
+    prim_pt[PVX] = prim(m, IVX, k, j, i);
+    prim_pt[PVY] = prim(m, IVY, k, j, i);
+    prim_pt[PVZ] = prim(m, IVZ, k, j, i);
+    for (int s = 0; s < nscal; s++) {
+      prim_pt[PYF + s] = prim(m, nhyd + s, k, j, i);
+    }
+    prim_pt[PPR] = prim(m, IPR, k, j, i);
+    prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], prim_pt[PPR], &prim_pt[PYF]);
+    Real H =
+      prim(m, IDN, k, j, i)*eos_.GetEnthalpy(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
+    Real usq = Primitive::SquareVector(&prim_pt[PVX], g3d);
+    Real const Wsq = 1.0 + usq;
+    Real const W = sqrt(Wsq);
+    Real B_u[NMAG] = {bcc(m, IBX, k, j, i)/vol,
+                      bcc(m, IBY, k, j, i)/vol,
+                      bcc(m, IBZ, k, j, i)/vol};
+    Real Bv = 0.0;
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < 3; b++) {
+        Bv += adm.g_dd(m,a,b,k,j,i)*prim_pt[PVX + a]*B_u[b];
+      }
+    }
+    Real Bsq = Primitive::SquareVector(B_u, g3d);
+    Bv = Bv/W;
+    Real bsq = Bv*Bv + Bsq/Wsq;
+    Real S_uu[3][3];
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b <= a; b++) {
+        S_uu[a][b] = (H + Bsq/Wsq)*prim_pt[PVX + a]*prim_pt[PVX + b]
+                      - B_u[a]*B_u[b]/Wsq
+                      - Bv*(B_u[a]*prim_pt[PVX + b] + B_u[b]*prim_pt[PVX + a])/W
+                      + (prim_pt[PPR] + 0.5*bsq)*g3u[imap[a][b]];
+        S_uu[b][a] = S_uu[a][b];
+      }
+    }
+
+    // XCFC's term, (Lie_beta' gamma)_ij, S = gamma_ij S^ij, D_k beta'^k
+    Real sx = 0.0, sl = 0.0, trl = 0.0, trS = 0.0, trK = 0.0, divb = 0.0, saa = 0.0;
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < 3; b++) {
+        Real lie = 0.0;   // beta^c d_c g_ab + g_cb d_a beta^c + g_ac d_b beta^c
+        for (int c = 0; c < 3; c++) {
+          lie += beta[c]*dg_ddd[c][a][b] + g3d[imap[c][b]]*dbeta_du[a][c]
+                 + g3d[imap[a][c]]*dbeta_du[b][c];
+        }
+        sx += alpha*adm.vK_dd(m, a, b, k, j, i)*S_uu[a][b];
+        sl += S_uu[a][b]*lie;
+        trl += g3u[imap[a][b]]*lie;
+        trS += g3d[imap[a][b]]*S_uu[a][b];
+        trK += g3u[imap[a][b]]*adm.vK_dd(m, a, b, k, j, i);
+      }
+      saa += S_uu[a][a];
+    }
+    for (int c = 0; c < 3; c++) {
+      Real dln = 0.0;   // 1/2 gamma^ij d_c gamma_ij
+      for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) dln += 0.5*g3u[imap[a][b]]*dg_ddd[c][a][b];
+      }
+      divb += dbeta_du[c][c] + beta[c]*dln;
+    }
+
+    // (psi^4)-dot: the residual chord (as AddKillingFullTerms' dp4) + the background's rate
+    const Real p4 = adm.psi4(m, k, j, i);
+    Real dp4 = 0.0;
+    if (dtg) {
+      Real p4n = p4, p4p = pv(m, 4, k, j, i);
+      if (bgm) {   // both ends assembled on THIS stage's background (CFC::AssembleADM's psi)
+        auto q4 = [&](const Real dp) {
+          const Real ps = rsc ? psi0(m, 0, k, j, i) + rsf*dp : dp + psi0(m, 0, k, j, i);
+          return ps*ps*ps*ps;
+        };
+        p4n = q4(dps(m, 0, k, j, i));
+        p4p = q4(pv(m, 5, k, j, i));
+      }
+      dp4 = (p4n - p4p)*idtm;
+    }
+    if (bgm) {   // xidot^k d_k psi0 from the trumpet table (as AddKillingFullTerms' psd)
+      const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
+                          CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
+                          CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
+      Real pt, apt, b0t[3], dpsi0, dal0, bb0, db0;
+      TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t,
+                             dpsi0, dal0, bb0, db0);
+      const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
+      const Real psd = (gx[0]*xr[0] + gx[1]*xr[1] + gx[2]*xr[2])/r*dpsi0;
+      const Real ps = sqrt(sqrt(p4));
+      dp4 += 4.0*ps*ps*ps*psd;
+    }
+
+    // the change and its trace part (S/3) gamma^ij (alpha K'_ij - alpha K^XCFC_ij)
+    Real ds = 0.0, dtr = 0.0;
+    if (mode == 1) {          // keff
+      ds = 0.5*(sl - dp4*saa) - sx;
+      dtr = trS/3.0*(0.5*trl - 1.5*dp4/p4 - alpha*trK);
+    } else if (mode == 2) {   // kcfc
+      ds = 0.5*(sl - trS*trl/3.0) - sx;
+      dtr = -trS/3.0*alpha*trK;
+    } else {                  // ktr
+      ds = trS/3.0*(divb - 1.5*dp4/p4);
+      dtr = ds;
+    }
+    rhs(m, IEN, k, j, i) += dt*vol*ds;
+    if (tb) {
+      tc(m, kTbA, k-ks, j-js, i-is) = vol*dtr;
+      tc(m, kTbA + 1, k-ks, j-js, i-is) = vol*(ds - dtr);
+    }
+  });
+
+  if (!chord) return;
+  // this stage's metric and CFC residual -> kf_prev (as AddKillingFullTerms)
+  par_for("tsk_prev", DevExeSpace(), 0, nmb-1, 0, pv.extent_int(2)-1,
+          0, pv.extent_int(3)-1, 0, pv.extent_int(4)-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    pv(m, 0, k, j, i) = adm.alpha(m, k, j, i);
+    for (int a = 0; a < 3; ++a) pv(m, 1 + a, k, j, i) = adm.beta_u(m, a, k, j, i);
+    pv(m, 4, k, j, i) = adm.psi4(m, k, j, i);
+  });
+  par_for("tsk_prev_res", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    pv(m, 5, k, j, i) = dps(m, 0, k, j, i);
+    pv(m, 6, k, j, i) = dap(m, 0, k, j, i);
+    for (int a = 0; a < 3; ++a) pv(m, 7 + a, k, j, i) = bres(m, a, k, j, i);
+  });
+  kf_tprev = kf_tstage;
   kf_have_prev = !kf_bres_stale;
   kf_bres_stale = false;
   auto *pmr = pmy_pack->pmesh->pmr;
@@ -1394,6 +1637,12 @@ template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms<2>( \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms<3>( \
     const DvceArray5D<Real> &, const DvceArray5D<Real> &, const Real, DvceArray5D<Real> &); \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms<4>( \
+    const DvceArray5D<Real> &, const DvceArray5D<Real> &, const Real, DvceArray5D<Real> &); \
+template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK<2>( \
+    const DvceArray5D<Real> &, const DvceArray5D<Real> &, const Real, DvceArray5D<Real> &); \
+template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK<3>( \
+    const DvceArray5D<Real> &, const DvceArray5D<Real> &, const Real, DvceArray5D<Real> &); \
+template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK<4>( \
     const DvceArray5D<Real> &, const DvceArray5D<Real> &, const Real, DvceArray5D<Real> &);
 
 INSTANTIATE_KILLING_TERMS(Primitive::IdealGas, Primitive::ResetFloor)

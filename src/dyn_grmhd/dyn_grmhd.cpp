@@ -390,6 +390,14 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
     need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz/fcfc (frozen weights)");
+    // R-194 item 3: read without GetOrAdd, so an input without it is unchanged
+    if (pin->DoesParameterExist("mhd", "killing_full_rest_mass")) {
+      const std::string rm = pin->GetString("mhd", "killing_full_rest_mass");
+      need(rm == "paired" || rm == "explicit", "killing_full_rest_mass = paired | explicit");
+      kf_rm = (rm == "explicit");
+      need(!kf_rm || (kf_dtg && !kf_fz),
+           "killing_full_dtg = true (arm ii) with killing_full_rest_mass = explicit");
+    }
     auto cflag = [&](const char *key) {
       return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
     };
@@ -553,6 +561,66 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
     kill_diag_every = pin->GetOrAddInteger("mhd", "killing_source_diag_every", 25);
     kdiag = DvceArray2D<Real>("kdiag", kKdBins, kKdComp);
+  }
+
+  // <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5, user-approved 2026-10-31;
+  // dyn_grmhd_killing.cpp AddTauSourceK). Read without GetOrAdd: an input without it is unchanged.
+  if (pin->DoesParameterExist("dyn_grmhd", "tau_source_K")) {
+    const std::string tk = pin->GetString("dyn_grmhd", "tau_source_K");
+    auto kneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> tau_source_K = " << tk << " needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    kneed(tk == "xcfc" || tk == "keff" || tk == "kcfc" || tk == "ktr",
+          "one of xcfc, keff, kcfc, ktr");
+    tau_source_k = (tk == "keff") ? TauSourceK::keff : ((tk == "kcfc") ? TauSourceK::kcfc :
+                   ((tk == "ktr") ? TauSourceK::ktr : TauSourceK::xcfc));
+  }
+  if (tau_source_k != TauSourceK::xcfc) {
+    auto kneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> tau_source_K needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto kflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    kneed(energy_variable == EnergyVariable::valencia, "<mhd> energy_variable = valencia");
+    kneed(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    kneed(pin->DoesBlockExist("cfc"), "CFC (gamma_ij = psi^4 delta_ij)");
+    kneed(pmy_pack->pmesh->three_d && indcs.ng >= 2, "a 3D mesh with nghost >= 2");
+    kneed(!kill_diag, "no <mhd> killing_source_diag");
+    if (TskChord()) {
+      // the actual d_t ln psi: arm (ii)'s residual chord and the background's analytic rate
+      // (as killing_full_dtg, dyn_grmhd.cpp above), as a source term only
+      kneed(pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
+            "<cfc> solve_interval <= 0 (a metric solve every stage)");
+      kneed(!pin->DoesParameterExist("cfc", "residual_scale_t1"),
+            "a constant <cfc> residual_scale (no residual_scale_t1 ramp)");
+      kneed(!kflag("puncture_enabled") || kflag("freeze_puncture_mass"),
+            "<cfc> freeze_puncture_mass = true with a puncture");
+      kf_bgmove = kflag("puncture_enabled") && kflag("puncture_moving");
+      if (kf_bgmove && ttab.n == 0) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+      LoadKillingScalars(pin);
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+    }
+    if (global_variable::my_rank == 0) {
+      const char *nm[4] = {"xcfc", "keff", "kcfc", "ktr"};
+      std::cout << "<dyn_grmhd> tau_source_K = " << nm[static_cast<int>(tau_source_k)]
+                << (TskChord() ? (kf_bgmove ? " (d_t ln psi: the residual chord + the moving "
+                                              "background's analytic rate)"
+                                            : " (d_t ln psi: the chord of psi^4)") : "")
+                << std::endl;
+    }
   }
 
   // <mhd> tau_budget_every (R-184 items 1-4, user-approved 2026-10-30; diagnostics only,
@@ -1075,6 +1143,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
       case 3: TauBudgetPre<3>(prim, bcc, rhs);
               break;
       case 4: TauBudgetPre<4>(prim, bcc, rhs);
+              break;
+    }
+  }
+  if (tau_source_k != TauSourceK::xcfc && !fixed_evolution) {
+    switch (nghost) {   // dyn_grmhd_killing.cpp (R-194)
+      case 2: AddTauSourceK<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddTauSourceK<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddTauSourceK<4>(prim, bcc, dt, rhs);
               break;
     }
   }

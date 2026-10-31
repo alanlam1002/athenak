@@ -74,11 +74,18 @@ namespace dyngr {
 // <mhd> energy_variable (R-155 item 1): the energy equation evolved
 // (killing_full, R-165 item 4: the full-metric comoving form, weights (alpha, beta') of the CFC metric)
 enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
+// <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5): the K in Valencia's tau source alpha S^ij K_ij
+// (xcfc: XCFC's K, the default; keff: K^eff = (Lie_beta' gamma - gamma-dot)/(2 alpha) with the
+// actual gamma-dot; kcfc: (Lie_beta' gamma)^TF/(2 alpha); ktr: XCFC's K plus the trace correction)
+enum class TauSourceK {xcfc, keff, kcfc, ktr};
 
 // <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): per-cell components (tb_c), the
 // first kTbNr summed per bin (x dV); bins: star = 4 density bands x (interior, surface),
 // shells = r_iso about the hole between the kTbShell edges
 constexpr int kTbNc = 22, kTbNr = 16, kTbStarBins = 8, kTbShellBins = 12;
+// tb_c components: 0-15 reduced per bin (x dV), 16 the bin, 17-20 A (Pre; tau_source_K: the
+// source change's trace and trace-free parts, AddTauSourceK), 21 the snapshot
+constexpr int kTbBin = 16, kTbA = 17, kTbSnap = 21;
 
 // <mhd> killing_source_diag (R-165 item 3(a)): r_iso bins (0: r < kKdR0, kKdBins-1: r >= kKdR1,
 // geometric in between) x components (sums: dt dV x, cumulative; maxima: over the run)
@@ -219,6 +226,10 @@ class DynGRMHD {
   // R-191 (KF_CFC, energy_variable = killing_fcfc): KF_z with s_CFC = -(alpha/3) S D_k beta'^k,
   // the CFC form of gamma-dot (2/3 gamma_ij D_k beta'^k), in place of s_z
   bool kf_fcfc = false;
+  // R-194 item 3 (<mhd> killing_full_rest_mass = explicit): T = sqrt(g) (alpha tau - beta'^k S_k),
+  // the face flux's rest-mass weight w_D = alpha_f, and the rest-mass work -sqrt(g) D V^j d_j alpha
+  // (full alpha) as a source; otherwise arm (ii)
+  bool kf_rm = false;
   DvceArray5D<Real> kf_prev;
   Real kf_tprev = 0.0, kf_tstage = 0.0;
   Real kf_m1u1 = 0.0;   // KCLOSE weights item: [M_s - M_1](u1), telescoped (KillingFullStage)
@@ -238,7 +249,14 @@ class DynGRMHD {
   void ReportKillingStage(int stage, Real dt);   // reduce kill_scr: KFSPLIT / KCLOSE motion
   void SaveKillingScalars(ParameterInput *pin);  // arm (ii)'s stage bookkeeping -> <mhd> kf_*
   void LoadKillingScalars(ParameterInput *pin);  // (the constructor, on a restart)
-  bool KfRst() const { return energy_variable == EnergyVariable::killing_full && kf_dtg; }
+  // <dyn_grmhd> tau_source_K (R-194): keff and ktr take gamma-dot from arm (ii)'s chord state
+  TauSourceK tau_source_k = TauSourceK::xcfc;
+  bool TskChord() const {
+    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr;
+  }
+  bool KfRst() const {
+    return (energy_variable == EnergyVariable::killing_full && kf_dtg) || TskChord();
+  }
   // a restart whose restart_state block was not applied (restart_state::ApplyStaged)
   void RestartStateIgnored() { kf_bres_stale = KfRst(); }
   int kill_stage = 0;             // the RK stage of the current killing source call
@@ -403,6 +421,11 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddKillingFullTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                            const Real dt, DvceArray5D<Real> &u0);
+  // <dyn_grmhd> tau_source_K != xcfc (R-194; dyn_grmhd_killing.cpp): after AddCoordTermsEOS,
+  // rhs(tau) += dt sqrt(g) (the variant's source - alpha S^ij K^XCFC_ij)
+  template<int NGHOST>
+  void AddTauSourceK(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                     const Real dt, DvceArray5D<Real> &u0);
   // <mhd> tau_budget_every (dyn_grmhd_taubudget.cpp): before AddKillingTerms (the tau slot
   // snapshot; killing_full: the ADM-consistency term A; comoving t1: sqrt(g) E, S_k), and
   // after it (the per-cell budget, binned and reported)

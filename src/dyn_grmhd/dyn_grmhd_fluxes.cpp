@@ -515,6 +515,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes(Driver *pdriver, int s
   if (pmy_pack->pmhd->use_fofc || pmy_pack->pcoord->coord_data.bh_excise) {
     FOFC<rsolver_method_, FM>(pdriver, stage);
   }
+  // <dyn_grmhd> tau_source_K = keff | ktr (R-194): arm (ii)'s stage time and kf_prev's validity
+  if (TskChord() && !fixed_evolution) KillingFullStage(pdriver, stage);
   // <mhd> energy_variable != valencia: the tau slot's final face flux (after FOFC, before the
   // fine/coarse flux correction) becomes the T flux (dyn_grmhd_killing.cpp)
   if (energy_variable != EnergyVariable::valencia && !fixed_evolution) {

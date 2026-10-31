@@ -44,6 +44,10 @@ def areal(r):
                      for x in np.atleast_1d(r)])
 
 
+# c158 (R-186 item 3): C122_AREAL="R0,R1,..." gives the shells as AREAL-radius edges (mapped to r_iso by chi; rows labelled R a-b)
+AREAL = [float(v) for v in os.environ['C122_AREAL'].split(',')] if os.environ.get('C122_AREAL') else None
+
+
 def par(d, blk, key, default):
     import re
     s = open(glob.glob(f'{d}/*.par')[0] if glob.glob(f'{d}/*.par') else f'{d}/parfile.par').read()
@@ -77,6 +81,14 @@ def michel_profile(rc, rhoc, r):
     return rho, ur, k
 
 
+def u_areal_trumpet(ut, r, R):
+    """c158: u^R = dR/dtau (slicing-invariant) from the trumpet code primitive u~^r_iso: W = sqrt(1 + psi^4 u~^2), psi^4 =
+    (R/r)^2; u^r_iso = u~^r - W beta^r_iso/alpha, beta^r_iso = beta^R r/(R alpha); u^R = u^r_iso R alpha/r"""
+    al = np.sqrt(np.maximum(1 - 2*M/R + CC**2/R**4, 1e-300)); bR = al*CC/R**2
+    W = np.sqrt(1 + (R/r)**2*ut*ut)
+    return (ut - W*(bR*r/(R*al))/al)*R*al/r
+
+
 def cells(f):
     P = bc.read_binary(f)
     g = np.asarray(P['mb_geometry']); n = P['nx1_out_mb']
@@ -94,6 +106,10 @@ def cells(f):
 
 def main():
     out, rows = sys.argv[1], []
+    shells, labels = SHELLS, [f'{a:g}-{b:g}' for a, b in SHELLS]
+    if AREAL:
+        shells = [(float(chi(a)), float(chi(b))) for a, b in zip(AREAL[:-1], AREAL[1:])]
+        labels = [f'R{a:g}-{b:g}' for a, b in zip(AREAL[:-1], AREAL[1:])]
     for d in sys.argv[2:]:
         lab = os.path.basename(d.rstrip('/'))
         fs = sorted(glob.glob(f'{d}/bin/{B}.prim_3d.*.bin'))
@@ -114,6 +130,7 @@ def main():
             rhoE = np.exp(CubicSpline(np.log(rg), np.log(rho_e))(np.log(r)))
             urE = CubicSpline(np.log(rg), ur_e)(np.log(r))
         alc = np.interp(np.log(r), np.log(rg), alg)
+        Rc = np.exp(np.interp(np.log(r), np.log(rg), np.log(Rg)))
         pk = 'eint' if 'eint' in D0 else 'press'
         Kof = lambda Dd: (Dd[pk]*(GAM - 1.0) if pk == 'eint' else Dd[pk])/Dd['dens']**GAM
         if test == 'hydrostatic':
@@ -125,17 +142,21 @@ def main():
             ur = (Dd['velx']*X + Dd['vely']*Y + Dd['velz']*Z)/np.maximum(r, 1e-30)
             if test == 'hydrostatic':
                 rhoE, urE = D0['dens'], (D0['velx']*X + D0['vely']*Y + D0['velz']*Z)/np.maximum(r, 1e-30)
-            for (a, b) in SHELLS:
+            for (a, b), sl in zip(shells, labels):
                 m = ev & (r >= a) & (r < b)
                 if not m.any():
                     continue
                 er = np.abs(rho[m] - rhoE[m])/rhoE[m]
                 eu = np.abs(ur[m] - urE[m])/np.maximum(np.abs(urE[m]), 1e-3 if test == 'hydrostatic' else 1e-30)
                 kk = Kof(Dd)[m]/(kE[m] if np.ndim(kE) else kE) - 1.0
-                rows.append(f'{lab},{t:.4g},{a:g}-{b:g},{m.sum()},{er.mean():.3e},{er.max():.3e},'
+                uR, uRE = u_areal_trumpet(ur[m], r[m], Rc[m]), u_areal_trumpet(urE[m], r[m], Rc[m])
+                eR = np.abs(uR - uRE)/np.maximum(np.abs(uRE), 1e-3 if test == 'hydrostatic' else 1e-30)
+                rows.append(f'{lab},{t:.4g},{sl},{m.sum()},{er.mean():.3e},{er.max():.3e},'
                             f'{eu.mean():.3e},{eu.max():.3e},{np.abs(ur[m]-urE[m]).max():.3e},'
-                            f'{kk.mean():.3e},{np.abs(kk).mean():.3e},{np.abs(kk).max():.3e}')
-    hdr = 'run,t,shell_r_iso,ncell,rho_L1rel,rho_Linf_rel,ur_L1rel,ur_Linf_rel,ur_Linf_abs,K_mean,K_L1,K_Linf'
+                            f'{kk.mean():.3e},{np.abs(kk).mean():.3e},{np.abs(kk).max():.3e},{eR.mean():.3e},{eR.max():.3e},'
+                            f'{alc[m].mean():.4f}')
+    hdr = ('run,t,shell_r_iso,ncell,rho_L1rel,rho_Linf_rel,ur_L1rel,ur_Linf_rel,ur_Linf_abs,K_mean,K_L1,K_Linf,uR_L1rel,'
+           'uR_Linf_rel,alpha_mean')
     open(out, 'w').write(hdr + '\n' + '\n'.join(rows) + '\n')
     print(hdr); print('\n'.join(rows))
 

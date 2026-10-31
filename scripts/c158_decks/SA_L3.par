@@ -1,0 +1,100 @@
+# c158 deck (R-186 item 3 Step A, user-approved 2026-10-30): Michel accretion in Cartesian Kerr-Schild (a = 0), AthenaK's GR hydro
+# module (the HARM form T^t_t + D, ideal_c2p_hyd.hpp:259-266), pgen gr_bondi; B.2's Michel (r_c = 8 M areal, rho_c = 1e-8 at r_c,
+# Gamma = 5/3: k_adi = T_c/rho_c^(2/3)), B.2's mesh (../c150_rframe/B2A_val_L3.par: root dx = 1 on +-64, static boxes +-32/16/8/4,
+# 16^3 MeshBlocks), its ppmx + hlle + rk3, cfl 0.4, nghost 4, FOFC, floors dfloor 1e-24, pfloor = dfloor*tfloor.
+# Not matched: excision at r_KS <= 1 (hard-coded rexcise, coordinates.cpp:69-70; alpha = 0.577 there), the boundary (gr_bondi's
+# FixedBondiInflow on the box faces, not B.2's hold at r_iso >= 40), no dual-energy/atmosphere-zone machinery (B.2 had them off).
+<comment>
+problem = Michel accretion in Kerr-Schild (Step A, level L3)
+<job>
+basename = ks_michel
+<mesh>
+nghost = 4
+nx1 = 128
+x1min = -64.0
+x1max = 64.0
+ix1_bc = user
+ox1_bc = user
+nx2 = 128
+x2min = -64.0
+x2max = 64.0
+ix2_bc = user
+ox2_bc = user
+nx3 = 128
+x3min = -64.0
+x3max = 64.0
+ix3_bc = user
+ox3_bc = user
+<meshblock>
+nx1 = 16
+nx2 = 16
+nx3 = 16
+<mesh_refinement>
+refinement = static
+num_levels = 4
+max_nmb_per_rank = 400
+
+<refined_region1>
+level = 1
+x1min = -32.0
+x1max = 32.0
+x2min = -32.0
+x2max = 32.0
+x3min = -32.0
+x3max = 32.0
+
+<refined_region2>
+level = 2
+x1min = -16.0
+x1max = 16.0
+x2min = -16.0
+x2max = 16.0
+x3min = -16.0
+x3max = 16.0
+
+<refined_region3>
+level = 3
+x1min = -8.0
+x1max = 8.0
+x2min = -8.0
+x2max = 8.0
+x3min = -8.0
+x3max = 8.0
+
+<coord>
+general_rel = true
+a = 0.0
+excise = true
+dexcise = 1.0e-24
+pexcise = 1.0e-46
+<time>
+evolution = dynamic
+integrator = rk3
+cfl_number = 0.4
+nlim = -1
+tlim = 120.0
+ndiag = 100
+<hydro>
+eos = ideal
+reconstruct = ppmx
+rsolver = hlle
+fofc = true
+gamma = 1.6666666666666667
+dfloor = 1.0e-24
+pfloor = 1.0e-46
+<problem>
+pgen_name = gr_bondi
+k_adi = 11240.528817557646
+r_crit = 8.0
+<output1>
+file_type = hst
+dt = 0.5
+data_format = %20.15e
+<output2>
+file_type = bin
+variable = hydro_w
+dt = 40.0
+id = prim_3d
+<output3>
+file_type = rst
+dcycle = 500

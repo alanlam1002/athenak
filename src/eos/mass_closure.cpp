@@ -171,7 +171,9 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
     // <mhd> energy_variable (R-155 item 1): close T instead (mass_closure.hpp)
     const std::string ev = pin->DoesParameterExist("mhd", "energy_variable") ?
                            pin->GetString("mhd", "energy_variable") : "valencia";
-    kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 : ((ev == "killing_full") ? 3 : 0));
+    // killing_fz (R-190): killing_full's weights (alpha, beta'), frozen per stage
+    kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 :
+            ((ev == "killing_full" || ev == "killing_fz") ? 3 : 0));
     // <mhd> killing_closure = t1 | ta (diagnostic, valencia only): the same T closure for a
     // Valencia run, its face flux formed from the stored D, S, tau fluxes (as the killing
     // options' KillingFaceFluxes), so the two formulations' T drifts are booked alike

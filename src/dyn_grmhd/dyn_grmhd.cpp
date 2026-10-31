@@ -349,10 +349,15 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     energy_variable = EnergyVariable::killing_ta;
   } else if (ev == "killing_full") {
     energy_variable = EnergyVariable::killing_full;
+  } else if (ev == "killing_fz") {
+    // R-190 item 1 (KF_z): killing_full's path with the weights frozen per stage (arm (i)) and
+    // the spatial source s_z (AddKillingFullTerms); no chord, no rate, no d_t of anything
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
-              << "killing_ta or killing_full)" << std::endl;
+              << "killing_ta, killing_full or killing_fz)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (kill_mom_fd && (energy_variable != EnergyVariable::killing_t1 ||
@@ -379,6 +384,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
+    need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz (frozen weights)");
     auto cflag = [&](const char *key) {
       return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
     };

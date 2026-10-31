@@ -14,6 +14,7 @@
 #   B1Ta  comoving killing_ta (B1T's deck, energy_variable = killing_ta), Delta and M_T per bin (item 5)
 #   B1Z   KF_z (R-190: TB1F's killing_full deck with energy_variable = killing_fz), after VB in its slot; Delta_z per bin
 #   B1C   KF_CFC (R-191: the same with energy_variable = killing_fcfc), after B1Ta in its slot
+#   B1Z/B1C start only after td159all's (9001813) KF_z/KF_CFC gates pass (flat gate, probe, restart: REQ_*)
 set -uo pipefail
 D=/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc
 E=$D/c159_cap
@@ -34,6 +35,12 @@ slot() {   # first-node-line nnodes arms...
     case $a in GATE_*)
       python3 $E/gate_${a#GATE_}.py $E >> $E/runs.log 2>&1 || { echo "$a failed: slot stops $(date -u +%FT%TZ)" >> $E/runs.log; touch $E/FAILED_$a.$PBS_JOBID; return; }
       touch $E/PASS_$a.$PBS_JOBID; echo "$a passed $(date -u +%FT%TZ)" >> $E/runs.log
+      continue ;;
+    REQ_*)   # REQ_<gate>: that gate of td159all (9001813, c159_kfz) must pass first; wait for it (up to 1.5 h)
+      local g=GATE_${a#REQ_} wn=0 Z=$D/c159_kfz
+      while ! ls $Z/PASS_$g.9001813* >/dev/null 2>&1 && ! ls $Z/FAILED_$g.9001813* >/dev/null 2>&1 && [ $wn -lt 540 ]; do sleep 10; wn=$((wn + 1)); done
+      ls $Z/PASS_$g.9001813* >/dev/null 2>&1 || { echo "$a: td159all's $g did not pass, slot stops $(date -u +%FT%TZ)" >> $E/runs.log; return; }
+      echo "$a: td159all's $g passed $(date -u +%FT%TZ)" >> $E/runs.log
       continue ;;
     WAIT_*)
       local gw=GATE_${a#WAIT_} wn=0
@@ -61,6 +68,6 @@ slot() {   # first-node-line nnodes arms...
     case "$(grep -o 'Terminating on [a-z -]*' out.log | tail -1)" in *"time limit"*|*"cycle limit"*) touch $E/DONE_$a ;; esac
   done
 }
-( slot 1 8 VB B1Z ) &
-( slot 9 8 B1Ta B1C ) &
+( slot 1 8 VB REQ_gz REQ_zp REQ_zr B1Z ) &
+( slot 9 8 B1Ta REQ_gc REQ_cp REQ_cr B1C ) &
 wait

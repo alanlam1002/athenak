@@ -549,6 +549,15 @@ void FixedBondiInflow(Mesh *pm) {
   }
 
   Real gm1 = 1.0;
+  // c159 (R-188 item 3; the design rule): the dyngr P2C calls below cover the ghost slabs of
+  // EVERY MeshBlock (internal faces too, where stale w0 overwrote the exchanged u0); keep a
+  // copy of u0 so that ghosts not on a user physical face keep their exchanged values
+  DvceArray5D<Real> usv;
+  if (use_dyngr) {
+    usv = DvceArray5D<Real>("bondi_usv", u0_.extent(0), u0_.extent(1), u0_.extent(2),
+                            u0_.extent(3), u0_.extent(4));
+    Kokkos::deep_copy(usv, u0_);
+  }
   if (!use_dyngr) {
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
@@ -690,6 +699,20 @@ void FixedBondiInflow(Mesh *pm) {
   if (use_dyngr) {
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ks-ng,ks-1);
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    int nvar = u0_.extent_int(1);
+    int isl = is, iel = ie, jsl = js, jel = je, ksl = ks, kel = ke;
+    par_for("bondi_restore", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      bool bc = (i < isl && mb_bcs.d_view(m,BoundaryFace::inner_x1) == BoundaryFlag::user) ||
+                (i > iel && mb_bcs.d_view(m,BoundaryFace::outer_x1) == BoundaryFlag::user) ||
+                (j < jsl && mb_bcs.d_view(m,BoundaryFace::inner_x2) == BoundaryFlag::user) ||
+                (j > jel && mb_bcs.d_view(m,BoundaryFace::outer_x2) == BoundaryFlag::user) ||
+                (k < ksl && mb_bcs.d_view(m,BoundaryFace::inner_x3) == BoundaryFlag::user) ||
+                (k > kel && mb_bcs.d_view(m,BoundaryFace::outer_x3) == BoundaryFlag::user);
+      if (!bc) {
+        for (int n = 0; n < nvar; ++n) u0_(m,n,k,j,i) = usv(m,n,k,j,i);
+      }
+    });
   } else {
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
     pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);

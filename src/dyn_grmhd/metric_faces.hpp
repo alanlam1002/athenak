@@ -16,9 +16,14 @@
 //!                   analytic background derivative + Dx<NGHOST> of the residual.
 //!   wellbalanced -- option (e): fluxes as (d); sources difference the SAME face values,
 //!                   d_d g|_i = (g_f(i+1/2) - g_f(i-1/2))/dx_d.
+//!   kerr_schild  -- R-188 item 3 (Step B): a FIXED analytic Kerr-Schild metric (<adm> without
+//!                   CFC/Z4c: ADM::SetADMVariablesToKerrSchild at the cells); the faces take the
+//!                   same closed form (ComputeADMDecomposition) at the face, full gamma_ij; the
+//!                   sources difference the face values as wellbalanced.
 //! The face metric is built once per stage (DynGRMHD::ComputeFaceMetric) into per-direction
-//! arrays fm_x{1,2,3}(m, n, k, j, i) with n = 0 alpha, 1-3 beta^i, 4 psi (gamma_ij =
-//! psi^4 delta_ij), read by the Riemann solvers, FOFC and the sources alike.
+//! arrays fm_x{1,2,3}(m, n, k, j, i) with n = 0 alpha, 1-3 beta^i, 4 psi, 5-10 gamma_ij
+//! (xx, xy, xz, yy, yz, zz; the trumpet modes: psi^4 delta_ij), read by the Riemann solvers,
+//! FOFC and the sources alike.
 //!
 //! The background at a face needs the areal radius R(r_iso), a root-find per point
 //! (cfc_puncture.hpp TrumpetIsoToAreal). TrumpetTable replaces it by a quintic Hermite
@@ -40,10 +45,10 @@
 
 namespace dyngr {
 
-enum class MetricTerms {cell, analytic_bg, wellbalanced};
+enum class MetricTerms {cell, analytic_bg, wellbalanced, kerr_schild};
 
 // face-array components
-constexpr int kFmAlpha = 0, kFmBeta = 1, kFmPsi = 4, kFmN = 5;
+constexpr int kFmAlpha = 0, kFmBeta = 1, kFmPsi = 4, kFmG = 5, kFmN = 11;
 
 //----------------------------------------------------------------------------------------
 //! \struct TrumpetTable
@@ -136,10 +141,11 @@ void FaceMetricFromArrays(const DvceArray5D<Real> &fm, const int m, const int k,
                           Real &alpha) {
   alpha = fm(m, kFmAlpha, k, j, i);
   for (int a = 0; a < 3; ++a) beta_u[a] = fm(m, kFmBeta + a, k, j, i);
-  const Real p = fm(m, kFmPsi, k, j, i);
-  const Real p4 = (p*p)*(p*p);
-  g3d[S11] = p4; g3d[S22] = p4; g3d[S33] = p4;
-  g3d[S12] = 0.0; g3d[S13] = 0.0; g3d[S23] = 0.0;
+  // R-188 item 3: the full gamma_ij (the trumpet modes store psi^4 delta_ij, the same
+  // arithmetic as before, at the fill)
+  g3d[S11] = fm(m, kFmG + 0, k, j, i); g3d[S12] = fm(m, kFmG + 1, k, j, i);
+  g3d[S13] = fm(m, kFmG + 2, k, j, i); g3d[S22] = fm(m, kFmG + 3, k, j, i);
+  g3d[S23] = fm(m, kFmG + 4, k, j, i); g3d[S33] = fm(m, kFmG + 5, k, j, i);
 }
 
 }  // namespace dyngr

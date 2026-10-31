@@ -174,6 +174,7 @@ class DynGRMHD {
   int fm_probe_cycles = 0, fm_probe_c0 = -1;   // <dyn_grmhd> face_probe_* (ghost/owner)
   Real fm_probe_box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   void ComputeFaceMetric(int stage);   // once per stage, at the start of CalcFluxes
+  void ComputeFaceMetricKS();          // metric_terms = kerr_schild (R-188 item 3)
   void FaceMetricProbe(int stage);
   void TrumpetTableTest(int npts);     // <dyn_grmhd> metric_table_test (host and device)
 
@@ -187,6 +188,7 @@ class DynGRMHD {
   // puncture; delta beta = beta' - xidot - beta_BH; the frozen weights' rate
   // -xidot^j (E d_j alpha0 - S_k d_j beta_BH^k) added to the T source (KCLOSE item "motion")
   bool kill_comov = false, kill_flat = false;
+  bool kill_ks = false;   // killing_weights = kerr_schild (R-188 item 3): weights = the KS metric
   bool kill_have_xprev = false;     // KCLOSE: the weights' centre of the previous stage
   Real kill_xprev[3] = {0.0, 0.0, 0.0}, kill_m1u1 = 0.0;
   DvceArray5D<Real> kill_scr;       // per-cell stage values reduced after the source kernel

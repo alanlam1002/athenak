@@ -195,6 +195,14 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
                 pin->GetString("mhd", "killing_weights") == "comoving";
       kcflat_ = kcomov_ && !(pin->DoesParameterExist("cfc", "puncture_enabled") &&
                              pin->GetBoolean("cfc", "puncture_enabled"));
+      // killing_weights = kerr_schild (R-188 item 3): the weights are adm itself, no CFC
+      kks_ = pin->DoesParameterExist("mhd", "killing_weights") &&
+             pin->GetString("mhd", "killing_weights") == "kerr_schild";
+      if (kks_ && kill_face_) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "<mhd> killing_closure (a Valencia run's T) is trumpet-only" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
       tag_ = "KCLOSE"; key_ = "closure_kill";
       dyngr::BuildTrumpetTable(ktab_, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                                pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
@@ -330,6 +338,22 @@ const DvceArray5D<Real> &MassClosure::KSrc(const DvceArray5D<Real> &u) const {
   // bg_xbh_: CFC refills the background at the next stage's centre before the C2P, where the stage
   // is measured (cfc.cpp SolveVecXTask); so the weights change between stages, as killing_full's
   // (AssembleFinal, after the C2P), and KillingT1Stage books that change as "weights"
+  if (kks_) {   // R-188 item 3: T with the fixed Kerr-Schild metric's own (alpha, beta), cellwise
+    auto &adm = pmy_pack->padm->adm;
+    const bool kta = (kill_ == 2);
+    auto kv = kv_;
+    par_for("kclose_tks", DevExeSpace(), 0, pmy_pack->nmb_thispack - 1, 0, u.extent_int(2) - 1,
+            0, u.extent_int(3) - 1, 0, u.extent_int(4) - 1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const Real al0 = adm.alpha(m, k, j, i), d = u(m, IDN, k, j, i);
+      kv(m, 0, k, j, i) = al0*(u(m, IEN, k, j, i) + d)
+                          - (adm.beta_u(m, 0, k, j, i)*u(m, IM1, k, j, i)
+                             + adm.beta_u(m, 1, k, j, i)*u(m, IM2, k, j, i)
+                             + adm.beta_u(m, 2, k, j, i)*u(m, IM3, k, j, i))
+                          - (kta ? al0 : 1.0)*d;
+    });
+    return kv_;
+  }
   const auto *pdg = pmy_pack->pdyngr;
   const bool kxp = kcomov_ && (pdg != nullptr) && pdg->kill_have_xprev;
   const Real cx = kxp ? pdg->kill_xprev[0] : pcfc->bg_xbh_[0];

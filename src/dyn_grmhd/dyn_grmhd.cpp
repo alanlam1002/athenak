@@ -274,10 +274,19 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     metric_terms = MetricTerms::analytic_bg;
   } else if (mt == "wellbalanced") {
     metric_terms = MetricTerms::wellbalanced;
+  } else if (mt == "kerr_schild") {
+    // R-188 item 3 (Step B): the fixed analytic Kerr-Schild metric (<adm> alone, M = 1)
+    metric_terms = MetricTerms::kerr_schild;
+    if (pin->DoesBlockExist("cfc") || pin->DoesBlockExist("z4c") || !pin->DoesBlockExist("adm")) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> metric_terms = kerr_schild needs <adm> without <cfc>/<z4c> "
+                << "(the fixed analytic metric)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<dyn_grmhd> metric_terms = '" << mt << "' (cell, analytic_bg or "
-              << "wellbalanced)" << std::endl;
+              << "<dyn_grmhd> metric_terms = '" << mt << "' (cell, analytic_bg, "
+              << "wellbalanced or kerr_schild)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   // <dyn_grmhd> killing_momentum_bg (R-178): cell (default: the momentum source as
@@ -299,7 +308,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                 << "<dyn_grmhd> face_residual_interp must be 2 or 4" << std::endl;
       std::exit(EXIT_FAILURE);
     }
-    if (!pin->GetOrAddBoolean("cfc", "puncture_enabled", false)) {
+    if (metric_terms != MetricTerms::kerr_schild &&
+        !pin->GetOrAddBoolean("cfc", "puncture_enabled", false)) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "<dyn_grmhd> metric_terms = " << mt << " needs the CFC trumpet "
                 << "background (<cfc> puncture_enabled = true)" << std::endl;
@@ -444,11 +454,23 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     // (<cfc> frame_vel*): d_t' of flat comoving coordinates, T = sqrt(g)(E - xidot.S - D)
     const std::string kw = pin->DoesParameterExist("mhd", "killing_weights") ?
                            pin->GetString("mhd", "killing_weights") : "trumpet";
-    need(kw == "trumpet" || kw == "boost" || kw == "comoving",
-         "<mhd> killing_weights = trumpet, boost or comoving");
+    need(kw == "trumpet" || kw == "boost" || kw == "comoving" || kw == "kerr_schild",
+         "<mhd> killing_weights = trumpet, boost, comoving or kerr_schild");
     kill_boost = (kw == "boost");
     kill_comov = (kw == "comoving");
-    if (kill_comov) {
+    // R-188 item 3 (Step B): the weights ARE the fixed Kerr-Schild metric (adm at the cells, the
+    // face arrays at the faces), so every residual is zero and s_T is ta's term alone
+    kill_ks = (kw == "kerr_schild");
+    if (kill_ks) {
+      need(metric_terms == MetricTerms::kerr_schild,
+           "<dyn_grmhd> metric_terms = kerr_schild with killing_weights = kerr_schild");
+      need(energy_variable == EnergyVariable::killing_t1 ||
+           energy_variable == EnergyVariable::killing_ta,
+           "energy_variable = killing_t1 or killing_ta with killing_weights = kerr_schild");
+      need(!pin->DoesParameterExist("mhd", "killing_source_diag") &&
+           !pin->DoesParameterExist("mhd", "tau_budget_every"),
+           "no killing_source_diag / tau_budget_every (trumpet diagnostics)");
+    } else if (kill_comov) {
       // R-175: the trumpet weights at the comoving hole (any frame: constant, accelerated or
       // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1);
       // killing_ta too (R-188 item 5: D's weight alpha0 moves with the hole)
@@ -464,7 +486,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     } else {
       need(!flag("frame_controller"), "a constant frame (<cfc> frame_controller = false)");
     }
-    if (kill_comov) {
+    if (kill_comov || kill_ks) {
     } else if (kill_boost) {
       need(!flag("puncture_enabled"), "no puncture (killing_weights = boost: flat background)");
       need(!pin->DoesParameterExist("cfc", "frame_accel1") &&

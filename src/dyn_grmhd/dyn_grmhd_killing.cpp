@@ -147,6 +147,34 @@ void DynGRMHD::KillingFaceFluxes() {
     if (kill_probe_cycles > 0) KillingFaceProbe();
     return;
   }
+  if (kill_ks) {
+    // R-188 item 3: the weights at the face are the face arrays' Kerr-Schild metric, i.e. the
+    // Riemann solver's own face metric (metric_faces.hpp), pointwise in the face coordinates
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+    const int ks = indcs.ks, ke = indcs.ke;
+    const int nmb = pmy_pack->nmb_thispack;
+    const bool ta = (energy_variable == EnergyVariable::killing_ta);
+    for (int dir = 0; dir < 3; ++dir) {
+      auto &f = (dir == 0) ? pmy_pack->pmhd->uflx.x1f :
+                ((dir == 1) ? pmy_pack->pmhd->uflx.x2f : pmy_pack->pmhd->uflx.x3f);
+      auto &fm = (dir == 0) ? fm_x1 : ((dir == 1) ? fm_x2 : fm_x3);
+      const int si = (dir == 0), sj = (dir == 1), sk = (dir == 2);
+      par_for("kill_faces_ks", DevExeSpace(), 0, nmb-1, ks, ke + sk, js, je + sj, is, ie + si,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        const Real al0 = fm(m, kFmAlpha, k, j, i);
+        const Real fD = f(m, IDN, k, j, i);
+        const Real w = ta ? al0 : 1.0;
+        f(m, IEN, k, j, i) = al0*(f(m, IEN, k, j, i) + fD)
+                             - (fm(m, kFmBeta, k, j, i)*f(m, IM1, k, j, i)
+                                + fm(m, kFmBeta + 1, k, j, i)*f(m, IM2, k, j, i)
+                                + fm(m, kFmBeta + 2, k, j, i)*f(m, IM3, k, j, i))
+                             - w*fD;
+      });
+    }
+    if (kill_probe_cycles > 0) KillingFaceProbe();
+    return;
+  }
   auto *pcfc = pmy_pack->pcfc;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
@@ -938,8 +966,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
   const int nhyd = pmy_pack->pmhd->nmhd;
   const int nscal = pmy_pack->pmhd->nscalars;
   const Real mb = eos.ps.GetEOS().GetBaryonMass();
-  const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
-  const Real m_bh = pcfc->puncture_mass_;
+  // killing_weights = kerr_schild (R-188 item 3): no CFC; the weights are adm itself
+  const bool kks = kill_ks;
+  const Real cx = kks ? 0.0 : pcfc->bg_xbh_[0], cy = kks ? 0.0 : pcfc->bg_xbh_[1];
+  const Real cz = kks ? 0.0 : pcfc->bg_xbh_[2], m_bh = kks ? 1.0 : pcfc->puncture_mass_;
   // apply: killing_t1/ta; otherwise (valencia + killing_source_diag) the diagnostic only
   const bool apply = (energy_variable != EnergyVariable::valencia);
   const bool ta = apply ? (energy_variable == EnergyVariable::killing_ta) : kill_diag_ta;
@@ -986,6 +1016,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
   par_for("kill_residual", DevExeSpace(), 0, nmb-1, 0, res.extent_int(2)-1,
           0, res.extent_int(3)-1, 0, res.extent_int(4)-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    if (kks) {   // the weights are the metric: no residual
+      for (int c = 0; c < 5; ++c) res(m, c, k, j, i) = 0.0;
+      return;
+    }
     const auto &sz = size.d_view(m);
     const Real x = CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx;
     const Real y = CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy;
@@ -1015,8 +1049,17 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
                         CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
                         CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
     Real al0, b0[3], psi0, K0[6], dal0, bb, db;
-    KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], al0, b0, psi0,
-             K0, dal0, bb, db);
+    if (kks) {   // adm itself (K0 packed xx, yy, zz, xy, xz, yz); d alpha0: the sources' below
+      al0 = adm.alpha(m, k, j, i);
+      for (int a = 0; a < 3; ++a) b0[a] = adm.beta_u(m, a, k, j, i);
+      psi0 = 1.0; dal0 = 0.0; bb = 0.0; db = 0.0;
+      K0[0] = adm.vK_dd(m, 0, 0, k, j, i); K0[1] = adm.vK_dd(m, 1, 1, k, j, i);
+      K0[2] = adm.vK_dd(m, 2, 2, k, j, i); K0[3] = adm.vK_dd(m, 0, 1, k, j, i);
+      K0[4] = adm.vK_dd(m, 0, 2, k, j, i); K0[5] = adm.vK_dd(m, 1, 2, k, j, i);
+    } else {
+      KWeights(boost, fv0, fv1, fv2, td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], al0, b0,
+               psi0, K0, dal0, bb, db);
+    }
     const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
     // killing_source_diag: the r_iso bin and the cell-time weight
     int kb = 0;
@@ -1073,7 +1116,23 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
           for (int e = 0; e < 3; ++e) dg_ddd[a][c][e] = 0.0;
         }
       }
-      if (fwb) {
+      if (kks) {   // AddCoordTermsFM's kerr_schild branch (every gamma_ij from the faces)
+        const int gmap[3][3] = {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}};
+        for (int a = 0; a < 3; a++) {
+          const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
+          const int ip = i + (a == 0), jp = j + (a == 1), kp = k + (a == 2);
+          dalpha_d[a] = (fm(m, kFmAlpha, kp, jp, ip) - fm(m, kFmAlpha, k, j, i))*idx[a];
+          dal0_d[a] = dalpha_d[a];   // ta's -D V^j d_j alpha0 with the sources' d alpha
+          for (int b = 0; b < 3; b++) {
+            dbeta_du[a][b] = (fm(m, kFmBeta + b, kp, jp, ip) - fm(m, kFmBeta + b, k, j, i))*
+                             idx[a];
+            for (int c = 0; c < 3; c++) {
+              const int q = kFmG + gmap[b][c];
+              dg_ddd[a][b][c] = (fm(m, q, kp, jp, ip) - fm(m, q, k, j, i))*idx[a];
+            }
+          }
+        }
+      } else if (fwb) {
         for (int a = 0; a < 3; a++) {
           const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
           const int ip = i + (a == 0), jp = j + (a == 1), kp = k + (a == 2);

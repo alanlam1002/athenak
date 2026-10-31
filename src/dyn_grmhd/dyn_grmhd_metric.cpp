@@ -24,6 +24,7 @@
 #include "coordinates/adm.hpp"
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "coordinates/cartesian_ks.hpp"
 #include "cfc/cfc.hpp"
 #include "cfc/cfc_puncture.hpp"
 #include "mhd/mhd.hpp"
@@ -188,6 +189,11 @@ void DynGRMHD::TrumpetTableTest(int npts) {
 //! centre of the last background fill (CFC::bg_xbh_). Every input is owner-consistent at
 //! same-level faces (exchanged adm, the pointwise background, the global xidot).
 void DynGRMHD::ComputeFaceMetric(int stage) {
+  if (metric_terms == MetricTerms::kerr_schild) {
+    ComputeFaceMetricKS();
+    if (fm_probe_cycles > 0) FaceMetricProbe(stage);
+    return;
+  }
   auto *pcfc = pmy_pack->pcfc;
   if (pcfc == nullptr || !pcfc->puncture_enabled_) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
@@ -261,9 +267,52 @@ void DynGRMHD::ComputeFaceMetric(int stage) {
       fm(m, kFmBeta + 1, k, j, i) = b0[1] + r5[3] + fv1;
       fm(m, kFmBeta + 2, k, j, i) = b0[2] + r5[4] + fv2;
       fm(m, kFmPsi, k, j, i) = psif;
+      const Real p4 = (psif*psif)*(psif*psif);   // gamma_ij = psi^4 delta_ij (metric_faces.hpp)
+      fm(m, kFmG + 0, k, j, i) = p4; fm(m, kFmG + 1, k, j, i) = 0.0;
+      fm(m, kFmG + 2, k, j, i) = 0.0; fm(m, kFmG + 3, k, j, i) = p4;
+      fm(m, kFmG + 4, k, j, i) = 0.0; fm(m, kFmG + 5, k, j, i) = p4;
     });
   }
   if (fm_probe_cycles > 0) FaceMetricProbe(stage);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHD::ComputeFaceMetricKS
+//! \brief metric_terms = kerr_schild (R-188 item 3): every face of the block (ghost faces
+//! included) from the closed form the cell fill uses (ComputeADMDecomposition, cartesian_ks.hpp;
+//! M = 1, <coord> a), pointwise in the face coordinates: a ghost's face equals its owner's
+void DynGRMHD::ComputeFaceMetricKS() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto &size = pmy_pack->pmb->mb_size;
+  const Real a = pmy_pack->pcoord->coord_data.bh_spin;
+  const bool mink = pmy_pack->pcoord->coord_data.is_minkowski;
+  for (int dir = 0; dir < 3; ++dir) {
+    if ((dir == 1 && nx2 == 1) || (dir == 2 && nx3 == 1)) continue;
+    auto &fm = (dir == 0) ? fm_x1 : ((dir == 1) ? fm_x2 : fm_x3);
+    const int si = (dir == 0), sj = (dir == 1), sk = (dir == 2);
+    par_for("fm_faces_ks", DevExeSpace(), 0, nmb-1, 0, fm.extent_int(2)-1, 0, fm.extent_int(3)-1,
+            0, fm.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const auto &sz = size.d_view(m);
+      const Real x = si ? LeftEdgeX(i-is, nx1, sz.x1min, sz.x1max)
+                        : CellCenterX(i-is, nx1, sz.x1min, sz.x1max);
+      const Real y = sj ? LeftEdgeX(j-js, nx2, sz.x2min, sz.x2max)
+                        : CellCenterX(j-js, nx2, sz.x2min, sz.x2max);
+      const Real z = sk ? LeftEdgeX(k-ks, nx3, sz.x3min, sz.x3max)
+                        : CellCenterX(k-ks, nx3, sz.x3min, sz.x3max);
+      Real al, b[3], p4, g[6], K[6];
+      ComputeADMDecomposition(x, y, z, mink, a, &al, &b[0], &b[1], &b[2], &p4,
+                              &g[0], &g[1], &g[2], &g[3], &g[4], &g[5],
+                              &K[0], &K[1], &K[2], &K[3], &K[4], &K[5]);
+      fm(m, kFmAlpha, k, j, i) = al;
+      for (int c = 0; c < 3; ++c) fm(m, kFmBeta + c, k, j, i) = b[c];
+      fm(m, kFmPsi, k, j, i) = sqrt(sqrt(p4));
+      for (int c = 0; c < 6; ++c) fm(m, kFmG + c, k, j, i) = g[c];
+    });
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -415,6 +464,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
 
   const bool wb = (metric_terms == MetricTerms::wellbalanced);
   const bool mfd = kill_mom_fd;
+  const bool kks = (metric_terms == MetricTerms::kerr_schild);   // R-188 item 3: full gamma_ij
   auto &fm1 = fm_x1;
   auto &fm2 = fm_x2;
   auto &fm3 = fm_x3;
@@ -423,8 +473,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
   const Real th = ttab.h, tih = ttab.ih;
   const int nt = ttab.n;
   auto *pcfc = pmy_pack->pcfc;
-  const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
-  const Real m_bh = pcfc->puncture_mass_;
+  const Real cx = kks ? 0.0 : pcfc->bg_xbh_[0], cy = kks ? 0.0 : pcfc->bg_xbh_[1];
+  const Real cz = kks ? 0.0 : pcfc->bg_xbh_[2], m_bh = kks ? 1.0 : pcfc->puncture_mass_;
 
   const bool ddon_ = eos.de_diag_on;
   auto &dd_ = de_diag;
@@ -451,7 +501,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsFM(const DvceArray5D<Real>
     Real dg_ddd[3][3][3] = {};
     // the momentum rows' (killing_momentum_bg = face_diff: their own, below; else these)
     Real dam[3] = {0.}, dbm[3][3] = {}, dgm[3][3][3] = {};
-    if (wb) {
+    if (kks) {   // the face values differenced, every gamma_ij (as wellbalanced)
+      const int gmap[3][3] = {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}};
+      for (int a = 0; a < ndim; a++) {
+        const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
+        const int ip = i + (a == 0), jp = j + (a == 1), kp = k + (a == 2);
+        dalpha_d[a] = (fm(m, kFmAlpha, kp, jp, ip) - fm(m, kFmAlpha, k, j, i))*idx[a];
+        for (int b = 0; b < 3; b++) {
+          dbeta_du[a][b] = (fm(m, kFmBeta + b, kp, jp, ip) - fm(m, kFmBeta + b, k, j, i))*
+                           idx[a];
+          for (int c = 0; c < 3; c++) {
+            const int q = kFmG + gmap[b][c];
+            dg_ddd[a][b][c] = (fm(m, q, kp, jp, ip) - fm(m, q, k, j, i))*idx[a];
+          }
+        }
+      }
+    } else if (wb) {
       for (int a = 0; a < ndim; a++) {
         const auto &fm = (a == 0) ? fm1 : ((a == 1) ? fm2 : fm3);
         const int ip = i + (a == 0), jp = j + (a == 1), kp = k + (a == 2);

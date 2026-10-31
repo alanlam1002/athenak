@@ -219,7 +219,8 @@ class DynGRMHD {
   int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
   bool kf_rst_loaded = false;     // kf_prev restored: keep it across the restart's new key
   bool kf_pre_rst = false;        // the parameters have no kf_* (fresh start or pre-arm-(ii) rst)
-  bool kf_bres_stale = false;     // restarted without dyngr.kfbres: u_beta is the zero fill
+  bool kf_bres_stale = false;     // restarted without dyngr.kfbres (u_beta is the zero fill) or
+                                  // without the restart_state block (cold CFC residuals)
   bool kf_bgmove = false;         // <cfc> puncture_moving: the background's analytic rate
   bool kf_have_xd = false;        // xi-ddot: xidot of the last step (frame controller)
   Real kf_xdstep[3] = {0.0, 0.0, 0.0}, kf_xdd[3] = {0.0, 0.0, 0.0};
@@ -232,6 +233,8 @@ class DynGRMHD {
   void SaveKillingScalars(ParameterInput *pin);  // arm (ii)'s stage bookkeeping -> <mhd> kf_*
   void LoadKillingScalars(ParameterInput *pin);  // (the constructor, on a restart)
   bool KfRst() const { return energy_variable == EnergyVariable::killing_full && kf_dtg; }
+  // a restart whose restart_state block was not applied (restart_state::ApplyStaged)
+  void RestartStateIgnored() { kf_bres_stale = KfRst(); }
   int kill_stage = 0;             // the RK stage of the current killing source call
 
   // <mhd> tau_budget_every (R-184 items 1-4; dyn_grmhd_taubudget.cpp): the per-cell tau

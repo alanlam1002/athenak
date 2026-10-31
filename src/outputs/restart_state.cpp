@@ -43,6 +43,15 @@ bool IsCore(const std::string &g) {
   return false;
 }
 
+// groups added after version 0 whose zero fill is the feature-off state (killing_full arm
+// (ii), R-174 (b)): a version-0 file may lack them (ApplyStaged)
+const char *const kOptional[] = {"dyngr.kfprev", "dyngr.kfbres"};
+
+bool IsOptional(const std::string &g) {
+  for (const char *c : kOptional) if (g == c) return true;
+  return false;
+}
+
 // "name:n,name:n" -> {(name, n)}
 std::vector<std::pair<std::string, int>> Parse(const std::string &s) {
   std::vector<std::pair<std::string, int>> v;
@@ -108,6 +117,20 @@ bool ApplyStaged(MeshBlockPack *pmbp) {
   const std::string cur = Layout(pmbp);
   bool applied = false;
   std::string why, zeroed, ignored;
+  if (staged_layout.empty() && staged_nvar != nvar) {
+    // c159 (R-188 item 1): a version-0 file written by this configuration without its
+    // optional groups (kOptional: zero = feature off) is this layout less them, in this
+    // order. Without this, B1N_cell's Valencia restart (22 variables) dropped the whole
+    // block under killing_full arm (ii) (35): cold CFC residuals on the first stage
+    std::string red;
+    int nr = 0;
+    for (const auto &g : Parse(cur)) {
+      if (IsOptional(g.first)) continue;
+      red += (red.empty() ? "" : ",") + g.first + ":" + std::to_string(g.second);
+      nr += g.second;
+    }
+    if (nr == staged_nvar) staged_layout = red;
+  }
   if (staged_layout.empty() || staged_layout == cur) {
     // version 0 (no layout: the same groups in the same order iff the count matches), or
     // the same layout: the block loads as it is
@@ -159,6 +182,9 @@ bool ApplyStaged(MeshBlockPack *pmbp) {
     }
     if (applied) Load(pmbp, map);
   }
+  // not applied: the CFC residuals and u_beta are the init's, not the run's (killing_full arm
+  // (ii): the first stage's store is no chord end)
+  if (!applied && pmbp->pdyngr != nullptr) pmbp->pdyngr->RestartStateIgnored();
   if (global_variable::my_rank == 0) {
     if (!applied) {
       // a different physics configuration than the one that wrote the file: the state

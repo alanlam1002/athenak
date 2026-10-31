@@ -467,9 +467,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       need(energy_variable == EnergyVariable::killing_t1 ||
            energy_variable == EnergyVariable::killing_ta,
            "energy_variable = killing_t1 or killing_ta with killing_weights = kerr_schild");
-      need(!pin->DoesParameterExist("mhd", "killing_source_diag") &&
-           !pin->DoesParameterExist("mhd", "tau_budget_every"),
-           "no killing_source_diag / tau_budget_every (trumpet diagnostics)");
+      need(!pin->DoesParameterExist("mhd", "killing_source_diag"),
+           "no killing_source_diag (a trumpet diagnostic)");
     } else if (kill_comov) {
       // R-175: the trumpet weights at the comoving hole (any frame: constant, accelerated or
       // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1);
@@ -591,7 +590,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     tneed(pmy_pack->pmesh->three_d, "a 3D mesh");
     tneed(!kill_boost && !kill_flat, "trumpet weights (not killing_weights = boost / flat)");
-    tneed(!tb_shells || tflag("puncture_enabled"), "a puncture with tau_budget_bins = shells");
+    tneed(!tb_shells || tflag("puncture_enabled") || metric_terms == MetricTerms::kerr_schild,
+          "a puncture (or metric_terms = kerr_schild) with tau_budget_bins = shells");
     if (energy_variable == EnergyVariable::killing_full) {
       // A's background part: the trumpet table (built for a moving background already)
       tneed(tflag("puncture_enabled"), "a puncture with killing_full");

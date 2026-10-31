@@ -388,6 +388,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   auto &tc = tb_c;
   auto *pcfc = pmy_pack->pcfc;
   const bool pun = (pcfc != nullptr) && (pcfc->puncture_mass_ > 0.0);
+  const bool kks = kill_ks;   // R-188 item 3: shells about the origin (r_KS: areal for a = 0)
+  auto &fm1 = fm_x1;
+  auto &fm2 = fm_x2;
+  auto &fm3 = fm_x3;
   const Real cx = pun ? pcfc->bg_xbh_[0] : 0.0, cy = pun ? pcfc->bg_xbh_[1] : 0.0;
   const Real cz = pun ? pcfc->bg_xbh_[2] : 0.0;
   const Real m_bh = pun ? pcfc->puncture_mass_ : 0.0;
@@ -494,7 +498,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
     // the weights at the cell and at a face (killing_full: the average of the two cells, as
     // KillingFaceFluxes; t1: the trumpet at the face, KWeights' calls)
     Real alc, bc[3];
-    if (kf) {
+    if (kf || kks) {   // kerr_schild (R-188 item 3): the weights are adm at the cell
       alc = adm.alpha(m, k, j, i);
       for (int a = 0; a < 3; ++a) bc[a] = adm.beta_u(m, a, k, j, i);
     } else {
@@ -509,6 +513,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
         for (int a = 0; a < 3; ++a) {
           b[a] = (adm.beta_u(m, a, k1, j1, i1) + adm.beta_u(m, a, k0, j0, i0))*0.5;
         }
+        return;
+      }
+      if (kks) {   // the face arrays (KillingFaceFluxes' kerr_schild weights)
+        const auto &fm = (dir == 0) ? fm1 : ((dir == 1) ? fm2 : fm3);
+        al = fm(m, kFmAlpha, k1, j1, i1);
+        for (int a = 0; a < 3; ++a) b[a] = fm(m, kFmBeta + a, k1, j1, i1);
         return;
       }
       const Real fx = ((dir == 0) ? LeftEdgeX(i1-is, nx1, sz.x1min, sz.x1max) : x) - cx;

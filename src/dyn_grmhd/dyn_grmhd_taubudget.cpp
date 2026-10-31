@@ -20,7 +20,8 @@
 //! F_tau^V = (F_T + b_f.F_S + w_f F_D)/a_f - F_D, and the cell counted (nfb).
 //!   killing_full (item 1): A = -1/2 sqrt(g) S^ij V_ij, V_ij = gamma-dot_ij + 2 alpha K_ij
 //!     - (Lie_beta' gamma)_ij, with the code's gamma-dot (the residual chord plus the analytic
-//!     background rate, as AddKillingFullTerms: 0 on a stage without a chord), adm.vK_dd, and
+//!     background rate, as AddKillingFullTerms; R-186: the rate also on a stage without a chord),
+//!     adm.vK_dd, and
 //!     Dx<NGHOST> of adm.beta_u, adm.g_dd. The background part V^0 is the trumpet's own
 //!     (psi0, alpha0, beta0 + xidot, K0 = psi0^-2 Ahat0 from the table about bg_xbh_; its
 //!     gamma-dot 4 psi0^3 xidot.grad psi0 where the code applies the rate; Dx<NGHOST> of the
@@ -235,7 +236,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
                       pmy_pack->padm->frame_vel_u[2]};
   const bool gauge = (gx[0] != 0.0) || (gx[1] != 0.0) || (gx[2] != 0.0);
   const bool bgm = kf_bgmove;
-  const bool rate = dtg && (bgm || kf_xdd[0] != 0.0 || kf_xdd[1] != 0.0 || kf_xdd[2] != 0.0);
+  const bool rate = kf_dtg && (bgm || kf_xdd[0] != 0.0 || kf_xdd[1] != 0.0 || kf_xdd[2] != 0.0);
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
   auto &td = ttab.d;
@@ -294,15 +295,15 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
         p4p = q4(pv(m, 5, k, j, i));
       }
       gdr = (p4n - p4p)*idtm;
-      if (rate && bgm) {
-        Real pt, apt, b0t[3], dps0t, dal0t, bb0, db0;
-        TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t,
-                               dps0t, dal0t, bb0, db0);
-        const Real psd = vx*dps0t;
-        const Real ps = sqrt(sqrt(p4));
-        gdb = 4.0*ps*ps*ps*psd;
-        gd0 = 4.0*ps0*ps0*ps0*vx*dpsi0;
-      }
+    }
+    if (rate && bgm) {   // R-186 item 1: with or without the chord, as the source kernel
+      Real pt, apt, b0t[3], dps0t, dal0t, bb0, db0;
+      TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t,
+                             dps0t, dal0t, bb0, db0);
+      const Real psd = vx*dps0t;
+      const Real ps = sqrt(sqrt(p4));
+      gdb = 4.0*ps*ps*ps*psd;
+      gd0 = 4.0*ps0*ps0*ps0*vx*dpsi0;
     }
 
     // the background's Lie term from Dx<NGHOST> of the table at the stencil's cell centres

@@ -599,6 +599,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   const bool split = (kf_split_every > 0);
   const bool fz = kf_fz;   // R-190 (KF_z)
+  const bool fcfc = kf_fcfc;   // R-191 (KF_CFC)
   const Real srho = kf_split_rho, srmin2 = kf_split_rmin*kf_split_rmin;
   auto &scr = kill_scr;
   auto &fx1_ = pmy_pack->pmhd->uflx.x1f;
@@ -874,7 +875,21 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       scr(m, 22, k-ks, j-js, i-is) = dn ? vol*W*prim(m, IDN, k, j, i)*dv : 0.0;
     }
     sT += sTb;
-    if (fz) {   // R-190 (KF_z): sqrt(g) 1/2 alpha S^ij (2 alpha K_ij - (Lie_beta' gamma)_ij)
+    if (fcfc) {   // R-191 (KF_CFC): -sqrt(g) (alpha/3) S D_k beta'^k, S = gamma_ij S^ij,
+      // D_k beta'^k = d_k beta'^k + beta'^k 1/2 gamma^ij d_k gamma_ij (= d_k(psi^6 beta'^k)/psi^6)
+      Real trS = 0.0, divb = 0.0;
+      for (int a = 0; a < 3; a++) {
+        for (int b = 0; b < 3; b++) trS += g3d[imap[a][b]]*S_uu[a][b];
+      }
+      for (int c = 0; c < 3; c++) {
+        Real dln = 0.0;   // 1/2 gamma^ij d_c gamma_ij
+        for (int a = 0; a < 3; a++) {
+          for (int b = 0; b < 3; b++) dln += 0.5*g3u[imap[a][b]]*dg_ddd[c][a][b];
+        }
+        divb += dbeta_du[c][c] + beta[c]*dln;
+      }
+      sT += -vol*(alpha/3.0)*trS*divb;
+    } else if (fz) {   // R-190 (KF_z): sqrt(g) 1/2 alpha S^ij (2 alpha K_ij - (Lie_beta' gamma)_ij)
       Real sz = 0.0;
       for (int a = 0; a < 3; a++) {
         for (int b = 0; b < 3; b++) {

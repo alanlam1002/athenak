@@ -611,7 +611,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
     tb_key = key;
   }
   if (global_variable::my_rank != 0) return;
-  const char *mode = val ? "valencia" : (kf ? (kf_fz ? "killing_fz" : "killing_full") :
+  const char *kfm = kf_fcfc ? "killing_fcfc" : (kf_fz ? "killing_fz" : "killing_full");
+  const char *mode = val ? "valencia" : (kf ? kfm :
                      (ta ? (comov ? "ta_comoving" : "ta") : (comov ? "t1_comoving" : "t1")));
   std::printf("KTB cycle=%d stage=%d time=%.12g dt=%.10e regrid=%d mode=%s bins=%s "
               "xc=%.8e,%.8e,%.8e nb=%d", pmy_pack->pmesh->ncycle, tb_stage,

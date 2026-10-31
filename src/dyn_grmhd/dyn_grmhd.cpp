@@ -354,10 +354,15 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     // the spatial source s_z (AddKillingFullTerms); no chord, no rate, no d_t of anything
     energy_variable = EnergyVariable::killing_full;
     kf_fz = true;
+  } else if (ev == "killing_fcfc") {
+    // R-191 item 1 (KF_CFC): KF_z's path with the source s_CFC = -(alpha/3) S D_k beta'^k
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
+    kf_fcfc = true;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
-              << "killing_ta, killing_full or killing_fz)" << std::endl;
+              << "killing_ta, killing_full, killing_fz or killing_fcfc)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (kill_mom_fd && (energy_variable != EnergyVariable::killing_t1 ||
@@ -384,7 +389,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
-    need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz (frozen weights)");
+    need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz/fcfc (frozen weights)");
     auto cflag = [&](const char *key) {
       return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
     };

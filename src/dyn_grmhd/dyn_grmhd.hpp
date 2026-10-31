@@ -216,6 +216,9 @@ class DynGRMHD {
   // R-190 (KF_z, energy_variable = killing_fz): arm (i)'s frozen weights plus the spatial
   // source s_z = 1/2 alpha S^ij (2 alpha K_ij - (Lie_beta' gamma)_ij) (x sqrt(gamma))
   bool kf_fz = false;
+  // R-191 (KF_CFC, energy_variable = killing_fcfc): KF_z with s_CFC = -(alpha/3) S D_k beta'^k,
+  // the CFC form of gamma-dot (2/3 gamma_ij D_k beta'^k), in place of s_z
+  bool kf_fcfc = false;
   DvceArray5D<Real> kf_prev;
   Real kf_tprev = 0.0, kf_tstage = 0.0;
   Real kf_m1u1 = 0.0;   // KCLOSE weights item: [M_s - M_1](u1), telescoped (KillingFullStage)

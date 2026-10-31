@@ -173,7 +173,7 @@ MassClosure::MassClosure(MeshBlockPack *pp, ParameterInput *pin, int var) :
                            pin->GetString("mhd", "energy_variable") : "valencia";
     // killing_fz (R-190): killing_full's weights (alpha, beta'), frozen per stage
     kill_ = (ev == "killing_t1") ? 1 : ((ev == "killing_ta") ? 2 :
-            ((ev == "killing_full" || ev == "killing_fz") ? 3 : 0));
+            ((ev == "killing_full" || ev == "killing_fz" || ev == "killing_fcfc") ? 3 : 0));
     // <mhd> killing_closure = t1 | ta (diagnostic, valencia only): the same T closure for a
     // Valencia run, its face flux formed from the stored D, S, tau fluxes (as the killing
     // options' KillingFaceFluxes), so the two formulations' T drifts are booked alike

@@ -27,8 +27,8 @@
 //!     gamma-dot 4 psi0^3 xidot.grad psi0 where the code applies the rate; Dx<NGHOST> of the
 //!     table's psi0^4, beta0 at the stencil's cell centres), V^res = V - V^0; each split into
 //!     the trace part -1/6 sqrt(g) (gamma_ij S^ij)(gamma^ij V_ij) and the rest. B = Delta - A.
-//!   comoving killing_t1 (item 2) and killing_ta (R-188 item 5: D's weight alpha0, so the E slot
-//!     of the pairing below holds sqrt(g)(E - D) and the face transform's w_f = alpha0_f): the
+//!   comoving killing_t1 (item 2) and killing_ta (R-188 item 5: the face transform's
+//!     w_f = alpha0_f; the pairing's E slot is sqrt(g) E as for t1, c159): the
 //!     frame-advection pairing at the T level,
 //!     M_T = S_motion - S_motion,disc, S_motion = sqrt(g) s_W (kill_scr 0), S_motion,disc =
 //!     sum_a [(w_f - w_c) F^xi]_{f-}^{f+} / dx_a over the T weights (alpha0 on sqrt(g) E,
@@ -203,7 +203,6 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
 
   if (kill_comov) {   // the frame pairing's cell values (the T source's own fluid)
     auto &tu = tb_u;
-    const bool ta = (energy_variable == EnergyVariable::killing_ta);
     par_for("tb_u", DevExeSpace(), 0, nmb-1, ks-1, ke+1, js-1, je+1, is-1, ie+1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
@@ -218,9 +217,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPre(const DvceArray5D<Real> &p
       Real E, S_d[3], S_uu[3][3], W, ein;
       TbFluid(eos_, mb, nhyd, nscal, prim, bcc, g3d, g3u, vol, m, k, j, i, E, S_d, S_uu, W,
               ein);
-      // killing_ta (R-188 item 5): D's weight alpha0 pairs with alpha0's E weight, so the slot
-      // holds sqrt(g) (E - D)
-      tu(m, 0, k, j, i) = vol*(ta ? E - prim(m, IDN, k, j, i)*W : E);
+      // killing_ta: the slot holds sqrt(g) E as for t1 (c159: D's weight carries no motion term)
+      tu(m, 0, k, j, i) = vol*E;
       for (int a = 0; a < 3; ++a) tu(m, 1 + a, k, j, i) = vol*S_d[a];
     });
   }

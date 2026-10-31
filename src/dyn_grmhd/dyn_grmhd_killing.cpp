@@ -1269,13 +1269,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingTerms(const DvceArray5D<Real>
     Real sW = 0.0;
     if (comov) {   // -(d_t' G) q = -xidot^j (E d_j alpha0 - S_k d_j beta_BH^k) (NOTE Sec. 5)
       const Real fr[3] = {fr0, fr1, fr2};
-      // killing_ta (R-188 item 5): D's weight -alpha0 moves too, -(d_t' G_D) D = +xidot^j D
-      // d_j alpha0, i.e. E -> E - D
-      const Real Ew = ta ? E - prim(m, IDN, k, j, i)*W : E;
+      // killing_ta: E here as for t1 (c159). Only alpha0 E - beta0.S takes its source from the
+      // Killing identity; D's part -alpha0 D is the fixed-weight product rule (-w F_D at the face,
+      // sTa above), as the inversion below, so its weight's motion carries no source
       for (int a = 0; a < 3; a++) {
         Real sdb = 0.0;
         for (int c = 0; c < 3; c++) sdb += S_d[c]*dB0[a][c];
-        sW -= fr[a]*(Ew*dal0_d[a] - sdb);
+        sW -= fr[a]*(E*dal0_d[a] - sdb);
       }
       scr(m, 0, k-ks, j-js, i-is) = vol*sW*sz.dx1*sz.dx2*sz.dx3;
     }

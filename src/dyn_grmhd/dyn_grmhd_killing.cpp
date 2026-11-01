@@ -1030,6 +1030,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
   auto &tc = tb_c;
   const bool trd = trace_diag;     // R-197 item 1: R, T_ij -> tr_diag (the solution untouched)
   auto &trc = tr_diag;
+  auto &ap0 = pcfc->u_alpha0_psi0;   // the split (R-201): the trumpet's alpha0 psi0, beta0, Ahat0
+  auto &b0u = pcfc->beta0_u;
+  auto &a0d = pcfc->a0_dd;
   const int imap[3][3] = {
     {S11, S12, S13},
     {S12, S22, S23},
@@ -1175,6 +1178,44 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
           q++;
         }
       }
+      // the split (R-201; dyn_grmhd.hpp kTrN): dap6 as cfc.cpp's cfc_build_dapsi6
+      const Real ps0 = psi0(m, 0, k, j, i), dpv = dps(m, 0, k, j, i);
+      const Real psv = dpv + ps0;
+      const Real pin = 1.0/psv, pin2 = pin*pin, pi7 = pin2*pin2*pin2*pin;
+      const Real p0i = 1.0/ps0, xr = dpv*p0i;
+      const Real o1 = ps0*pin, o2 = o1*o1, o7 = o2*o2*o2*o1;
+      const Real p0i2 = p0i*p0i, p0i7 = p0i2*p0i2*p0i2*p0i;
+      const Real p7 = 7.0 + xr*(21.0 + xr*(35.0 + xr*(35.0 + xr*(21.0 + xr*(7.0 + xr)))));
+      const Real reg7 = p0i7*xr*p7*o7;
+      const Real dap6 = dap(m, 0, k, j, i)*pi7 - ap0(m, 0, k, j, i)*reg7;
+      const Real ap6z = ap0(m, 0, k, j, i)*p0i7;   // alpha0 psi0^-6
+      Real db0[3][3];
+      for (int a = 0; a < 3; a++) {
+        for (int c = 0; c < 3; c++) db0[a][c] = Dx<NGHOST>(a, idx, b0u, m, c, k, j, i);
+      }
+      const Real dvb0 = db0[0][0] + db0[1][1] + db0[2][2];
+      Real tcn = 0.0, tsn = 0.0, bn = 0.0, sc = 0.0, ss = 0.0, sb = 0.0;
+      q = 0;
+      for (int a = 0; a < 3; a++) {
+        for (int b = a; b < 3; b++) {
+          const Real a0 = a0d(m, a, b, k, j, i);
+          const Real lb0 = db0[a][b] + db0[b][a] - ((a == b) ? 2.0/3.0*dvb0 : 0.0);
+          const Real tcr = -2.0*dap6*a0, bg = lb0 - 2.0*ap6z*a0;
+          const Real tsf = tt[q] - tcr - bg;
+          const Real w = (a == b) ? 1.0 : 2.0;
+          tcn += w*tcr*tcr; tsn += w*tsf*tsf; bn += w*bg*bg;
+          sc += w*S_uu[a][b]*tcr; ss += w*S_uu[a][b]*tsf; sb += w*S_uu[a][b]*bg;
+          trc(m, 14 + q, k, j, i) = tcr;
+          trc(m, 20 + q, k, j, i) = tsf;
+          q++;
+        }
+      }
+      trc(m, 26, k, j, i) = sqrt(tcn);
+      trc(m, 27, k, j, i) = sqrt(tsn);
+      trc(m, 28, k, j, i) = sqrt(bn);
+      trc(m, 29, k, j, i) = -0.5*p4*sc;
+      trc(m, 30, k, j, i) = -0.5*p4*ss;
+      trc(m, 31, k, j, i) = -0.5*p4*sb;
       const Real rr = r6 - divb;
       trc(m, 0, k, j, i) = rr;
       trc(m, 1, k, j, i) = r6;
@@ -1207,54 +1248,67 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
     }
   });
 
-  // R-197 item 1: TRD lines (diagnostic; reads tr_diag and prim)
+  // R-197 item 1: TRD lines; R-201: TRR lines (diagnostic; read tr_diag and prim)
   if (trd && trace_every > 0 && pmy_pack->pmesh->ncycle % trace_every == 0) {
     const Real rc = trace_rhoc;
-    const Real bth[kTrBands] = {0.5, 0.1, 0.01};
+    const Real bt0 = 0.5*rc, bt1 = 0.1*rc, bt2 = 0.01*rc;
     const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
-    Real out[kTrBands*kTrRed] = {0.0};
-    for (int b = 0; b < kTrBands; ++b) {
-      const Real th = bth[b]*rc;
-      for (int c = 0; c < kTrRed; ++c) {
-        Real sm = 0.0;
-        Kokkos::parallel_reduce("trd_band", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
-        KOKKOS_LAMBDA(const int idx, Real &acc) {
-          const int m = idx/nkji;
-          const int k = (idx - m*nkji)/nji + ks;
-          const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
-          const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
-          const Real rho = prim(m, IDN, k, j, i);
-          if (!(rho >= th)) return;
-          const auto &sz = size.d_view(m);
-          const Real dv = sz.dx1*sz.dx2*sz.dx3, w = rho*dv;
-          const Real rr = trc(m, 0, k, j, i), tn = trc(m, 9, k, j, i);
-          Real v = 0.0;
-          switch (c) {
-            case 0: v = w; break;
-            case 1: v = w*rr; break;
-            case 2: v = w*rr*rr; break;
-            case 3: v = w*tn; break;
-            case 4: v = w*tn*tn; break;
-            case 5: v = w*rr*tn; break;
-            case 6: v = w*trc(m, 1, k, j, i); break;
-            case 7: v = w*trc(m, 2, k, j, i); break;
-            case 8: {
-              const Real p4 = adm.psi4(m, k, j, i);
-              v = p4*p4*sqrt(p4)*dv*trc(m, 11, k, j, i);   // sqrt(gamma) = psi^6
-              break;
-            }
-            default: {
-              const Real p4 = adm.psi4(m, k, j, i);
-              v = p4*p4*sqrt(p4)*dv*trc(m, 12, k, j, i);
-            }
-          }
-          acc += v;
-        }, Kokkos::Sum<Real>(sm));
-        out[b*kTrRed + c] = sm;
+    const Real lr0 = log(trace_rmin), ilr = (kTrRB - 2)/log(trace_rmax/trace_rmin);
+    array_sum::TrBandSum sb;
+    array_sum::TrRadSum sr;
+    Kokkos::parallel_reduce("trd_band", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, array_sum::TrBandSum &acc) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      const Real rho = prim(m, IDN, k, j, i);
+      if (!(rho >= bt2)) return;
+      const auto &sz = size.d_view(m);
+      const Real dv = sz.dx1*sz.dx2*sz.dx3, w = rho*dv;
+      const Real rr = trc(m, 0, k, j, i), tn = trc(m, 9, k, j, i);
+      const Real p4 = adm.psi4(m, k, j, i);
+      const Real gv = p4*p4*sqrt(p4)*dv;   // sqrt(gamma) dV, sqrt(gamma) = psi^6
+      const Real v[kTrRed] = {w, w*rr, w*rr*rr, w*tn, w*tn*tn, w*rr*tn, w*trc(m, 1, k, j, i),
+                              w*trc(m, 2, k, j, i), gv*trc(m, 11, k, j, i),
+                              gv*trc(m, 12, k, j, i), w*trc(m, 27, k, j, i),
+                              w*trc(m, 26, k, j, i), w*trc(m, 28, k, j, i),
+                              gv*trc(m, 30, k, j, i), gv*trc(m, 29, k, j, i),
+                              gv*trc(m, 31, k, j, i)};
+      const int nb = (rho >= bt0) ? 3 : ((rho >= bt1) ? 2 : 1);   // bands b = 3 - nb .. 2
+      for (int b = 3 - nb; b < 3; ++b) {
+        for (int c = 0; c < kTrRed; ++c) acc.the_array[b*kTrRed + c] += v[c];
       }
-    }
+    }, Kokkos::Sum<array_sum::TrBandSum>(sb));
+    Kokkos::parallel_reduce("trd_rad", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+    KOKKOS_LAMBDA(const int idx, array_sum::TrRadSum &acc) {
+      const int m = idx/nkji;
+      const int k = (idx - m*nkji)/nji + ks;
+      const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+      const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      const Real rho = prim(m, IDN, k, j, i);
+      if (!(rho >= bt2)) return;
+      const auto &sz = size.d_view(m);
+      const Real x = CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx;
+      const Real y = CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy;
+      const Real z = CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz;
+      const Real r = sqrt(x*x + y*y + z*z);
+      const Real u = (log(fmax(r, 1.0e-300)) - lr0)*ilr;
+      const int rb = (u < 0.0) ? 0 : ((u >= kTrRB - 2) ? kTrRB - 1 : 1 + static_cast<int>(u));
+      const Real dv = sz.dx1*sz.dx2*sz.dx3, w = rho*dv;
+      const Real p4 = adm.psi4(m, k, j, i);
+      const Real gv = p4*p4*sqrt(p4)*dv;
+      const Real v[kTrRC] = {w, w*trc(m, 0, k, j, i), w*trc(m, 27, k, j, i),
+                             w*trc(m, 26, k, j, i), w*trc(m, 28, k, j, i),
+                             gv*trc(m, 30, k, j, i), gv*trc(m, 29, k, j, i),
+                             gv*trc(m, 31, k, j, i)};
+      for (int c = 0; c < kTrRC; ++c) acc.the_array[rb*kTrRC + c] += v[c];
+    }, Kokkos::Sum<array_sum::TrRadSum>(sr));
 #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, out, kTrBands*kTrRed, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, sb.the_array, kTrBands*kTrRed, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, sr.the_array, kTrRB*kTrRC, MPI_ATHENA_REAL, MPI_SUM,
+                  MPI_COMM_WORLD);
 #endif
     if (global_variable::my_rank == 0) {
       std::printf("TRD cycle=%d stage=%d time=%.12g tstage=%.12g dtm=%.10e valid=%d ahat=%s",
@@ -1262,7 +1316,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
                   dtg ? 1 : 0, trace_ahat ? "cfc_lagged" : "xcfc");
       for (int b = 0; b < kTrBands; ++b) {
         std::printf(" b%d=", b);
-        for (int c = 0; c < kTrRed; ++c) std::printf(c ? ",%.10e" : "%.10e", out[b*kTrRed + c]);
+        for (int c = 0; c < kTrRed; ++c) {
+          std::printf(c ? ",%.10e" : "%.10e", sb.the_array[b*kTrRed + c]);
+        }
+      }
+      std::printf("\nTRR cycle=%d stage=%d time=%.12g xbh=%.8e,%.8e,%.8e rmin=%g rmax=%g",
+                  pmy_pack->pmesh->ncycle, kill_stage, pmy_pack->pmesh->time, cx, cy, cz,
+                  trace_rmin, trace_rmax);
+      for (int b = 0; b < kTrRB; ++b) {
+        std::printf(" r%d=", b);
+        for (int c = 0; c < kTrRC; ++c) {
+          std::printf(c ? ",%.10e" : "%.10e", sr.the_array[b*kTrRC + c]);
+        }
       }
       std::printf("\n");
       std::fflush(stdout);

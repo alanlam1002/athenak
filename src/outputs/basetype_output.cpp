@@ -504,16 +504,20 @@ BaseTypeOutput::BaseTypeOutput(ParameterInput *pin, Mesh *pm, OutputParameters o
     // DynGRMHD trace mismatch R and TT remainder T_ij (<dyn_grmhd> trace_diag; R-197)
     if (variable.compare("mhd_trace_diag") == 0) {
       if (pm->pmb_pack->pdyngr == nullptr ||
-          pm->pmb_pack->pdyngr->tr_diag.extent_int(1) < 14) {
+          pm->pmb_pack->pdyngr->tr_diag.extent_int(1) < 32) {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "mhd_trace_diag output needs <dyn_grmhd> trace_diag = true"
                   << std::endl;
         exit(EXIT_FAILURE);
       }
-      const char *nm[14] = {"tr_R", "tr_6dtlnpsi", "tr_divb", "tr_Txx", "tr_Txy", "tr_Txz",
+      const char *nm[32] = {"tr_R", "tr_6dtlnpsi", "tr_divb", "tr_Txx", "tr_Txy", "tr_Txz",
                             "tr_Tyy", "tr_Tyz", "tr_Tzz", "tr_Tnorm", "tr_Ttrace",
-                            "tr_sig_tt", "tr_sig_r", "tr_valid"};
-      for (int v = 0; v < 14; ++v) {
+                            "tr_sig_tt", "tr_sig_r", "tr_valid",
+                            "tr_Tcxx", "tr_Tcxy", "tr_Tcxz", "tr_Tcyy", "tr_Tcyz", "tr_Tczz",
+                            "tr_Tsxx", "tr_Tsxy", "tr_Tsxz", "tr_Tsyy", "tr_Tsyz", "tr_Tszz",
+                            "tr_Tcnorm", "tr_Tsnorm", "tr_Bnorm",
+                            "tr_sig_tc", "tr_sig_ts", "tr_sig_tb"};
+      for (int v = 0; v < 32; ++v) {
         outvars.emplace_back(nm[v], v, &(pm->pmb_pack->pdyngr->tr_diag));
       }
     }

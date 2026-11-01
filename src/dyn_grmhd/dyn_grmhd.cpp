@@ -598,6 +598,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   if (trace_diag) {
     trace_every = pin->GetOrAddInteger("dyn_grmhd", "trace_diag_every", 1);
     trace_rhoc = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rhoc", 3.24e-4);
+    trace_rmin = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rmin", 2.0);
+    trace_rmax = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rmax", 200.0);
   }
   if (tau_source_k != TauSourceK::xcfc || trace_diag) {
     auto kneed = [&](bool ok, const char *what) {

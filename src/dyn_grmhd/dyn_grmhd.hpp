@@ -83,11 +83,44 @@ enum class TauSourceK {xcfc, keff, kcfc, ktr};
 //   0 R = 6 d_t ln psi - D_k beta'^k, 1 6 d_t ln psi, 2 D_k beta'^k,
 //   3-8 T_ij = (L beta')_ij - 2 alpha psi^-6 Ahat_ij (flat indices; xx xy xz yy yz zz),
 //   9 |T|_coord = sqrt(T_ij T_ij) (= |psi^4 T|_phys), 10 delta^ij T_ij,
-//   11 -1/2 psi^4 S^ij T_ij, 12 R S/3 (the two parts of 1/2 S^ij V_ij), 13 the chord valid (0/1)
-constexpr int kTrN = 14;
+//   11 -1/2 psi^4 S^ij T_ij, 12 R S/3 (the two parts of 1/2 S^ij V_ij), 13 the chord valid (0/1);
+// the split (R-201): with Ahat = Ahat0 + LX (cfc_reconstruct.cpp) and beta' = beta0 + beta_res + xidot,
+//   T = T_self + T_cross + B,  T_cross = -2 dap6 Ahat0 (dap6 = alpha psi^-6 - alpha0 psi0^-6, the
+//   cancellation-free form of cfc.cpp's cfc_build_dapsi6), B = (L beta0)_FD - 2 alpha0 psi0^-6 Ahat0
+//   (the trumpet's identity, zero in the continuum: its finite-difference residual), so
+//   T_self = (L beta_res)_FD - 2 alpha psi^-6 LX:
+//   14-19 T_cross_ij, 20-25 T_self_ij, 26 |T_cross|, 27 |T_self|, 28 |B| (|.|_coord),
+//   29-31 -1/2 psi^4 S^ij (T_cross, T_self, B)_ij (the trace-free deposit's parts; their sum is 11)
+constexpr int kTrN = 32;
 // TRD line components per band (w = rho dV): w, w R, w R^2, w |T|, w |T|^2, w R |T|, w 6 d_t ln psi,
-// w D_k beta'^k, sqrt(g) dV (-1/2 psi^4 S^ij T_ij), sqrt(g) dV R S/3
-constexpr int kTrBands = 3, kTrRed = 10;
+// w D_k beta'^k, sqrt(g) dV (-1/2 psi^4 S^ij T_ij), sqrt(g) dV R S/3, w |T_self|, w |T_cross|, w |B|,
+// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij)
+constexpr int kTrBands = 3, kTrRed = 16;
+// TRR lines (R-201): kTrRB radial bins about the hole (r = |x - x_BH|, log-spaced between
+// trace_diag_rmin and trace_diag_rmax, the first / last bins open-ended), cells with
+// rho >= 0.01 trace_diag_rhoc; components w, w R, w |T_self|, w |T_cross|, w |B|,
+// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij)
+constexpr int kTrRB = 10, kTrRC = 8;
+}  // namespace dyngr
+namespace array_sum {
+typedef array_type<Real, dyngr::kTrBands*dyngr::kTrRed> TrBandSum;   // the TRD sums in one reduction
+typedef array_type<Real, dyngr::kTrRB*dyngr::kTrRC> TrRadSum;        // the TRR sums
+}  // namespace array_sum
+namespace Kokkos {
+template<>
+struct reduction_identity<array_sum::TrBandSum> {
+  KOKKOS_FORCEINLINE_FUNCTION static array_sum::TrBandSum sum() {
+    return array_sum::TrBandSum();
+  }
+};
+template<>
+struct reduction_identity<array_sum::TrRadSum> {
+  KOKKOS_FORCEINLINE_FUNCTION static array_sum::TrRadSum sum() {
+    return array_sum::TrRadSum();
+  }
+};
+}  // namespace Kokkos
+namespace dyngr {
 
 // <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): per-cell components (tb_c), the
 // first kTbNr summed per bin (x dV); bins: star = 4 density bands x (interior, surface),
@@ -273,6 +306,7 @@ class DynGRMHD {
   // in the bands rho >= 0.5, 0.1, 0.01 trace_diag_rhoc (default 3.24e-4); 0 = none
   int trace_every = 1;
   Real trace_rhoc = 3.24e-4;
+  Real trace_rmin = 2.0, trace_rmax = 200.0;   // <dyn_grmhd> trace_diag_rmin / _rmax (TRR)
   // kf_prev holds the previous stage's metric for the current MeshBlocks (KillingFullStage's test)
   bool KfPrevValid() const;
   bool KfRst() const {

@@ -46,7 +46,10 @@ enum class MGNormType {max, l1, l2};
 // progressively more accuracy at higher resolution. rms: the fixed,
 // volume-weighted, mesh-resolution-invariant norm. See DEVELOPMENT.md's R3
 // entry (ported from ~/athenak_cfc's R3 fix) for the full derivation.
-enum class MGNormScaling {legacy, rms};
+// max (<cfc> mg_norm = max, R-201 item 1; CFC drivers): the convergence norm is the L-inf
+// defect (MGNormType::max), channels combined by max, no volume normalisation, so the
+// threshold bounds the local defect
+enum class MGNormScaling {legacy, rms, max};
 
 //----------------------------------------------------------------------------------------
 // LogicalLocation hash and equality for std::unordered_map

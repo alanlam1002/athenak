@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -420,6 +421,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
+  mg_log_vcycles_ = pin->GetOrAddBoolean("cfc", "mg_log_vcycles", false);
   // <cfc> residual_scale (see cfc.hpp). Read without GetOrAdd, so an input without the
   // keys leaves the parameter block (and the restart files) unchanged.
   if (pin->DoesParameterExist("cfc", "residual_scale")) {
@@ -2861,7 +2863,23 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
     pmgd_pietabeta->Solve(pdriver, stage);
   }
   pmgd_pietabeta->RetrieveSolution(u_p_beta);
+  if (mg_log_vcycles_) LogVcycles(stage);
   return;
+}
+
+void CFC::LogVcycles(int stage) {
+  MultigridDriver *d[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
+  const char *nm[4] = {"X", "psi", "ap", "beta"};
+  char buf[512];
+  int len = std::snprintf(buf, sizeof(buf), "MGV cycle= %d stage= %d time= %.10e",
+                          pmy_pack->pmesh->ncycle, stage, pmy_pack->pmesh->time);
+  for (int i = 0; i < 4; ++i) {
+    bool ran = d[i]->NSolve() != mglog_ns_[i];
+    mglog_ns_[i] = d[i]->NSolve();
+    len += std::snprintf(buf + len, sizeof(buf) - len, " %s= %d,%.4e,%.4e", nm[i],
+                         ran ? d[i]->LastNVcycle() : -1, d[i]->LastDef0(), d[i]->LastDef());
+  }
+  if (global_variable::my_rank == 0) std::printf("%s\n", buf);
 }
 
 void CFC::ReconstructShift() {

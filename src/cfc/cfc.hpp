@@ -626,6 +626,12 @@ class CFC {
   void RescaleMatterSources(Driver *pdriver, int stage);      // step 4: rebuild S-tilde
   void SolveLapse(Driver *pdriver, int stage);           // step 5: eq. 74, alpha*psi
   void SolveShift(Driver *pdriver, int stage);            // step 6: eq. 75 -> u_p_beta
+  // <cfc> mg_log_vcycles (default false; diagnostics only, R-201): after the shift solve, rank
+  // 0 prints "MGV" with each CFC solve's V-cycle count and initial / final defect since the
+  // last MGV line (n = -1: that solver did not run in between)
+  bool mg_log_vcycles_ = false;
+  int64_t mglog_ns_[4] = {0, 0, 0, 0};
+  void LogVcycles(int stage);
 
   void ReconstructShift();  // CFC_ReconstructBeta: beta_u from u_p_beta
 

@@ -865,6 +865,7 @@ void MultigridDriver::ZeroHierarchy() {
 
 void MultigridDriver::SolveMG(Driver *pdriver) {
   if (MGTimingOn()) ++mg_timers_.solve_count;
+  ++nsolve_;
   if (zero_hierarchy_) ZeroHierarchy();
   if (eps_ >= 0.0 || rtol_ > 0.0) {
     SolveIterative(pdriver);
@@ -965,8 +966,9 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       std::cout << "MG relative target = " << target << std::endl;
     }
   }
+  last_def0_ = def;
   int n = 0;
-  while (def > target) {
+  while (def > target || n < min_vcycles_) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     Real olddef = def;
     def = TotalDefectNorm();
@@ -997,6 +999,8 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       break;
     }
   }
+  last_nvcycle_ = n;
+  last_def_ = def;
   Kokkos::fence();
   return;
 }
@@ -1013,6 +1017,7 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
       std::cout << "MG initial defect = " << def << std::endl;
     }
   }
+  last_nvcycle_ = niter_;
   for (int n = 0; n < niter_; ++n) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     if (fshowdef_ >= 2) {

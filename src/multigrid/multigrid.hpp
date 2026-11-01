@@ -494,6 +494,12 @@ class MultigridDriver {
   void ZeroFinestSolution();
   void LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh);
   Real TotalDefectNorm();
+  // the last SolveMG()'s V-cycle count and its initial / final defect (TotalDefectNorm),
+  // and the number of SolveMG() calls so far (<cfc> mg_log_vcycles, R-201): diagnostics only
+  int LastNVcycle() const { return last_nvcycle_; }
+  Real LastDef0() const { return last_def0_; }
+  Real LastDef() const { return last_def_; }
+  int64_t NSolve() const { return nsolve_; }
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -658,6 +664,13 @@ class MultigridDriver {
   Real norm_ref_vol_ = 0.0;
   Real rtol_;                 // <= 0 disables the relative criterion
   int niter_, npresmooth_, npostsmooth_;
+  // <cfc> mg_min_vcycles (CFC drivers; default 0 = off, bitwise): SolveIterative does at
+  // least this many V-cycles even when the warm start's defect is already <= the target
+  // (R-201: with 0, such a solve does none and the metric lags the matter)
+  int min_vcycles_ = 0;
+  int last_nvcycle_ = 0;
+  Real last_def0_ = 0.0, last_def_ = 0.0;
+  int64_t nsolve_ = 0;
   int os_, oe_;
   int coffset_;
   int fprolongation_;

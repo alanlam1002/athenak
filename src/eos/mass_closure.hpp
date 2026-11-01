@@ -73,6 +73,22 @@
 //!     histogrammed with the event's DY change (RK-weighted);
 //!   the update's non-closure (sum w_s Y_s - transport), the RK rounding, and the gap between
 //!     cycles (regrid, unmask), so that R = dM_shell - sum(items) is round-off.
+//! <mhd> shell_counters_release (default false; R-177 addendum 3 / R-204 item 2; needs
+//! shell_counters; read without GetOrAdd): per shell, the distribution of the energy solution's
+//! K_en/K_tr - 1 (de_diag 3, both signs) with the compression theta (de_diag 15), counted per
+//! C2P (unweighted) in three classes (lines SHELL_REL, at each SHELL output):
+//!   applied:  flagged (de_diag 2 != 0) and dbr 4 -- the guard let the energy solution through
+//!             and the tracer was resynced to K_en (primitive_solver_hyd.hpp, the second-law
+//!             guard and the resync below it);
+//!   declined: dbr 2 -- the guard found K_en <= K_tr (1 + dual_energy_second_law_tol) and kept
+//!             the tracer (entropy solution);
+//!   release:  flagged at the previous C2P, unflagged now, dense, dbr 1 -- the entropy branch,
+//!             the energy solution discarded whatever its sign.
+//! K_en/K_tr - 1 bins: edges -0.1, -0.03, -0.01, -0.003, -0.001 (the default guard tol), 0,
+//! 0.001, 0.003, 0.01, 0.03, 0.1 (12 bins); theta bins as the flag events'. Also per (class,
+//! K bin) the exact sum of K_en/K_tr - 1 (a Fix, scaled by 2^-60). With it on, the per-cell
+//! "previous C2P" states (this flag and sh_den_'s dense state) are reset whenever the rank's
+//! MeshBlock gids change (a regrid), not only when their extents change (C-159 §5).
 
 #include <cstdint>
 #include <memory>
@@ -160,6 +176,8 @@ constexpr int kShM = 20;                 // m = 0, 0.01, ..., 0.20 M*
 constexpr int kShN = kShM + 2;           // + beyond 0.2 inside r_H, + outside r_H
 constexpr int kShH = 6;                  // histogram bins (sensor ratio; theta)
 constexpr int kShC = 8;                  // C2P channels
+constexpr int kRelC = 3;                 // shell_counters_release: applied, declined, release
+constexpr int kRelK = 12;                // K_en/K_tr - 1 bins
 enum ShSlot {
   sMpre = 0, sMpost,                     // DY before / after the C2P
   sX0,                                   // C2P channels (kShC)
@@ -269,6 +287,11 @@ class MassClosure {
   DvceArray4D<int> sh_idx_;                 // per cell: shell
   DvceArray4D<int> sh_den_;                 // per cell: dense at the last C2P (-1 unknown)
   Kokkos::View<int64_t*> sh_acc_;           // (M(u1), then stage x slot) x shell: Fix limbs
+  bool sh_rel_ = false;                     // <mhd> shell_counters_release
+  DvceArray4D<int> sh_flg_;                 // per cell: flagged at the last C2P (-1 unknown)
+  std::vector<int> sh_gid_;                 // the MeshBlock gids of the last ShellIndex
+  Kokkos::View<int64_t*> sh_rcnt_;          // ((shell x class) x K bin) x theta bin: counts
+  Kokkos::View<int64_t*> sh_rsum_;          // (shell x class) x K bin: Fix limbs of sum (K-1) 2^-60
   KSum sh_ms_[kShN], sh_mprev_[kShN];       // interval start; last cycle's end
   KSum sh_it_[kShN][kShItem];               // interval sums
   void ShellPartition(Real time);

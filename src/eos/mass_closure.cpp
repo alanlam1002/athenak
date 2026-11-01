@@ -851,6 +851,9 @@ void MassClosure::SegmentStart(ParameterInput *pin, int cycle) {
       y->sh_mbh_ = pin->GetOrAddReal("mhd", "shell_counters_mbh", 1.0);
       y->sh_fc_ = pin->GetOrAddReal("mhd", "shell_counters_fc", 0.01);
       y->sh_rhfix_ = pin->GetOrAddReal("mhd", "shell_counters_rh", 0.0);
+      if (pin->DoesParameterExist("mhd", "shell_counters_release")) {
+        y->sh_rel_ = pin->GetBoolean("mhd", "shell_counters_release");
+      }
     }
     extra_.emplace_back(y);
   }
@@ -1122,6 +1125,13 @@ void MassClosure::StageFlux(int stage, Real beta_dt) {
       sh_ncyc_ = 0;
       sh_t0_ = time;
       sh_tnext_ = time + sh_dt_;
+      if (sh_rel_) {
+        const int nc = kShN*kRelC*kRelK*kShH, ns = 3*kShN*kRelC*kRelK;
+        if (sh_rcnt_.extent_int(0) != nc) Kokkos::realloc(sh_rcnt_, nc);
+        if (sh_rsum_.extent_int(0) != ns) Kokkos::realloc(sh_rsum_, ns);
+        Kokkos::deep_copy(sh_rcnt_, static_cast<int64_t>(0));
+        Kokkos::deep_copy(sh_rsum_, static_cast<int64_t>(0));
+      }
     }
   }
   // transport: -beta dt div F dV of DY, and of Y_up F_D (Y_up: the upwind cell's DY/D by the
@@ -1278,6 +1288,23 @@ void MassClosure::ShellIndex() {
     Kokkos::realloc(sh_den_, nmb, nx3, nx2, nx1);
     Kokkos::deep_copy(sh_den_, -1);   // a new mesh: no previous C2P to cross from
   }
+  if (sh_rel_) {
+    // shell_counters_release: a regrid that keeps nmb still changes the cells under (m, k, j, i)
+    // (C-159 §5): reset both "previous C2P" states when this rank's MeshBlock gids change
+    std::vector<int> gid(nmb);
+    for (int m = 0; m < nmb; ++m) gid[m] = pp->pmb->mb_gid.h_view(m);
+    bool fresh = (gid != sh_gid_);
+    if (sh_flg_.extent_int(0) != nmb || sh_flg_.extent_int(1) != nx3 ||
+        sh_flg_.extent_int(2) != nx2 || sh_flg_.extent_int(3) != nx1) {
+      Kokkos::realloc(sh_flg_, nmb, nx3, nx2, nx1);
+      fresh = true;
+    }
+    if (fresh) {
+      Kokkos::deep_copy(sh_flg_, -1);
+      Kokkos::deep_copy(sh_den_, -1);
+      sh_gid_ = gid;
+    }
+  }
   ShEdges e;
   for (int q = 0; q <= kShM; ++q) e.re[q] = sh_re_[q];
   e.rh = sh_rh_; e.xc = sh_xc_[0]; e.yc = sh_xc_[1]; e.zc = sh_xc_[2];
@@ -1309,6 +1336,10 @@ void MassClosure::ShellStage(int stage) {
   auto acc = sh_acc_;
   const int nv = var_;
   const int o0 = (1 + (stage - 1)*kShSlot)*kShN;
+  const bool rel = sh_rel_;
+  auto &flg = sh_flg_;
+  auto rcnt = sh_rcnt_;
+  auto rsum = sh_rsum_;
   par_for("shell_stage", DevExeSpace(), 0, pp->nmb_thispack-1, 0, nx3-1, 0, nx2-1, 0, nx1-1,
   KOKKOS_LAMBDA(const int m, const int kk, const int jj, const int ii) {
     const int k = kk + ks, j = jj + js, i = ii + is;
@@ -1348,6 +1379,31 @@ void MassClosure::ShellStage(int stage) {
       FixAtomic(acc, slot(now ? sCrInY : sCrOutY), ypost);
     }
     den(m, kk, jj, ii) = now;
+    if (rel) {
+      // shell_counters_release: the guard's decision (applied / declined) on flagged cells and
+      // the release (flagged at the last C2P -> unflagged now, entropy branch), each with this
+      // C2P's K_en/K_tr - 1 (de_diag 3) and theta (de_diag 15)
+      const int fl = (dd(m, 2, k, j, i) != 0.0) ? 1 : 0, pf = flg(m, kk, jj, ii);
+      int cl = -1;
+      if (dbr > 3.5 && dbr < 4.5 && fl == 1) {
+        cl = 0;
+      } else if (dbr > 1.5 && dbr < 2.5) {
+        cl = 1;
+      } else if (dbr > 0.5 && dbr < 1.5 && fl == 0 && pf == 1) {
+        cl = 2;
+      }
+      if (cl >= 0) {
+        const Real dk = dd(m, 3, k, j, i), th = dd(m, 15, k, j, i);
+        const int kb = (dk >= -0.1) + (dk >= -0.03) + (dk >= -0.01) + (dk >= -0.003) +
+                       (dk >= -0.001) + (dk >= 0.0) + (dk >= 0.001) + (dk >= 0.003) +
+                       (dk >= 0.01) + (dk >= 0.03) + (dk >= 0.1);
+        const int ht = (th >= 0.01) + (th >= 0.03) + (th >= 0.1) + (th >= 0.3) + (th >= 1.0);
+        const int sk = (b*kRelC + cl)*kRelK + kb;
+        Kokkos::atomic_add(&rcnt(sk*kShH + ht), static_cast<int64_t>(1));
+        FixAtomic(rsum, sk, dk*0x1p-60);
+      }
+      flg(m, kk, jj, ii) = fl;
+    }
   });
 }
 
@@ -1408,6 +1464,46 @@ void MassClosure::ShellCycle(int ns, const Real *gam0, const Real *gam1, const R
 
 //! rank 0: the interval's lines, one per shell
 void MassClosure::ShellReport(Real time) {
+  if (sh_rel_ && sh_rcnt_.extent_int(0) > 0) {
+    // shell_counters_release: SHELL_REL lines (all ranks reduce; rank 0 prints)
+    const int nc = kShN*kRelC*kRelK*kShH, ns = 3*kShN*kRelC*kRelK;
+    std::vector<int64_t> cnt(nc), sum(ns);
+    Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(cnt.data(), nc), sh_rcnt_);
+    Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(sum.data(), ns), sh_rsum_);
+    ShGlobal(cnt);
+    ShGlobal(sum);
+    if (global_variable::my_rank == 0) {
+      const char *cn[kRelC] = {"applied", "declined", "release"};
+      for (int b = 0; b < kShN; ++b) {
+        for (int c = 0; c < kRelC; ++c) {
+          int64_t n = 0;
+          Real st = 0.0;
+          std::ostringstream ok, os;
+          for (int kb = 0; kb < kRelK; ++kb) {
+            const int sk = (b*kRelC + c)*kRelK + kb;
+            int64_t nk = 0;
+            for (int h = 0; h < kShH; ++h) {
+              nk += cnt[sk*kShH + h];
+              os << ((kb || h) ? "," : "") << cnt[sk*kShH + h];
+            }
+            const Real sv = ShFix(sum, sk).Val()*0x1p60;
+            n += nk; st += sv;
+            ok << (kb ? "," : "") << nk;
+          }
+          std::ostringstream o;
+          o << std::setprecision(10) << "SHELL_REL t0=" << sh_t0_ << " t1=" << time
+            << " shell=" << b << " class=" << cn[c] << " n=" << n << " sum_dk=" << st
+            << " mean_dk=" << ((n > 0) ? st/static_cast<Real>(n) : 0.0) << " k_n=" << ok.str()
+            << " k_sum=";
+          for (int kb = 0; kb < kRelK; ++kb) {
+            o << (kb ? "," : "") << ShFix(sum, (b*kRelC + c)*kRelK + kb).Val()*0x1p60;
+          }
+          o << " k_theta_n=" << os.str();
+          std::cout << o.str() << std::endl;
+        }
+      }
+    }
+  }
   if (global_variable::my_rank == 0) {
     for (int b = 0; b < kShN; ++b) {
       const KSum *it = sh_it_[b];

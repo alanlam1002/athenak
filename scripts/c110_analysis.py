@@ -9,8 +9,12 @@
       K0 = its t = 0 value)
   (g) alpha_min (user hst)                           (h) dt (out.log) and the cumulative regrid count; the wall
                                                          time per M of evolution (out.log elapsed)
-    c110_analysis.py OUTDIR LABEL=RUNDIR [LABEL=RUNDIR ...] [--ref LABEL=RUNDIR] [--split]
+    c110_analysis.py OUTDIR LABEL=RUNDIR[,RUNDIR2...] [LABEL=...] [--ref LABEL=RUNDIR] [--split] [--title T]
 --split also writes each panel as its own figure, c110_<name>_<a-h>_<tag>.png.
+RUNDIR may be a comma-separated list of segments of one run (c160: e.g. a parent run and an arm restarted from it); each
+segment's series is kept up to the next segment's first time, so the normalisations (K/K0, scal-0, tot-E) are the first
+segment's t = 0 values. Labels without a fixed colour take C0, C1, ... in the order given; --title replaces the title's
+"2x2 NAME (L4, base8, GPU IPC off)" head.
 The decks are read from RUNDIR/parfile.par (the BH position and the geodesic's release state).
 """
 import argparse
@@ -128,13 +132,42 @@ def series(lab, d, nproc):
     S = S[np.argsort(S[:, 0])]
     bh = bh_xy(d, S[:, 0])
     sep = np.hypot(S[:, 1] - bh[:, 0], S[:, 2] - bh[:, 1])
-    out = {'t_dump': S[:, 0], 'sep': sep, 'Kc': S[:, 3] / S[0, 3] if S[0, 0] == 0 else S[:, 3] / np.nan}
+    out = {'t_dump': S[:, 0], 'sep': sep, 'Kraw': S[:, 3]}
     out['t_u'], out['rhomax'] = col(d, 'user', 'rho-max')
     _, out['amin'] = col(d, 'user', 'alpha-min')
     out['t_m'], out['mass'] = col(d, 'mhd', 'mass')
     _, out['scal0'] = col(d, 'mhd', 'scal-0')
     _, out['totE'] = col(d, 'mhd', 'tot-E')
     out['T'], out['DT'], out['W'], out['rg'], out['mb'] = log_series(d)
+    return out
+
+
+def series_segs(lab, spec, nproc):
+    """series() of each comma-separated segment, joined: segment n up to segment n+1's first time"""
+    segs = [series(lab, d, nproc) for d in spec.split(',')]
+    keys = (('t_dump', ('sep', 'Kraw')), ('t_u', ('rhomax', 'amin')), ('t_m', ('mass', 'scal0', 'totE')),
+            ('T', ('DT', 'W')))
+    out = {}
+    for tk, vk in keys:
+        parts = {k: [] for k in (tk,) + vk}
+        woff = 0.0
+        for n, sg in enumerate(segs):
+            tcut = segs[n + 1]['t_u'][0] if n + 1 < len(segs) else np.inf
+            m = sg[tk] < tcut
+            for k in (tk,) + vk:
+                v = sg[k][m]
+                if k == 'W':
+                    v = v + woff
+                parts[k].append(v)
+            if tk == 'T' and m.any():
+                woff = parts['W'][-1][-1]
+        for k in parts:
+            out[k] = np.concatenate(parts[k])
+    out['rg'] = np.concatenate([sg['rg'][sg['rg'] < (segs[n + 1]['t_u'][0] if n + 1 < len(segs) else np.inf)]
+                                for n, sg in enumerate(segs)])
+    out['mb'] = np.concatenate([sg['mb'][sg['mb'][:, 0] < (segs[n + 1]['t_u'][0] if n + 1 < len(segs) else np.inf)]
+                                for n, sg in enumerate(segs)]).reshape(-1, 2)
+    out['Kc'] = out['Kraw'] / out['Kraw'][0] if out['t_dump'][0] == 0 else out['Kraw'] / np.nan
     return out
 
 
@@ -148,12 +181,15 @@ def main():
     ap.add_argument('--rp', type=float, default=10.0)    # design periapsis R_areal of the geodesic
     ap.add_argument('--name', default='rp10')             # output prefix and title (rp18)
     ap.add_argument('--split', action='store_true')       # also one PNG per panel: c110_<name>_<a-h>_<tag>.png
+    ap.add_argument('--title', default=None)             # the title's head (default: 2x2 NAME (L4, base8, GPU IPC off))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     R = {}
     for spec in a.runs + a.ref:
         lab, d = spec.split('=', 1)
-        R[lab] = (d, series(lab, d, a.nproc), spec in a.ref)
+        R[lab] = (d.split(',')[0], series_segs(lab, d, a.nproc), spec in a.ref)
+    for n, lab in enumerate(l for l in R if l not in COL):
+        COL[lab] = f'C{n}'
     tmax = max(np.nanmax(s['t_u']) for _, s, _ in R.values())
     geo = None
     if a.runs:
@@ -208,7 +244,8 @@ def main():
     ax = ax.ravel()
     for k in range(8):
         panel(k, ax[k], legend=k in (0, 1))
-    fig.suptitle(f'2x2 {a.name} (L4, base8, GPU IPC off): ' + ', '.join(
+    head = a.title if a.title else f'2x2 {a.name} (L4, base8, GPU IPC off)'
+    fig.suptitle(f'{head}:' + ('\n' if a.title else ' ') + ', '.join(
         f'{k} to t = {np.nanmax(v[1]["t_u"]):.0f}' for k, v in R.items() if not v[2]) +
         f'; dashed = reference; grey line = design periapsis t = {a.tp}; ticks on (h) = regrids')
     fig.tight_layout()

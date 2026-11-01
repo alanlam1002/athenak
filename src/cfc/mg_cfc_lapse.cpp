@@ -404,9 +404,11 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {
     norm_mode_ = MGNormScaling::rms;
+  } else if (norm_str == "max") {   // R-201 item 1: the local defect (multigrid.hpp)
+    norm_mode_ = MGNormScaling::max;
   } else {
     std::cout << "### FATAL ERROR in MGCFCLapseDriver" << std::endl
-              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+              << "cfc/mg_norm must be 'legacy', 'rms' or 'max'." << std::endl;
     std::exit(EXIT_FAILURE);
   }
   rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);

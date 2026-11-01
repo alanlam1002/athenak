@@ -891,6 +891,10 @@ void MultigridDriver::SolveMG(Driver *pdriver) {
 Real MultigridDriver::TotalDefectNorm() {
   MGScopedTimer t(MGTimingOn(), mg_timers_.defect_sec);
   Real def = 0.0;
+  if (norm_mode_ == MGNormScaling::max) {   // <cfc> mg_norm = max: the local (L-inf) defect
+    for (int v = 0; v < nvar_; ++v) def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+    return def;
+  }
   for (int v = 0; v < nvar_; ++v) {
     Real d = CalculateDefectNorm(MGNormType::l2, v);
     def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;

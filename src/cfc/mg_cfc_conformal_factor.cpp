@@ -432,9 +432,11 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {
     norm_mode_ = MGNormScaling::rms;
+  } else if (norm_str == "max") {   // R-201 item 1: the local defect (multigrid.hpp)
+    norm_mode_ = MGNormScaling::max;
   } else {
     std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver" << std::endl
-              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+              << "cfc/mg_norm must be 'legacy', 'rms' or 'max'." << std::endl;
     std::exit(EXIT_FAILURE);
   }
   // <= 0 disables (the default): eps_ alone sets the stopping point, exactly as

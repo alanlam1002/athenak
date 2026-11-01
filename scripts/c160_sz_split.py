@@ -109,7 +109,7 @@ def par(d, k, dflt=0.0):
 def hst_at(d, t, names):
     f = glob.glob(f'{d}/*.user.hst')[0]
     hdr = open(f).readlines()[1]
-    h = np.loadtxt(f); i = np.argmin(np.abs(h[:, 0] - t))
+    h = np.loadtxt(f, ndmin=2); i = np.argmin(np.abs(h[:, 0] - t))
     return [h[i, int(re.search(rf'\[(\d+)\]={n}\b', hdr).group(1)) - 1] if re.search(rf'\]={n}\b', hdr) else 0.0
             for n in names]
 

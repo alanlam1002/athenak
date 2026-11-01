@@ -78,6 +78,16 @@ enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
 // (xcfc: XCFC's K, the default; keff: K^eff = (Lie_beta' gamma - gamma-dot)/(2 alpha) with the
 // actual gamma-dot; kcfc: (Lie_beta' gamma)^TF/(2 alpha); ktr: XCFC's K plus the trace correction)
 enum class TauSourceK {xcfc, keff, kcfc, ktr};
+// <dyn_grmhd> trace_diag (R-197 item 1, diagnostics only; AddTauSourceK): per-cell tr_diag
+// components (output variable mhd_trace_diag), rates in M^-1:
+//   0 R = 6 d_t ln psi - D_k beta'^k, 1 6 d_t ln psi, 2 D_k beta'^k,
+//   3-8 T_ij = (L beta')_ij - 2 alpha psi^-6 Ahat_ij (flat indices; xx xy xz yy yz zz),
+//   9 |T|_coord = sqrt(T_ij T_ij) (= |psi^4 T|_phys), 10 delta^ij T_ij,
+//   11 -1/2 psi^4 S^ij T_ij, 12 R S/3 (the two parts of 1/2 S^ij V_ij), 13 the chord valid (0/1)
+constexpr int kTrN = 14;
+// TRD line components per band (w = rho dV): w, w R, w R^2, w |T|, w |T|^2, w R |T|, w 6 d_t ln psi,
+// w D_k beta'^k, sqrt(g) dV (-1/2 psi^4 S^ij T_ij), sqrt(g) dV R S/3
+constexpr int kTrBands = 3, kTrRed = 10;
 
 // <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): per-cell components (tb_c), the
 // first kTbNr summed per bin (x dV); bins: star = 4 density bands x (interior, surface),
@@ -252,8 +262,19 @@ class DynGRMHD {
   // <dyn_grmhd> tau_source_K (R-194): keff and ktr take gamma-dot from arm (ii)'s chord state
   TauSourceK tau_source_k = TauSourceK::xcfc;
   bool TskChord() const {
-    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr;
+    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr || trace_diag;
   }
+  // <dyn_grmhd> trace_diag (R-197 item 1): the chord state and tr_diag, nothing written to the
+  // solution; trace_diag_ahat = cfc_lagged (R-197 addendum, diagnostic only): CFC's psi and
+  // lapse solves take Ahat^2 from Ahat = psi^6 (L beta)/(2 alpha) of the previous stage (kf_prev)
+  bool trace_diag = false, trace_ahat = false;
+  DvceArray5D<Real> tr_diag;
+  // <dyn_grmhd> trace_diag_every (default 1): TRD lines, per stage, rho dV-weighted sums of R, |T|
+  // in the bands rho >= 0.5, 0.1, 0.01 trace_diag_rhoc (default 3.24e-4); 0 = none
+  int trace_every = 1;
+  Real trace_rhoc = 3.24e-4;
+  // kf_prev holds the previous stage's metric for the current MeshBlocks (KillingFullStage's test)
+  bool KfPrevValid() const;
   bool KfRst() const {
     return (energy_variable == EnergyVariable::killing_full && kf_dtg) || TskChord();
   }

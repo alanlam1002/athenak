@@ -578,7 +578,28 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     tau_source_k = (tk == "keff") ? TauSourceK::keff : ((tk == "kcfc") ? TauSourceK::kcfc :
                    ((tk == "ktr") ? TauSourceK::ktr : TauSourceK::xcfc));
   }
-  if (tau_source_k != TauSourceK::xcfc) {
+  // <dyn_grmhd> trace_diag, trace_diag_ahat (R-197 item 1 and addendum, user-approved
+  // 2026-11-01; diagnostics only). Read without GetOrAdd: an input without them is unchanged.
+  if (pin->DoesParameterExist("dyn_grmhd", "trace_diag")) {
+    trace_diag = pin->GetBoolean("dyn_grmhd", "trace_diag");
+  }
+  if (pin->DoesParameterExist("dyn_grmhd", "trace_diag_ahat")) {
+    const std::string ta = pin->GetString("dyn_grmhd", "trace_diag_ahat");
+    if ((ta != "xcfc" && ta != "cfc_lagged") || (ta == "cfc_lagged" && !trace_diag) ||
+        (ta == "cfc_lagged" && pin->DoesParameterExist("cfc", "puncture_enabled") &&
+         pin->GetBoolean("cfc", "puncture_enabled"))) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> trace_diag_ahat = xcfc | cfc_lagged; cfc_lagged needs "
+                << "trace_diag = true and no puncture" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    trace_ahat = (ta == "cfc_lagged");
+  }
+  if (trace_diag) {
+    trace_every = pin->GetOrAddInteger("dyn_grmhd", "trace_diag_every", 1);
+    trace_rhoc = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rhoc", 3.24e-4);
+  }
+  if (tau_source_k != TauSourceK::xcfc || trace_diag) {
     auto kneed = [&](bool ok, const char *what) {
       if (ok) return;
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
@@ -612,6 +633,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
       Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
                       indcs.nx1 + 2*indcs.ng);
+      if (trace_diag) {
+        Kokkos::realloc(tr_diag, nmb, kTrN, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+      }
     }
     if (global_variable::my_rank == 0) {
       const char *nm[4] = {"xcfc", "keff", "kcfc", "ktr"};
@@ -619,6 +644,9 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                 << (TskChord() ? (kf_bgmove ? " (d_t ln psi: the residual chord + the moving "
                                               "background's analytic rate)"
                                             : " (d_t ln psi: the chord of psi^4)") : "")
+                << (trace_diag ? "; trace_diag (R, T_ij -> mhd_trace_diag)" : "")
+                << (trace_ahat ? "; trace_diag_ahat = cfc_lagged (psi, lapse: Ahat = psi^6 "
+                                 "(L beta)/(2 alpha), the previous stage's)" : "")
                 << std::endl;
     }
   }
@@ -1146,8 +1174,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
               break;
     }
   }
-  if (tau_source_k != TauSourceK::xcfc && !fixed_evolution) {
-    switch (nghost) {   // dyn_grmhd_killing.cpp (R-194)
+  if ((tau_source_k != TauSourceK::xcfc || trace_diag) && !fixed_evolution) {
+    switch (nghost) {   // dyn_grmhd_killing.cpp (R-194; R-197 trace_diag)
       case 2: AddTauSourceK<2>(prim, bcc, dt, rhs);
               break;
       case 3: AddTauSourceK<3>(prim, bcc, dt, rhs);

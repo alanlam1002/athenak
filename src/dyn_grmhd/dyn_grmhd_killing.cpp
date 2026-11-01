@@ -277,6 +277,15 @@ void DynGRMHD::KillingFaceProbe() {
 //! per cell as a difference (R-177 item 1: two sums of T, then subtracted, left KCLOSE an
 //! R ~ eps |T|), the u1 part telescoped stage by stage: [M_s - M_1](u1) = sum over q <= s of
 //! [M_q - M_{q-1}](u1) (kf_m1u1, from kf_prev = the previous stage's weights).
+bool DynGRMHD::KfPrevValid() const {
+  if (!kf_have_prev) return false;
+  if (kf_rst_loaded) return true;
+  auto *pmr = pmy_pack->pmesh->pmr;
+  return kf_key[0] == ((pmr != nullptr) ? pmr->nmb_created : 0) &&
+         kf_key[1] == ((pmr != nullptr) ? pmr->nmb_deleted : 0) &&
+         kf_key[2] == pmy_pack->nmb_thispack;
+}
+
 void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   // the time of the metric this stage's fluxes use: solved from the previous stage's state,
   // t + tau_{s-1} dt with tau_s = gam0 tau_{s-1} + beta (as CFC::StageTime, cfc.cpp:2945)
@@ -1019,6 +1028,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
   const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
   const bool tb = TauBudgetOn();   // the change's trace / trace-free parts -> tb_c (kTbA, +1)
   auto &tc = tb_c;
+  const bool trd = trace_diag;     // R-197 item 1: R, T_ij -> tr_diag (the solution untouched)
+  auto &trc = tr_diag;
   const int imap[3][3] = {
     {S11, S12, S13},
     {S12, S22, S23},
@@ -1144,6 +1155,39 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       dp4 += 4.0*ps*ps*ps*psd;
     }
 
+    if (trd) {
+      // R-197 item 1: R = 6 d_t ln psi - D_k beta'^k (the chord above) and the TT remainder
+      // T_ij = (L beta')_ij - 2 alpha psi^-6 Ahat_ij, Ahat_ij = psi^2 K_ij (CFC::AssembleADM);
+      // flat indices, (L beta)_ij = d_i beta^j + d_j beta^i - 2/3 delta_ij d_k beta^k
+      const Real r6 = 1.5*dp4/p4;
+      const Real dvb = dbeta_du[0][0] + dbeta_du[1][1] + dbeta_du[2][2];
+      const Real a2p = 2.0*alpha/p4;   // 2 alpha psi^-6 psi^2
+      Real tt[6], tn = 0.0, ttr = 0.0, sT = 0.0;
+      int q = 0;
+      for (int a = 0; a < 3; a++) {
+        for (int b = a; b < 3; b++) {
+          const Real lb = dbeta_du[a][b] + dbeta_du[b][a] - ((a == b) ? 2.0/3.0*dvb : 0.0);
+          tt[q] = lb - a2p*adm.vK_dd(m, a, b, k, j, i);
+          const Real w = (a == b) ? 1.0 : 2.0;
+          tn += w*tt[q]*tt[q];
+          sT += w*S_uu[a][b]*tt[q];
+          if (a == b) ttr += tt[q];
+          q++;
+        }
+      }
+      const Real rr = r6 - divb;
+      trc(m, 0, k, j, i) = rr;
+      trc(m, 1, k, j, i) = r6;
+      trc(m, 2, k, j, i) = divb;
+      for (int c = 0; c < 6; c++) trc(m, 3 + c, k, j, i) = tt[c];
+      trc(m, 9, k, j, i) = sqrt(tn);
+      trc(m, 10, k, j, i) = ttr;
+      trc(m, 11, k, j, i) = -0.5*p4*sT;
+      trc(m, 12, k, j, i) = rr*trS/3.0;
+      trc(m, 13, k, j, i) = dtg ? 1.0 : 0.0;
+    }
+    if (mode == 0) return;   // trace_diag alone: Valencia's tau source unchanged
+
     // the change and its trace part (S/3) gamma^ij (alpha K'_ij - alpha K^XCFC_ij)
     Real ds = 0.0, dtr = 0.0;
     if (mode == 1) {          // keff
@@ -1162,6 +1206,68 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       tc(m, kTbA + 1, k-ks, j-js, i-is) = vol*(ds - dtr);
     }
   });
+
+  // R-197 item 1: TRD lines (diagnostic; reads tr_diag and prim)
+  if (trd && trace_every > 0 && pmy_pack->pmesh->ncycle % trace_every == 0) {
+    const Real rc = trace_rhoc;
+    const Real bth[kTrBands] = {0.5, 0.1, 0.01};
+    const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+    Real out[kTrBands*kTrRed] = {0.0};
+    for (int b = 0; b < kTrBands; ++b) {
+      const Real th = bth[b]*rc;
+      for (int c = 0; c < kTrRed; ++c) {
+        Real sm = 0.0;
+        Kokkos::parallel_reduce("trd_band", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+        KOKKOS_LAMBDA(const int idx, Real &acc) {
+          const int m = idx/nkji;
+          const int k = (idx - m*nkji)/nji + ks;
+          const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+          const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+          const Real rho = prim(m, IDN, k, j, i);
+          if (!(rho >= th)) return;
+          const auto &sz = size.d_view(m);
+          const Real dv = sz.dx1*sz.dx2*sz.dx3, w = rho*dv;
+          const Real rr = trc(m, 0, k, j, i), tn = trc(m, 9, k, j, i);
+          Real v = 0.0;
+          switch (c) {
+            case 0: v = w; break;
+            case 1: v = w*rr; break;
+            case 2: v = w*rr*rr; break;
+            case 3: v = w*tn; break;
+            case 4: v = w*tn*tn; break;
+            case 5: v = w*rr*tn; break;
+            case 6: v = w*trc(m, 1, k, j, i); break;
+            case 7: v = w*trc(m, 2, k, j, i); break;
+            case 8: {
+              const Real p4 = adm.psi4(m, k, j, i);
+              v = p4*p4*sqrt(p4)*dv*trc(m, 11, k, j, i);   // sqrt(gamma) = psi^6
+              break;
+            }
+            default: {
+              const Real p4 = adm.psi4(m, k, j, i);
+              v = p4*p4*sqrt(p4)*dv*trc(m, 12, k, j, i);
+            }
+          }
+          acc += v;
+        }, Kokkos::Sum<Real>(sm));
+        out[b*kTrRed + c] = sm;
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, out, kTrBands*kTrRed, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+    if (global_variable::my_rank == 0) {
+      std::printf("TRD cycle=%d stage=%d time=%.12g tstage=%.12g dtm=%.10e valid=%d ahat=%s",
+                  pmy_pack->pmesh->ncycle, kill_stage, pmy_pack->pmesh->time, kf_tstage, dtm,
+                  dtg ? 1 : 0, trace_ahat ? "cfc_lagged" : "xcfc");
+      for (int b = 0; b < kTrBands; ++b) {
+        std::printf(" b%d=", b);
+        for (int c = 0; c < kTrRed; ++c) std::printf(c ? ",%.10e" : "%.10e", out[b*kTrRed + c]);
+      }
+      std::printf("\n");
+      std::fflush(stdout);
+    }
+  }
 
   if (!chord) return;
   // this stage's metric and CFC residual -> kf_prev (as AddKillingFullTerms)

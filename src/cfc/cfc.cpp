@@ -1727,10 +1727,54 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 // step 2: Adual^ij/Ahat^2, computed directly from u_p_x's (P_i, eta) once its own
 // ghost exchange (CFC_BCSPiEtaX) completes -- X^i is never materialized.
 
+namespace {
+//! <dyn_grmhd> trace_diag_ahat = cfc_lagged (R-197 addendum, user-approved 2026-11-01; a
+//! diagnostic arm, never a production option): Ahat^2 for the psi and lapse solves from the
+//! original-CFC Ahat^ij = psi^6 (L beta)^ij/(2 alpha) of the previous stage's metric (kf_prev:
+//! alpha, beta^i, psi^4, ghosts included), all three lagged; X, Adual (the shift source and K)
+//! unchanged
+template<int NGHOST>
+void LaggedCFCAhatSq(MeshBlockPack *pmbp, const DvceArray5D<Real> &pv, DvceArray5D<Real> &asq) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  auto &size = pmbp->pmb->mb_size;
+  par_for("cfc_ahat_sq_lagged", DevExeSpace(), 0, pmbp->nmb_thispack-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
+                        1.0/size.d_view(m).dx3};
+    Real db[3][3];   // d_a beta^c
+    for (int a = 0; a < 3; ++a) {
+      for (int c = 0; c < 3; ++c) db[a][c] = Dx<NGHOST>(a, idx, pv, m, 1 + c, k, j, i);
+    }
+    const Real dvb = db[0][0] + db[1][1] + db[2][2];
+    const Real p4 = pv(m, 4, k, j, i);
+    const Real f = p4*sqrt(p4)/(2.0*pv(m, 0, k, j, i));   // psi^6/(2 alpha)
+    Real sq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        const Real ab = f*(db[a][b] + db[b][a] - ((a == b) ? 2.0/3.0*dvb : 0.0));
+        sq += ab*ab;
+      }
+    }
+    asq(m, 0, k, j, i) = sq;
+  });
+}
+}  // namespace
+
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
   if (rs_bg_only_) { return TaskStatus::complete; }   // scaled by f = 0
   ComputeADual();
+  auto *pdg = pmy_pack->pdyngr;
+  if (pdg != nullptr && pdg->trace_ahat && pdg->KfPrevValid()) {
+    // R-197 addendum; without a valid previous stage (the first, after a regrid) XCFC's
+    switch (pmy_pack->pmesh->mb_indcs.ng) {
+      case 2: LaggedCFCAhatSq<2>(pmy_pack, pdg->kf_prev, a_sq); break;
+      case 3: LaggedCFCAhatSq<3>(pmy_pack, pdg->kf_prev, a_sq); break;
+      case 4: LaggedCFCAhatSq<4>(pmy_pack, pdg->kf_prev, a_sq); break;
+    }
+  }
   // Adual^ij feeds BOTH scalar solves (psi's Ahat^2 term and the lapse's) AND the
   // shift source. If this is finite here but K_dd ends up NaN, the corruption is
   // downstream of Adual, not in it.

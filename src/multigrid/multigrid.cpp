@@ -891,56 +891,6 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
 }
 
 //----------------------------------------------------------------------------------------
-//! \fn Real Multigrid::CalculateSourceNorm(MGNormType nrm, int n)
-//! \brief Norm of the source src_ on the current level, for <cfc>/mg_rtol_ref = source
-//! and the <cfc>/mg_log diagnostic. max: max |src|. l2: always the volume-weighted
-//! (rms-convention) sum, times defscale_ as in CalculateDefectNorm; the driver divides by
-//! the root volume and takes the square root. l1 is not supported (returns 0).
-
-namespace {
-template <typename ExecSpace, typename SrcView, typename SizeView>
-Real SourceNormImpl(const SrcView &src, const SizeView &mb_size, MGNormType nrm, int n,
-                    int nmmb, int ks, int ke, int js, int je, int is, int ie, Real lfac3) {
-  Real norm = 0.0;
-  if (nrm == MGNormType::max) {
-    Kokkos::parallel_reduce("MG::SourceNorm_Linf",
-      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<4>>({0, ks, js, is},
-                                                        {nmmb, ke+1, je+1, ie+1}),
-      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &lmax) {
-        lmax = Kokkos::max(lmax, Kokkos::fabs(src(m, n, k, j, i)));
-      }, Kokkos::Max<Real>(norm));
-  } else if (nrm == MGNormType::l2) {
-    Kokkos::parallel_reduce("MG::SourceNorm_L2",
-      Kokkos::MDRangePolicy<ExecSpace, Kokkos::Rank<4>>({0, ks, js, is},
-                                                        {nmmb, ke+1, je+1, ie+1}),
-      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &lsum) {
-        Real val = src(m, n, k, j, i);
-        lsum += mb_size(m).dx1*mb_size(m).dx2*mb_size(m).dx3*lfac3*val*val;
-      }, Kokkos::Sum<Real>(norm));
-  }
-  return norm;
-}
-}  // namespace
-
-Real Multigrid::CalculateSourceNorm(MGNormType nrm, int n) {
-  // Only the MeshBlock-level object (mglevels_) has per-block sizes; the driver never
-  // calls this on mgroot_.
-  if (pmy_pack_ == nullptr) return 0.0;
-  int ll = nlevel_-1-current_level_;
-  int is = ngh_, js = ngh_, ks = ngh_;
-  int ie = is+(indcs_.nx1>>ll)-1, je = js+(indcs_.nx2>>ll)-1, ke = ks+(indcs_.nx3>>ll)-1;
-  const Real lfac3 = static_cast<Real>((1 << ll) * (1 << ll) * (1 << ll));
-  auto &mb_size = pmy_pack_->pmb->mb_size;
-  Real norm = on_host_ ?
-      SourceNormImpl<HostExeSpace>(src_[current_level_].h_view, mb_size.h_view, nrm, n,
-                                   nmmb_, ks, ke, js, je, is, ie, lfac3) :
-      SourceNormImpl<DevExeSpace>(src_[current_level_].d_view, mb_size.d_view, nrm, n,
-                                  nmmb_, ks, ke, js, je, is, ie, lfac3);
-  if (nrm != MGNormType::max) norm *= defscale_;
-  return norm;
-}
-
-//----------------------------------------------------------------------------------------
 //! \fn Real Multigrid::CalculateAverage(MGVariable type)
 //! \brief Calculate volume-weighted average of variable 0 on current level
 

@@ -288,7 +288,6 @@ class Multigrid {
   void CalculateMatrixPack(Real dt);
   void SetFromRootGrid(bool folddata);
   Real CalculateDefectNorm(MGNormType nrm, int n);
-  Real CalculateSourceNorm(MGNormType nrm, int n);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -603,6 +602,9 @@ class MultigridDriver {
   // when off nothing below is evaluated, so production arithmetic is unchanged.
   bool rtol_source_;
   int mg_log_;
+  // mg_norm = max only: a stall is this many consecutive V-cycles that fail to cut the
+  // best defect so far by 10% (<cfc>/mg_stall_cycles, default 3).
+  int mg_stall_cycles_;
   std::string mg_log_name_;
 
   bool full_multigrid_;

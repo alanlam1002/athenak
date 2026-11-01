@@ -10,6 +10,7 @@
 
 // C++ headers
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -46,7 +47,8 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
     niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0),
     fprolongation_(0), mg_verbose_(0),
-    norm_mode_(MGNormScaling::legacy), rtol_(0.0),
+    norm_mode_(MGNormScaling::legacy), rtol_(0.0), rtol_source_(false), mg_log_(0),
+    mg_log_name_("mg"),
     nb_rank_(0), ncoeff_(0),
     octets_(nullptr), octetmap_(nullptr), octetbflag_(nullptr), noctets_(nullptr),
     oct_u_buf_(nullptr), oct_def_buf_(nullptr),
@@ -762,11 +764,123 @@ void MultigridDriver::SolveMG(Driver *pdriver) {
 
 Real MultigridDriver::TotalDefectNorm() {
   Real def = 0.0;
+  if (norm_mode_ == MGNormScaling::max) {
+    for (int v = 0; v < nvar_; ++v) {
+      def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+    }
+    return def;
+  }
   for (int v = 0; v < nvar_; ++v) {
     Real d = CalculateDefectNorm(MGNormType::l2, v);
     def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;
   }
   return def;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::TotalSourceNorm()
+//! \brief Source norm in the convergence norm's sense (R-058, mg_rtol_ref = source):
+//! max |src| for mg_norm = max, else the volume-weighted L2, channels combined as in
+//! TotalDefectNorm (sum for legacy, max otherwise).
+
+Real MultigridDriver::TotalSourceNorm() {
+  MGNormType nrm = (norm_mode_ == MGNormScaling::max) ? MGNormType::max : MGNormType::l2;
+  Real f = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    Real d = CalculateSourceNorm(nrm, v);
+    f = (norm_mode_ == MGNormScaling::legacy) ? f + d : std::max(f, d);
+  }
+  return f;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin, ...)
+//! \brief <block>/mg_rtol_ref = initial (default) | source, <block>/mg_log = 0|1|2.
+
+void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
+                                             const std::string &block) {
+  std::string ref = pin->GetOrAddString(block, "mg_rtol_ref", "initial");
+  if (ref == "initial") {
+    rtol_source_ = false;
+  } else if (ref == "source") {
+    rtol_source_ = true;
+  } else {
+    std::cout << "### FATAL ERROR in MultigridDriver::ReadConvergenceOptions" << std::endl
+              << block << "/mg_rtol_ref must be 'initial' or 'source'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::LogSolve(...)
+//! \brief One "MGLOG" line per solve (R-058). Collective: every rank must call it.
+//! Fields: name, cycle, time, V-cycles, wall [s] of the V-cycle loop, the initial and
+//! final defect in the convergence norm, its reference (initial defect or source norm)
+//! and target, then the final defect as volume-weighted L2 and as max (both
+//! max-combined over channels, independent of mg_norm), the source in the same two
+//! norms, and with mg_log >= 2 the channel, position and refinement level of max |defect|.
+
+void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real target,
+                               double wall) {
+  // L2 in the rms convention whatever mg_norm is: CalculateDefectNorm reads norm_mode_
+  // for its volume weight, so switch it for these calls only (the solve is finished).
+  MGNormScaling keep = norm_mode_;
+  norm_mode_ = MGNormScaling::rms;
+  Real l2 = 0.0, mx = 0.0, fl2 = 0.0, fmx = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    l2 = std::max(l2, CalculateDefectNorm(MGNormType::l2, v));
+    mx = std::max(mx, CalculateDefectNorm(MGNormType::max, v));
+    fl2 = std::max(fl2, CalculateSourceNorm(MGNormType::l2, v));
+    fmx = std::max(fmx, CalculateSourceNorm(MGNormType::max, v));
+  }
+  norm_mode_ = keep;
+  std::ostringstream os;
+  os << std::scientific << std::setprecision(4)
+     << "MGLOG " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle << " t "
+     << pmy_mesh_->time << " it " << niter << " wall " << wall << " conv0 " << def0
+     << " conv " << def << " ref " << ref << " target " << target << " l2 " << l2
+     << " max " << mx << " src_l2 " << fl2 << " src_max " << fmx;
+  if (mg_log_ >= 2 && mglevels_ != nullptr) {
+    // position of max |defect|: host copy of the finest per-block defect (just computed
+    // by the CalculateDefectNorm calls above), then a MAXLOC over ranks
+    auto def_h = Kokkos::create_mirror_view(mglevels_->GetCurrentDefect());
+    Kokkos::deep_copy(def_h, mglevels_->GetCurrentDefect());
+    int ngh = mglevels_->GetGhostCells();
+    int ncx = def_h.extent_int(4), ncy = def_h.extent_int(3), ncz = def_h.extent_int(2);
+    auto &size = pmy_pack_->pmb->mb_size.h_view;
+    auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+    struct { double val; int rank; } loc_in{-1.0, global_variable::my_rank}, loc_out;
+    double pos[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // x1, x2, x3, level, channel
+    for (int m = 0; m < pmy_pack_->nmb_thispack; ++m) {
+      for (int v = 0; v < nvar_; ++v) {
+        for (int k = ngh; k < ncz - ngh; ++k) {
+          for (int j = ngh; j < ncy - ngh; ++j) {
+            for (int i = ngh; i < ncx - ngh; ++i) {
+              double a = std::fabs(def_h(m, v, k, j, i));
+              if (a > loc_in.val) {
+                loc_in.val = a;
+                pos[0] = size(m).x1min + (i - ngh + 0.5)*size(m).dx1;
+                pos[1] = size(m).x2min + (j - ngh + 0.5)*size(m).dx2;
+                pos[2] = size(m).x3min + (k - ngh + 0.5)*size(m).dx3;
+                pos[3] = pmy_mesh_->lloc_eachmb[gid_h(m)].level - locrootlevel_;
+                pos[4] = v;
+              }
+            }
+          }
+        }
+      }
+    }
+    loc_out = loc_in;
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(&loc_in, &loc_out, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    MPI_Bcast(pos, 5, MPI_DOUBLE, loc_out.rank, MPI_COMM_WORLD);
+#endif
+    os << " at " << std::fixed << std::setprecision(3) << pos[0] << " " << pos[1] << " "
+       << pos[2] << " lev " << static_cast<int>(pos[3]) << " ch "
+       << static_cast<int>(pos[4]);
+  }
+  if (global_variable::my_rank == 0) std::cout << os.str() << std::endl;
 }
 
 //----------------------------------------------------------------------------------------
@@ -830,8 +944,12 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   // invariant under any constant rescaling of the norm, so it is what
   // sidesteps needing to re-derive an absolute eps_ for every mesh/norm
   // combination -- see the migration note in DEVELOPMENT.md.
+  Real def0 = def;
+  Real ref = rtol_source_ ? TotalSourceNorm() : def;   // R-058: mg_rtol_ref
   Real target = eps_;
-  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * def);
+  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * ref);
+  std::chrono::steady_clock::time_point t0;
+  if (mg_log_ > 0) { Kokkos::fence(); t0 = std::chrono::steady_clock::now(); }
   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
     std::cout << "MG initial defect = " << def << std::endl;
     if (rtol_ > 0.0) {
@@ -870,6 +988,10 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     }
   }
   Kokkos::fence();
+  if (mg_log_ > 0) {
+    double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    LogSolve(n, def0, def, ref, target, wall);
+  }
   return;
 }
 
@@ -971,6 +1093,28 @@ Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
   }
   if (nrm == MGNormType::l2) {
     norm = Kokkos::sqrt(norm);
+  }
+  return norm;
+}
+
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::CalculateSourceNorm(MGNormType nrm, int n)
+//! \brief source norm over all ranks, normalized as CalculateDefectNorm (R-058)
+
+Real MultigridDriver::CalculateSourceNorm(MGNormType nrm, int n) {
+  Real norm = (mglevels_ != nullptr) ? mglevels_->CalculateSourceNorm(nrm, n) : 0.0;
+  #if MPI_PARALLEL_ENABLED
+  Real global_norm = 0.0;
+  MPI_Allreduce(&norm, &global_norm, 1, MPI_ATHENA_REAL,
+                (nrm == MGNormType::max) ? MPI_MAX : MPI_SUM, MPI_COMM_WORLD);
+  norm = global_norm;
+  #endif
+  if (nrm != MGNormType::max) {
+    Real vol = (mgroot_->size_.x1max - mgroot_->size_.x1min)
+             * (mgroot_->size_.x2max - mgroot_->size_.x2min)
+             * (mgroot_->size_.x3max - mgroot_->size_.x3min);
+    norm = Kokkos::sqrt(norm/vol);
   }
   return norm;
 }

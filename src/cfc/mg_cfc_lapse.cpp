@@ -196,13 +196,16 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {
     norm_mode_ = MGNormScaling::rms;
+  } else if (norm_str == "max") {
+    norm_mode_ = MGNormScaling::max;
   } else {
     std::cout << "### FATAL ERROR in MGCFCLapseDriver" << std::endl
-              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+              << "cfc/mg_norm must be 'legacy', 'rms' or 'max'." << std::endl;
     std::exit(EXIT_FAILURE);
   }
   rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
+  ReadConvergenceOptions(pin, "cfc");   // mg_rtol_ref, mg_log (R-058)
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
   // See MGCFCConformalFactorDriver's identical comment -- AMR-refined meshes need

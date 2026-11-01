@@ -270,9 +270,11 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {
     norm_mode_ = MGNormScaling::rms;
+  } else if (norm_str == "max") {
+    norm_mode_ = MGNormScaling::max;
   } else {
     std::cout << "### FATAL ERROR in MGCFCConformalFactorDriver" << std::endl
-              << "cfc/mg_norm must be 'legacy' or 'rms'." << std::endl;
+              << "cfc/mg_norm must be 'legacy', 'rms' or 'max'." << std::endl;
     std::exit(EXIT_FAILURE);
   }
   // <= 0 disables (the default): eps_ alone sets the stopping point, exactly as
@@ -280,6 +282,7 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   // MultigridDriver::SolveIterative), invariant to the mg_norm choice above.
   rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
+  ReadConvergenceOptions(pin, "cfc");   // mg_rtol_ref, mg_log (R-058)
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
   // AMR-refined meshes need more smoothing per level to fully converge than a

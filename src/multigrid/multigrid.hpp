@@ -46,8 +46,10 @@ enum class MGNormType {max, l1, l2};
 // SolveIterative sums the per-channel norms over nvar_, over-penalizing
 // nvar_>1 solvers. rms: each cell is weighted by its own physical volume
 // (correct under AMR/SMR, where a pack's blocks span different levels) and
-// channels are combined by max instead of sum. See <cfc>/mg_norm.
-enum class MGNormScaling {legacy, rms};
+// channels are combined by max instead of sum. max (R-058): convergence on the
+// per-channel max |defect| over every MeshBlock cell (all refinement levels; the octet
+// and root coarse levels are not included), channels combined by max. See <cfc>/mg_norm.
+enum class MGNormScaling {legacy, rms, max};
 
 //----------------------------------------------------------------------------------------
 // LogicalLocation hash and equality for std::unordered_map
@@ -286,6 +288,7 @@ class Multigrid {
   void CalculateMatrixPack(Real dt);
   void SetFromRootGrid(bool folddata);
   Real CalculateDefectNorm(MGNormType nrm, int n);
+  Real CalculateSourceNorm(MGNormType nrm, int n);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -440,6 +443,11 @@ class MultigridDriver {
   // 4x tighter bar than an nvar_=1 one). rms: max (each channel independently
   // meets tolerance; nvar_=1 is unaffected).
   Real TotalDefectNorm();
+  // Same channel combination as TotalDefectNorm, applied to the source (max norm for
+  // mg_norm = max, volume-weighted L2 otherwise). Reference for mg_rtol_ref = source.
+  Real TotalSourceNorm();
+  // Name used in the <cfc>/mg_log lines (the two vector-Poisson instances differ).
+  void SetLogName(const std::string &name) { mg_log_name_ = name; }
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -545,7 +553,12 @@ class MultigridDriver {
 
   virtual void SolveCoarsestGrid();
   Real CalculateDefectNorm(MGNormType nrm, int n);
+  Real CalculateSourceNorm(MGNormType nrm, int n);
   void CalculateMatrix(Real dt);
+  // Reads <block>/mg_rtol_ref and mg_log (R-058); defaults keep today's behavior.
+  void ReadConvergenceOptions(ParameterInput *pin, const std::string &block);
+  // One mg_log line per SolveIterative call (rank 0 prints; all ranks take part).
+  void LogSolve(int niter, Real def0, Real def, Real ref, Real target, double wall);
   Multigrid* FindMultigrid(int tgid);
   // container to hold names of TaskIDs
   MultigridTaskIDs id;
@@ -582,6 +595,15 @@ class MultigridDriver {
   // these, so gravity is unaffected regardless of what CFC does.
   MGNormScaling norm_mode_;
   Real rtol_;
+  // R-058. rtol_source_: the relative target is rtol_ x the source norm (TotalSourceNorm)
+  // instead of rtol_ x the initial defect. mg_log_: 0 off; 1 one line per solve with
+  // iterations, wall time, initial/final convergence norm, final volume-weighted L2 and
+  // max |defect|, source norms; 2 also the position and refinement level of the max
+  // |defect| (host copy of the defect, diagnostic runs only). Both off by default, and
+  // when off nothing below is evaluated, so production arithmetic is unchanged.
+  bool rtol_source_;
+  int mg_log_;
+  std::string mg_log_name_;
 
   bool full_multigrid_;
   int fmg_ncycle_;

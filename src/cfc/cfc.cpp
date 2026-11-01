@@ -193,6 +193,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
   pmgd_alpha     = new MGCFCLapseDriver(pmbp, pin);
+  pmgd_pietax->SetLogName("X");          // <cfc>/mg_log line labels (R-058)
+  pmgd_pietabeta->SetLogName("beta");
+  pmgd_psi->SetLogName("psi");
+  pmgd_alpha->SetLogName("alpha_psi");
 
   // Post-multigrid ghost exchange: one MeshBoundaryValuesCC + coarse shadow array
   // per field cfc_reconstruct.cpp later differentiates, mirroring

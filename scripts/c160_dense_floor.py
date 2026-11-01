@@ -2,7 +2,8 @@
 """c160 (R-194 B.1 readout, C-156 item 4): per arm and 3D dump, the dense-band statistics of c122_b1.py (mass-weighted
 <K/K0 - 1> over rho >= 0.01 / 0.1 rho_c, warm > +5% mass fraction, rho_max/rho_c), each also EXCLUDING the cells at the
 temperature floor (T <= 1.0001e-22), and the floored mass fraction.
-    c160_dense_floor.py OUT.csv LABEL=RUNDIR [...] [--times 72,96,120]"""
+    c160_dense_floor.py OUT.csv LABEL=RUNDIR [...] [--times 72,96,120 | --times all]
+Also the warm (> +5%) / cold (< -5%) shares of the UNFLOORED d01 mass and the floored cell count (R-195 sec. 6)."""
 import glob, re, sys, types
 import numpy as np
 sys.modules.setdefault('h5py', types.ModuleType('h5py'))
@@ -18,15 +19,17 @@ def par(d, k):
 
 def main():
     out = sys.argv[1]
-    ts = [float(x) for x in sys.argv[sys.argv.index('--times') + 1].split(',')] if '--times' in sys.argv else [72, 96, 120]
+    tsa = sys.argv[sys.argv.index('--times') + 1] if '--times' in sys.argv else '72,96,120'
+    ts = None if tsa == 'all' else [float(x) for x in tsa.split(',')]
     specs = [a for a in sys.argv[2:] if '=' in a]
-    rows = ['arm,t,d01_mean,d01_mean_unfl,d01_warm5,d01_floor_frac,d1_mean,d1_mean_unfl,d1_floor_frac,rhomax']
+    rows = ['arm,t,d01_mean,d01_mean_unfl,d01_warm5,d01_floor_frac,d01_warm_unfl,d01_cold_unfl,d01_nfl,d1_mean,d1_mean_unfl,'
+            'd1_floor_frac,rhomax']
     for s in specs:
         lab, d = s.split('=', 1)
         rhoc, k0 = par(d, 'rhoc'), par(d, 'kappa')
         fs = sorted(glob.glob(f'{d}/bin/*.prim_3d.0*.bin'))
         tt = [bc.read_binary(f)['time'] for f in fs]
-        for t in ts:
+        for t in (tt if ts is None else ts):
             f = fs[int(np.argmin(np.abs(np.array(tt) - t)))]
             P = bc.read_binary(f); g = np.asarray(P['mb_geometry']); n = P['nx1_out_mb']; q = P['mb_data']
             cat = lambda k: np.concatenate([np.asarray(q[k][b]).ravel() for b in range(len(g))]).astype(float)
@@ -39,7 +42,9 @@ def main():
                 mean = (w[m]*x[m]).sum()/w[m].sum(); mun = (w[mu]*x[mu]).sum()/w[mu].sum()
                 ff = w[m & fl].sum()/w[m].sum()
                 if thr == 0.01:
-                    r += [f'{mean:.5f}', f'{mun:.5f}', f'{w[m][x[m] > 0.05].sum()/w[m].sum():.4f}', f'{ff:.4f}']
+                    r += [f'{mean:.5f}', f'{mun:.5f}', f'{w[m][x[m] > 0.05].sum()/w[m].sum():.4f}', f'{ff:.4f}',
+                          f'{w[mu][x[mu] > 0.05].sum()/w[mu].sum():.4f}', f'{w[mu][x[mu] < -0.05].sum()/w[mu].sum():.4f}',
+                          str(int((m & fl).sum()))]
                 else:
                     r += [f'{mean:.5f}', f'{mun:.5f}', f'{ff:.4f}']
             r.append(f'{rho.max()/rhoc:.4f}')

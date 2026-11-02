@@ -605,6 +605,10 @@ class MultigridDriver {
   // mg_norm = max only: a stall is this many consecutive V-cycles that fail to cut the
   // best defect so far by 10% (<cfc>/mg_stall_cycles, default 3).
   int mg_stall_cycles_;
+  // <cfc> mg_min_vcycles (default 0 = off, bitwise; TDE R-201, as athenak wip/kbg): SolveIterative
+  // does at least this many V-cycles even when the warm start's defect is already <= the target
+  // (with 0 such a solve does none, and the metric can lag a compact moving source).
+  int min_vcycles_ = 0;
   std::string mg_log_name_;
 
   bool full_multigrid_;

@@ -125,6 +125,12 @@ class DynGRMHD {
   // timestep in dyn_grmhd_newdt.cpp instead of the conservative max_dv=1 (speed of
   // light) fallback -- same input key as PR #698's analogous flag on Hydro/MHD.
   bool gr_dt;
+  // <dyn_grmhd> tau_source_K = xcfc (default, 0) | kcfc (1): the K in Valencia's tau source
+  // alpha S^ij K_ij. xcfc uses CFC's adm.vK_dd = psi^-2 (LX)_ij (cfc_reconstruct.cpp), which is not
+  // the extrinsic curvature of the metric sequence the solver builds; kcfc replaces it by
+  // K_ij = (L_beta gamma)^TF_ij / (2 alpha) (traceless, no time derivative), the background-free
+  // form of TDE's kcfc / kcfc_bg (athenak wip/kbg 6a0bec13, TDE R-192..R-210).
+  int tau_source_k;
 };
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -161,6 +167,11 @@ class DynGRMHDPS : public DynGRMHD {
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                        const Real dt, DvceArray5D<Real> &u0);
+  // tau_source_K = kcfc: a separate kernel after AddCoordTermsEOS, so the default path's kernel
+  // is untouched (PVC codegen: inactive branches can change it).
+  template<int NGHOST>
+  void AddTauSourceKCFC(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                         const Real dt, DvceArray5D<Real> &u0);
 };
 

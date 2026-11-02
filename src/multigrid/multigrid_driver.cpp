@@ -796,7 +796,8 @@ Real MultigridDriver::TotalSourceNorm() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin, ...)
-//! \brief <block>/mg_rtol_ref = initial (default) | source, <block>/mg_log = 0|1|2.
+//! \brief <block>/mg_rtol_ref = initial (default) | source, <block>/mg_log = 0|1|2,
+//! <block>/mg_stall_cycles, <block>/mg_min_vcycles (default 0).
 
 void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
                                              const std::string &block) {
@@ -812,6 +813,7 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   }
   mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
+  min_vcycles_ = pin->GetOrAddInteger(block, "mg_min_vcycles", 0);
 }
 
 //----------------------------------------------------------------------------------------
@@ -960,7 +962,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   }
   int n = 0, nstall = 0, ncyc = 0;   // ncyc: V-cycles run, incl. one ended by a stall
   Real best = std::numeric_limits<Real>::max();
-  while (def > target) {
+  while (def > target || n < min_vcycles_) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     ++ncyc;
     Real olddef = def;

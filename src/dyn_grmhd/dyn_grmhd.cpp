@@ -149,6 +149,24 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   scalar_pplimiter = pin->GetOrAddBoolean("mhd", "scalar_pplimiter", true);
 
   fixed_evolution = pin->GetOrAddBoolean("mhd", "fixed", false);
+  {
+    std::string tk = pin->GetOrAddString("dyn_grmhd", "tau_source_K", "xcfc");
+    if (tk == "xcfc") {
+      tau_source_k = 0;
+    } else if (tk == "kcfc") {
+      tau_source_k = 1;
+      if (!pin->DoesBlockExist("cfc")) {   // pcfc is built after DynGRMHD (meshblock_pack.cpp)
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "<dyn_grmhd> tau_source_K = kcfc needs the CFC metric (<cfc> block)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> tau_source_K must be 'xcfc' or 'kcfc', not '" << tk << "'"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);
 
   // allocate memory for temperature
@@ -510,6 +528,125 @@ TaskStatus DynGRMHD::UpdateExcisionMasks(Driver *pdrive, int stage) {
   return TaskStatus::complete;
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::AddTauSourceKCFC
+//! \brief <dyn_grmhd> tau_source_K = kcfc: replace XCFC's K in the tau source alpha S^ij K_ij by
+//! K_ij = (L_beta gamma)^TF_ij / (2 alpha), i.e. add dt sqrt(g) S^ij [ (1/2) (L_beta gamma)^TF_ij
+//! - alpha K^XCFC_ij ] to rhs(IEN) after AddCoordTermsEOS has added alpha S^ij K^XCFC_ij.
+//! (L_beta gamma)_ij = beta^k d_k gamma_ij + gamma_ik d_j beta^k + gamma_jk d_i beta^k with the same
+//! Dx<NGHOST> derivatives and the same S^ij (fluid + field) as AddCoordTermsEOS; TF w.r.t. gamma.
+//! Stationary metric: d_t gamma_ij = 0 = -2 alpha K_ij + (L_beta gamma)_ij. The trace (psi's rate)
+//! and any time derivative are dropped, as TDE's kcfc (athenak wip/kbg 6a0bec13).
+template<class EOSPolicy, class ErrorPolicy> template<int NGHOST>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceKCFC(const DvceArray5D<Real> &prim,
+    const DvceArray5D<Real> &bcc, const Real dt, DvceArray5D<Real> &rhs) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size  = pmy_pack->pmb->mb_size;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &adm = pmy_pack->padm->adm;
+  auto &eos_ = eos.ps.GetEOS();
+  int &nhyd  = pmy_pack->pmhd->nmhd;
+  int &nscal = pmy_pack->pmhd->nscalars;
+  const Real mb = eos.ps.GetEOS().GetBaryonMass();
+  const int imap[3][3] = {
+    {S11, S12, S13},
+    {S12, S22, S23},
+    {S13, S23, S33}
+  };
+  int ndim = pmy_pack->pmesh->one_d ? 1 : (pmy_pack->pmesh->two_d ? 2 : 3);
+
+  par_for("tau_source_kcfc", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real g3d[NSPMETRIC] = {adm.g_dd(m,0,0,k,j,i), adm.g_dd(m,0,1,k,j,i),
+                           adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
+                           adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i)};
+    const Real& alpha = adm.alpha(m, k, j, i);
+    Real detg = adm::SpatialDet(g3d[S11], g3d[S12], g3d[S13],
+                                g3d[S22], g3d[S23], g3d[S33]);
+    Real vol = sqrt(detg);
+    Real g3u[NSPMETRIC] = {0.};
+    adm::SpatialInv(1.0/detg, g3d[S11], g3d[S12], g3d[S13], g3d[S22], g3d[S23], g3d[S33],
+                    &g3u[S11], &g3u[S12], &g3u[S13], &g3u[S22], &g3u[S23], &g3u[S33]);
+    Real idx[] = {1./size.d_view(m).dx1, 1./size.d_view(m).dx2, 1./size.d_view(m).dx3};
+    Real dbeta_du[3][3] = {};
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < ndim; b++) {
+        dbeta_du[b][a] = Dx<NGHOST>(b, idx, adm.beta_u, m, a, k, j, i);
+      }
+    }
+    Real dg_ddd[3][3][3] = {};
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        for (int c = 0; c < ndim; ++c) {
+          dg_ddd[c][a][b] = Dx<NGHOST>(c, idx, adm.g_dd, m, a, b, k, j, i);
+        }
+      }
+    }
+    // S^ij exactly as AddCoordTermsEOS
+    Real prim_pt[NPRIM] = {0.0};
+    prim_pt[PRH] = prim(m, IDN, k, j, i)/mb;
+    prim_pt[PVX] = prim(m, IVX, k, j, i);
+    prim_pt[PVY] = prim(m, IVY, k, j, i);
+    prim_pt[PVZ] = prim(m, IVZ, k, j, i);
+    for (int s = 0; s < nscal; s++) {
+      prim_pt[PYF + s] = prim(m, nhyd + s, k, j, i);
+    }
+    prim_pt[PPR] = prim(m, IPR, k, j, i);
+    prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], prim_pt[PPR], &prim_pt[PYF]);
+    Real H =
+      prim(m, IDN, k, j, i)*eos_.GetEnthalpy(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
+    Real usq = Primitive::SquareVector(&prim_pt[PVX], g3d);
+    Real const Wsq = 1.0 + usq;
+    Real const W = sqrt(Wsq);
+    Real B_u[NMAG] = {bcc(m, IBX, k, j, i)/vol,
+                      bcc(m, IBY, k, j, i)/vol,
+                      bcc(m, IBZ, k, j, i)/vol};
+    Real Bv = 0.0;
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < 3; b++) {
+        Bv += adm.g_dd(m,a,b,k,j,i)*prim_pt[PVX + a]*B_u[b];
+      }
+    }
+    Real Bsq = Primitive::SquareVector(B_u, g3d);
+    Bv = Bv/W;
+    Real bsq = Bv*Bv + Bsq/Wsq;
+    Real S_uu[3][3];
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b <= a; b++) {
+        S_uu[a][b] = (H + Bsq/Wsq)*prim_pt[PVX + a]*prim_pt[PVX + b]
+                      - B_u[a]*B_u[b]/Wsq
+                      - Bv*(B_u[a]*prim_pt[PVX + b] + B_u[b]*prim_pt[PVX + a])/W
+                      + (prim_pt[PPR] + 0.5*bsq)*g3u[imap[a][b]];
+        S_uu[b][a] = S_uu[a][b];
+      }
+    }
+    // (L_beta gamma)_ab and its trace-free part
+    Real Lg[3][3], tr = 0.0;
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < 3; b++) {
+        Real v = 0.0;
+        for (int c = 0; c < 3; c++) {
+          v += adm.beta_u(m, c, k, j, i)*dg_ddd[c][a][b]
+               + g3d[imap[a][c]]*dbeta_du[b][c] + g3d[imap[b][c]]*dbeta_du[a][c];
+        }
+        Lg[a][b] = v;
+        tr += g3u[imap[a][b]]*v;
+      }
+    }
+    Real ds = 0.0;
+    for (int a = 0; a < 3; a++) {
+      for (int b = 0; b < 3; b++) {
+        Real ltf = Lg[a][b] - tr*g3d[imap[a][b]]/3.0;
+        ds += S_uu[a][b]*(0.5*ltf - alpha*adm.vK_dd(m, a, b, k, j, i));
+      }
+    }
+    rhs(m, IEN, k, j, i) += dt*vol*ds;
+  });
+}
+
 template<class EOSPolicy, class ErrorPolicy> template<int NGHOST>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real> &prim,
     const DvceArray5D<Real> &bcc,
@@ -697,6 +834,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
       }
     }
   });
+  if (tau_source_k == 1) {
+    AddTauSourceKCFC<NGHOST>(prim, bcc, dt, rhs);
+  }
 }
 
 // Instantiated templates

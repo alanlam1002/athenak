@@ -54,7 +54,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
   int &nscal = pmy_pack->phydro->nscalars;
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("Prol_C2P_CC", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/nnghbr;
     const int n = tmember.league_rank() - m*nnghbr;
@@ -209,7 +209,7 @@ void MeshBoundaryValuesCC::PrimToConsFineBndry(const DvceArray5D<Real> &prim,
   int &nscal = pmy_pack->phydro->nscalars;
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("ProlCC", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/nnghbr;
     const int n = tmember.league_rank() - m*nnghbr;
@@ -322,7 +322,7 @@ void MeshBoundaryValuesCC::ConsToPrimCoarseBndry(const DvceArray5D<Real> &cons,
   int &nscal = pmy_pack->pmhd->nscalars;
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("ProlCC", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/nnghbr;
     const int n = tmember.league_rank() - m*nnghbr;
@@ -484,7 +484,7 @@ void MeshBoundaryValuesCC::PrimToConsFineBndry(const DvceArray5D<Real> &prim,
   int &nscal = pmy_pack->pmhd->nscalars;
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("ProlCC", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/nnghbr;
     const int n = tmember.league_rank() - m*nnghbr;

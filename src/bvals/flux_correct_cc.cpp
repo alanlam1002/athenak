@@ -46,7 +46,7 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendFluxCC(DvceFaceFld5D<Real> &flx) {
   auto &two_d = pmy_pack->pmesh->two_d;
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(# of variables)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr*nvar), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr*nvar), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(nnghbr*nvar);
     const int n = (tmember.league_rank() - m*(nnghbr*nvar))/nvar;
@@ -242,7 +242,7 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackFluxCC(DvceFaceFld5D<Real> &flx) {
   int nvar = flx.x1f.extent_int(1); // TODO(@user): 2nd idx from L of in arr must be NVAR
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(# of variables)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr*nvar), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr*nvar), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(nnghbr*nvar);
     const int n = (tmember.league_rank() - m*(nnghbr*nvar))/nvar;

@@ -658,7 +658,7 @@ void MeshRefinement::PackAMRBuffersCC(DvceArray5D<Real> &a, DvceArray5D<Real> &c
   // Outer loop over (# of MeshBlocks sent)*(# of variables)
   int nvar = a.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
   int nnv = nmb_send*nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int n = (tmember.league_rank())/nvar;
     const int v = (tmember.league_rank() - n*nvar);
@@ -706,7 +706,7 @@ void MeshRefinement::PackAMRBuffersFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Real
   auto &sdata = send_data;
   // Outer loop over (# of MeshBlocks sent)*(3 compnts of field)
   int nn = 3*nmb_send;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nn, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nn, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int n = (tmember.league_rank())/3;
     const int v = (tmember.league_rank() - 3*n);
@@ -880,7 +880,7 @@ void MeshRefinement::UnpackAMRBuffersCC(DvceArray5D<Real> &a, DvceArray5D<Real> 
   // Outer loop over (# of MeshBlocks recv)*(# of variables)
   int nvar = a.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
   int nnv = nmb_recv*nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int n = (tmember.league_rank())/nvar;
     const int v = (tmember.league_rank() - n*nvar);
@@ -929,7 +929,7 @@ void MeshRefinement::UnpackAMRBuffersFC(DvceFaceFld4D<Real> &b, DvceFaceFld4D<Re
   auto &rdata = recv_data;
   // Outer loop over (# of MeshBlocks recv)*(3 compnts of field)
   int nnv = 3*nmb_recv;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int n = (tmember.league_rank())/3;
     const int v = (tmember.league_rank() - n*3);

@@ -45,7 +45,7 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFluxFC(DvceEdgeFld4D<Real> &flx) {
   auto &two_d = pmy_pack->pmesh->two_d;
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(3 field components)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(3*nnghbr);
     const int n = (tmember.league_rank() - m*(3*nnghbr))/3;
@@ -456,7 +456,7 @@ void MeshBoundaryValuesFC::SumBoundaryFluxes(DvceEdgeFld4D<Real> &flx,
 
   // Sum receive buffers into EMFs stored on MeshBlocks
   // Outer loop over (# of MeshBlocks)*(3 field components)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/3;
     const int v = tmember.league_rank()%3;
@@ -664,7 +664,7 @@ void MeshBoundaryValuesFC::ZeroFluxesAtBoundaryWithFiner(DvceEdgeFld4D<Real> &fl
   auto &mblev = pmy_pack->pmb->mb_lev;
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(3 field components)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(3*nnghbr);
     const int n = (tmember.league_rank() - m*(3*nnghbr))/3;
@@ -813,7 +813,7 @@ void MeshBoundaryValuesFC::AverageBoundaryFluxes(DvceEdgeFld4D<Real> &flx,
   bool &three_d = pmy_pack->pmesh->three_d;
 
   // Outer loop over (# of MeshBlocks)*(# of neighbors)*(3 field components)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb*nnghbr), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(3*nnghbr);
     const int n = (tmember.league_rank() - m*(3*nnghbr))/3;

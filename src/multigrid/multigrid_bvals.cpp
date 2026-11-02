@@ -1476,7 +1476,7 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
 
   {
   int nmnv = nmb * nnghbr * nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("PackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank() / (nnghbr * nvar);
     const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;
@@ -1687,7 +1687,7 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
   {
   int nmnv = nmb * nnghbr * nvar;
   unpack_unfenced_ = true;   // reads aggrbuf asynchronously: see PostRecvMG
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank() / (nnghbr * nvar);
     const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;

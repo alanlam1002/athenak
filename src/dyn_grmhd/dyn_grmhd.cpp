@@ -656,6 +656,33 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
   }
 
+  // <dyn_grmhd> probe_dummy_alloc (C-166 section 3, user-approved 2026-11-02; debug only, read
+  // without GetOrAdd): with trace_diag and tau_source_K off, make trace_diag's device allocations
+  // here and leave them unused -- 1: kf_prev's and tr_diag's sizes; 2: also the trumpet table on
+  // a moving bed -- to test whether an allocation alone changes the GPU result
+  if (pin->DoesParameterExist("dyn_grmhd", "probe_dummy_alloc") && !TskChord()) {
+    const int pd = pin->GetInteger("dyn_grmhd", "probe_dummy_alloc");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    const int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    if (pd >= 1) {
+      Kokkos::realloc(probe_a, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+      Kokkos::realloc(probe_b, nmb, kTrN, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+    }
+    auto pflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    if (pd >= 2 && pflag("puncture_enabled") && pflag("puncture_moving") && ttab.n == 0) {
+      BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                        pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<dyn_grmhd> probe_dummy_alloc = " << pd << " (unused device allocations)"
+                << std::endl;
+    }
+  }
+
   // <mhd> tau_budget_every (R-184 items 1-4, user-approved 2026-10-30; diagnostics only,
   // dyn_grmhd_taubudget.cpp). Read without GetOrAdd: an input without it is unchanged.
   if (pin->DoesParameterExist("mhd", "tau_budget_every")) {

@@ -62,7 +62,7 @@ TaskStatus MeshBoundaryValuesFC::PackAndSendFC(DvceFaceFld4D<Real> &b,
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(three field components)
   int nmnv = 3*nmb;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/3;
     const int v = tmember.league_rank()%3;
@@ -306,7 +306,7 @@ TaskStatus MeshBoundaryValuesFC::RecvAndUnpackFC(DvceFaceFld4D<Real> &b,
   auto recvoff = recv_agg_offset_;
 #endif
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(three field components)
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb), Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), (3*nmb), ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = tmember.league_rank()/3;
     const int v = tmember.league_rank()%3;

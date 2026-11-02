@@ -312,6 +312,7 @@ class DynGRMHD {
   // lapse solves take Ahat^2 from Ahat = psi^6 (L beta)/(2 alpha) of the previous stage (kf_prev)
   bool trace_diag = false, trace_ahat = false;
   DvceArray5D<Real> tr_diag;
+  DvceArray5D<Real> probe_a, probe_b;   // <dyn_grmhd> probe_dummy_alloc (C-166 section 3, debug)
   DvceArray4D<Real> kbg_ell;   // keff_bg: ln(psi/psi0) on all cells (its FD gradient)
   // <dyn_grmhd> trace_diag_every (default 1): TRD lines, per stage, rho dV-weighted sums of R, |T|
   // in the bands rho >= 0.5, 0.1, 0.01 trace_diag_rhoc (default 3.24e-4); 0 = none

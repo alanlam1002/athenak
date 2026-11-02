@@ -1130,7 +1130,7 @@ void MeshRefinement::RefineCC(DualArray1D<int> &n2o, DvceArray5D<Real> &a,
   auto &ngids_ = new_gids_eachrank[global_variable::my_rank];
   // Outer loop over (# of MeshBlocks sent)*(# of variables)
   int nmv = new_nmb*nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmv, Kokkos::AUTO);
+  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmv, ATHENA_TEAM_SIZE);
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/nvar;
     const int v = (tmember.league_rank() - m*nvar);

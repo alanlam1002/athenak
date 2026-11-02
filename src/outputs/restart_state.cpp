@@ -124,8 +124,11 @@ bool ApplyStaged(MeshBlockPack *pmbp) {
     // block under killing_full arm (ii) (35): cold CFC residuals on the first stage
     std::string red;
     int nr = 0;
+    // <mhd> dual_energy_restart_init (R-209): a dual-energy-off file has no dyngr.flag (the
+    // non-evolved flag slot of dual_energy_flag_exchange, zero = unflagged); drop it here too
+    const bool deri = pmbp->pdyngr != nullptr && pmbp->pdyngr->de_restart_init;
     for (const auto &g : Parse(cur)) {
-      if (IsOptional(g.first)) continue;
+      if (IsOptional(g.first) || (deri && g.first == "dyngr.flag")) continue;
       red += (red.empty() ? "" : ",") + g.first + ":" + std::to_string(g.second);
       nr += g.second;
     }

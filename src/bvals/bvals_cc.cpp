@@ -8,6 +8,7 @@
 //! Mesh variables.
 //! Prolongation of CC variables  occurs in ProlongateCC() function called from task list
 
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <algorithm>
@@ -62,6 +63,92 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
   }
   auto aggsbuf = rank_sendbuf_vars_;
   auto sendoff = send_agg_offset_;
+#endif
+#ifdef ATHENA_TEAM_CAP
+  // C-173 (debug only; sanitizer builds define ATHENA_TEAM_CAP): device initcheck probe of
+  // SendBuff's integer inputs, once, before the first pack. Each kernel branches on one input
+  // class; MSan aborts at the first uninitialised use. MSANP_SKIP=k skips probes 0..k-1.
+  {
+    static bool msanp_done = false;
+    if (!msanp_done) {
+      msanp_done = true;
+      const char *sk = std::getenv("MSANP_SKIP");
+      const int skip = (sk != nullptr) ? std::atoi(sk) : 0;
+      DvceArray1D<int> sink("msanp_sink", 1);
+      auto snk = sink;
+      DvceArray1D<int> dinit("msanp_dinit", 8);          // initialised by Kokkos on the device
+      DvceArray1D<int> h2d("msanp_h2d", 8);
+      {
+        auto hh = Kokkos::create_mirror_view(h2d);
+        for (int q = 0; q < 8; ++q) hh(q) = q;
+        Kokkos::deep_copy(h2d, hh);                       // initialised only by a host->device copy
+      }
+      auto say = [&](int k, const char *nm) {
+        if (global_variable::my_rank == 0) {
+          std::printf("MSANP probe %d %s %s\n", k, nm, (k < skip) ? "skipped" : "run");
+          std::fflush(stdout);
+        }
+        return k >= skip;
+      };
+      if (say(0, "device-initialised view")) {
+        Kokkos::parallel_for("msanp0_dinit", Kokkos::RangePolicy<>(DevExeSpace(), 0, 8),
+        KOKKOS_LAMBDA(const int q) { if (dinit(q) == 7) Kokkos::atomic_add(&snk(0), 1); });
+        Kokkos::fence();
+      }
+      if (say(1, "host->device copied view")) {
+        Kokkos::parallel_for("msanp1_h2d", Kokkos::RangePolicy<>(DevExeSpace(), 0, 8),
+        KOKKOS_LAMBDA(const int q) { if (h2d(q) == 7) Kokkos::atomic_add(&snk(0), 1); });
+        Kokkos::fence();
+      }
+      auto &ng = pmy_pack->pmb->nghbr;
+      auto &ml = pmy_pack->pmb->mb_lev;
+      auto &mg = pmy_pack->pmb->mb_gid;
+      if (say(2, "nghbr.d_view gid/lev/rank/dest")) {
+        Kokkos::parallel_for("msanp2_nghbr", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nnghbr),
+        KOKKOS_LAMBDA(const int q) {
+          const int m = q/nnghbr, n = q - m*nnghbr;
+          if (ng.d_view(m,n).gid >= 0) Kokkos::atomic_add(&snk(0), 1);
+          if (ng.d_view(m,n).lev > 0) Kokkos::atomic_add(&snk(0), 1);
+          if (ng.d_view(m,n).rank > 0) Kokkos::atomic_add(&snk(0), 1);
+          if (ng.d_view(m,n).dest > 0) Kokkos::atomic_add(&snk(0), 1);
+        });
+        Kokkos::fence();
+      }
+      if (say(3, "mb_lev / mb_gid")) {
+        Kokkos::parallel_for("msanp3_mb", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb),
+        KOKKOS_LAMBDA(const int m) {
+          if (ml.d_view(m) > 0) Kokkos::atomic_add(&snk(0), 1);
+          if (mg.d_view(m) > 0) Kokkos::atomic_add(&snk(0), 1);
+        });
+        Kokkos::fence();
+      }
+#if MPI_PARALLEL_ENABLED
+      if (rank_packed_bvals_nvars_ != nvar) BuildRankPackedVarMetadata(nvar);
+      auto so = send_agg_offset_;
+      if (say(4, "send_agg_offset_")) {
+        Kokkos::parallel_for("msanp4_sendoff",
+        Kokkos::RangePolicy<>(DevExeSpace(), 0, so.extent_int(0)),
+        KOKKOS_LAMBDA(const int q) { if (so(q) >= 0) Kokkos::atomic_add(&snk(0), 1); });
+        Kokkos::fence();
+      }
+#endif
+      auto &sb = sendbuf;
+      if (say(5, "captured sendbuf index structs (isame/icoar/ifine[0])")) {
+        Kokkos::parallel_for("msanp5_sbuf", Kokkos::RangePolicy<>(DevExeSpace(), 0, nnghbr),
+        KOKKOS_LAMBDA(const int n) {
+          if (sb[n].isame[0].bis > 0 || sb[n].isame[0].bie > 0 || sb[n].isame[0].bks > 0 ||
+              sb[n].isame[0].bke > 0) Kokkos::atomic_add(&snk(0), 1);
+          if (sb[n].icoar[0].bis > 0 || sb[n].icoar[0].bke > 0) Kokkos::atomic_add(&snk(0), 1);
+          if (sb[n].ifine[0].bis > 0 || sb[n].ifine[0].bke > 0) Kokkos::atomic_add(&snk(0), 1);
+        });
+        Kokkos::fence();
+      }
+      if (global_variable::my_rank == 0) {
+        std::printf("MSANP all probes passed (skip=%d)\n", skip);
+        std::fflush(stdout);
+      }
+    }
+  }
 #endif
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(# of variables)
   int nmnv = nmb*nnghbr*nvar;

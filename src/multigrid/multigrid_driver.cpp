@@ -10,12 +10,14 @@
 
 // C++ headers
 #include <algorithm>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>    // abs
 #include <iomanip>    // setprecision
 #include <iostream>   // endl
+#include <limits>
 #include <sstream>    // sstream
 #include <stdexcept>  // runtime_error
 #include <string>     // c_str()
@@ -891,8 +893,10 @@ void MultigridDriver::SolveMG(Driver *pdriver) {
 Real MultigridDriver::TotalDefectNorm() {
   MGScopedTimer t(MGTimingOn(), mg_timers_.defect_sec);
   Real def = 0.0;
-  if (norm_mode_ == MGNormScaling::max) {   // <cfc> mg_norm = max: the local (L-inf) defect
-    for (int v = 0; v < nvar_; ++v) def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+  if (norm_mode_ == MGNormScaling::max) {   // cfc a0bd94a4 (R-058); see MGNormScaling
+    for (int v = 0; v < nvar_; ++v) {
+      def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+    }
     return def;
   }
   for (int v = 0; v < nvar_; ++v) {
@@ -900,6 +904,113 @@ Real MultigridDriver::TotalDefectNorm() {
     def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;
   }
   return def;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::TotalSourceNorm()
+//! \brief Source norm in the convergence norm's sense (R-058, mg_rtol_ref = source):
+//! ||F(u=0)|| (see CalculateSourceNorm), max for mg_norm = max, else L2, channels
+//! combined as in TotalDefectNorm (sum for legacy, max otherwise).
+
+Real MultigridDriver::TotalSourceNorm() {
+  MGNormType nrm = (norm_mode_ == MGNormScaling::max) ? MGNormType::max : MGNormType::l2;
+  Real f = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    Real d = CalculateSourceNorm(nrm, v);
+    f = (norm_mode_ == MGNormScaling::legacy) ? f + d : std::max(f, d);
+  }
+  return f;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin, ...)
+//! \brief <block>/mg_rtol_ref = initial (default) | source, <block>/mg_log = 0|1|2.
+
+void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
+                                             const std::string &block) {
+  std::string ref = pin->GetOrAddString(block, "mg_rtol_ref", "initial");
+  if (ref == "initial") {
+    rtol_source_ = false;
+  } else if (ref == "source") {
+    rtol_source_ = true;
+  } else {
+    std::cout << "### FATAL ERROR in MultigridDriver::ReadConvergenceOptions" << std::endl
+              << block << "/mg_rtol_ref must be 'initial' or 'source'." << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
+  mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::LogSolve(...)
+//! \brief One "MGLOG" line per solve (R-058). Collective: every rank must call it.
+//! Fields: name, cycle, time, V-cycles, wall [s] of the V-cycle loop, the initial and
+//! final defect in the convergence norm, its reference (initial defect or source norm)
+//! and target, then the final defect as volume-weighted L2 and as max (both
+//! max-combined over channels, independent of mg_norm), the source in the same two
+//! norms, and with mg_log >= 2 the channel, position and refinement level of max |defect|.
+
+void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real target,
+                               double wall) {
+  // L2 in the rms convention whatever mg_norm is: CalculateDefectNorm reads norm_mode_
+  // for its volume weight, so switch it for these calls only (the solve is finished).
+  MGNormScaling keep = norm_mode_;
+  norm_mode_ = MGNormScaling::rms;
+  Real l2 = 0.0, mx = 0.0, fl2 = 0.0, fmx = 0.0;
+  for (int v = 0; v < nvar_; ++v) {
+    l2 = std::max(l2, CalculateDefectNorm(MGNormType::l2, v));
+    mx = std::max(mx, CalculateDefectNorm(MGNormType::max, v));
+    fl2 = std::max(fl2, CalculateSourceNorm(MGNormType::l2, v));
+    fmx = std::max(fmx, CalculateSourceNorm(MGNormType::max, v));
+  }
+  norm_mode_ = keep;
+  std::ostringstream os;
+  os << std::scientific << std::setprecision(4)
+     << "MGLOG " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle << " t "
+     << pmy_mesh_->time << " it " << niter << " wall " << wall << " conv0 " << def0
+     << " conv " << def << " ref " << ref << " target " << target << " l2 " << l2
+     << " max " << mx << " src_l2 " << fl2 << " src_max " << fmx;
+  if (mg_log_ >= 2 && mglevels_ != nullptr) {
+    // position of max |defect|: host copy of the finest per-block defect (just computed
+    // by the CalculateDefectNorm calls above), then a MAXLOC over ranks
+    auto def_h = Kokkos::create_mirror_view(mglevels_->GetCurrentDefect());
+    Kokkos::deep_copy(def_h, mglevels_->GetCurrentDefect());
+    int ngh = mglevels_->GetGhostCells();
+    int ncx = def_h.extent_int(4), ncy = def_h.extent_int(3), ncz = def_h.extent_int(2);
+    auto &size = pmy_pack_->pmb->mb_size.h_view;
+    auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
+    struct { double val; int rank; } loc_in{-1.0, global_variable::my_rank}, loc_out;
+    double pos[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // x1, x2, x3, level, channel
+    for (int m = 0; m < pmy_pack_->nmb_thispack; ++m) {
+      for (int v = 0; v < nvar_; ++v) {
+        for (int k = ngh; k < ncz - ngh; ++k) {
+          for (int j = ngh; j < ncy - ngh; ++j) {
+            for (int i = ngh; i < ncx - ngh; ++i) {
+              double a = std::fabs(def_h(m, v, k, j, i));
+              if (a > loc_in.val) {
+                loc_in.val = a;
+                pos[0] = size(m).x1min + (i - ngh + 0.5)*size(m).dx1;
+                pos[1] = size(m).x2min + (j - ngh + 0.5)*size(m).dx2;
+                pos[2] = size(m).x3min + (k - ngh + 0.5)*size(m).dx3;
+                pos[3] = pmy_mesh_->lloc_eachmb[gid_h(m)].level - locrootlevel_;
+                pos[4] = v;
+              }
+            }
+          }
+        }
+      }
+    }
+    loc_out = loc_in;
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(&loc_in, &loc_out, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+    MPI_Bcast(pos, 5, MPI_DOUBLE, loc_out.rank, MPI_COMM_WORLD);
+#endif
+    os << " at " << std::fixed << std::setprecision(3) << pos[0] << " " << pos[1] << " "
+       << pos[2] << " lev " << static_cast<int>(pos[3]) << " ch "
+       << static_cast<int>(pos[4]);
+  }
+  if (global_variable::my_rank == 0) std::cout << os.str() << std::endl;
 }
 
 //----------------------------------------------------------------------------------------
@@ -962,8 +1073,13 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   // "converged" solve may be; rtol_ <= 0.0 reproduces the original eps_-only
   // behavior exactly). Orthogonal to norm_mode_: a relative target is
   // invariant under any constant rescaling of the norm.
+  // mg_rtol_ref = source (R-058): the reference is ||F(u=0)|| instead of the initial defect.
+  Real def0 = def;
+  Real ref = rtol_source_ ? TotalSourceNorm() : def;
   Real target = eps_;
-  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * def);
+  if (rtol_ > 0.0) target = std::max(eps_, rtol_ * ref);
+  std::chrono::steady_clock::time_point t0;
+  if (mg_log_ > 0) { Kokkos::fence(); t0 = std::chrono::steady_clock::now(); }
   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
     std::cout << "MG initial defect = " << def << std::endl;
     if (rtol_ > 0.0) {
@@ -971,16 +1087,39 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     }
   }
   last_def0_ = def;
-  int n = 0;
+  // Stop rule (R-213: cfc's loop, R-058, composed with our mg_min_vcycles, R-201):
+  //   iterate while (def > target || n < min_vcycles_), where target = max(eps_, rtol_*ref);
+  //   inside, after each V-cycle, a stall (legacy/rms: def/olddef > 0.9; max: mg_stall_cycles_
+  //   cycles in a row without cutting the best defect by 10%) exits only when eps_ == 0
+  //   ("iterate until stalling"), and otherwise warns; the 40-cycle cap is fatal.
+  // mg_min_vcycles therefore acts at the loop head only: it forces cycles a converged warm
+  // start would skip, and cannot override a stall exit (eps_ == 0) or the cap.
+  int n = 0, nstall = 0, ncyc = 0;   // ncyc: V-cycles run, incl. one ended by a stall
+  Real best = std::numeric_limits<Real>::max();
   while (def > target || n < min_vcycles_) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
+    ++ncyc;
     Real olddef = def;
     def = TotalDefectNorm();
     MGChk("vcycle", def);
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
-    if (def/olddef > 0.9) {
+    // mg_norm = max: max |defect| sits on refinement-interface cells and is not monotone
+    // in V-cycles (x10-100 jump on the first cycle after a warm start, R-058 t=0 check),
+    // so there a stall is mg_stall_cycles_ cycles in a row that fail to cut the best
+    // defect so far by 10%, counted from the first cycle. Other modes: unchanged.
+    bool stalled = (def/olddef > 0.9);
+    if (norm_mode_ == MGNormScaling::max) {
+      if (def < 0.9*best) {
+        best = def;
+        nstall = 0;
+      } else {
+        ++nstall;
+      }
+      stalled = (nstall >= mg_stall_cycles_);
+    }
+    if (stalled) {
       // Keyed on the literal eps_ == 0.0 ("iterate until stalling") mode, not
       // on target -- rtol_ > 0.0 must not silently disable stall detection
       // for an eps_ == 0.0 run.
@@ -1006,6 +1145,10 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   last_nvcycle_ = n;
   last_def_ = def;
   Kokkos::fence();
+  if (mg_log_ > 0) {
+    double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    LogSolve(ncyc, def0, def, ref, target, wall);
+  }
   return;
 }
 
@@ -1112,6 +1255,34 @@ Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
   }
   if (nrm == MGNormType::l2) {
     norm = Kokkos::sqrt(norm);
+  }
+  return norm;
+}
+
+
+//----------------------------------------------------------------------------------------
+//! \fn Real MultigridDriver::CalculateSourceNorm(MGNormType nrm, int n)
+//! \brief Source norm for R-058 (mg_rtol_ref = source, mg_log): the defect norm of the
+//! zero guess, ||F(u=0)||, normalized as CalculateDefectNorm. For the linear X/beta
+//! solvers that is ||src||. The nonlinear psi/alpha_psi solvers keep their right-hand
+//! side in coeff_ and their finest-level src_ is identically zero, so a src_ norm would
+//! be 0 there (target 0); ||F(0)|| is ||RHS(u=0)||, the same scale. u is saved and
+//! restored and def_ recomputed, so the solve state is unchanged. Collective.
+
+Real MultigridDriver::CalculateSourceNorm(MGNormType nrm, int n) {
+  DvceArray5D<Real> usave;
+  if (mglevels_ != nullptr) {
+    auto u = mglevels_->GetCurrentData();
+    usave = DvceArray5D<Real>(Kokkos::view_alloc("mg_usave", Kokkos::WithoutInitializing),
+                              u.layout());
+    Kokkos::deep_copy(usave, u);
+    Kokkos::deep_copy(u, 0.0);
+  }
+  Real norm = CalculateDefectNorm(nrm, n);
+  if (mglevels_ != nullptr) {
+    Kokkos::deep_copy(mglevels_->GetCurrentData(), usave);
+    mglevels_->CalculateDefectPack();
+    Kokkos::fence();
   }
   return norm;
 }

@@ -444,6 +444,7 @@ MGCFCConformalFactorDriver::MGCFCConformalFactorDriver(MeshBlockPack *pmbp,
   // MultigridDriver::SolveIterative), invariant to the mg_norm choice above.
   rtol_ = pin->GetOrAddReal("cfc", "mg_rtol", 0.0);
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
+  ReadConvergenceOptions(pin, "cfc");   // mg_rtol_ref, mg_log, mg_stall_cycles (R-058)
   min_vcycles_ = pin->GetOrAddInteger("cfc", "mg_min_vcycles", 0);   // shared by all CFC solves
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;

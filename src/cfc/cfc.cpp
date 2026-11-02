@@ -253,6 +253,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
   pmgd_alpha     = new MGCFCLapseDriver(pmbp, pin);
+  pmgd_pietax->SetLogName("X");          // <cfc>/mg_log line labels (R-058)
+  pmgd_pietabeta->SetLogName("beta");
+  pmgd_psi->SetLogName("psi");
+  pmgd_alpha->SetLogName("alpha_psi");
   // Labels only tag MGTimers output; the two vector-Poisson drivers are the same
   // class, so they cannot be told apart from inside the constructor.
   pmgd_pietax->mg_label_    = "X^i     ";

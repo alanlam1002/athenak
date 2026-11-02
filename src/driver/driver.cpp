@@ -11,6 +11,8 @@
 #include <limits>
 #include <algorithm>
 #include <string> // string
+#include <utility>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -315,6 +317,53 @@ void Driver::ExecuteTaskList(Mesh *pm, std::string tl, int stage) {
   return;
 }
 
+namespace {
+//! C-166 section 3 (debug only, <job> probe_hash): an exact, order-independent, position-sensitive
+//! hash of a device array's bits (ghosts included): sum over elements of mix(bits ^ index)
+uint64_t ProbeHash(const DvceArray5D<Real> &a) {
+  const size_t n = a.span();
+  const Real *p = a.data();
+  uint64_t h = 0;
+  Kokkos::parallel_reduce("probe_hash", Kokkos::RangePolicy<>(DevExeSpace(), 0, n),
+  KOKKOS_LAMBDA(const size_t q, uint64_t &s) {
+    uint64_t z = *reinterpret_cast<const uint64_t*>(&p[q]) ^ (0x9e3779b97f4a7c15ULL*(q + 1));
+    z = (z ^ (z >> 30))*0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27))*0x94d049bb133111ebULL;
+    s += z ^ (z >> 31);
+  }, h);
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &h, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  return h;
+}
+void ProbeHashes(Mesh *pm, const char *where) {
+  auto *pp = pm->pmb_pack;
+  std::vector<std::pair<const char *, DvceArray5D<Real>>> v;
+  if (pp->pmhd != nullptr) {
+    v.push_back({"u0", pp->pmhd->u0}); v.push_back({"w0", pp->pmhd->w0});
+    v.push_back({"bcc0", pp->pmhd->bcc0});
+  }
+  if (pp->padm != nullptr) v.push_back({"u_adm", pp->padm->u_adm});
+  if (pp->pcfc != nullptr) {
+    v.push_back({"cfc.delta_psi", pp->pcfc->delta_psi});
+    v.push_back({"cfc.delta_alpha_psi", pp->pcfc->delta_alpha_psi});
+    v.push_back({"cfc.u_beta", pp->pcfc->u_beta});
+    v.push_back({"cfc.u_adual", pp->pcfc->u_adual});
+    v.push_back({"cfc.a_sq", pp->pcfc->a_sq});
+    v.push_back({"cfc.u_psi0", pp->pcfc->u_psi0});
+  }
+  if (pp->pdyngr != nullptr) v.push_back({"dyngr.temperature", pp->pdyngr->temperature});
+  for (auto &a : v) {
+    const uint64_t h = (a.second.span() > 0) ? ProbeHash(a.second) : 0;
+    if (global_variable::my_rank == 0) {
+      std::printf("PROBE_HASH %s %s %016llx\n", where, a.first,
+                  static_cast<unsigned long long>(h));
+    }
+  }
+  if (global_variable::my_rank == 0) std::fflush(stdout);
+}
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 // Driver::Initialize()
 // Tasks to be performed before execution of Driver, such as setting ghost zones (BCs),
@@ -326,6 +375,9 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // state (w0, flags, MG warm starts) restores it here and skips the MHD ghost exchange
   // and init C2P (the file holds u0's and w0's ghosts as the run left them), so it
   // continues bitwise (C-100)
+  const bool probe = pin->DoesParameterExist("job", "probe_hash") &&
+                     pin->GetBoolean("job", "probe_hash");   // C-166 section 3 (debug only)
+  if (probe) ProbeHashes(pmesh, "P1_pgen");
   const bool staged = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
   // <job> restart_embed_fill (R1, restart_state.hpp): the new outer blocks are filled, then
   // the load runs the regrid path once (ghost exchange, CFC::ReinitializeMetricForAMR's
@@ -344,6 +396,7 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // <job> seed_tau_eps (R-115 Q3): seeds u0 (ghosts included); the next stage's C2P
   // carries the seed into the primitives
   (void) restart_state::Seed(pmesh, pin, res_flag);
+  if (probe) ProbeHashes(pmesh, "P2_initbv");
 
   //---- Step 1b. CFC only: converge the metric to the (fixed) initial primitives
   // before anything else reads padm->adm -- see cfc::CFC::InitializeMetric's doc
@@ -363,6 +416,7 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     pmesh->pmb_pack->pcfc->InitializeMetric(this);
     nlim = saved_nlim;
   }
+  if (probe) ProbeHashes(pmesh, "P3_metric");
 
   //---- Step 2.  Compute time step (if problem involves time evolution)
   hydro::Hydro *phydro = pmesh->pmb_pack->phydro;
@@ -395,6 +449,10 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     }
 
     pmesh->NewTimeStep(tlim);
+  }
+  if (probe) {
+    ProbeHashes(pmesh, "P4_newdt");
+    if (global_variable::my_rank == 0) std::printf("PROBE_DT %.17g\n", pmesh->dt);
   }
 
   //---- Step 3.  Cycle through output Types and load data / write files.

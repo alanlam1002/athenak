@@ -6,6 +6,8 @@
 //! \file mg_cfc_vector_poisson.cpp
 //! \brief implementation of MGCFCVectorPoisson[Driver]
 
+#include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -281,6 +283,13 @@ MGCFCVectorPoissonDriver::~MGCFCVectorPoissonDriver() {
 //! for X^i and a separate instance for beta^i.
 
 void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
+  if (NSolve() == 0) {   // flag probe (debug branch only): fsubtract_average_'s raw byte
+    unsigned char b;
+    std::memcpy(&b, &fsubtract_average_, 1);
+    std::printf("MGFLAG rank=%d drv=%p fsubtract_average_byte=%u\n", global_variable::my_rank,
+                static_cast<void *>(this), static_cast<unsigned>(b));
+    std::fflush(stdout);
+  }
   PrepareForAMR();
   SetupMultigrid(dt, false);
   // autompo_ is always false here (see constructor comment), so no

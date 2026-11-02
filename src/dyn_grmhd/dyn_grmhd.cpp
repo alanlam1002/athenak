@@ -1124,7 +1124,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
 //! from a dual-energy-off file (same nscalars: the tracer's slot held a passive scalar), from
 //! the restored primitives on every cell (ghosts included, as restart_state restores them): Y = DualEnergyY(p/rho^gamma) (as PrimToCons, which also derives
 //! the tracer from P and rho), w0's tracer slot = Y and u0's = (densitized D) Y; no other
-//! variable changes. Prints the largest |K(Y)/(p/rho^gamma) - 1| over cells with rho > 0
+//! variable changes; then the dual-energy flags from the restored primitives (UpdateShockFlags,
+//! as after every C2P). Prints the largest |K(Y)/(p/rho^gamma) - 1| over cells with rho > 0
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
   auto *pmhd = pmy_pack->pmhd;
@@ -1164,6 +1165,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, &err, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
+  // the owner's shock flags from the restored primitives (as after a C2P): a DE-off file has
+  // no dyngr.flag, and the restored path runs no C2P before the first stage
+  eos.UpdateShockFlags();
   if (global_variable::my_rank == 0) {
     std::cout << "DEINIT dual_energy_restart_init: K tracer set from p/rho^gamma on every cell "
               << "(Y = (K/" << kmax << ")^" << yp << "); max |K(Y)/(p/rho^gamma) - 1| = "

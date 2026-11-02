@@ -254,6 +254,11 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
   ReadConvergenceOptions(pin, "cfc");   // mg_rtol_ref, mg_log (R-058)
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
+  // multipole/fixed outer boundaries: the source's mean is part of the problem, never removed
+  // (as MGCFCConformalFactor/MGCFCLapse). Unset, this member was read uninitialised (TDE C-170,
+  // athenak wip/kbg 78599c1c: whether the X/beta solves subtracted the x-source mean depended on
+  // leftover heap bytes).
+  fsubtract_average_ = false;
 
   int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
   bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);

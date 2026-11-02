@@ -1037,6 +1037,24 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
   // R-205: with no previous stage (dtg false: the run's first stage, after a restart without
   // kf_prev, after a regrid) R is unavailable: its slots are NaN, not a one-sided chord
   const Real qnan = std::numeric_limits<Real>::quiet_NaN();
+  // R-204 item 1: kcfc_bg (mode 4), keff_bg (mode 5); keff_bg's ell = ln(psi/psi0) on all cells
+  // (from g_dd = psi^4 delta_ij and the analytic psi0: a residual field, finite-differenced)
+  const bool pun = pcfc->puncture_enabled_;
+  if (mode == 5) {
+    auto &ad = pmy_pack->padm->adm;
+    const int n3 = indcs.nx3 + 2*indcs.ng, n2 = indcs.nx2 + 2*indcs.ng;
+    const int n1 = indcs.nx1 + 2*indcs.ng;
+    if (kbg_ell.extent_int(0) != nmb || kbg_ell.extent_int(1) != n3 ||
+        kbg_ell.extent_int(2) != n2 || kbg_ell.extent_int(3) != n1) {
+      Kokkos::realloc(kbg_ell, nmb, n3, n2, n1);
+    }
+    auto &el = kbg_ell;
+    par_for("keff_bg_ell", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      el(m, k, j, i) = 0.25*log(ad.g_dd(m, 0, 0, k, j, i)) - log(psi0(m, 0, k, j, i));
+    });
+  }
+  auto &ell = kbg_ell;
   const int imap[3][3] = {
     {S11, S12, S13},
     {S12, S22, S23},
@@ -1149,6 +1167,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       }
       dp4 = (p4n - p4p)*idtm;
     }
+    const Real dp4r = dp4;   // the residual chord alone (keff_bg)
     if (bgm) {   // xidot^k d_k psi0 from the trumpet table (as AddKillingFullTerms' psd)
       const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
                           CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
@@ -1231,7 +1250,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       trc(m, 12, k, j, i) = dtg ? rr*trS/3.0 : qnan;
       trc(m, 13, k, j, i) = dtg ? 1.0 : 0.0;
     }
-    if (mode == 0) return;   // trace_diag alone: Valencia's tau source unchanged
+    if (mode == 0) {   // trace_diag alone: Valencia's tau source unchanged
+      if (trd) trc(m, 32, k, j, i) = 0.0;
+      return;
+    }
 
     // the change and its trace part (S/3) gamma^ij (alpha K'_ij - alpha K^XCFC_ij)
     Real ds = 0.0, dtr = 0.0;
@@ -1241,11 +1263,69 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
     } else if (mode == 2) {   // kcfc
       ds = 0.5*(sl - trS*trl/3.0) - sx;
       dtr = -trS/3.0*alpha*trK;
+    } else if (mode >= 4) {   // kcfc_bg, keff_bg (R-204 item 1)
+      // the trace-free part psi^4 [(L beta_res)_FD + 2 alpha0 psi0^-6 Ahat0]/(2 alpha): kcfc's
+      // psi^4 (L beta')_FD with the background's (L beta0)_FD replaced by its identity, i.e. less
+      // psi^4 B, B = (L beta0)_FD - 2 alpha0 psi0^-6 Ahat0 (trace_diag's split, the same terms)
+      const Real p0i = 1.0/psi0(m, 0, k, j, i), p0i2 = p0i*p0i;
+      const Real ap6z = ap0(m, 0, k, j, i)*(p0i2*p0i2*p0i2*p0i);   // alpha0 psi0^-6
+      Real db0[3][3];
+      for (int a = 0; a < 3; a++) {
+        for (int c = 0; c < 3; c++) db0[a][c] = Dx<NGHOST>(a, idx, b0u, m, c, k, j, i);
+      }
+      const Real dvb0 = db0[0][0] + db0[1][1] + db0[2][2];
+      Real sbg = 0.0;   // S^ij B_ij
+      for (int a = 0; a < 3; a++) {
+        for (int b = a; b < 3; b++) {
+          const Real lb0 = db0[a][b] + db0[b][a] - ((a == b) ? 2.0/3.0*dvb0 : 0.0);
+          const Real bg = lb0 - 2.0*ap6z*a0d(m, a, b, k, j, i);
+          sbg += ((a == b) ? 1.0 : 2.0)*S_uu[a][b]*bg;
+        }
+      }
+      ds = 0.5*(sl - trS*trl/3.0) - 0.5*p4*sbg - sx;
+      dtr = -trS/3.0*alpha*trK;
+      if (mode == 5) {
+        // keff_bg's trace term (S/3) X_res, the residual of D_k beta'^k - 6 d_t ln psi: with
+        // beta' = beta0 + beta_res + xidot, ell = ln(psi/psi0), the background's d_k beta0^k +
+        // 6 beta0.grad ln psi0 = 0 (the stationary trumpet) and, on a moving bed, 6 xidot.grad
+        // ln psi0 - 6 d_t ln psi0 = 0 (d_t psi0 = xidot.grad psi0, as the chord's analytic rate):
+        //   X_res = d_k beta_res^k (FD) + 6 beta_res.grad ln psi0 (analytic)
+        //           + 6 beta'.grad ell (FD) - 6 d_t ell,
+        //   6 d_t ell = 1.5 dp4_res/psi^4 + 6 (xidot.grad ln psi0)(psi0/psi - 1)
+        // (dp4_res: the residual chord on this stage's background, 0 where no chord); a static
+        // background with xidot != 0 keeps + 6 xidot.grad ln psi0 (d_t psi0 = 0 there)
+        Real gl0[3] = {0.0, 0.0, 0.0};   // grad ln psi0, the trumpet's closed form
+        if (pun) {
+          const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
+                              CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
+                              CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
+          const Real r = sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2]);
+          const Real rs = m_bh*cfc::TrumpetIsoToAreal(r/m_bh);
+          Real pz, az, bz[3], qz[6], a2z, dpz;
+          cfc::TrumpetBackground(m_bh, xr[0], xr[1], xr[2], rs, &pz, &az, bz, qz, &a2z, &dpz,
+                                 nullptr);
+          const Real ir = 1.0/(r + 1.0e-30);
+          for (int a = 0; a < 3; ++a) gl0[a] = dpz/pz*xr[a]*ir;
+        }
+        Real xres = 0.0, xg = 0.0;
+        for (int c = 0; c < 3; ++c) {
+          const Real br = beta[c] - b0u(m, c, k, j, i) - gx[c];
+          xres += (dbeta_du[c][c] - db0[c][c]) + 6.0*br*gl0[c] +
+                  6.0*beta[c]*Dx<NGHOST>(c, idx, ell, m, k, j, i);
+          xg += gx[c]*gl0[c];
+        }
+        const Real ps = sqrt(sqrt(p4));
+        xres -= 1.5*dp4r/p4;
+        xres += bgm ? -6.0*xg*(psi0(m, 0, k, j, i)/ps - 1.0) : 6.0*xg;
+        ds += trS/3.0*xres;
+        dtr += trS/3.0*xres;
+      }
     } else {                  // ktr
       ds = trS/3.0*(divb - 1.5*dp4/p4);
       dtr = ds;
     }
     rhs(m, IEN, k, j, i) += dt*vol*ds;
+    if (trd) trc(m, 32, k, j, i) = ds;
     if (tb) {
       tc(m, kTbA, k-ks, j-js, i-is) = vol*dtr;
       tc(m, kTbA + 1, k-ks, j-js, i-is) = vol*(ds - dtr);
@@ -1278,7 +1358,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
                               gv*trc(m, 12, k, j, i), w*trc(m, 27, k, j, i),
                               w*trc(m, 26, k, j, i), w*trc(m, 28, k, j, i),
                               gv*trc(m, 30, k, j, i), gv*trc(m, 29, k, j, i),
-                              gv*trc(m, 31, k, j, i)};
+                              gv*trc(m, 31, k, j, i), gv*trc(m, 32, k, j, i)};
       const int nb = (rho >= bt0) ? 3 : ((rho >= bt1) ? 2 : 1);   // bands b = 3 - nb .. 2
       for (int b = 3 - nb; b < 3; ++b) {
         for (int c = 0; c < kTrRed; ++c) acc.the_array[b*kTrRed + c] += v[c];
@@ -1305,7 +1385,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       const Real v[kTrRC] = {w, w*trc(m, 0, k, j, i), w*trc(m, 27, k, j, i),
                              w*trc(m, 26, k, j, i), w*trc(m, 28, k, j, i),
                              gv*trc(m, 30, k, j, i), gv*trc(m, 29, k, j, i),
-                             gv*trc(m, 31, k, j, i)};
+                             gv*trc(m, 31, k, j, i), gv*trc(m, 32, k, j, i)};
       for (int c = 0; c < kTrRC; ++c) acc.the_array[rb*kTrRC + c] += v[c];
     }, Kokkos::Sum<array_sum::TrRadSum>(sr));
 #if MPI_PARALLEL_ENABLED

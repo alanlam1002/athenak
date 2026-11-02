@@ -77,7 +77,10 @@ enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
 // <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5): the K in Valencia's tau source alpha S^ij K_ij
 // (xcfc: XCFC's K, the default; keff: K^eff = (Lie_beta' gamma - gamma-dot)/(2 alpha) with the
 // actual gamma-dot; kcfc: (Lie_beta' gamma)^TF/(2 alpha); ktr: XCFC's K plus the trace correction)
-enum class TauSourceK {xcfc, keff, kcfc, ktr};
+// kcfc_bg / keff_bg (R-204 item 1): kcfc / keff with the background analytic -- the trumpet's
+// (L beta0) replaced by its identity 2 alpha0 psi0^-6 Ahat0 (no FD of beta0), and keff's trace term
+// reduced to its residual part (the background's D_k beta0'^k - 6 d_t' ln psi0 = 0 analytically)
+enum class TauSourceK {xcfc, keff, kcfc, ktr, kcfc_bg, keff_bg};
 // <dyn_grmhd> trace_diag (R-197 item 1, diagnostics only; AddTauSourceK): per-cell tr_diag
 // components (output variable mhd_trace_diag), rates in M^-1:
 //   0 R = 6 d_t ln psi - D_k beta'^k, 1 6 d_t ln psi, 2 D_k beta'^k,
@@ -91,16 +94,17 @@ enum class TauSourceK {xcfc, keff, kcfc, ktr};
 //   T_self = (L beta_res)_FD - 2 alpha psi^-6 LX:
 //   14-19 T_cross_ij, 20-25 T_self_ij, 26 |T_cross|, 27 |T_self|, 28 |B| (|.|_coord),
 //   29-31 -1/2 psi^4 S^ij (T_cross, T_self, B)_ij (the trace-free deposit's parts; their sum is 11)
-constexpr int kTrN = 32;
+//   32 ds_K: the tau source change the run applies, alpha S^ij (K' - K^XCFC)_ij (0 for xcfc; R-204)
+constexpr int kTrN = 33;
 // TRD line components per band (w = rho dV): w, w R, w R^2, w |T|, w |T|^2, w R |T|, w 6 d_t ln psi,
 // w D_k beta'^k, sqrt(g) dV (-1/2 psi^4 S^ij T_ij), sqrt(g) dV R S/3, w |T_self|, w |T_cross|, w |B|,
-// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij)
-constexpr int kTrBands = 3, kTrRed = 16;
+// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij), sqrt(g) dV ds_K
+constexpr int kTrBands = 3, kTrRed = 17;
 // TRR lines (R-201): kTrRB radial bins about the hole (r = |x - x_BH|, log-spaced between
 // trace_diag_rmin and trace_diag_rmax, the first / last bins open-ended), cells with
 // rho >= 0.01 trace_diag_rhoc; components w, w R, w |T_self|, w |T_cross|, w |B|,
 // sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij)
-constexpr int kTrRB = 10, kTrRC = 8;
+constexpr int kTrRB = 10, kTrRC = 9;   // + sqrt(g) dV ds_K
 }  // namespace dyngr
 namespace array_sum {
 typedef array_type<Real, dyngr::kTrBands*dyngr::kTrRed> TrBandSum;   // the TRD sums in one reduction
@@ -300,13 +304,15 @@ class DynGRMHD {
   // R-205: the solution itself needs the chord (keff, ktr); trace_diag alone never does, so it
   // never decides what a restart loads (KfRst) and never zero-fills solver state (u_beta)
   bool TskSolChord() const {
-    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr;
+    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr ||
+           tau_source_k == TauSourceK::keff_bg;
   }
   // <dyn_grmhd> trace_diag (R-197 item 1): the chord state and tr_diag, nothing written to the
   // solution; trace_diag_ahat = cfc_lagged (R-197 addendum, diagnostic only): CFC's psi and
   // lapse solves take Ahat^2 from Ahat = psi^6 (L beta)/(2 alpha) of the previous stage (kf_prev)
   bool trace_diag = false, trace_ahat = false;
   DvceArray5D<Real> tr_diag;
+  DvceArray4D<Real> kbg_ell;   // keff_bg: ln(psi/psi0) on all cells (its FD gradient)
   // <dyn_grmhd> trace_diag_every (default 1): TRD lines, per stage, rho dV-weighted sums of R, |T|
   // in the bands rho >= 0.5, 0.1, 0.01 trace_diag_rhoc (default 3.24e-4); 0 = none
   int trace_every = 1;

@@ -573,10 +573,11 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                 << "<dyn_grmhd> tau_source_K = " << tk << " needs " << what << std::endl;
       std::exit(EXIT_FAILURE);
     };
-    kneed(tk == "xcfc" || tk == "keff" || tk == "kcfc" || tk == "ktr",
-          "one of xcfc, keff, kcfc, ktr");
+    kneed(tk == "xcfc" || tk == "keff" || tk == "kcfc" || tk == "ktr" || tk == "kcfc_bg" ||
+          tk == "keff_bg", "one of xcfc, keff, kcfc, ktr, kcfc_bg, keff_bg");
     tau_source_k = (tk == "keff") ? TauSourceK::keff : ((tk == "kcfc") ? TauSourceK::kcfc :
-                   ((tk == "ktr") ? TauSourceK::ktr : TauSourceK::xcfc));
+                   ((tk == "ktr") ? TauSourceK::ktr : ((tk == "kcfc_bg") ? TauSourceK::kcfc_bg :
+                   ((tk == "keff_bg") ? TauSourceK::keff_bg : TauSourceK::xcfc))));
   }
   // <dyn_grmhd> trace_diag, trace_diag_ahat (R-197 item 1 and addendum, user-approved
   // 2026-11-01; diagnostics only). Read without GetOrAdd: an input without them is unchanged.
@@ -643,7 +644,7 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
       }
     }
     if (global_variable::my_rank == 0) {
-      const char *nm[4] = {"xcfc", "keff", "kcfc", "ktr"};
+      const char *nm[6] = {"xcfc", "keff", "kcfc", "ktr", "kcfc_bg", "keff_bg"};
       std::cout << "<dyn_grmhd> tau_source_K = " << nm[static_cast<int>(tau_source_k)]
                 << (TskChord() ? (kf_bgmove ? " (d_t ln psi: the residual chord + the moving "
                                               "background's analytic rate)"

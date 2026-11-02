@@ -292,6 +292,8 @@ class MassClosure {
   std::vector<int> sh_gid_;                 // the MeshBlock gids of the last ShellIndex
   Kokkos::View<int64_t*> sh_rcnt_;          // ((shell x class) x K bin) x theta bin: counts
   Kokkos::View<int64_t*> sh_rsum_;          // (shell x class) x K bin: Fix limbs of sum (K-1) 2^-60
+  std::vector<int64_t> sh_rcnt_h_, sh_rsum_h_;   // their global sums (ShellRelGather, all ranks)
+  void ShellRelGather();
   KSum sh_ms_[kShN], sh_mprev_[kShN];       // interval start; last cycle's end
   KSum sh_it_[kShN][kShItem];               // interval sums
   void ShellPartition(Real time);

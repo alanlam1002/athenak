@@ -968,6 +968,8 @@ void MassClosure::SegmentEnd(int cycle, Real time) {
                                                      + chkn[q];
   }
   const bool pass = std::fabs(R) <= tol*mstar;
+  // the release counters' reduction is collective: every rank, before rank 0's ShellReport below
+  if (ytr_ && sh_on_ && sh_have_ && sh_ncyc_ > 0) ShellRelGather();
   if (global_variable::my_rank != 0) return;
   const char *nm[kNItem] = {"out", "exc<0.59", "exc0.59-0.78", "exc0.78-1.88",
                             "exc1.88-2.92", "exc>=2.92", "rf", "zone_rem", "zone_add",
@@ -1090,7 +1092,10 @@ void MassClosure::StageFlux(int stage, Real beta_dt) {
   const Real time = pp->pmesh->time;
   const int nslot = (1 + 4*kShSlot)*kShN;
   if (stage == 1) {
-    if (sh_have_ && time >= sh_tnext_) ShellReport(time);
+    if (sh_have_ && time >= sh_tnext_) {
+      ShellRelGather();
+      ShellReport(time);
+    }
     const bool fresh = !sh_have_ || time >= sh_tnext_;
     if (fresh) ShellPartition(time);
     ShellIndex();
@@ -1462,16 +1467,26 @@ void MassClosure::ShellCycle(int ns, const Real *gam0, const Real *gam1, const R
   ++sh_ncyc_;
 }
 
+//! shell_counters_release: the global sums of the release counters, on EVERY rank (a
+//! collective): called before each ShellReport, which SegmentEnd reaches on rank 0 only
+void MassClosure::ShellRelGather() {
+  sh_rcnt_h_.clear();
+  sh_rsum_h_.clear();
+  if (!sh_rel_ || sh_rcnt_.extent_int(0) == 0) return;
+  const int nc = kShN*kRelC*kRelK*kShH, ns = 3*kShN*kRelC*kRelK;
+  sh_rcnt_h_.resize(nc);
+  sh_rsum_h_.resize(ns);
+  Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(sh_rcnt_h_.data(), nc), sh_rcnt_);
+  Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(sh_rsum_h_.data(), ns), sh_rsum_);
+  ShGlobal(sh_rcnt_h_);
+  ShGlobal(sh_rsum_h_);
+}
+
 //! rank 0: the interval's lines, one per shell
 void MassClosure::ShellReport(Real time) {
-  if (sh_rel_ && sh_rcnt_.extent_int(0) > 0) {
-    // shell_counters_release: SHELL_REL lines (all ranks reduce; rank 0 prints)
-    const int nc = kShN*kRelC*kRelK*kShH, ns = 3*kShN*kRelC*kRelK;
-    std::vector<int64_t> cnt(nc), sum(ns);
-    Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(cnt.data(), nc), sh_rcnt_);
-    Kokkos::deep_copy(Kokkos::View<int64_t*, Kokkos::HostSpace>(sum.data(), ns), sh_rsum_);
-    ShGlobal(cnt);
-    ShGlobal(sum);
+  if (sh_rel_ && !sh_rcnt_h_.empty()) {
+    // shell_counters_release: SHELL_REL lines from ShellRelGather's global sums (rank 0)
+    const std::vector<int64_t> &cnt = sh_rcnt_h_, &sum = sh_rsum_h_;
     if (global_variable::my_rank == 0) {
       const char *cn[kRelC] = {"applied", "declined", "release"};
       for (int b = 0; b < kShN; ++b) {

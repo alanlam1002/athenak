@@ -503,6 +503,7 @@ class MultigridDriver {
   Real LastDef0() const { return last_def0_; }
   Real LastDef() const { return last_def_; }
   int64_t NSolve() const { return nsolve_; }
+  void ProbeVCycle(const char *where, int vc);   // C-166 section 3 (debug only)
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing

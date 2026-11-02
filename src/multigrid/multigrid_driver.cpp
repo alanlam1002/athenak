@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>    // abs
+#include <cstring>
 #include <iomanip>    // setprecision
 #include <iostream>   // endl
 #include <sstream>    // sstream
@@ -777,6 +778,78 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
   return;
 }
 
+namespace {
+//! C-166 section 3 (debug only, <cfc> mg_verbose >= 4): exact order-independent hashes
+uint64_t MixBits(uint64_t z) {
+  z = (z ^ (z >> 30))*0xbf58476d1ce4e5b9ULL;
+  z = (z ^ (z >> 27))*0x94d049bb133111ebULL;
+  return z ^ (z >> 31);
+}
+uint64_t HashDev(const DvceArray5D<Real> &a) {
+  const size_t n = a.span();
+  const Real *p = a.data();
+  uint64_t h = 0;
+  if (n == 0) return 0;
+  Kokkos::parallel_reduce("mg_probe_hash", Kokkos::RangePolicy<>(DevExeSpace(), 0, n),
+  KOKKOS_LAMBDA(const size_t q, uint64_t &s) {
+    uint64_t z = *reinterpret_cast<const uint64_t*>(&p[q]) ^ (0x9e3779b97f4a7c15ULL*(q + 1));
+    z = (z ^ (z >> 30))*0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27))*0x94d049bb133111ebULL;
+    s += z ^ (z >> 31);
+  }, h);
+  return h;
+}
+uint64_t HashHost(const Real *p, size_t n) {
+  uint64_t h = 0;
+  for (size_t q = 0; q < n; ++q) {
+    uint64_t b;
+    std::memcpy(&b, &p[q], sizeof(b));
+    h += MixBits(b ^ (0x9e3779b97f4a7c15ULL*(q + 1)));
+  }
+  return h;
+}
+}  // namespace
+
+//! C-166 section 3 (debug only): the hashes of every MG array (block levels' u/def/src on the
+//! device and host, the root grid, the octet buffers), summed over ranks, at one point
+void MultigridDriver::ProbeVCycle(const char *where, int vc) {
+  std::vector<std::pair<std::string, uint64_t>> v;
+  auto add = [&](const std::string &nm, uint64_t h) { v.push_back({nm, h}); };
+  for (Multigrid *g : {mglevels_, mgroot_}) {
+    if (g == nullptr) continue;
+    const std::string gn = (g == mglevels_) ? "blk" : "root";
+    for (int l = 0; l < g->nlevel_; ++l) {
+      const std::string ln = gn + std::to_string(l);
+      add(ln + ".u.d", HashDev(g->u_[l].d_view));
+      add(ln + ".def.d", HashDev(g->def_[l].d_view));
+      add(ln + ".src.d", HashDev(g->src_[l].d_view));
+      add(ln + ".u.h", HashHost(g->u_[l].h_view.data(), g->u_[l].h_view.span()));
+      add(ln + ".def.h", HashHost(g->def_[l].h_view.data(), g->def_[l].h_view.span()));
+      add(ln + ".src.h", HashHost(g->src_[l].h_view.data(), g->src_[l].h_view.span()));
+    }
+  }
+  for (int l = 0; l < nreflevel_; ++l) {
+    const std::string ln = "oct" + std::to_string(l);
+    add(ln + ".u", HashHost(oct_u_buf_[l].data(), oct_u_buf_[l].size()));
+    add(ln + ".def", HashHost(oct_def_buf_[l].data(), oct_def_buf_[l].size()));
+    add(ln + ".src", HashHost(oct_src_buf_[l].data(), oct_src_buf_[l].size()));
+  }
+  std::vector<uint64_t> h(v.size());
+  for (size_t q = 0; q < v.size(); ++q) h[q] = v[q].second;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, h.data(), static_cast<int>(h.size()), MPI_UINT64_T, MPI_SUM,
+                MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    for (size_t q = 0; q < v.size(); ++q) {
+      std::printf("MGPROBE solve=%lld vc=%d %s lev=%d %s %016llx\n",
+                  static_cast<long long>(nsolve_), vc, where, current_level_,
+                  v[q].first.c_str(), static_cast<unsigned long long>(h[q]));
+    }
+    std::fflush(stdout);
+  }
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::SolveVCycle(int npresmooth, int npostsmooth)
 //! \brief Solve the V-cycle starting from the current level
@@ -786,13 +859,21 @@ void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmoo
   if (MGTimingOn()) ++mg_timers_.vcycle_count;
   int startlevel = current_level_;
   coffset_ ^= 1;
+  // C-166 section 3 (debug only): mg_verbose >= 4, the first solve of this driver
+  static int vc_probe = 0;
+  const bool pr = (fshowdef_ >= 4) && (nsolve_ == 1);
+  if (pr) ProbeVCycle("start", vc_probe);
   while (current_level_ > 0) {
     OneStepToCoarser(pdriver, npresmooth);
+    if (pr) ProbeVCycle("down", vc_probe);
   }
   SolveCoarsestGrid();
+  if (pr) ProbeVCycle("coarsest", vc_probe);
   while (current_level_ < startlevel) {
     OneStepToFiner(pdriver, npostsmooth);
+    if (pr) ProbeVCycle("up", vc_probe);
   }
+  if (pr) ++vc_probe;
   return;
 }
 

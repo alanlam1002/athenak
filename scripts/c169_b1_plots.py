@@ -25,8 +25,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt   # noqa: E402
 
 TP = 135.9
-ARMS = [('VB10', 'VB10 (Valencia)', '#2a78d6'), ('Be10', 'Be10 (keff)', '#eb6834')]
-REFS = [('VBf_1e8', 'VBf (Valencia, 1e-8, C-157)', '#2a78d6'), ('Be_1e8', 'Be (keff, 1e-8, C-157)', '#eb6834')]
+ARMS = [('VB10', 'VB10 (Valencia)', '#2a78d6'), ('Be10', 'Be10 (keff)', '#eb6834'), ('Bc10', 'Bc10 (kcfc)', '#1baf7a')]
+REFS = [('VBf_1e8', 'VBf (Valencia, 1e-8, C-157)', '#2a78d6'), ('Be_1e8', 'Be (keff, 1e-8, C-157)', '#eb6834'),
+        ('Bc_1e8', 'Bc (kcfc, 1e-8, C-157)', '#1baf7a')]
 NB = 16     # TRD sums per band (wip/trace-split): w, wR, wR^2, w|T|, w|T|^2, wR|T|, w6dtlnpsi, wDb, g sig_tt, g RS/3,
             # w|Ts|, w|Tc|, w|B|, g dep_self, g dep_cross, g dep_B
 NRB, NRC = 10, 8   # TRR: bins x (w, wR, w|Ts|, w|Tc|, w|B|, g dep_self, g dep_cross, g dep_B)

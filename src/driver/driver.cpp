@@ -327,6 +327,18 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
   // and init C2P (the file holds u0's and w0's ghosts as the run left them), so it
   // continues bitwise (C-100)
   const bool staged = res_flag && restart_state::ApplyStaged(pmesh->pmb_pack);
+  // <mhd> dual_energy_restart_init (R-209): the K tracer from the restored primitives; without
+  // the restored state (w0) there is nothing to derive it from
+  if (res_flag && pmesh->pmb_pack->pdyngr != nullptr &&
+      pmesh->pmb_pack->pdyngr->de_restart_init) {
+    if (!staged) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> dual_energy_restart_init needs the restart's restart_state block"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    pmesh->pmb_pack->pdyngr->DualEnergyRestartInit();
+  }
   // <job> restart_embed_fill (R1, restart_state.hpp): the new outer blocks are filled, then
   // the load runs the regrid path once (ghost exchange, CFC::ReinitializeMetricForAMR's
   // re-solve and C2P), not the restored path; MCLOSE books it as regrid_embed (EmbedMark)

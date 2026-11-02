@@ -192,6 +192,12 @@ class DynGRMHD {
   virtual std::string RestartStateLayout() { return ""; }
   virtual void SaveRestartState(DvceArray5D<Real> &dst, int ns) {}
   virtual void LoadRestartState(const DvceArray5D<Real> &src, int ns) {}
+  // <mhd> dual_energy_restart_init (R-209; default false, read without GetOrAdd): a dual-energy
+  // run restarted from a file written with dual_energy off but the same nscalars, whose last
+  // scalar (the K tracer's slot) then holds a passive scalar: the tracer is set from the
+  // restored primitives (DualEnergyRestartInit, right after restart_state::ApplyStaged)
+  bool de_restart_init = false;
+  virtual void DualEnergyRestartInit() {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
   // <mhd> mass_closure (eos/mass_closure.hpp): the itemized MCLOSE ledger; nullptr if off
   mclose::MassClosure *pmclose = nullptr;
@@ -449,6 +455,7 @@ class DynGRMHDPS : public DynGRMHD {
   std::string RestartStateLayout() override;
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
+  void DualEnergyRestartInit() override;
   void SaveRestartScalars(ParameterInput *pin) override {
     eos.SaveTier3State(pin);
     eos.SaveDualEnergyTotal(pin);

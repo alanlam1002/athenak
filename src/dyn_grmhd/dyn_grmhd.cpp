@@ -563,6 +563,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     kdiag = DvceArray2D<Real>("kdiag", kKdBins, kKdComp);
   }
 
+  // <mhd> dual_energy_restart_init (R-209, user-approved 2026-11-02): see dyn_grmhd.hpp
+  if (pin->DoesParameterExist("mhd", "dual_energy_restart_init")) {
+    de_restart_init = pin->GetBoolean("mhd", "dual_energy_restart_init");
+  }
   // <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5, user-approved 2026-10-31;
   // dyn_grmhd_killing.cpp AddTauSourceK). Read without GetOrAdd: an input without it is unchanged.
   if (pin->DoesParameterExist("dyn_grmhd", "tau_source_K")) {
@@ -1111,6 +1115,59 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
                       Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
     kf_rst_loaded = true;
     kf_bres_stale = kf_pre_rst;   // the first stage's u_beta is no solve (KillingFull store)
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::DualEnergyRestartInit()
+//! \brief <mhd> dual_energy_restart_init (R-209): the K tracer of a dual-energy run restarted
+//! from a dual-energy-off file (same nscalars: the tracer's slot held a passive scalar), from
+//! the restored primitives on every cell (ghosts included, as restart_state restores them): Y = DualEnergyY(p/rho^gamma) (as PrimToCons, which also derives
+//! the tracer from P and rho), w0's tracer slot = Y and u0's = (densitized D) Y; no other
+//! variable changes. Prints the largest |K(Y)/(p/rho^gamma) - 1| over cells with rho > 0
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
+  auto *pmhd = pmy_pack->pmhd;
+  if (!eos.de_on || eos.de_idx < 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> dual_energy_restart_init needs <mhd> dual_energy = true" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  const int iy = pmhd->nmhd + eos.de_idx;
+  const Real kmax = eos.de_kmax, gam = eos.de_gamma, yp = eos.de_ypow;
+  auto &w0 = pmhd->w0;
+  auto &u0 = pmhd->u0;
+  const int nmb = pmy_pack->nmb_thispack;
+  par_for("de_restart_init", DevExeSpace(), 0, nmb-1, 0, w0.extent_int(2)-1,
+          0, w0.extent_int(3)-1, 0, w0.extent_int(4)-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real rho = w0(m, IDN, k, j, i);
+    const Real y = (rho > 0.0) ?
+        PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>::DualEnergyY(
+            w0(m, IPR, k, j, i)/pow(rho, gam), kmax, yp) : 0.0;
+    w0(m, iy, k, j, i) = y;
+    u0(m, iy, k, j, i) = u0(m, IDN, k, j, i)*y;
+  });
+  Real err = 0.0;
+  Kokkos::parallel_reduce("de_restart_init_chk",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExeSpace(), {0, 0, 0, 0},
+          {nmb, w0.extent_int(2), w0.extent_int(3), w0.extent_int(4)}),
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &e) {
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > 0.0)) return;
+    const Real kk = w0(m, IPR, k, j, i)/pow(rho, gam);
+    if (!(kk > 0.0) || kk > kmax) return;   // outside the tracer's range [0, kmax]: clipped
+    const Real kt = PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>::DualEnergyK(
+        w0(m, iy, k, j, i), kmax, yp);
+    e = fmax(e, fabs(kt/kk - 1.0));
+  }, Kokkos::Max<Real>(err));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &err, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    std::cout << "DEINIT dual_energy_restart_init: K tracer set from p/rho^gamma on every cell "
+              << "(Y = (K/" << kmax << ")^" << yp << "); max |K(Y)/(p/rho^gamma) - 1| = "
+              << err << std::endl;
   }
 }
 

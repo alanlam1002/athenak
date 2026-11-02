@@ -252,6 +252,10 @@ MGCFCVectorPoissonDriver::MGCFCVectorPoissonDriver(MeshBlockPack *pmbp,
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
+  // multipole/fixed outer boundaries: the source's mean is part of the problem, never removed
+  // (as MGCFCConformalFactor/MGCFCLapse). Unset, this member was read uninitialised (C-170:
+  // the X solve subtracted its x-source mean on every rank in B.1 and with trace_diag on)
+  fsubtract_average_ = false;
 
   int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
   bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);

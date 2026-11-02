@@ -936,6 +936,23 @@ Real Multigrid::CalculateAverage(MGVariable type) {
       }, Kokkos::Sum<Real>(sum));
   }
 
+  // C-166 section 3 (debug only, mg_verbose >= 4): the device sum vs a serial host sum of the
+  // same data (and, below, the global values), to 17 digits
+  Real hsum = 0.0;
+  const bool prb = (pmy_driver_ != nullptr) && (pmy_driver_->ShowDefect() >= 4) && !on_host_;
+  if (prb) {
+    auto dh = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+        (type == MGVariable::src) ? src_[current_level_].d_view : u_[current_level_].d_view);
+    auto bh = block_rdx_.h_view;
+    for (int m = 0; m < nmmb_; ++m) {
+      Real dx_m = bh(m) * static_cast<Real>(1 << ll_l);
+      Real dV_m = dx_m * dx_m * dx_m;
+      for (int k = ks; k <= ke; ++k)
+        for (int j = js; j <= je; ++j)
+          for (int i = is; i <= ie; ++i) hsum += dh(m, 0, k, j, i) * dV_m;
+    }
+  }
+  const Real lsum = sum;
   Real volume = 0.0;
   {
     Real nx = static_cast<Real>(indcs_.nx1);
@@ -954,6 +971,12 @@ Real Multigrid::CalculateAverage(MGVariable type) {
   volume = global_volume;
   #endif
 
+  if (prb) {
+    std::printf("MGAVG rank=%d level=%d nlevel=%d nmmb=%d local_dev=%.17g local_host=%.17g "
+                "global=%.17g volume=%.17g\n", global_variable::my_rank, current_level_,
+                nlevel_, nmmb_, lsum, hsum, sum, volume);
+    std::fflush(stdout);
+  }
   return (volume > 0.0) ? (sum / volume) : 0.0;
 }
 

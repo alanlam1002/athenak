@@ -631,7 +631,9 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
         BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
                           pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
       }
-      LoadKillingScalars(pin);
+      // the restart's chord bookkeeping only where the restart carries kf_prev (KfRst): a
+      // trace_diag-only run starts its chord fresh (kf_have_prev false: R unavailable)
+      if (KfRst()) LoadKillingScalars(pin);
       int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
       Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
                       indcs.nx1 + 2*indcs.ng);

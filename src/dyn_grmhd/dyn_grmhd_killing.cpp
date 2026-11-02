@@ -45,6 +45,7 @@
 
 #include <cstdio>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 #include "athena.hpp"
@@ -1033,6 +1034,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
   auto &ap0 = pcfc->u_alpha0_psi0;   // the split (R-201): the trumpet's alpha0 psi0, beta0, Ahat0
   auto &b0u = pcfc->beta0_u;
   auto &a0d = pcfc->a0_dd;
+  // R-205: with no previous stage (dtg false: the run's first stage, after a restart without
+  // kf_prev, after a regrid) R is unavailable: its slots are NaN, not a one-sided chord
+  const Real qnan = std::numeric_limits<Real>::quiet_NaN();
   const int imap[3][3] = {
     {S11, S12, S13},
     {S12, S22, S23},
@@ -1217,14 +1221,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       trc(m, 30, k, j, i) = -0.5*p4*ss;
       trc(m, 31, k, j, i) = -0.5*p4*sb;
       const Real rr = r6 - divb;
-      trc(m, 0, k, j, i) = rr;
-      trc(m, 1, k, j, i) = r6;
+      trc(m, 0, k, j, i) = dtg ? rr : qnan;
+      trc(m, 1, k, j, i) = dtg ? r6 : qnan;
       trc(m, 2, k, j, i) = divb;
       for (int c = 0; c < 6; c++) trc(m, 3 + c, k, j, i) = tt[c];
       trc(m, 9, k, j, i) = sqrt(tn);
       trc(m, 10, k, j, i) = ttr;
       trc(m, 11, k, j, i) = -0.5*p4*sT;
-      trc(m, 12, k, j, i) = rr*trS/3.0;
+      trc(m, 12, k, j, i) = dtg ? rr*trS/3.0 : qnan;
       trc(m, 13, k, j, i) = dtg ? 1.0 : 0.0;
     }
     if (mode == 0) return;   // trace_diag alone: Valencia's tau source unchanged

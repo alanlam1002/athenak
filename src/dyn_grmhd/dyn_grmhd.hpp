@@ -294,8 +294,13 @@ class DynGRMHD {
   void LoadKillingScalars(ParameterInput *pin);  // (the constructor, on a restart)
   // <dyn_grmhd> tau_source_K (R-194): keff and ktr take gamma-dot from arm (ii)'s chord state
   TauSourceK tau_source_k = TauSourceK::xcfc;
-  bool TskChord() const {
-    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr || trace_diag;
+  bool TskChord() const {   // the chord state (kf_prev, stage time): the solution's or trace_diag's
+    return TskSolChord() || trace_diag;
+  }
+  // R-205: the solution itself needs the chord (keff, ktr); trace_diag alone never does, so it
+  // never decides what a restart loads (KfRst) and never zero-fills solver state (u_beta)
+  bool TskSolChord() const {
+    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr;
   }
   // <dyn_grmhd> trace_diag (R-197 item 1): the chord state and tr_diag, nothing written to the
   // solution; trace_diag_ahat = cfc_lagged (R-197 addendum, diagnostic only): CFC's psi and
@@ -310,7 +315,7 @@ class DynGRMHD {
   // kf_prev holds the previous stage's metric for the current MeshBlocks (KillingFullStage's test)
   bool KfPrevValid() const;
   bool KfRst() const {
-    return (energy_variable == EnergyVariable::killing_full && kf_dtg) || TskChord();
+    return (energy_variable == EnergyVariable::killing_full && kf_dtg) || TskSolChord();
   }
   // a restart whose restart_state block was not applied (restart_state::ApplyStaged)
   void RestartStateIgnored() { kf_bres_stale = KfRst(); }

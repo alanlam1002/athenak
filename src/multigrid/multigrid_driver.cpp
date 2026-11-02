@@ -75,7 +75,7 @@ MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
     nrbx3_(pmbp->pmesh->nmb_rootx3),
     pmy_pack_(pmbp),
     pmy_mesh_(pmbp->pmesh),
-    needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
+    fsubtract_average_(false), needinit_(true), amr_seq_(0), nreflevel_(0), eps_(-1.0),
     norm_mode_(MGNormScaling::legacy), rtol_(0.0),
     niter_(-1), npresmooth_(1), npostsmooth_(1), coffset_(0),
     fprolongation_(0), mg_verbose_(0),

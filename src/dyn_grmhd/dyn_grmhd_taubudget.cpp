@@ -629,7 +629,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   }
   if (global_variable::my_rank != 0) return;
   const char *kfm = kf_fcfc ? "killing_fcfc" : (kf_fz ? "killing_fz" : "killing_full");
-  const char *vkm[4] = {"valencia", "valencia_keff", "valencia_kcfc", "valencia_ktr"};
+  const char *vkm[6] = {"valencia", "valencia_keff", "valencia_kcfc", "valencia_ktr",
+                        "valencia_kcfc_bg", "valencia_keff_bg"};
   if (kf_rm) kfm = "killing_full_rm";
   const char *mode = val ? vkm[static_cast<int>(tau_source_k)] : (kf ? kfm :
                      (ta ? (comov ? "ta_comoving" : "ta") : (comov ? "t1_comoving" : "t1")));

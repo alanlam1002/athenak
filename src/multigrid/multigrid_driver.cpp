@@ -13,6 +13,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>    // abs
 #include <cstring>
 #include <iomanip>    // setprecision
@@ -833,6 +834,28 @@ void MultigridDriver::ProbeVCycle(const char *where, int vc) {
     add(ln + ".u", HashHost(oct_u_buf_[l].data(), oct_u_buf_[l].size()));
     add(ln + ".def", HashHost(oct_def_buf_[l].data(), oct_def_buf_[l].size()));
     add(ln + ".src", HashHost(oct_src_buf_[l].data(), oct_src_buf_[l].size()));
+  }
+  // mg_verbose >= 5: at the first solve's first V-cycle start, every block level's src and def
+  // to raw files per rank (int32 dims nmb, nvar, n3, n2, n1, then the doubles), to locate cells
+  if (fshowdef_ >= 5 && vc == 0 && std::string(where) == "start") {
+    for (int l = 0; l < mglevels_->nlevel_; ++l) {
+      for (int w = 0; w < 2; ++w) {
+        auto &a = (w == 0) ? mglevels_->src_[l].d_view : mglevels_->def_[l].d_view;
+        auto hm = Kokkos::create_mirror_view_and_copy(HostMemSpace(), a);
+        char fn[256];
+        std::snprintf(fn, sizeof(fn), "mgdump_s%lld_r%d_l%d_%s.bin",
+                      static_cast<long long>(nsolve_), global_variable::my_rank, l,
+                      (w == 0) ? "src" : "def");
+        FILE *f = std::fopen(fn, "wb");
+        if (f != nullptr) {
+          const int32_t d[5] = {a.extent_int(0), a.extent_int(1), a.extent_int(2),
+                                a.extent_int(3), a.extent_int(4)};
+          std::fwrite(d, sizeof(int32_t), 5, f);
+          std::fwrite(hm.data(), sizeof(Real), hm.span(), f);
+          std::fclose(f);
+        }
+      }
+    }
   }
   std::vector<uint64_t> h(v.size());
   for (size_t q = 0; q < v.size(); ++q) h[q] = v[q].second;

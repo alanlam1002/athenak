@@ -965,6 +965,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   Real target = eps_;
   if (rtol_ > 0.0) target = std::max(eps_, rtol_ * def);
   if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
+    if (fshowdef_ >= 3) std::cout << std::setprecision(17);   // C-166 sec. 3 (debug)
     std::cout << "MG initial defect = " << def << std::endl;
     if (rtol_ > 0.0) {
       std::cout << "MG relative target = " << target << std::endl;
@@ -1018,7 +1019,8 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
   if (fshowdef_ >= 2) {
     Real def = TotalDefectNorm();
     if (global_variable::my_rank == 0) {
-      std::cout << "MG initial defect = " << def << std::endl;
+      if (fshowdef_ >= 3) std::cout << std::setprecision(17);   // C-166 sec. 3 (debug)
+    std::cout << "MG initial defect = " << def << std::endl;
     }
   }
   last_nvcycle_ = niter_;

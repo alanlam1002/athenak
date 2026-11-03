@@ -132,6 +132,56 @@ MeshBoundaryValues::~MeshBoundaryValues() {
 #endif
 }
 
+//----------------------------------------------------------------------------------------
+//! \fn void MeshBoundaryValues::RefreshLiteTables()
+//! \brief wip/bvals-closure: (re)build the device tables send_lite/recv_lite from
+//! sendbuf/recvbuf. A host-side comparison per call; the device copy only when an entry
+//! changed (new indices after a regrid, or a reallocated vars view).
+
+namespace {
+bool SameIndcs(const MeshBufferIndcs &a, const MeshBufferIndcs &b) {
+  return a.bis == b.bis && a.bie == b.bie && a.bjs == b.bjs && a.bje == b.bje &&
+         a.bks == b.bks && a.bke == b.bke;
+}
+bool FillLite(MeshBufferLite &l, const MeshBoundaryBuffer &b) {
+  MeshBufferLite t;
+  t.isame = b.isame[0]; t.icoar = b.icoar[0]; t.ifine = b.ifine[0];
+  t.isame_z4c = b.isame_z4c; t.isame_ndat = b.isame_ndat;
+  t.vars = b.vars.data();
+  t.ld = (b.vars.extent(0) > 0) ? static_cast<size_t>(b.vars.stride(0)) : 0;
+  const bool same = SameIndcs(l.isame, t.isame) && SameIndcs(l.icoar, t.icoar) &&
+                    SameIndcs(l.ifine, t.ifine) && SameIndcs(l.isame_z4c, t.isame_z4c) &&
+                    l.isame_ndat == t.isame_ndat && l.vars == t.vars && l.ld == t.ld;
+  l = t;
+  return !same;
+}
+}  // namespace
+
+void MeshBoundaryValues::RefreshLiteTables() {
+  bool fresh = false;
+  if (send_lite.d_view.extent(0) != 56) {
+    Kokkos::realloc(send_lite, 56);
+    Kokkos::realloc(recv_lite, 56);
+    for (int n = 0; n < 56; ++n) {
+      send_lite.h_view(n) = MeshBufferLite{};
+      recv_lite.h_view(n) = MeshBufferLite{};
+      send_lite.h_view(n).vars = nullptr; recv_lite.h_view(n).vars = nullptr;
+      send_lite.h_view(n).isame_ndat = -1; recv_lite.h_view(n).isame_ndat = -1;
+      send_lite.h_view(n).ld = 0; recv_lite.h_view(n).ld = 0;
+    }
+    fresh = true;
+  }
+  bool ch = fresh;
+  for (int n = 0; n < 56; ++n) {
+    ch = FillLite(send_lite.h_view(n), sendbuf[n]) || ch;
+    ch = FillLite(recv_lite.h_view(n), recvbuf[n]) || ch;
+  }
+  if (ch) {
+    Kokkos::deep_copy(send_lite.d_view, send_lite.h_view);
+    Kokkos::deep_copy(recv_lite.d_view, recv_lite.h_view);
+  }
+}
+
 #if MPI_PARALLEL_ENABLED
 int MeshBoundaryValues::GetVarDataSize(const MeshBoundaryBuffer &buf, int m, int n,
                                        int nvars) const {

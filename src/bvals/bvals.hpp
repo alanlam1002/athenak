@@ -138,6 +138,20 @@ struct RankPackedVarMessage {
 class MeshBlockPack;
 
 //----------------------------------------------------------------------------------------
+//! \struct MeshBufferLite
+//! \brief wip/bvals-closure (R-218 item 2, debug timing): the per-buffer data the CC pack/
+//! unpack kernels read (the [0] index structs, isame_z4c, isame_ndat, and the vars view's
+//! data pointer and row stride), so the kernels capture a small device table instead of the
+//! 56-element MeshBoundaryBuffer arrays (a closure > 1800 B is launched indirectly by Kokkos
+//! SYCL through a host copy, kokkos/core/src/SYCL/Kokkos_SYCL_Instance.hpp:237-243, C-176).
+struct MeshBufferLite {
+  MeshBufferIndcs isame, icoar, ifine, isame_z4c;
+  int isame_ndat;
+  Real *vars;
+  size_t ld;   // vars.stride(0): element (m, e) is vars[m*ld + e]
+};
+
+//----------------------------------------------------------------------------------------
 //! \class MeshBoundaryValues
 //  \brief Abstract base class for boundary values for different kinds of Mesh variables
 
@@ -150,6 +164,10 @@ class MeshBoundaryValues {
   // However each MeshBoundaryBuffer is lightweight, so the convenience of fixed array
   // sizes and index values for array elements outweighs cost of extra memory.
   MeshBoundaryBuffer sendbuf[56], recvbuf[56];
+  // wip/bvals-closure: device tables of sendbuf/recvbuf (MeshBufferLite), refreshed by
+  // RefreshLiteTables() whenever a buffer's indices or allocation change
+  DualArray1D<MeshBufferLite> send_lite, recv_lite;
+  void RefreshLiteTables();
 
   // constant inflow states at each face, initialized in problem generator
   DualArray2D<Real> u_in, b_in, i_in;

@@ -39,6 +39,22 @@ MeshBoundaryValuesCC::MeshBoundaryValuesCC(MeshBlockPack *pp, ParameterInput *pi
 //! Input arrays must be 5D Kokkos View dimensioned (nmb, nvar, nx3, nx2, nx1)
 //! 5D Kokkos View of coarsened (restricted) array data also required with SMR/AMR
 
+namespace {
+// wip/bvals-closure: print a kernel's closure size once per label (rank 0), with the size of
+// one 56-buffer MeshBoundaryBuffer array (the old SendBuff/RecvBuff closures captured both
+// sendbuf and recvbuf, or recvbuf, by value: >= that size each)
+void ClosureSizeOnce(const char *label, std::size_t sz, std::size_t sz_arr) {
+  static bool done_s = false, done_r = false;
+  bool &done = (label[0] == 'S') ? done_s : done_r;
+  if (!done && global_variable::my_rank == 0) {
+    std::cout << "BVCLOSURE " << label << " closure " << sz << " B; sizeof(sendbuf[56]) "
+              << sz_arr << " B; sizeof(MeshBoundaryBuffer) " << sizeof(MeshBoundaryBuffer)
+              << " B; sizeof(MeshBufferLite) " << sizeof(MeshBufferLite) << " B" << std::endl;
+  }
+  done = true;
+}
+}  // namespace
+
 TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
                                                DvceArray5D<Real> &ca) {
   // create local references for variables in kernel
@@ -50,8 +66,9 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
   auto &nghbr = pmy_pack->pmb->nghbr;
   auto &mbgid = pmy_pack->pmb->mb_gid;
   auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &sbuf = sendbuf;
-  auto &rbuf = recvbuf;
+  RefreshLiteTables();   // wip/bvals-closure: small device tables, not sendbuf[56]
+  auto sl = send_lite.d_view;
+  auto rl = recv_lite.d_view;
   auto &is_z4c = is_z4c_;
   auto &multilevel = pmy_pack->pmesh->multilevel;
 #if MPI_PARALLEL_ENABLED
@@ -66,7 +83,7 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(# of variables)
   int nmnv = nmb*nnghbr*nvar;
   Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
-  Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
+  auto k_send = KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(nnghbr*nvar);
     const int n = (tmember.league_rank() - m*(nnghbr*nvar))/nvar;
     const int v = (tmember.league_rank() - m*(nnghbr*nvar) - n*nvar);
@@ -76,28 +93,28 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
       // if neighbor is at coarser level, use coar indices to pack buffer
       int il, iu, jl, ju, kl, ku;
       if (nghbr.d_view(m,n).lev < mblev.d_view(m)) {
-        il = sbuf[n].icoar[0].bis;
-        iu = sbuf[n].icoar[0].bie;
-        jl = sbuf[n].icoar[0].bjs;
-        ju = sbuf[n].icoar[0].bje;
-        kl = sbuf[n].icoar[0].bks;
-        ku = sbuf[n].icoar[0].bke;
+        il = sl(n).icoar.bis;
+        iu = sl(n).icoar.bie;
+        jl = sl(n).icoar.bjs;
+        ju = sl(n).icoar.bje;
+        kl = sl(n).icoar.bks;
+        ku = sl(n).icoar.bke;
       // if neighbor is at same level, use same indices to pack buffer
       } else if (nghbr.d_view(m,n).lev == mblev.d_view(m)) {
-        il = sbuf[n].isame[0].bis;
-        iu = sbuf[n].isame[0].bie;
-        jl = sbuf[n].isame[0].bjs;
-        ju = sbuf[n].isame[0].bje;
-        kl = sbuf[n].isame[0].bks;
-        ku = sbuf[n].isame[0].bke;
+        il = sl(n).isame.bis;
+        iu = sl(n).isame.bie;
+        jl = sl(n).isame.bjs;
+        ju = sl(n).isame.bje;
+        kl = sl(n).isame.bks;
+        ku = sl(n).isame.bke;
       // if neighbor is at finer level, use fine indices to pack buffer
       } else {
-        il = sbuf[n].ifine[0].bis;
-        iu = sbuf[n].ifine[0].bie;
-        jl = sbuf[n].ifine[0].bjs;
-        ju = sbuf[n].ifine[0].bje;
-        kl = sbuf[n].ifine[0].bks;
-        ku = sbuf[n].ifine[0].bke;
+        il = sl(n).ifine.bis;
+        iu = sl(n).ifine.bie;
+        jl = sl(n).ifine.bjs;
+        ju = sl(n).ifine.bje;
+        kl = sl(n).ifine.bks;
+        ku = sl(n).ifine.bke;
       }
       int ni = iu - il + 1;
       int nj = ju - jl + 1;
@@ -123,13 +140,13 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
           if (nghbr.d_view(m,n).lev >= mblev.d_view(m)) {
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              rbuf[dn].vars(dm, (i-il + ni*(j-jl + nj*(k-kl + nk*v))) ) = a(m,v,k,j,i);
+              rl(dn).vars[(dm)*rl(dn).ld + ((i-il + ni*(j-jl + nj*(k-kl + nk*v))))] = a(m,v,k,j,i);
             });
           // if neighbor is at coarser level, load data from coarse_u0
           } else {
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              rbuf[dn].vars(dm, (i-il + ni*(j-jl + nj*(k-kl + nk*v))) ) = ca(m,v,k,j,i);
+              rl(dn).vars[(dm)*rl(dn).ld + ((i-il + ni*(j-jl + nj*(k-kl + nk*v))))] = ca(m,v,k,j,i);
             });
           }
 
@@ -156,13 +173,13 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
           if (nghbr.d_view(m,n).lev >= mblev.d_view(m)) {
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              sbuf[n].vars(m, (i-il + ni*(j-jl + nj*(k-kl + nk*v))) ) = a(m,v,k,j,i);
+              sl(n).vars[(m)*sl(n).ld + ((i-il + ni*(j-jl + nj*(k-kl + nk*v))))] = a(m,v,k,j,i);
             });
           // if neighbor is at coarser level, load data from coarse_u0
           } else {
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              sbuf[n].vars(m, (i-il + ni*(j-jl + nj*(k-kl + nk*v))) ) = ca(m,v,k,j,i);
+              sl(n).vars[(m)*sl(n).ld + ((i-il + ni*(j-jl + nj*(k-kl + nk*v))))] = ca(m,v,k,j,i);
             });
           }
 #endif
@@ -170,7 +187,9 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
       });
     } // end if-neighbor-exists block
     tmember.team_barrier();
-  }); // end par_for_outer
+  }; // end par_for_outer
+  ClosureSizeOnce("SendBuff", sizeof(k_send), sizeof(sendbuf));
+  Kokkos::parallel_for("SendBuff", policy, k_send);
 
   Kokkos::parallel_for("SendBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(nnghbr*nvar);
@@ -183,17 +202,17 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
       // If neighbor is at same level and data is for Z4c module, append data from coarse
       // array for higher-order prolongation
       if ((nghbr.d_view(m,n).lev == mblev.d_view(m)) && (is_z4c) && (multilevel)) {
-        il = sbuf[n].isame_z4c.bis;
-        iu = sbuf[n].isame_z4c.bie;
-        jl = sbuf[n].isame_z4c.bjs;
-        ju = sbuf[n].isame_z4c.bje;
-        kl = sbuf[n].isame_z4c.bks;
-        ku = sbuf[n].isame_z4c.bke;
+        il = sl(n).isame_z4c.bis;
+        iu = sl(n).isame_z4c.bie;
+        jl = sl(n).isame_z4c.bjs;
+        ju = sl(n).isame_z4c.bje;
+        kl = sl(n).isame_z4c.bks;
+        ku = sl(n).isame_z4c.bke;
         int ni = iu - il + 1;
         int nj = ju - jl + 1;
         int nk = ku - kl + 1;
         int nkj  = nk*nj;
-        int ndat = nvar*sbuf[n].isame_ndat; // size of same level data already in buff
+        int ndat = nvar*sl(n).isame_ndat; // size of same level data already in buff
 
         // indices of recv'ing (destination) MB and buffer: MB IDs are stored sequentially
         // in MeshBlockPacks, so array index equals (target_id - first_id)
@@ -212,7 +231,7 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
             // load data from coarse_u0
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              rbuf[dn].vars(dm,ndat+ (i-il + ni*(j-jl + nj*(k-kl + nk*v))))=ca(m,v,k,j,i);
+              rl(dn).vars[(dm)*rl(dn).ld + (ndat+ (i-il + ni*(j-jl + nj*(k-kl + nk*v))))]=ca(m,v,k,j,i);
             });
 
           // else copy into send buffer for MPI communication below
@@ -227,7 +246,7 @@ TaskStatus MeshBoundaryValuesCC::PackAndSendCC(DvceArray5D<Real> &a,
             // load data from coarse_u0
             Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember,il,iu+1),
             [&](const int i) {
-              sbuf[n].vars(m,ndat+ (i-il + ni*(j-jl + nj*(k-kl + nk*v))) )=ca(m,v,k,j,i);
+              sl(n).vars[(m)*sl(n).ld + (ndat+ (i-il + ni*(j-jl + nj*(k-kl + nk*v))))]=ca(m,v,k,j,i);
             });
 #endif
           }
@@ -276,7 +295,8 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
   int nmb = pmy_pack->nmb_thispack;
   int nnghbr = pmy_pack->pmb->nnghbr;
   auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &rbuf = recvbuf;
+  RefreshLiteTables();   // wip/bvals-closure: small device table, not recvbuf[56]
+  auto rl = recv_lite.d_view;
   auto &is_z4c = is_z4c_;
   auto &multilevel = pmy_pack->pmesh->multilevel;
 #if MPI_PARALLEL_ENABLED
@@ -317,7 +337,7 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(# of variables)
   Kokkos::TeamPolicy<> policy(DevExeSpace(), (nmb*nnghbr*nvar), Kokkos::AUTO);
-  Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
+  auto k_recv = KOKKOS_LAMBDA(TeamMember_t tmember) {
     const int m = (tmember.league_rank())/(nnghbr*nvar);
     const int n = (tmember.league_rank() - m*(nnghbr*nvar))/nvar;
     const int v = (tmember.league_rank() - m*(nnghbr*nvar) - n*nvar);
@@ -327,28 +347,28 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
       int il, iu, jl, ju, kl, ku;
       // if neighbor is at coarser level, use coar indices to unpack buffer
       if (nghbr.d_view(m,n).lev < mblev.d_view(m)) {
-        il = rbuf[n].icoar[0].bis;
-        iu = rbuf[n].icoar[0].bie;
-        jl = rbuf[n].icoar[0].bjs;
-        ju = rbuf[n].icoar[0].bje;
-        kl = rbuf[n].icoar[0].bks;
-        ku = rbuf[n].icoar[0].bke;
+        il = rl(n).icoar.bis;
+        iu = rl(n).icoar.bie;
+        jl = rl(n).icoar.bjs;
+        ju = rl(n).icoar.bje;
+        kl = rl(n).icoar.bks;
+        ku = rl(n).icoar.bke;
       // if neighbor is at same level, use same indices to unpack buffer
       } else if (nghbr.d_view(m,n).lev == mblev.d_view(m)) {
-        il = rbuf[n].isame[0].bis;
-        iu = rbuf[n].isame[0].bie;
-        jl = rbuf[n].isame[0].bjs;
-        ju = rbuf[n].isame[0].bje;
-        kl = rbuf[n].isame[0].bks;
-        ku = rbuf[n].isame[0].bke;
+        il = rl(n).isame.bis;
+        iu = rl(n).isame.bie;
+        jl = rl(n).isame.bjs;
+        ju = rl(n).isame.bje;
+        kl = rl(n).isame.bks;
+        ku = rl(n).isame.bke;
       // if neighbor is at finer level, use fine indices to unpack buffer
       } else {
-        il = rbuf[n].ifine[0].bis;
-        iu = rbuf[n].ifine[0].bie;
-        jl = rbuf[n].ifine[0].bjs;
-        ju = rbuf[n].ifine[0].bje;
-        kl = rbuf[n].ifine[0].bks;
-        ku = rbuf[n].ifine[0].bke;
+        il = rl(n).ifine.bis;
+        iu = rl(n).ifine.bie;
+        jl = rl(n).ifine.bjs;
+        ju = rl(n).ifine.bje;
+        kl = rl(n).ifine.bks;
+        ku = rl(n).ifine.bke;
       }
       int ni = iu - il + 1;
       int nj = ju - jl + 1;
@@ -372,9 +392,9 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
           [&](const int i) {
             const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
 #if MPI_PARALLEL_ENABLED
-            a(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rbuf[n].vars(m, bi);
+            a(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rl(n).vars[(m)*rl(n).ld + (bi)];
 #else
-            a(m,v,k,j,i) = rbuf[n].vars(m, bi);
+            a(m,v,k,j,i) = rl(n).vars[(m)*rl(n).ld + (bi)];
 #endif
           });
 
@@ -384,16 +404,18 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
           [&](const int i) {
             const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
 #if MPI_PARALLEL_ENABLED
-            ca(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rbuf[n].vars(m, bi);
+            ca(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rl(n).vars[(m)*rl(n).ld + (bi)];
 #else
-            ca(m,v,k,j,i) = rbuf[n].vars(m, bi);
+            ca(m,v,k,j,i) = rl(n).vars[(m)*rl(n).ld + (bi)];
 #endif
           });
         }
       });
     }  // end if-neighbor-exists block
     tmember.team_barrier();
-  });  // end par_for_outer
+  };  // end par_for_outer
+  ClosureSizeOnce("RecvBuff", sizeof(k_recv), sizeof(sendbuf));
+  Kokkos::parallel_for("RecvBuff", policy, k_recv);
 
   // Outer loop over (# of MeshBlocks)*(# of buffers)*(# of variables)
   Kokkos::parallel_for("RecvBuff", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
@@ -406,17 +428,17 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
       // If neighbor is at same level and data is for Z4c module, unpack data from coarse
       // array for higher-order prolongation
       if ((nghbr.d_view(m,n).lev == mblev.d_view(m)) && (is_z4c) && (multilevel)) {
-        il = rbuf[n].isame_z4c.bis;
-        iu = rbuf[n].isame_z4c.bie;
-        jl = rbuf[n].isame_z4c.bjs;
-        ju = rbuf[n].isame_z4c.bje;
-        kl = rbuf[n].isame_z4c.bks;
-        ku = rbuf[n].isame_z4c.bke;
+        il = rl(n).isame_z4c.bis;
+        iu = rl(n).isame_z4c.bie;
+        jl = rl(n).isame_z4c.bjs;
+        ju = rl(n).isame_z4c.bje;
+        kl = rl(n).isame_z4c.bks;
+        ku = rl(n).isame_z4c.bke;
         int ni = iu - il + 1;
         int nj = ju - jl + 1;
         int nk = ku - kl + 1;
         int nkj  = nk*nj;
-        int ndat = nvar*rbuf[n].isame_ndat; // size of same level data packed in buff
+        int ndat = nvar*rl(n).isame_ndat; // size of same level data packed in buff
 #if MPI_PARALLEL_ENABLED
         const int base = recvoff(m*nnghbr + n);
 #endif
@@ -432,9 +454,9 @@ TaskStatus MeshBoundaryValuesCC::RecvAndUnpackCC(DvceArray5D<Real> &a,
           [&](const int i) {
             const int bi = ndat + (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
 #if MPI_PARALLEL_ENABLED
-            ca(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rbuf[n].vars(m, bi);
+            ca(m,v,k,j,i) = (base >= 0) ? aggrbuf(base + bi) : rl(n).vars[(m)*rl(n).ld + (bi)];
 #else
-            ca(m,v,k,j,i) = rbuf[n].vars(m, bi);
+            ca(m,v,k,j,i) = rl(n).vars[(m)*rl(n).ld + (bi)];
 #endif
           });
         });

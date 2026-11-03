@@ -16,6 +16,7 @@
 #include "eos/primitive-solver/reset_floor.hpp"
 #include "eos/primitive-solver/geom_math.hpp"
 #include "flux_dyn_grmhd.hpp"
+#include "dyn_grmhd/metric_faces.hpp"
 
 namespace dyngr {
 
@@ -104,7 +105,9 @@ void SingleStateLLF_DYNGR(const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eo
 //! TODO: This could potentially be sped up by calculating the conserved variables without
 //  the help of PrimitiveSolver; there are redundant calculations with B^i v_i and W that
 //  may not be needed.
-template<int ivx, class EOSPolicy, class ErrorPolicy>
+//! fmet (optional, <dyn_grmhd> metric_terms != cell): the per-stage face metric of this
+//! direction (metric_faces.hpp), read instead of the 2-point average of the cell metric
+template<int ivx, class EOSPolicy, class ErrorPolicy, class... FM>
 KOKKOS_INLINE_FUNCTION
 void LLF_DYNGR(TeamMember_t const &member,
      const PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>& eos,
@@ -115,7 +118,8 @@ void LLF_DYNGR(TeamMember_t const &member,
      const ScrArray2D<Real> &bl, const ScrArray2D<Real> &br, const DvceArray4D<Real> &bx,
      const int& nhyd, const int& nscal,
      const adm::ADM::ADM_vars& adm,
-     DvceArray5D<Real> flx, DvceArray4D<Real> ey, DvceArray4D<Real> ez) {
+     DvceArray5D<Real> flx, DvceArray4D<Real> ey, DvceArray4D<Real> ez,
+     const FM&... fmet) {
   par_for_inner(member, il, iu, [&](const int i) {
     constexpr int ibx = ivx - IVX;
     constexpr int iby = ((ivx - IVX) + 1)%3;
@@ -132,7 +136,9 @@ void LLF_DYNGR(TeamMember_t const &member,
     Real g3d[NSPMETRIC];
     Real beta_u[3];
     Real alpha;
-    if constexpr (ivx == IVX) {
+    if constexpr (sizeof...(FM) > 0) {
+      FaceMetricFromArrays<ivx>(fmet..., m, k, j, i, g3d, beta_u, alpha);
+    } else if constexpr (ivx == IVX) {
       adm::Face1Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha, g3d, beta_u, alpha);
     } else if (ivx == IVY) {
       adm::Face2Metric(m, k, j, i, adm.g_dd, adm.beta_u, adm.alpha, g3d, beta_u, alpha);

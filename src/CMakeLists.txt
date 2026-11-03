@@ -51,6 +51,10 @@ add_executable(
         dyn_grmhd/dyn_grmhd_fluxes.cpp
         dyn_grmhd/dyn_grmhd_fofc.cpp
         dyn_grmhd/dyn_grmhd_newdt.cpp
+        dyn_grmhd/dyn_grmhd_metric.cpp
+        dyn_grmhd/dyn_grmhd_killing.cpp
+        dyn_grmhd/dyn_grmhd_taubudget.cpp
+        dyn_grmhd/dyn_grmhd_riemann_frame.cpp
 
         eos/eos.cpp
         eos/mass_closure.cpp

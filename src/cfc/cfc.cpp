@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdio>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -252,6 +253,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   pmgd_pietabeta = new MGCFCVectorPoissonDriver(pmbp, pin);
   pmgd_psi       = new MGCFCConformalFactorDriver(pmbp, pin);
   pmgd_alpha     = new MGCFCLapseDriver(pmbp, pin);
+  pmgd_pietax->SetLogName("X");          // <cfc>/mg_log line labels (R-058)
+  pmgd_pietabeta->SetLogName("beta");
+  pmgd_psi->SetLogName("psi");
+  pmgd_alpha->SetLogName("alpha_psi");
   // Labels only tag MGTimers output; the two vector-Poisson drivers are the same
   // class, so they cannot be told apart from inside the constructor.
   pmgd_pietax->mg_label_    = "X^i     ";
@@ -420,10 +425,75 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Lower clamp on the assembled lapse (see AssembleLapseShiftK). Default 0.0
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
+  mg_log_vcycles_ = pin->GetOrAddBoolean("cfc", "mg_log_vcycles", false);
+  // <cfc> mg_regrid_norm / mg_regrid_threshold (R-218 item 1; see cfc.hpp). Read without
+  // GetOrAdd, so an input without the keys leaves the parameter block unchanged.
+  if (pin->DoesParameterExist("cfc", "mg_regrid_norm")) {
+    std::string rn = pin->GetString("cfc", "mg_regrid_norm");
+    if (rn == "max") {
+      regrid_max_ = true;
+    } else if (rn != "off") {
+      std::cout << "### FATAL ERROR in CFC: <cfc> mg_regrid_norm must be 'off' or 'max'"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pin->DoesParameterExist("cfc", "mg_regrid_threshold")) {
+      regrid_thr_ = pin->GetReal("cfc", "mg_regrid_threshold");
+    }
+  }
+  // <cfc> residual_scale (see cfc.hpp). Read without GetOrAdd, so an input without the
+  // keys leaves the parameter block (and the restart files) unchanged.
+  if (pin->DoesParameterExist("cfc", "residual_scale")) {
+    rs_on_ = true;
+    rs_const_ = pin->GetReal("cfc", "residual_scale");
+  }
+  if (pin->DoesParameterExist("cfc", "residual_scale_t1")) {
+    if (rs_on_) {
+      std::cout << "### FATAL ERROR in CFC: <cfc> residual_scale and residual_scale_t1 "
+                << "are exclusive (a constant f or a ramp)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    rs_on_ = rs_ramp_ = true;
+    rs_t1_ = pin->GetReal("cfc", "residual_scale_t1");
+    rs_t0_ = pin->DoesParameterExist("cfc", "residual_scale_t0") ?
+             pin->GetReal("cfc", "residual_scale_t0") : 0.0;
+    rs_f0_ = pin->DoesParameterExist("cfc", "residual_scale_f0") ?
+             pin->GetReal("cfc", "residual_scale_f0") : 1.0;
+    rs_f1_ = pin->DoesParameterExist("cfc", "residual_scale_f1") ?
+             pin->GetReal("cfc", "residual_scale_f1") : 0.0;
+    if (!(rs_t1_ > rs_t0_)) {
+      std::cout << "### FATAL ERROR in CFC: <cfc> residual_scale_t1 must exceed "
+                << "residual_scale_t0" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  if (rs_on_) {
+    rs_log_ = pin->DoesParameterExist("cfc", "residual_scale_log_interval") ?
+              pin->GetInteger("cfc", "residual_scale_log_interval") : 10;
+    if (global_variable::my_rank == 0) {
+      if (rs_ramp_) {
+        std::cout << "CFC residual_scale: C1 ramp f = " << rs_f0_ << " (t <= " << rs_t0_
+                  << ") -> " << rs_f1_ << " (t >= " << rs_t1_ << ")" << std::endl;
+      } else {
+        std::cout << "CFC residual_scale: constant f = " << rs_const_ << std::endl;
+      }
+    }
+  }
   // Lower clamp on psi at the psi solve's output; see ApplyPsiFloor. Default 0.0
   // (disabled) so every existing fixture is bitwise unchanged.
   psi_floor_ = pin->GetOrAddReal("cfc", "psi_floor", 0.0);
+  // <cfc> freeze_puncture_mass (R-155 item 2, user-approved 2026-10-29; default false): M_BH
+  // stays at its initial value, so the background is exactly stationary (the Killing-energy
+  // option needs it) and no roundoff-level accretion re-anchors the residuals (C-129). The
+  // excision tally is still drained and accreted_mass_ booked; MCLOSE books the removed mass
+  // as before. It is accrete_to_puncture = false under its R-155 name, and it wins over an
+  // accrete_to_puncture = true (e.g. the GetOrAdd default in a restart's parameter copy).
+  freeze_puncture_mass_ = pin->GetOrAddBoolean("cfc", "freeze_puncture_mass", false);
   accrete_to_puncture_ = pin->GetOrAddBoolean("cfc", "accrete_to_puncture", true);
+  if (freeze_puncture_mass_) {
+    accrete_to_puncture_ = false;
+    pin->SetBoolean("cfc", "accrete_to_puncture", false);
+  }
   puncture_mass_init_ = puncture_mass_;
 
   // ADM-mass extraction radii, discovered by existence (<cfc> adm_mass_r0, _r1, ...).
@@ -485,6 +555,7 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
     FillPunctureBackground(pmbp, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   } else {
     Kokkos::deep_copy(u_psi0, 1.0);
@@ -1016,6 +1087,7 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
 
 void CFC::InitializeMetric(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
+  if (rs_on_) { SetResidualScale(pmy_pack->pmesh->time, 0, false); }
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
@@ -1100,7 +1172,7 @@ void CFC::InitializeMetric(Driver *pdriver) {
           psi_relax(m,0,k,j,i) = (1.0 - omega)*psi_old_relax(m,0,k,j,i) +
                                   omega*psi_relax(m,0,k,j,i);
         });
-        cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0);
+        AssemblePsiMetric(false);
       }
 
       Real dpsi = 0.0;
@@ -1231,6 +1303,7 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
 
 void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
+  if (rs_on_) { SetResidualScale(pmy_pack->pmesh->time, 0, false); }
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
@@ -1245,6 +1318,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
   }
 
@@ -1312,6 +1386,13 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
                                   - u_psi0_(m,0,k,j,i);
   });
 
+  // <cfc> mg_regrid_norm = max (R-218 item 1): the four solves of this re-solve (X, psi
+  // here; alpha_psi, beta in RunLapseShiftAssemblePass below) converge on the max norm to
+  // regrid_thr_; restored after RunLapseShiftAssemblePass
+  MultigridDriver *rdrv[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
+  if (regrid_max_) {
+    for (auto *d : rdrv) d->BeginConvergenceOverride(MGNormScaling::max, regrid_thr_);
+  }
   RunXPsiSolvePass(pdriver);
   numrel::ChecksumAfterTask(pmy_pack, "regrid_xpsi", -1);
   // Interior-only: RescaleMatterSources (inside RunLapseShiftAssemblePass
@@ -1322,6 +1403,9 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
   numrel::ChecksumAfterTask(pmy_pack, "regrid_c2p", -1);
   RunLapseShiftAssemblePass(pdriver);
+  if (regrid_max_) {
+    for (auto *d : rdrv) d->EndConvergenceOverride();
+  }
   numrel::ChecksumAfterTask(pmy_pack, "regrid_lapse", -1);
 
   // dual_energy_flag_exchange (R-076 item 1): the owners decide the flags on the new
@@ -1485,7 +1569,7 @@ TaskStatus CFC::BCSPsiTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::AssemblePsiGhostsTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
-  cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0, true);
+  AssemblePsiMetric(true);
   return TaskStatus::complete;
 }
 
@@ -1649,6 +1733,11 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
   // Phase 2 M1: the analytic background follows the puncture; refilled once per solve
   // (the solved delta fields are re-solved right after, so nothing needs re-anchoring)
   if (puncture_moving_) { RefillMovingPuncture(StageTime(pdriver, stage)); }
+  // residual_scale: this stage's f, fixed for all of its CFC tasks (the first of them)
+  if (rs_on_) {
+    SetResidualScale(StageTime(pdriver, stage), stage, stage == pdriver->nexp_stages);
+    if (rs_bg_only_) { return TaskStatus::complete; }
+  }
   // Matter FIRST, before any elliptic work this cycle. This is the ordering test the
   // first instrumented run (job 8835173) could not make: if the conserved state is
   // already non-finite when the cycle's solves begin, every elliptic NaN downstream is
@@ -1669,9 +1758,54 @@ TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
 // step 2: Adual^ij/Ahat^2, computed directly from u_p_x's (P_i, eta) once its own
 // ghost exchange (CFC_BCSPiEtaX) completes -- X^i is never materialized.
 
+namespace {
+//! <dyn_grmhd> trace_diag_ahat = cfc_lagged (R-197 addendum, user-approved 2026-11-01; a
+//! diagnostic arm, never a production option): Ahat^2 for the psi and lapse solves from the
+//! original-CFC Ahat^ij = psi^6 (L beta)^ij/(2 alpha) of the previous stage's metric (kf_prev:
+//! alpha, beta^i, psi^4, ghosts included), all three lagged; X, Adual (the shift source and K)
+//! unchanged
+template<int NGHOST>
+void LaggedCFCAhatSq(MeshBlockPack *pmbp, const DvceArray5D<Real> &pv, DvceArray5D<Real> &asq) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  auto &size = pmbp->pmb->mb_size;
+  par_for("cfc_ahat_sq_lagged", DevExeSpace(), 0, pmbp->nmb_thispack-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real idx[] = {1.0/size.d_view(m).dx1, 1.0/size.d_view(m).dx2,
+                        1.0/size.d_view(m).dx3};
+    Real db[3][3];   // d_a beta^c
+    for (int a = 0; a < 3; ++a) {
+      for (int c = 0; c < 3; ++c) db[a][c] = Dx<NGHOST>(a, idx, pv, m, 1 + c, k, j, i);
+    }
+    const Real dvb = db[0][0] + db[1][1] + db[2][2];
+    const Real p4 = pv(m, 4, k, j, i);
+    const Real f = p4*sqrt(p4)/(2.0*pv(m, 0, k, j, i));   // psi^6/(2 alpha)
+    Real sq = 0.0;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        const Real ab = f*(db[a][b] + db[b][a] - ((a == b) ? 2.0/3.0*dvb : 0.0));
+        sq += ab*ab;
+      }
+    }
+    asq(m, 0, k, j, i) = sq;
+  });
+}
+}  // namespace
+
 TaskStatus CFC::ComputeADualTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (rs_bg_only_) { return TaskStatus::complete; }   // scaled by f = 0
   ComputeADual();
+  auto *pdg = pmy_pack->pdyngr;
+  if (pdg != nullptr && pdg->trace_ahat && pdg->KfPrevValid()) {
+    // R-197 addendum; without a valid previous stage (the first, after a regrid) XCFC's
+    switch (pmy_pack->pmesh->mb_indcs.ng) {
+      case 2: LaggedCFCAhatSq<2>(pmy_pack, pdg->kf_prev, a_sq); break;
+      case 3: LaggedCFCAhatSq<3>(pmy_pack, pdg->kf_prev, a_sq); break;
+      case 4: LaggedCFCAhatSq<4>(pmy_pack, pdg->kf_prev, a_sq); break;
+    }
+  }
   // Adual^ij feeds BOTH scalar solves (psi's Ahat^2 term and the lapse's) AND the
   // shift source. If this is finite here but K_dd ends up NaN, the corruption is
   // downstream of Adual, not in it.
@@ -1693,6 +1827,7 @@ TaskStatus CFC::SolvePsiTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::RescaleSrcTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (rs_bg_only_) { return TaskStatus::complete; }   // the lapse solve is skipped
   RescaleMatterSources(pdriver, stage);
   return TaskStatus::complete;
 }
@@ -1747,6 +1882,7 @@ TaskStatus CFC::SolveShiftTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (rs_bg_only_) { return TaskStatus::complete; }   // scaled by f = 0
   ReconstructShift();
   return TaskStatus::complete;
 }
@@ -2093,6 +2229,7 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     BHPosition(pmy_pack->pmesh->time, xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
+    for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
 
     // Re-anchor the residuals.  delta_psi stores psi - psi0, so raising psi0 without
@@ -2409,6 +2546,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
 //----------------------------------------------------------------------------------------
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
+  if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
   // r_com_X_ (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) only needs u0/psi, both
   // already available -- must run before AssembleVectorSource(false), whose
   // eta-source loop reads r_com_X_.
@@ -2560,6 +2698,11 @@ void CFC::ApplyReflectingBoundaryCorrection(Real center[3]) {
 
 void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
+  // residual_scale f = 0: no solve, the background metric (psi0 + 0*delta_psi)
+  if (rs_bg_only_) {
+    AssemblePsiMetric(false);
+    return;
+  }
 
   // On the very first call ever, seed the V-cycle's initial guess from the problem
   // generator's own ADM data (padm->adm.psi4) instead of a cold Kokkos-zero start.
@@ -2598,7 +2741,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
   // psi ghost exchange (CFC_RestPsi onward). See ApplyPsiFloor.
   ApplyPsiFloor();
 
-  cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0);
+  AssemblePsiMetric(false);
   return;
 }
 
@@ -2675,6 +2818,7 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
 }
 
 void CFC::SolveLapse(Driver *pdriver, int stage) {
+  if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int nmb = pmy_pack->nmb_thispack;
   int ncells1 = u_tilde.extent_int(4);
@@ -2733,6 +2877,7 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 }
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
+  if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
   // AssembleVectorSource(true) fills r_com_beta_ internally (right after
   // BuildShiftSource() completes, Sec 3.10 item 2/Sec 5 Phase A item 8b) -- by the
   // time it returns, r_com_beta_ is ready for SetMultipoleOrigin() below.
@@ -2747,7 +2892,23 @@ void CFC::SolveShift(Driver *pdriver, int stage) {
     pmgd_pietabeta->Solve(pdriver, stage);
   }
   pmgd_pietabeta->RetrieveSolution(u_p_beta);
+  if (mg_log_vcycles_) LogVcycles(stage);
   return;
+}
+
+void CFC::LogVcycles(int stage) {
+  MultigridDriver *d[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
+  const char *nm[4] = {"X", "psi", "ap", "beta"};
+  char buf[512];
+  int len = std::snprintf(buf, sizeof(buf), "MGV cycle= %d stage= %d time= %.10e",
+                          pmy_pack->pmesh->ncycle, stage, pmy_pack->pmesh->time);
+  for (int i = 0; i < 4; ++i) {
+    bool ran = d[i]->NSolve() != mglog_ns_[i];
+    mglog_ns_[i] = d[i]->NSolve();
+    len += std::snprintf(buf + len, sizeof(buf) - len, " %s= %d,%.4e,%.4e", nm[i],
+                         ran ? d[i]->LastNVcycle() : -1, d[i]->LastDef0(), d[i]->LastDef());
+  }
+  if (global_variable::my_rank == 0) std::printf("%s\n", buf);
 }
 
 void CFC::ReconstructShift() {
@@ -2762,18 +2923,103 @@ void CFC::RefillMovingPuncture(Real t) {
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
   FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                          a0_dd, a0_sq, grad_ap6_0);
+  for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
   pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Real CFC::ResidualScale(Real t) const
+//! \brief <cfc> residual_scale's f(t): the constant, or the C^1 smoothstep
+//! f0 + (f1 - f0) x^2 (3 - 2x), x = (t - t0)/(t1 - t0) clamped to [0, 1] (exactly f0 at
+//! x = 0 and f1 at x = 1). A function of t only: no restart state.
+
+Real CFC::ResidualScale(Real t) const {
+  if (!rs_on_) { return 1.0; }
+  if (!rs_ramp_) { return rs_const_; }
+  if (t <= rs_t0_) { return rs_f0_; }
+  if (t >= rs_t1_) { return rs_f1_; }
+  Real x = (t - rs_t0_)/(rs_t1_ - rs_t0_);
+  return rs_f0_ + (rs_f1_ - rs_f0_)*(x*x*(3.0 - 2.0*x));
+}
+
+void CFC::SetResidualScale(Real t, int stage, bool last_stage) {
+  const bool was = rs_bg_only_;
+  rs_f_ = ResidualScale(t);
+  rs_bg_only_ = (rs_f_ == 0.0);
+  if (global_variable::my_rank != 0) { return; }
+  const int cyc = pmy_pack->pmesh->ncycle;
+  if (rs_bg_only_ != was) {
+    std::cout << "CFC residual_scale: cycle=" << cyc << " stage=" << stage << " t=" << t
+              << (rs_bg_only_ ? " f=0: background only, multigrid solves skipped"
+                              : " f>0: multigrid solves resumed") << std::endl;
+  }
+  if (rs_log_ > 0 && (stage < 1 || (last_stage && cyc % rs_log_ == 0))) {
+    std::cout << "CFC residual_scale: cycle=" << cyc << " stage=" << stage
+              << std::setprecision(17) << " t=" << t << " f=" << rs_f_
+              << std::setprecision(6) << std::endl;
+  }
+}
+
+void CFC::AssemblePsiMetric(bool with_ghosts) {
+  if (rs_on_ && rs_f_ != 1.0) {
+    cfc::AssembleConformalMetricScaled(pmy_pack, delta_psi, u_psi0, with_ghosts, rs_f_);
+  } else {
+    cfc::AssembleConformalMetric(pmy_pack, delta_psi, u_psi0, with_ghosts);
+  }
 }
 
 void CFC::AssembleADM(Real time) {
   Real xd[3] = {0.0, 0.0, 0.0};
   if (frame_enabled_) { FrameVel(time, xd); }
-  cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
-                           a_dd, beta_u, beta0_u, alpha_floor_, xd);
+  if (rs_on_ && rs_f_ != 1.0) {
+    cfc::AssembleLapseShiftKScaled(pmy_pack, delta_psi, delta_alpha_psi, u_psi0,
+                                   u_alpha0_psi0, a_dd, a0_dd, beta_u, beta0_u,
+                                   alpha_floor_, xd, rs_f_);
+  } else {
+    cfc::AssembleLapseShiftK(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0,
+                             a_dd, beta_u, beta0_u, alpha_floor_, xd);
+  }
   // ADMBCs reads this as beta_u's asymptotic value (adm_bcs.cpp).
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
   frame_assembled_ = true;
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::FillEmbedADM(const DvceArray1D<int> &newmb, Real time)
+//! \brief see cfc.hpp
+
+void CFC::FillEmbedADM(const DvceArray1D<int> &newmb, Real time) {
+  Real xd[3] = {0.0, 0.0, 0.0};
+  if (frame_enabled_) { FrameVel(time, xd); }
+  const Real xd0 = xd[0], xd1 = xd[1], xd2 = xd[2];
+  const Real afl = alpha_floor_;
+  auto &adm = pmy_pack->padm->adm;
+  auto &psi0 = u_psi0;
+  auto &ap0 = u_alpha0_psi0;
+  auto &b0 = beta0_u;
+  auto &a0 = a0_dd;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int n1 = indcs.nx1 + 2*indcs.ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+  par_for("cfc_embed_adm", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, 0, n3-1, 0, n2-1,
+          0, n1-1, KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    if (newmb(m) == 0) return;
+    const Real p = psi0(m,0,k,j,i);
+    const Real p2 = p*p, p4 = p2*p2;
+    adm.psi4(m,k,j,i) = p4;
+    adm.g_dd(m,0,0,k,j,i) = p4; adm.g_dd(m,1,1,k,j,i) = p4; adm.g_dd(m,2,2,k,j,i) = p4;
+    adm.g_dd(m,0,1,k,j,i) = 0.0; adm.g_dd(m,0,2,k,j,i) = 0.0; adm.g_dd(m,1,2,k,j,i) = 0.0;
+    adm.alpha(m,k,j,i) = fmax(ap0(m,0,k,j,i)/p, afl);
+    adm.beta_u(m,0,k,j,i) = b0(m,0,k,j,i) + xd0;
+    adm.beta_u(m,1,k,j,i) = b0(m,1,k,j,i) + xd1;
+    adm.beta_u(m,2,k,j,i) = b0(m,2,k,j,i) + xd2;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) { adm.vK_dd(m,a,b,k,j,i) = a0(m,a,b,k,j,i)/p2; }
+    }
+  });
+  for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
 }
 
 //----------------------------------------------------------------------------------------
@@ -3050,6 +3296,13 @@ void CFC::InitFrameControl(Driver *pdriver) {
 int CFC::RestartStateVars() const {
   return 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
            + pmgd_pietabeta->NumVars();
+}
+
+std::string CFC::RestartStateLayout() const {
+  return "cfc.dpsi:1,cfc.dap:1,cfc.mg_psi:" + std::to_string(pmgd_psi->NumVars())
+         + ",cfc.mg_alpha:" + std::to_string(pmgd_alpha->NumVars())
+         + ",cfc.mg_pietax:" + std::to_string(pmgd_pietax->NumVars())
+         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars());
 }
 
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {

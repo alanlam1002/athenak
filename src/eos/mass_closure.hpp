@@ -40,6 +40,17 @@
 //! the RK-weighted geometric source term plus the update's rounding; "crec" and "other"
 //! (tau: the dual-energy resync) are physical changes there, so only regrid and restart
 //! are flagged. Same exact sums, same tolerance (in M*).
+//! <mhd> tracer_closure (default false; R-130/R-131 item 3, user-approved; needs mass_closure,
+//! dual_energy and dual_energy_diag): the same closure for the dual-energy tracer DY (line
+//! YCLOSE; diagnostic only, reads the state), with its item "other" (the C2P's change in the
+//! ordinary cells) split per cell by the dual-energy branch of that C2P (de_diag slot 0, dbr:
+//! 4 = flagged dense, energy solution + resync; 0 = non-dense resync; 1/2/3/5 = entropy or bad,
+//! DY unchanged, a check), the flagged-dense resyncs into up and down and binned by the gas's
+//! normal grid speed |V.n|_coord = |(alpha v^i - beta^i) n_i|, n = -grad P/|grad P| (coordinate
+//! components, central differences of w0; as scripts/c117_shock_speed.py); every C2P item binned
+//! by density band (rho/rho_c, <mhd> tracer_closure_rhoc); and every item accumulated per phase
+//! (<mhd> tracer_closure_phase_t = t1,t2,t3: phases t < t1, [t1,t2), [t2,t3), >= t3). Printed
+//! per segment (YCLOSE, YCLOSE_RUN) and cumulatively per phase (YCLOSE_PH_RUN, YCLOSE_BAND_RUN).
 
 #include <cstdint>
 #include <memory>
@@ -47,6 +58,7 @@
 #include <vector>
 
 #include "athena.hpp"
+#include "dyn_grmhd/metric_faces.hpp"
 
 class MeshBlockPack;
 class ParameterInput;
@@ -105,6 +117,22 @@ enum StageIdx {
   kMd0,                                    // sum d0 dV (debug: must equal M_pre)
   kNStage
 };
+// tracer_closure: the per-cell categories of the C2P change, per density band
+enum YCat {
+  yExc = 0, yRf, yZoneRem, yZoneAdd, yFloor, yCrec,
+  yNonDense,                    // dbr 0: non-dense resync
+  yDenseChk,                    // dbr 1/2/3/5: entropy or bad (DY unchanged; a check)
+  yUp0,                         // dbr 4, DY up, |V.n| bins (kYV of them)
+  kYV = 7,
+  yDn0 = yUp0 + kYV,            // dbr 4, DY down, |V.n| bins
+  kYCat = yDn0 + kYV
+};
+constexpr int kYBand = 4;       // rho/rho_c >= 1e-1, [1e-2, 1e-1), [1e-3, 1e-2), < 1e-3
+constexpr int kYPh = 4;         // phases (tracer_closure_phase_t: three edges)
+constexpr int kYN = kYBand*kYCat;
+constexpr int kYG = 16;         // reduced in groups of 16 sums
+constexpr int kYNG = (kYN + kYG - 1)/kYG;
+
 // face sums: F_out (outer faces) and F_exc (into the excision-flux mask)
 enum FaceIdx { kFout = 0, kFexc, kNFace };
 
@@ -141,11 +169,30 @@ class MassClosure {
   void MarkAfter(int item);
   // the regrid path: M_prol after prolongation (item 6 against the last M_end)
   void RegridProlongated();
+  // killing_full (R-177 item 1): before a regrid (MeshRefinement::AdaptiveMeshRefinement),
+  // the jump from the last stage's weights (kf_prev) to the current metric's, booked as
+  // "weights"; the regrid items then measure T with one set of weights on both sides
+  // (RegridProlongated: the transferred metric; MarkAfter: those, saved, then the re-solved
+  // metric's change booked as "weights")
+  void RegridPre();
   // after Driver::Initialize (M_start, the restart item) and at the end (the MCLOSE line)
   void SegmentStart(ParameterInput *pin, int cycle);
   void SegmentEnd(int cycle, Real time);
   // into the restart's parameter copy: M_end, the run's cumulative items, M*
   void Save(ParameterInput *pin) const;
+  // R1 embedding at load (<job> restart_embed_fill, restart_state::EmbedFill): the grid
+  // mass after the restart is staged (k = 0: the old domain only, the new blocks are
+  // zero), after the atmosphere fill (1) and after the load's metric re-solve and C2P
+  // (2). SegmentStart then reports them (TAG_EMBED: old domain - saved M_end, which must
+  // be exactly 0; the atmosphere added; the load C2P's change) and books their sum as
+  // regrid_embed instead of in the restart item.
+  void EmbedMark(int k);
+  // energy_variable = killing_full (dyn_grmhd_killing.cpp KillingFullStage): the T change from
+  // the weights' change at fixed u of this stage (stage 1: since the last stage), booked as
+  // KCLOSE's "weights" (not in the restart's parameter copy: its _RUN value is this process's)
+  void KillWeights(int stage, Real g);
+  // killing_weights = comoving: the stage's weight-motion source, beta_dt sum sqrt(g) s_W dV
+  void KillMotion(int stage, Real g);
 
  private:
   MeshBlockPack *pmy_pack;
@@ -153,6 +200,19 @@ class MassClosure {
   std::string tag_, key_;     // its output tag (MCLOSE, ...) and parameter-key prefix
   DvceArray4D<Real> x0_;      // S_i / tau: the variable before the C2P (IDN: ledger d0)
   std::vector<std::unique_ptr<MassClosure>> extra_;   // mass_closure_full: S_1..3, tau
+                                                      // (+ tracer_closure: DY)
+  // tracer_closure
+  bool ytr_req_ = false;      // (IDN) create the DY closure at the first SegmentStart
+  bool ytr_ = false;          // this is the DY closure (YCLOSE)
+  Real y_rhoc = 3.24e-4;
+  Real y_ph[kYPh-1] = {125.9, 145.9, 185.9};
+  Real y_tlast = 0.0;         // the time of the last stage (phase of the booked items)
+  DvceArray4D<int> y_cat_;    // per cell: band*kYCat + category, -1 = no change
+  DvceArray4D<Real> y_val_;   // per cell: the change dV
+  Fix y_st[4][kYN];
+  KSum yseg[kYN], ycum[kYPh][kYN], phcum[kYPh][kNItem];
+  int Phase(Real t) const;
+  void YStage(int stage, const DvceArray4D<Real> &cls, const DvceArray4D<Real> &c2p);
   int every = 0;              // <mhd> mass_closure_every: per-cycle MCLOSE_CYC lines
   Real tol = 1.0e-10;         // <mhd> mass_closure_tol (in M*)
   Real mstar = 0.0;           // <mhd> mass_closure_mstar (0: the grid mass at run start)
@@ -165,7 +225,37 @@ class MassClosure {
   bool have_last_end = false;
   Real m_prev_end = 0.0;      // the previous segment's M_end (restart), NaN if unknown
   int ncyc = 0, cycle0 = 0;
+  KSum e_mark_[3];            // EmbedMark(0..2)
+  bool embed_ = false;        // EmbedMark(2) done: SegmentStart books regrid_embed
+  KSum embed_cum_;            // the run's cumulative regrid_embed (parameter copy)
   KSum Mass() const;          // global (rank-ordered) M of u0
+  // <mhd> energy_variable = killing_t1 | killing_ta (R-155 item 1): the tau closure becomes
+  // the closure of the evolved Killing energy T = alpha0 (tau + D) - beta0^k S_k - w D
+  // (densitized; w = 1 or alpha0; line KCLOSE), whose face flux is the tau slot's flux there
+  // (dyn_grmhd_killing.cpp). Its item "source" is then the RK-weighted residual-order source.
+  int kill_ = 0;              // 0: off, 1: killing_t1, 2: killing_ta, 3: killing_full
+  Real kw_st_[4] = {0.0, 0.0, 0.0, 0.0};   // killing_full: KillWeights per stage
+  KSum kw_seg_, kw_cum_;
+  bool kboost_ = false;       // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
+  // <mhd> killing_weights = comoving (R-175): the weights move with the hole (bg_xbh_), so the
+  // stage gaps are booked as "weights" (as killing_full); the frozen weights' rate added to the
+  // source, xidot^j (E d_j alpha0 - S_k d_j beta_BH^k), is its own item "motion" (out of
+  // "source"). kcflat_: no puncture, weights (1, 0).
+  bool kcomov_ = false, kcflat_ = false;
+  bool kfrm_ = false;         // R-194 item 3: killing_full_rest_mass = explicit (w_D = alpha)
+  Real km_st_[4] = {0.0, 0.0, 0.0, 0.0};   // KillMotion per stage (the stage's applied amount)
+  KSum km_seg_, km_cum_;
+  bool KWt() const { return kill_ == 3 || kcomov_; }
+  // killing_full's weights in KSrc: 0 kf_prev while valid, else adm; 1 adm; 2 kws_ (the
+  // metric RegridProlongated saw, alpha and beta^i, every cell)
+  mutable int kwmode_ = 0;
+  DvceArray5D<Real> kws_;
+  bool kregrid_ = false;      // RegridProlongated done, its MarkAfter not yet
+  bool kill_face_ = false;    // <mhd> killing_closure on a Valencia run: T's face flux formed
+  mutable DvceArray5D<Real> kv_;   // T of the array passed to KSrc (one variable)
+  dyngr::TrumpetTable ktab_;
+  const DvceArray5D<Real> &KSrc(const DvceArray5D<Real> &u) const;   // u, or T(u) into kv_
+  int KVar() const { return kill_ ? 0 : var_; }
 };
 
 }  // namespace mclose

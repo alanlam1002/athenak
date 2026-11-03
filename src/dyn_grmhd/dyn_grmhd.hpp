@@ -14,8 +14,10 @@
 #include "tasklist/task_list.hpp"
 #include "driver/driver.hpp"
 #include "eos/primitive_solver_hyd.hpp"
+#include "dyn_grmhd/metric_faces.hpp"
 
-enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr};   // Riemann solvers for dynamical GR
+// Riemann solvers for dynamical GR; hlle_frame_dyngr: <mhd> riemann_frame = boosted (R-168)
+enum class DynGRMHD_RSolver {llf_dyngr, hlle_dyngr, hlle_frame_dyngr};
 enum class DynGRMHD_EOS {eos_ideal, eos_piecewise_poly,
                       eos_compose, eos_hybrid};        // EOS policies for dynamical GR
 enum class DynGRMHD_Error {reset_floor};               // Error policies for dynamical GR
@@ -69,6 +71,78 @@ struct DynGRMHDTaskIDs {
 
 namespace dyngr {
 
+// <mhd> energy_variable (R-155 item 1): the energy equation evolved
+// (killing_full, R-165 item 4: the full-metric comoving form, weights (alpha, beta') of the CFC metric)
+enum class EnergyVariable {valencia, killing_t1, killing_ta, killing_full};
+// <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5): the K in Valencia's tau source alpha S^ij K_ij
+// (xcfc: XCFC's K, the default; keff: K^eff = (Lie_beta' gamma - gamma-dot)/(2 alpha) with the
+// actual gamma-dot; kcfc: (Lie_beta' gamma)^TF/(2 alpha); ktr: XCFC's K plus the trace correction)
+// kcfc_bg / keff_bg (R-204 item 1): kcfc / keff with the background analytic -- the trumpet's
+// (L beta0) replaced by its identity 2 alpha0 psi0^-6 Ahat0 (no FD of beta0), and keff's trace term
+// reduced to its residual part (the background's D_k beta0'^k - 6 d_t' ln psi0 = 0 analytically)
+enum class TauSourceK {xcfc, keff, kcfc, ktr, kcfc_bg, keff_bg};
+// <dyn_grmhd> trace_diag (R-197 item 1, diagnostics only; AddTauSourceK): per-cell tr_diag
+// components (output variable mhd_trace_diag), rates in M^-1:
+//   0 R = 6 d_t ln psi - D_k beta'^k, 1 6 d_t ln psi, 2 D_k beta'^k,
+//   3-8 T_ij = (L beta')_ij - 2 alpha psi^-6 Ahat_ij (flat indices; xx xy xz yy yz zz),
+//   9 |T|_coord = sqrt(T_ij T_ij) (= |psi^4 T|_phys), 10 delta^ij T_ij,
+//   11 -1/2 psi^4 S^ij T_ij, 12 R S/3 (the two parts of 1/2 S^ij V_ij), 13 the chord valid (0/1);
+// the split (R-201): with Ahat = Ahat0 + LX (cfc_reconstruct.cpp) and beta' = beta0 + beta_res + xidot,
+//   T = T_self + T_cross + B,  T_cross = -2 dap6 Ahat0 (dap6 = alpha psi^-6 - alpha0 psi0^-6, the
+//   cancellation-free form of cfc.cpp's cfc_build_dapsi6), B = (L beta0)_FD - 2 alpha0 psi0^-6 Ahat0
+//   (the trumpet's identity, zero in the continuum: its finite-difference residual), so
+//   T_self = (L beta_res)_FD - 2 alpha psi^-6 LX:
+//   14-19 T_cross_ij, 20-25 T_self_ij, 26 |T_cross|, 27 |T_self|, 28 |B| (|.|_coord),
+//   29-31 -1/2 psi^4 S^ij (T_cross, T_self, B)_ij (the trace-free deposit's parts; their sum is 11)
+//   32 ds_K: the tau source change the run applies, alpha S^ij (K' - K^XCFC)_ij (0 for xcfc; R-204)
+constexpr int kTrN = 33;
+// TRD line components per band (w = rho dV): w, w R, w R^2, w |T|, w |T|^2, w R |T|, w 6 d_t ln psi,
+// w D_k beta'^k, sqrt(g) dV (-1/2 psi^4 S^ij T_ij), sqrt(g) dV R S/3, w |T_self|, w |T_cross|, w |B|,
+// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij), sqrt(g) dV ds_K
+constexpr int kTrBands = 3, kTrRed = 17;
+// TRR lines (R-201): kTrRB radial bins about the hole (r = |x - x_BH|, log-spaced between
+// trace_diag_rmin and trace_diag_rmax, the first / last bins open-ended), cells with
+// rho >= 0.01 trace_diag_rhoc; components w, w R, w |T_self|, w |T_cross|, w |B|,
+// sqrt(g) dV (-1/2 psi^4 S^ij (T_self, T_cross, B)_ij)
+constexpr int kTrRB = 10, kTrRC = 9;   // + sqrt(g) dV ds_K
+}  // namespace dyngr
+namespace array_sum {
+typedef array_type<Real, dyngr::kTrBands*dyngr::kTrRed> TrBandSum;   // the TRD sums in one reduction
+typedef array_type<Real, dyngr::kTrRB*dyngr::kTrRC> TrRadSum;        // the TRR sums
+}  // namespace array_sum
+namespace Kokkos {
+template<>
+struct reduction_identity<array_sum::TrBandSum> {
+  KOKKOS_FORCEINLINE_FUNCTION static array_sum::TrBandSum sum() {
+    return array_sum::TrBandSum();
+  }
+};
+template<>
+struct reduction_identity<array_sum::TrRadSum> {
+  KOKKOS_FORCEINLINE_FUNCTION static array_sum::TrRadSum sum() {
+    return array_sum::TrRadSum();
+  }
+};
+}  // namespace Kokkos
+namespace dyngr {
+
+// <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): per-cell components (tb_c), the
+// first kTbNr summed per bin (x dV); bins: star = 4 density bands x (interior, surface),
+// shells = r_iso about the hole between the kTbShell edges
+constexpr int kTbNc = 22, kTbNr = 16, kTbStarBins = 8, kTbShellBins = 12;
+// tb_c components: 0-15 reduced per bin (x dV), 16 the bin, 17-20 A (Pre; tau_source_K: the
+// source change's trace and trace-free parts, AddTauSourceK), 21 the snapshot
+constexpr int kTbBin = 16, kTbA = 17, kTbSnap = 21;
+
+// <mhd> killing_source_diag (R-165 item 3(a)): r_iso bins (0: r < kKdR0, kKdBins-1: r >= kKdR1,
+// geometric in between) x components (sums: dt dV x, cumulative; maxima: over the run)
+constexpr int kKdBins = 42, kKdComp = 14, kKdNSum = 8;
+constexpr Real kKdR0 = 0.25, kKdR1 = 40.0;
+// sums: 0 eff (the effective T source), 1-5 dt dV sqrt(g) (s_K, s_alpha, s_E, s_beta, s_ta),
+// 6 eff of the cells left on the Valencia update (alpha0 < 1e-3), 7 dt dV |delta alpha|;
+// maxima: 8 |delta alpha|, 9 |delta alpha/alpha0|, 10 |delta beta|, 11 |psi^4 - psi0^4|,
+// 12 |d delta alpha|, 13 dt dV (the cell-time weight, a sum)
+
 class DynGRMHD {
  public:
   DynGRMHD(MeshBlockPack *ppack, ParameterInput *pin);
@@ -114,8 +188,16 @@ class DynGRMHD {
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke) = 0;
   // restart_state (outputs/restart_state.hpp): per-cell state beyond u0, ghosts included
   virtual int RestartStateVars() { return 0; }
+  // restart_state's group layout, "name:n,..." in SaveRestartState's order (R-140 item 4)
+  virtual std::string RestartStateLayout() { return ""; }
   virtual void SaveRestartState(DvceArray5D<Real> &dst, int ns) {}
   virtual void LoadRestartState(const DvceArray5D<Real> &src, int ns) {}
+  // <mhd> dual_energy_restart_init (R-209; default false, read without GetOrAdd): a dual-energy
+  // run restarted from a file written with dual_energy off but the same nscalars, whose last
+  // scalar (the K tracer's slot) then holds a passive scalar: the tracer is set from the
+  // restored primitives (DualEnergyRestartInit, right after restart_state::ApplyStaged)
+  bool de_restart_init = false;
+  virtual void DualEnergyRestartInit() {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
   // <mhd> mass_closure (eos/mass_closure.hpp): the itemized MCLOSE ledger; nullptr if off
   mclose::MassClosure *pmclose = nullptr;
@@ -138,6 +220,158 @@ class DynGRMHD {
   // static Kerr-Schild spacetime). Gated on gr_dt (below): false (default) preserves
   // the old, maximally conservative max_dv=1 behavior.
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage) = 0;
+
+  // <dyn_grmhd> metric_terms / face_residual_interp (R-140 item 1; metric_faces.hpp).
+  // Default cell: none of the members below is allocated or used.
+  MetricTerms metric_terms = MetricTerms::cell;
+  int face_residual_interp = 4;     // 4: (-1, 9, 9, -1)/16 of the residual; 2: the average
+  // <dyn_grmhd> killing_momentum_bg = face_diff (R-178; killing_t1 + analytic_bg): the momentum
+  // source's background derivatives -> centred differences of t1's face-weight values
+  bool kill_mom_fd = false;
+  TrumpetTable ttab;
+  DvceArray5D<Real> fm_res;         // the residual (delta psi, delta(alpha psi), beta_res)
+  DvceArray5D<Real> fm_x1, fm_x2, fm_x3;   // the face metric per direction (kFm*)
+  int fm_probe_cycles = 0, fm_probe_c0 = -1;   // <dyn_grmhd> face_probe_* (ghost/owner)
+  Real fm_probe_box[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  void ComputeFaceMetric(int stage);   // once per stage, at the start of CalcFluxes
+  void FaceMetricProbe(int stage);
+  void TrumpetTableTest(int npts);     // <dyn_grmhd> metric_table_test (host and device)
+
+  // <mhd> energy_variable (R-155 item 1; dyn_grmhd_killing.cpp). Default valencia: none of
+  // the members below is used, and no kernel of the default path is changed.
+  EnergyVariable energy_variable = EnergyVariable::valencia;
+  DvceArray5D<Real> kill_res;       // the residual (delta alpha, delta beta^i, psi^4 - psi0^4)
+  bool kill_boost = false;          // <mhd> killing_weights = boost: (alpha0, beta0) = (1, xidot)
+  // <mhd> killing_weights = comoving (R-175; KILLING_ENERGY_NOTE Sec. 5): the trumpet weights at
+  // the comoving hole (CFC::bg_xbh_, refilled every stage), excluding xidot, or (1, 0) without a
+  // puncture; delta beta = beta' - xidot - beta_BH; the frozen weights' rate
+  // -xidot^j (E d_j alpha0 - S_k d_j beta_BH^k) added to the T source (KCLOSE item "motion")
+  bool kill_comov = false, kill_flat = false;
+  bool kill_have_xprev = false;     // KCLOSE: the weights' centre of the previous stage
+  Real kill_xprev[3] = {0.0, 0.0, 0.0}, kill_m1u1 = 0.0;
+  DvceArray5D<Real> kill_scr;       // per-cell stage values reduced after the source kernel
+  void KillingT1Stage(Driver *pdriver, int stage);   // comoving: KCLOSE's weights item
+  void KillingFaceFluxes();         // the tau slot's face flux -> the T face flux
+  int kill_probe_cycles = 0, kill_probe_c0 = -1, kill_probe_stage = 0;   // ghost/owner probe
+  void KillingFaceProbe();          // <dyn_grmhd> killing_probe_cycles, face_probe_box
+  // <mhd> killing_source_diag (R-165 item 3(a)): the effective T source of every stage update
+  // (killing_t1/ta: dt sqrt(g) s_T; valencia + killing_closure: the Valencia update's T
+  // violation) and the residual's size, binned in r_iso, cumulative; KDIAG lines every
+  // killing_source_diag_every cycles. Diagnostic only: the update is unchanged.
+  bool kill_diag = false, kill_diag_ta = false;
+  int kill_diag_every = 25, kill_diag_last = -1;
+  DvceArray2D<Real> kdiag;
+  void ReportKillingDiag();
+  // energy_variable = killing_full (R-165 item 4): weights (alpha, beta') of the current CFC
+  // metric, at faces the Riemann solver's face metric (adm::Face?Metric averages).
+  // <mhd> killing_full_dtg: false = arm (i), d_t' g = 0; true = arm (ii), the source
+  // -1/2 alpha sqrt(gamma) T^{mu nu} d_t' g_{mu nu} and the weights' rate, both from the
+  // previous stage's metric (kf_prev: alpha, beta^i, psi^4 at every cell, ghosts included).
+  // R-174 (arm (ii) extended): kf_prev also holds the previous stage's CFC residual (delta psi,
+  // delta(alpha psi), beta_res: slots 5-9), the source differences the residual only, against
+  // the previous residual on the CURRENT background (and xidot), and adds the background's rate
+  // analytically (comoving: -xdot_BH . grad g0 from the trumpet table; xi-ddot in beta');
+  // kf_prev and the stage bookkeeping are restart state (dyngr.kfprev, <mhd> kf_*).
+  bool kf_dtg = false, kf_have_prev = false;
+  // R-190 (KF_z, energy_variable = killing_fz): arm (i)'s frozen weights plus the spatial
+  // source s_z = 1/2 alpha S^ij (2 alpha K_ij - (Lie_beta' gamma)_ij) (x sqrt(gamma))
+  bool kf_fz = false;
+  // R-191 (KF_CFC, energy_variable = killing_fcfc): KF_z with s_CFC = -(alpha/3) S D_k beta'^k,
+  // the CFC form of gamma-dot (2/3 gamma_ij D_k beta'^k), in place of s_z
+  bool kf_fcfc = false;
+  // R-194 item 3 (<mhd> killing_full_rest_mass = explicit): T = sqrt(g) (alpha tau - beta'^k S_k),
+  // the face flux's rest-mass weight w_D = alpha_f, and the rest-mass work -sqrt(g) D V^j d_j alpha
+  // (full alpha) as a source; otherwise arm (ii)
+  bool kf_rm = false;
+  // R-221 (KF_CFC-ta-bg, energy_variable = killing_fcfc_ta; supersedes R-206): KF_CFC's frozen
+  // weights and trace source with the rest mass explicit (kf_rm), and the background taken
+  // analytically (kf_bgw): the face weights are the trumpet's (alpha0, beta0 + xidot) evaluated at
+  // the face plus the two-cell average of the residual (kill_res 0: alpha - alpha0, 1-3: beta' -
+  // beta0 - xidot); in the source D_k beta0'^k = 6 xidot.grad ln psi0 and grad alpha0 are analytic,
+  // only the residual is Dx<NGHOST>'d (kill_res, kbg_ell = ln(psi/psi0)). <mhd> killing_full_bg =
+  // none: the same variable without the background (the cell average of the full metric at faces,
+  // Dx<NGHOST> of the full metric in the source), the "KF_CFC-ta" reference.
+  bool kf_bgw = false;
+  void KillingBgResidual();   // kill_res 0-3 and kbg_ell on every cell (ghosts included)
+  DvceArray5D<Real> kf_prev;
+  Real kf_tprev = 0.0, kf_tstage = 0.0;
+  Real kf_m1u1 = 0.0;   // KCLOSE weights item: [M_s - M_1](u1), telescoped (KillingFullStage)
+  int kf_key[3] = {-1, -1, -1};   // nmb_created, nmb_deleted, nmb_thispack of kf_prev
+  bool kf_rst_loaded = false;     // kf_prev restored: keep it across the restart's new key
+  bool kf_pre_rst = false;        // the parameters have no kf_* (fresh start or pre-arm-(ii) rst)
+  bool kf_bres_stale = false;     // restarted without dyngr.kfbres (u_beta is the zero fill) or
+                                  // without the restart_state block (cold CFC residuals)
+  bool kf_bgmove = false;         // <cfc> puncture_moving: the background's analytic rate
+  bool kf_have_xd = false;        // xi-ddot: xidot of the last step (frame controller)
+  Real kf_xdstep[3] = {0.0, 0.0, 0.0}, kf_xdd[3] = {0.0, 0.0, 0.0};
+  // <mhd> killing_full_split_every (R-174 (e)): KFSPLIT lines, each stage's s_T integrals
+  // (background / residual part; rho >= killing_full_split_rho and all cells)
+  int kf_split_every = 0;
+  Real kf_split_rho = 0.0, kf_split_rmin = 0.0;   // the masked ("dense") set
+  void KillingFullStage(Driver *pdriver, int stage);   // stage time + KCLOSE weights item
+  void ReportKillingStage(int stage, Real dt);   // reduce kill_scr: KFSPLIT / KCLOSE motion
+  void SaveKillingScalars(ParameterInput *pin);  // arm (ii)'s stage bookkeeping -> <mhd> kf_*
+  void LoadKillingScalars(ParameterInput *pin);  // (the constructor, on a restart)
+  // <dyn_grmhd> tau_source_K (R-194): keff and ktr take gamma-dot from arm (ii)'s chord state
+  TauSourceK tau_source_k = TauSourceK::xcfc;
+  bool TskChord() const {   // the chord state (kf_prev, stage time): the solution's or trace_diag's
+    return TskSolChord() || trace_diag;
+  }
+  // R-205: the solution itself needs the chord (keff, ktr); trace_diag alone never does, so it
+  // never decides what a restart loads (KfRst) and never zero-fills solver state (u_beta)
+  bool TskSolChord() const {
+    return tau_source_k == TauSourceK::keff || tau_source_k == TauSourceK::ktr ||
+           tau_source_k == TauSourceK::keff_bg;
+  }
+  // <dyn_grmhd> trace_diag (R-197 item 1): the chord state and tr_diag, nothing written to the
+  // solution; trace_diag_ahat = cfc_lagged (R-197 addendum, diagnostic only): CFC's psi and
+  // lapse solves take Ahat^2 from Ahat = psi^6 (L beta)/(2 alpha) of the previous stage (kf_prev)
+  bool trace_diag = false, trace_ahat = false;
+  DvceArray5D<Real> tr_diag;
+  DvceArray4D<Real> kbg_ell;   // keff_bg: ln(psi/psi0) on all cells (its FD gradient)
+  // <dyn_grmhd> trace_diag_every (default 1): TRD lines, per stage, rho dV-weighted sums of R, |T|
+  // in the bands rho >= 0.5, 0.1, 0.01 trace_diag_rhoc (default 3.24e-4); 0 = none
+  int trace_every = 1;
+  Real trace_rhoc = 3.24e-4;
+  Real trace_rmin = 2.0, trace_rmax = 200.0;   // <dyn_grmhd> trace_diag_rmin / _rmax (TRR)
+  // kf_prev holds the previous stage's metric for the current MeshBlocks (KillingFullStage's test)
+  bool KfPrevValid() const;
+  bool KfRst() const {
+    return (energy_variable == EnergyVariable::killing_full && kf_dtg) || TskSolChord();
+  }
+  // a restart whose restart_state block was not applied (restart_state::ApplyStaged)
+  void RestartStateIgnored() { kf_bres_stale = KfRst(); }
+  int kill_stage = 0;             // the RK stage of the current killing source call
+
+  // <mhd> tau_budget_every (R-184 items 1-4; dyn_grmhd_taubudget.cpp): the per-cell tau
+  // budget against Valencia's update from the same state, binned (density band x surface /
+  // interior, or r_iso shells), one KTB line per stage. Diagnostic only: separate kernels
+  // around the unchanged source kernels; 0 (default) allocates and runs nothing.
+  int tb_every = 0;
+  bool tb_shells = false;           // tau_budget_bins = shells (else star)
+  Real tb_rhoc = 3.24e-4, tb_rstar = 0.677, tb_tmin = -1.0e30, tb_tmax = 1.0e30;
+  int tb_stage = 0;                 // the RK stage (CalcFluxes)
+  int tb_key = -1;                  // nmb_created + nmb_deleted at the last stage-1 report
+  bool tb_regrid = false;           // a regrid since the last stage-1 report
+  DvceArray5D<Real> tb_c;           // per-cell values (interior)
+  DvceArray5D<Real> tb_fv;          // the Valencia tau face flux, per direction (copy)
+  DvceArray5D<Real> tb_u;           // sqrt(g) E, sqrt(g) S_k at cells, ghosts included
+  bool TauBudgetOn() const;         // this cycle reports (tau_budget_every, the t window)
+  void TauBudgetFaceCopy();         // KillingFaceFluxes, before the T transform
+
+  // <mhd> riemann_frame = boosted (R-168, "level R"; rsolvers/hlle_frame_dyn_grmhd.hpp,
+  // dyn_grmhd_riemann_frame.cpp): HLLE in the frame of U at each face. rsolver_method is
+  // then hlle_frame_dyngr; the default (eulerian) leaves every kernel unchanged.
+  bool rf_on = false;               // riemann_frame = boosted
+  bool rf_ugrid = false;            // riemann_frame_U = grid_rest (else eulerian, U = n)
+  bool rf_r2 = false;               // riemann_frame_recon = R2 (else R1)
+  bool rf_hllc = false;             // riemann_frame_solver = hllc (else hlle; FOFC: hlle)
+  bool rf_bchecked = false;         // the B = 0 check done
+  DvceArray1D<int> rf_err;          // (0): faces where grid_rest U is not timelike
+  DvceArray5D<Real> rf_vsave;       // R2: w0's velocity during the sweeps
+  void RFrameCellVelocities(int dir);   // R2: w0 velocity -> u^(i), cell reference tetrad
+  void RFrameRestoreVelocities();       // R2: w0 velocity back (bitwise)
+  void RFrameStageCheck(bool after);    // before: B = 0 (once), err reset; after: err
 
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
@@ -202,11 +436,12 @@ class DynGRMHDPS : public DynGRMHD {
   // Dynamical EOS
   PrimitiveSolverHydro<EOSPolicy, ErrorPolicy> eos;
 
-  // CalculateFluxes function templated over Riemann Solvers
-  template<DynGRMHD_RSolver T>
+  // CalculateFluxes function templated over Riemann Solvers; FM: the face metric of
+  // <dyn_grmhd> metric_terms != cell (FM = false is the present scheme)
+  template<DynGRMHD_RSolver T, bool FM = false>
   TaskStatus CalcFluxes(Driver *d, int stage);
 
-  template<DynGRMHD_RSolver T>
+  template<DynGRMHD_RSolver T, bool FM = false>
   void FOFC(Driver *d, int stage);
 
   // functions
@@ -227,11 +462,14 @@ class DynGRMHDPS : public DynGRMHD {
   }
   virtual void PrimToConInit(int is, int ie, int js, int je, int ks, int ke);
   int RestartStateVars() override;
+  std::string RestartStateLayout() override;
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
+  void DualEnergyRestartInit() override;
   void SaveRestartScalars(ParameterInput *pin) override {
     eos.SaveTier3State(pin);
     eos.SaveDualEnergyTotal(pin);
+    SaveKillingScalars(pin);
   }
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;
@@ -247,10 +485,37 @@ class DynGRMHDPS : public DynGRMHD {
 
   // dyn_grmhd_newdt.cpp
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage);
+  // riemann_frame = boosted: the CFL from the frame speeds (dyn_grmhd_riemann_frame.cpp)
+  TaskStatus NewTimeStepFrame(Driver *pdrive, int stage);
 
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                         const Real dt, DvceArray5D<Real> &u0);
+  // metric_terms = analytic_bg | wellbalanced (dyn_grmhd_metric.cpp)
+  template<int NGHOST>
+  void AddCoordTermsFM(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                       const Real dt, DvceArray5D<Real> &u0);
+  // energy_variable = killing_t1 | killing_ta (dyn_grmhd_killing.cpp): after
+  // AddCoordTermsEOS, the tau slot's update replaced by the one implied by the T update
+  template<int NGHOST>
+  void AddKillingTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                       const Real dt, DvceArray5D<Real> &u0);
+  // energy_variable = killing_full (R-165 item 4; dyn_grmhd_killing.cpp)
+  template<int NGHOST>
+  void AddKillingFullTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                           const Real dt, DvceArray5D<Real> &u0);
+  // <dyn_grmhd> tau_source_K != xcfc (R-194; dyn_grmhd_killing.cpp): after AddCoordTermsEOS,
+  // rhs(tau) += dt sqrt(g) (the variant's source - alpha S^ij K^XCFC_ij)
+  template<int NGHOST>
+  void AddTauSourceK(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                     const Real dt, DvceArray5D<Real> &u0);
+  // <mhd> tau_budget_every (dyn_grmhd_taubudget.cpp): before AddKillingTerms (the tau slot
+  // snapshot; killing_full: the ADM-consistency term A; comoving t1: sqrt(g) E, S_k), and
+  // after it (the per-cell budget, binned and reported)
+  template<int NGHOST>
+  void TauBudgetPre(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                    const DvceArray5D<Real> &u0);
+  void TauBudgetPost(const DvceArray5D<Real> &w0, const Real dt, const DvceArray5D<Real> &u0);
 };
 
 // Factory function for generating DynGRMHD based on parameter input.

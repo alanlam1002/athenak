@@ -243,4 +243,79 @@ void AssembleLapseShiftK(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi
   });
 }
 
+// <cfc> residual_scale (R-140 item 6, D7): the same two assemblies with the solved
+// residual scaled by f -- psi = psi0 + f*dpsi, alpha*psi = (alpha*psi)0 + f*d(alpha*psi),
+// beta = beta0 + f*b, Ahat = Ahat0 + f*(Ahat - Ahat0). Separate kernels: the unscaled
+// ones above stay exactly as they were, and CFC calls these only when f != 1. At f = 0
+// every product f*x is a signed zero, so the metric is the background bitwise.
+
+void AssembleConformalMetricScaled(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                                   const DvceArray5D<Real> &u_psi0, bool with_ghosts,
+                                   Real f) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int gi = with_ghosts ? indcs.ng : 0;
+  const int gj = (with_ghosts && indcs.nx2 > 1) ? indcs.ng : 0;
+  const int gk = (with_ghosts && indcs.nx3 > 1) ? indcs.ng : 0;
+  const int is = indcs.is - gi, ie = indcs.ie + gi;
+  const int js = indcs.js - gj, je = indcs.je + gj;
+  const int ks = indcs.ks - gk, ke = indcs.ke + gk;
+  int nmb = pmbp->nmb_thispack;
+  auto &adm = pmbp->padm->adm;
+
+  par_for("cfc_assemble_conformal_metric_rs", DevExeSpace(),
+          0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real psi_val = u_psi0(m,0,k,j,i) + f*delta_psi(m,0,k,j,i);
+    Real psi4 = psi_val*psi_val*psi_val*psi_val;
+    adm.psi4(m,k,j,i) = psi4;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        adm.g_dd(m,a,b,k,j,i) = (a == b ? psi4 : 0.0);
+      }
+    }
+  });
+}
+
+void AssembleLapseShiftKScaled(MeshBlockPack *pmbp, const DvceArray5D<Real> &delta_psi,
+                               const DvceArray5D<Real> &delta_alpha_psi,
+                               const DvceArray5D<Real> &u_psi0,
+                               const DvceArray5D<Real> &u_alpha0_psi0,
+                               const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a_dd,
+                               const AthenaTensor<Real, TensorSymm::SYM2, 3, 2> &a0_dd,
+                               const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta_u,
+                               const AthenaTensor<Real, TensorSymm::NONE, 3, 1> &beta0_u,
+                               Real alpha_floor, const Real frame_vel_u[3], Real f) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+  int nmb = pmbp->nmb_thispack;
+  auto &adm = pmbp->padm->adm;
+  const Real gx0 = frame_vel_u[0], gx1 = frame_vel_u[1], gx2 = frame_vel_u[2];
+  const bool gauge = (gx0 != 0.0) || (gx1 != 0.0) || (gx2 != 0.0);
+
+  par_for("cfc_assemble_lapse_shift_k_rs", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real psi_val = u_psi0(m,0,k,j,i) + f*delta_psi(m,0,k,j,i);
+    Real ipsi2 = 1.0/(psi_val*psi_val);
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) {
+        Real a0 = a0_dd(m,a,b,k,j,i);
+        adm.vK_dd(m,a,b,k,j,i) = (a0 + f*(a_dd(m,a,b,k,j,i) - a0))*ipsi2;
+      }
+    }
+    // the same floor as AssembleLapseShiftK
+    Real alpha_val = (u_alpha0_psi0(m,0,k,j,i) + f*delta_alpha_psi(m,0,k,j,i))/psi_val;
+    adm.alpha(m,k,j,i) = (alpha_val < alpha_floor) ? alpha_floor : alpha_val;
+    for (int a = 0; a < 3; ++a) {
+      adm.beta_u(m,a,k,j,i) = beta0_u(m,a,k,j,i) + f*beta_u(m,a,k,j,i);
+    }
+    if (gauge) {
+      adm.beta_u(m,0,k,j,i) += gx0;
+      adm.beta_u(m,1,k,j,i) += gx1;
+      adm.beta_u(m,2,k,j,i) += gx2;
+    }
+  });
+}
+
 }  // namespace cfc

@@ -636,6 +636,9 @@ void Mesh::NewTimeStep(const Real tlim) {
   MPI_Allreduce(MPI_IN_PLACE, &dt, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
 #endif
 
+  // <time> dt_max: a cap after the (rank-reduced) CFL minimum, so every rank applies it alike
+  if (dt_max > 0.0) dt = std::min(dt, dt_max);
+
   // limit last time step to stop at tlim *exactly*
   if ( (time < tlim) && ((time + dt) > tlim) ) {dt = tlim - time;}
 

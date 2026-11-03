@@ -30,6 +30,7 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "z4c/tmunu.hpp"
+#include "cfc/cfc.hpp"
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
 
@@ -137,6 +138,67 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
               << "' not implemented for GR dynamics" << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  // <mhd> riemann_frame (R-168, user-approved 2026-10-30): eulerian (default, HLLE_DYNGR) |
+  // boosted (HLLE in U's frame at each face, rsolvers/hlle_frame_dyn_grmhd.hpp). Read without
+  // GetOrAdd, so a default input's parameter copy is unchanged.
+  const std::string rfr = pin->DoesParameterExist("mhd", "riemann_frame") ?
+                          pin->GetString("mhd", "riemann_frame") : "eulerian";
+  if (rfr == "boosted") {
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> riemann_frame = boosted needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    need(rsolver_method == DynGRMHD_RSolver::hlle_dyngr, "<mhd> rsolver = hlle");
+    const std::string ru = pin->DoesParameterExist("mhd", "riemann_frame_U") ?
+                           pin->GetString("mhd", "riemann_frame_U") : "eulerian";
+    const std::string rr = pin->DoesParameterExist("mhd", "riemann_frame_recon") ?
+                           pin->GetString("mhd", "riemann_frame_recon") : "R1";
+    need(ru == "eulerian" || ru == "grid_rest", "riemann_frame_U = eulerian | grid_rest");
+    // riemann_frame_solver (R-170 item 3): hlle (default) | hllc; FOFC's fallback stays hlle
+    const std::string rs = pin->DoesParameterExist("mhd", "riemann_frame_solver") ?
+                           pin->GetString("mhd", "riemann_frame_solver") : "hlle";
+    need(rs == "hlle" || rs == "hllc", "riemann_frame_solver = hlle | hllc");
+    rf_hllc = (rs == "hllc");
+    need(rr == "R1" || rr == "R2", "riemann_frame_recon = R1 | R2");
+    rf_on = true;
+    rf_ugrid = (ru == "grid_rest");
+    rf_r2 = (rr == "R2");
+    rsolver_method = DynGRMHD_RSolver::hlle_frame_dyngr;
+    rf_err = DvceArray1D<int>("rf_err", 2);
+    if (rf_r2) {
+      auto &indcs = pmy_pack->pmesh->mb_indcs;
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(rf_vsave, nmb, 3, (indcs.nx3 > 1) ? indcs.nx3 + 2*indcs.ng : 1,
+                      (indcs.nx2 > 1) ? indcs.nx2 + 2*indcs.ng : 1, indcs.nx1 + 2*indcs.ng);
+    }
+    // U3: the ghost/owner probe of the face fluxes (KillingFaceProbe, Valencia rows)
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> riemann_frame = boosted, riemann_frame_U = " << ru
+                << ", riemann_frame_recon = " << rr << ", riemann_frame_solver = " << rs
+                << std::endl;
+    }
+  } else if (pin->DoesParameterExist("mhd", "riemann_frame_solver") ||
+             pin->DoesParameterExist("mhd", "riemann_frame_U") ||
+             pin->DoesParameterExist("mhd", "riemann_frame_recon")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> riemann_frame_solver/_U/_recon need riemann_frame = boosted" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (rfr != "eulerian" && rfr != "boosted") {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> riemann_frame = '" << rfr << "' (eulerian or boosted)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   std::string fofc = pin->GetOrAddString("mhd", "fofc_method", "llf");
   if (fofc.compare("llf") == 0) {
     fofc_method = DynGRMHD_RSolver::llf_dyngr;
@@ -203,6 +265,479 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   }
   pmclose = new mclose::MassClosure(pp, pin);
   if (!pmclose->on) { delete pmclose; pmclose = nullptr; }
+
+  // <dyn_grmhd> metric_terms (R-140 item 1; metric_faces.hpp). Default cell: nothing below.
+  std::string mt = pin->GetOrAddString("dyn_grmhd", "metric_terms", "cell");
+  if (mt == "cell") {
+    metric_terms = MetricTerms::cell;
+  } else if (mt == "analytic_bg") {
+    metric_terms = MetricTerms::analytic_bg;
+  } else if (mt == "wellbalanced") {
+    metric_terms = MetricTerms::wellbalanced;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<dyn_grmhd> metric_terms = '" << mt << "' (cell, analytic_bg or "
+              << "wellbalanced)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  // <dyn_grmhd> killing_momentum_bg (R-178): cell (default: the momentum source as
+  // metric_terms gives it) or face_diff (killing_t1 + analytic_bg only, checked below)
+  if (pin->DoesParameterExist("dyn_grmhd", "killing_momentum_bg")) {
+    const std::string kmb = pin->GetString("dyn_grmhd", "killing_momentum_bg");
+    if (kmb != "cell" && kmb != "face_diff") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> killing_momentum_bg = '" << kmb << "' (cell or face_diff)"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    kill_mom_fd = (kmb == "face_diff");
+  }
+  if (metric_terms != MetricTerms::cell) {
+    face_residual_interp = pin->GetOrAddInteger("dyn_grmhd", "face_residual_interp", 4);
+    if (face_residual_interp != 2 && face_residual_interp != 4) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> face_residual_interp must be 2 or 4" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (!pin->GetOrAddBoolean("cfc", "puncture_enabled", false)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> metric_terms = " << mt << " needs the CFC trumpet "
+                << "background (<cfc> puncture_enabled = true)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    if (indcs.ng < 2) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> metric_terms needs nghost >= 2" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    int n1 = indcs.nx1 + 2*(indcs.ng);
+    int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int n3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(fm_res, nmb, 5, n3, n2, n1);
+    Kokkos::realloc(fm_x1, nmb, kFmN, n3, n2, n1 + 1);
+    if (n2 > 1) Kokkos::realloc(fm_x2, nmb, kFmN, n3, n2 + 1, n1);
+    if (n3 > 1) Kokkos::realloc(fm_x3, nmb, kFmN, n3 + 1, n2, n1);
+    // the table: w = sqrt(r_iso/M) in [0, 64] (r_iso <= 4096 M), h = 0.0025 (quintic
+    // Hermite; 2e-16 relative in rho and rho - 3/2, mpmath check in c122)
+    BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                      pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    fm_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "face_probe_cycles", 0);
+    const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                         "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+    for (int q = 0; q < 6; ++q) {
+      fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<dyn_grmhd> metric_terms = " << mt << ", face_residual_interp = "
+                << face_residual_interp << ", trumpet table n = " << ttab.n << std::endl;
+    }
+    const int nt = pin->GetOrAddInteger("dyn_grmhd", "metric_table_test", 0);
+    if (nt > 0) TrumpetTableTest(nt);
+  }
+
+  // <mhd> energy_variable (R-155 item 1, user-approved 2026-10-29; dyn_grmhd_killing.cpp).
+  // Read without GetOrAdd, so a default (valencia) input's parameter copy is unchanged.
+  std::string ev = pin->DoesParameterExist("mhd", "energy_variable") ?
+                   pin->GetString("mhd", "energy_variable") : "valencia";
+  if (ev == "valencia") {
+    energy_variable = EnergyVariable::valencia;
+  } else if (ev == "killing_t1") {
+    energy_variable = EnergyVariable::killing_t1;
+  } else if (ev == "killing_ta") {
+    energy_variable = EnergyVariable::killing_ta;
+  } else if (ev == "killing_full") {
+    energy_variable = EnergyVariable::killing_full;
+  } else if (ev == "killing_fz") {
+    // R-190 item 1 (KF_z): killing_full's path with the weights frozen per stage (arm (i)) and
+    // the spatial source s_z (AddKillingFullTerms); no chord, no rate, no d_t of anything
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
+  } else if (ev == "killing_fcfc") {
+    // R-191 item 1 (KF_CFC): KF_z's path with the source s_CFC = -(alpha/3) S D_k beta'^k
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
+    kf_fcfc = true;
+  } else if (ev == "killing_fcfc_ta") {
+    // R-221 item 1 (KF_CFC-ta-bg): KF_CFC with T = sqrt(g) (alpha tau - beta'^k S_k) (w_D = alpha,
+    // the rest-mass work explicit) and the analytic background (kf_bgw, below)
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
+    kf_fcfc = true;
+    kf_rm = true;
+    kf_bgw = true;
+  } else {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
+              << "killing_ta, killing_full, killing_fz, killing_fcfc or killing_fcfc_ta)"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (kill_mom_fd && (energy_variable != EnergyVariable::killing_t1 ||
+                      metric_terms != MetricTerms::analytic_bg)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<dyn_grmhd> killing_momentum_bg = face_diff needs <mhd> energy_variable = "
+              << "killing_t1 and <dyn_grmhd> metric_terms = analytic_bg" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (energy_variable == EnergyVariable::killing_full) {
+    // R-165 item 4: the weights are the current CFC metric's (alpha, beta'), at faces the
+    // Riemann solver's own face metric, so no background, frame or puncture condition
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> energy_variable = killing_full needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    need(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    need(pmy_pack->pmesh->three_d, "a 3D mesh");
+    need(pin->DoesBlockExist("cfc"), "CFC (the source assumes gamma_ij = psi^4 delta_ij)");
+    need(!pin->DoesParameterExist("mhd", "killing_weights"),
+         "no <mhd> killing_weights (its weights are the metric's)");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    need(indcs.ng >= 2, "nghost >= 2");
+    kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
+    need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz/fcfc (frozen weights)");
+    if (kf_bgw) {   // R-221: killing_fcfc_ta (its rest mass is explicit by definition)
+      need(!pin->DoesParameterExist("mhd", "killing_full_rest_mass"),
+           "no <mhd> killing_full_rest_mass with killing_fcfc_ta (explicit by definition)");
+      if (pin->DoesParameterExist("mhd", "killing_full_bg")) {   // read without GetOrAdd
+        const std::string kb = pin->GetString("mhd", "killing_full_bg");
+        need(kb == "analytic" || kb == "none", "killing_full_bg = analytic | none");
+        kf_bgw = (kb == "analytic");
+      }
+      if (kf_bgw) {
+        int nmbr = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+        Kokkos::realloc(kill_res, nmbr, 4, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+        Kokkos::realloc(kbg_ell, nmbr, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+        if (pin->DoesParameterExist("cfc", "puncture_enabled") &&
+            pin->GetBoolean("cfc", "puncture_enabled")) {   // the trumpet at faces and cells
+          BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                            pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+        }
+      }
+    }
+    // R-194 item 3: read without GetOrAdd, so an input without it is unchanged
+    if (!kf_rm && pin->DoesParameterExist("mhd", "killing_full_rest_mass")) {
+      const std::string rm = pin->GetString("mhd", "killing_full_rest_mass");
+      need(rm == "paired" || rm == "explicit", "killing_full_rest_mass = paired | explicit");
+      kf_rm = (rm == "explicit");
+      need(!kf_rm || (kf_dtg && !kf_fz),
+           "killing_full_dtg = true (arm ii) with killing_full_rest_mass = explicit");
+    }
+    auto cflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    if (kf_dtg) {
+      // R-174: the residual differenced between stage solves needs a solve every stage, a
+      // constant residual scale (the assembly CFC::AssembleADM uses; no ramp), and a
+      // background that moves only analytically (no puncture-mass update)
+      need(pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
+           "<cfc> solve_interval <= 0 with killing_full_dtg (a metric solve every stage)");
+      need(!pin->DoesParameterExist("cfc", "residual_scale_t1"),
+           "a constant <cfc> residual_scale (no residual_scale_t1 ramp) with killing_full_dtg");
+      need(!cflag("puncture_enabled") || cflag("freeze_puncture_mass"),
+           "<cfc> freeze_puncture_mass = true with a puncture and killing_full_dtg");
+      kf_bgmove = cflag("puncture_enabled") && cflag("puncture_moving");
+      if (kf_bgmove) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+      kf_split_every = pin->GetOrAddInteger("mhd", "killing_full_split_every", 0);
+      kf_split_rho = pin->GetOrAddReal("mhd", "killing_full_split_rho", 0.0);
+      kf_split_rmin = pin->GetOrAddReal("mhd", "killing_full_split_rmin", 0.0);
+      LoadKillingScalars(pin);
+    }
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {   // the ghost/owner probe of the T face flux
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                    indcs.nx1 + 2*indcs.ng);
+    if (kf_split_every > 0) {
+      // KFSPLIT: s_T background, residual (all cells, then the masked set), the background's
+      // chord effect (all, masked), and the masked L1 of (chord effect - analytic), of analytic;
+      // 8-16: the residual's d_t on the masked set (R-177 item 2); 17-22: the hole's work
+      // against its force (R-177 addendum; ReportKillingStage)
+      Kokkos::realloc(kill_scr, nmb, 23, indcs.nx3, indcs.nx2, indcs.nx1);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> energy_variable = killing_full, killing_full_dtg = "
+                << (kf_dtg ? "true (arm ii: d_t' g, the residual from the previous stage"
+                           : "false (arm i: d_t' g = 0")
+                << ((kf_dtg && kf_bgmove) ? ", the moving background analytic)" : ")")
+                << std::endl;
+    }
+  } else if (energy_variable != EnergyVariable::valencia) {
+    // the weights (alpha0, beta0) are the BH-frame Killing vector of a stationary background:
+    // the hole at rest on the grid and its mass frozen (the comoving version is not approved)
+    auto need = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> energy_variable = " << ev << " needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto flag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    // <mhd> killing_weights (R-158): trumpet (default: the hole's static background) or
+    // boost, (alpha0, beta0) = (1, xidot) with xidot the constant frame velocity
+    // (<cfc> frame_vel*): d_t' of flat comoving coordinates, T = sqrt(g)(E - xidot.S - D)
+    const std::string kw = pin->DoesParameterExist("mhd", "killing_weights") ?
+                           pin->GetString("mhd", "killing_weights") : "trumpet";
+    need(kw == "trumpet" || kw == "boost" || kw == "comoving",
+         "<mhd> killing_weights = trumpet, boost or comoving");
+    kill_boost = (kw == "boost");
+    kill_comov = (kw == "comoving");
+    if (kill_comov) {
+      // R-175: the trumpet weights at the comoving hole (any frame: constant, accelerated or
+      // the controller), or (1, 0) without a puncture (then Valencia to round-off, gate G1);
+      // killing_ta too (R-188 item 5: D's weight alpha0 moves with the hole)
+      need(energy_variable == EnergyVariable::killing_t1 ||
+           energy_variable == EnergyVariable::killing_ta,
+           "energy_variable = killing_t1 or killing_ta with killing_weights = comoving");
+      kill_flat = !flag("puncture_enabled");
+      if (!kill_flat) {
+        need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+        need(metric_terms == MetricTerms::analytic_bg,
+             "<dyn_grmhd> metric_terms = analytic_bg with killing_weights = comoving");
+      }
+    } else {
+      need(!flag("frame_controller"), "a constant frame (<cfc> frame_controller = false)");
+    }
+    if (kill_comov) {
+    } else if (kill_boost) {
+      need(!flag("puncture_enabled"), "no puncture (killing_weights = boost: flat background)");
+      need(!pin->DoesParameterExist("cfc", "frame_accel1") &&
+           !pin->DoesParameterExist("cfc", "frame_accel2") &&
+           !pin->DoesParameterExist("cfc", "frame_accel3"),
+           "a constant frame velocity (no <cfc> frame_accel*)");
+    } else {
+      need(flag("puncture_enabled"), "<cfc> puncture_enabled = true (the trumpet background)");
+      need(!flag("puncture_moving"), "the BH frame (<cfc> puncture_moving = false)");
+      need(flag("freeze_puncture_mass"), "<cfc> freeze_puncture_mass = true");
+    }
+    // R-171: metric_terms = analytic_bg | wellbalanced allowed (the analytic background at faces;
+    // AddKillingTerms then takes the metric derivatives AddCoordTermsFM applied)
+    need(metric_terms == MetricTerms::cell || !kill_boost,
+         "<dyn_grmhd> metric_terms = cell with killing_weights = boost");
+    need(!kill_mom_fd || !(kill_boost || kill_flat),
+         "the trumpet weights with <dyn_grmhd> killing_momentum_bg = face_diff");
+    need(pmy_pack->pmesh->three_d, "a 3D mesh");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    need(indcs.ng >= 2, "nghost >= 2");
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(kill_res, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                    indcs.nx1 + 2*indcs.ng);
+    if (kill_comov) {   // the weight-motion source per cell (KCLOSE item "motion")
+      Kokkos::realloc(kill_scr, nmb, 1, indcs.nx3, indcs.nx2, indcs.nx1);
+    }
+    BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                      pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    kill_probe_cycles = pin->GetOrAddInteger("dyn_grmhd", "killing_probe_cycles", 0);
+    if (kill_probe_cycles > 0) {
+      const char *bk[6] = {"face_probe_xmin", "face_probe_xmax", "face_probe_ymin",
+                           "face_probe_ymax", "face_probe_zmin", "face_probe_zmax"};
+      for (int q = 0; q < 6; ++q) {
+        fm_probe_box[q] = pin->GetOrAddReal("dyn_grmhd", bk[q], (q % 2) ? 1.0e30 : -1.0e30);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> energy_variable = " << ev << ", killing_weights = " << kw
+                << (kill_flat ? " (no puncture: weights (1, 0))" : "")
+                << " (trumpet table n = " << ttab.n << ")" << std::endl;
+    }
+  }
+
+  // <mhd> killing_source_diag (R-165 item 3(a), dyn_grmhd_killing.cpp): trumpet weights only;
+  // a Valencia run takes w from <mhd> killing_closure (t1 | ta)
+  kill_diag = pin->DoesParameterExist("mhd", "killing_source_diag") &&
+              pin->GetBoolean("mhd", "killing_source_diag");
+  if (kill_diag) {
+    auto dneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> killing_source_diag needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto dflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    dneed(!kill_boost, "trumpet weights (not killing_weights = boost)");
+    dneed(dflag("puncture_enabled") && !dflag("puncture_moving"),
+          "the BH frame (<cfc> puncture_enabled = true, puncture_moving = false)");
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    dneed(pmy_pack->pmesh->three_d && indcs.ng >= 2, "a 3D mesh with nghost >= 2");
+    if (energy_variable == EnergyVariable::valencia) {
+      const std::string kc = pin->DoesParameterExist("mhd", "killing_closure") ?
+                             pin->GetString("mhd", "killing_closure") : "";
+      dneed(kc == "t1" || kc == "ta", "<mhd> killing_closure = t1 | ta (a Valencia run)");
+      kill_diag_ta = (kc == "ta");
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(kill_res, nmb, 5, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+      BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                        pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+    } else {
+      kill_diag_ta = (energy_variable == EnergyVariable::killing_ta);
+    }
+    kill_diag_every = pin->GetOrAddInteger("mhd", "killing_source_diag_every", 25);
+    kdiag = DvceArray2D<Real>("kdiag", kKdBins, kKdComp);
+  }
+
+  // <mhd> dual_energy_restart_init (R-209, user-approved 2026-11-02): see dyn_grmhd.hpp
+  if (pin->DoesParameterExist("mhd", "dual_energy_restart_init")) {
+    de_restart_init = pin->GetBoolean("mhd", "dual_energy_restart_init");
+  }
+  // <dyn_grmhd> tau_source_K (R-194 items 1, 2, 5, user-approved 2026-10-31;
+  // dyn_grmhd_killing.cpp AddTauSourceK). Read without GetOrAdd: an input without it is unchanged.
+  if (pin->DoesParameterExist("dyn_grmhd", "tau_source_K")) {
+    const std::string tk = pin->GetString("dyn_grmhd", "tau_source_K");
+    auto kneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> tau_source_K = " << tk << " needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    kneed(tk == "xcfc" || tk == "keff" || tk == "kcfc" || tk == "ktr" || tk == "kcfc_bg" ||
+          tk == "keff_bg", "one of xcfc, keff, kcfc, ktr, kcfc_bg, keff_bg");
+    tau_source_k = (tk == "keff") ? TauSourceK::keff : ((tk == "kcfc") ? TauSourceK::kcfc :
+                   ((tk == "ktr") ? TauSourceK::ktr : ((tk == "kcfc_bg") ? TauSourceK::kcfc_bg :
+                   ((tk == "keff_bg") ? TauSourceK::keff_bg : TauSourceK::xcfc))));
+  }
+  // <dyn_grmhd> trace_diag, trace_diag_ahat (R-197 item 1 and addendum, user-approved
+  // 2026-11-01; diagnostics only). Read without GetOrAdd: an input without them is unchanged.
+  if (pin->DoesParameterExist("dyn_grmhd", "trace_diag")) {
+    trace_diag = pin->GetBoolean("dyn_grmhd", "trace_diag");
+  }
+  if (pin->DoesParameterExist("dyn_grmhd", "trace_diag_ahat")) {
+    const std::string ta = pin->GetString("dyn_grmhd", "trace_diag_ahat");
+    if ((ta != "xcfc" && ta != "cfc_lagged") || (ta == "cfc_lagged" && !trace_diag) ||
+        (ta == "cfc_lagged" && pin->DoesParameterExist("cfc", "puncture_enabled") &&
+         pin->GetBoolean("cfc", "puncture_enabled"))) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> trace_diag_ahat = xcfc | cfc_lagged; cfc_lagged needs "
+                << "trace_diag = true and no puncture" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    trace_ahat = (ta == "cfc_lagged");
+  }
+  if (trace_diag) {
+    trace_every = pin->GetOrAddInteger("dyn_grmhd", "trace_diag_every", 1);
+    trace_rhoc = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rhoc", 3.24e-4);
+    trace_rmin = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rmin", 2.0);
+    trace_rmax = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rmax", 200.0);
+  }
+  if (tau_source_k != TauSourceK::xcfc || trace_diag) {
+    auto kneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> tau_source_K needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto kflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    kneed(energy_variable == EnergyVariable::valencia, "<mhd> energy_variable = valencia");
+    kneed(metric_terms == MetricTerms::cell, "<dyn_grmhd> metric_terms = cell");
+    kneed(pin->DoesBlockExist("cfc"), "CFC (gamma_ij = psi^4 delta_ij)");
+    kneed(pmy_pack->pmesh->three_d && indcs.ng >= 2, "a 3D mesh with nghost >= 2");
+    kneed(!kill_diag, "no <mhd> killing_source_diag");
+    if (TskChord()) {
+      // the actual d_t ln psi: arm (ii)'s residual chord and the background's analytic rate
+      // (as killing_full_dtg, dyn_grmhd.cpp above), as a source term only
+      kneed(pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
+            "<cfc> solve_interval <= 0 (a metric solve every stage)");
+      kneed(!pin->DoesParameterExist("cfc", "residual_scale_t1"),
+            "a constant <cfc> residual_scale (no residual_scale_t1 ramp)");
+      kneed(!kflag("puncture_enabled") || kflag("freeze_puncture_mass"),
+            "<cfc> freeze_puncture_mass = true with a puncture");
+      kf_bgmove = kflag("puncture_enabled") && kflag("puncture_moving");
+      if (kf_bgmove && ttab.n == 0) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+      // the restart's chord bookkeeping only where the restart carries kf_prev (KfRst): a
+      // trace_diag-only run starts its chord fresh (kf_have_prev false: R unavailable)
+      if (KfRst()) LoadKillingScalars(pin);
+      int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+      Kokkos::realloc(kf_prev, nmb, 10, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+      if (trace_diag) {
+        Kokkos::realloc(tr_diag, nmb, kTrN, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      const char *nm[6] = {"xcfc", "keff", "kcfc", "ktr", "kcfc_bg", "keff_bg"};
+      std::cout << "<dyn_grmhd> tau_source_K = " << nm[static_cast<int>(tau_source_k)]
+                << (TskChord() ? (kf_bgmove ? " (d_t ln psi: the residual chord + the moving "
+                                              "background's analytic rate)"
+                                            : " (d_t ln psi: the chord of psi^4)") : "")
+                << (trace_diag ? "; trace_diag (R, T_ij -> mhd_trace_diag)" : "")
+                << (trace_ahat ? "; trace_diag_ahat = cfc_lagged (psi, lapse: Ahat = psi^6 "
+                                 "(L beta)/(2 alpha), the previous stage's)" : "")
+                << std::endl;
+    }
+  }
+
+  // <mhd> tau_budget_every (R-184 items 1-4, user-approved 2026-10-30; diagnostics only,
+  // dyn_grmhd_taubudget.cpp). Read without GetOrAdd: an input without it is unchanged.
+  if (pin->DoesParameterExist("mhd", "tau_budget_every")) {
+    tb_every = pin->GetInteger("mhd", "tau_budget_every");
+  }
+  if (tb_every > 0) {
+    auto tneed = [&](bool ok, const char *what) {
+      if (ok) return;
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> tau_budget_every needs " << what << std::endl;
+      std::exit(EXIT_FAILURE);
+    };
+    auto tflag = [&](const char *key) {
+      return pin->DoesParameterExist("cfc", key) && pin->GetBoolean("cfc", key);
+    };
+    const std::string bins = pin->GetOrAddString("mhd", "tau_budget_bins", "star");
+    tneed(bins == "star" || bins == "shells", "<mhd> tau_budget_bins = star | shells");
+    tb_shells = (bins == "shells");
+    tb_rhoc = pin->GetOrAddReal("mhd", "tau_budget_rhoc", 3.24e-4);
+    tb_rstar = pin->GetOrAddReal("mhd", "tau_budget_rstar", 0.677);
+    tb_tmin = pin->GetOrAddReal("mhd", "tau_budget_tmin", -1.0e30);
+    tb_tmax = pin->GetOrAddReal("mhd", "tau_budget_tmax", 1.0e30);
+    auto &indcs = pmy_pack->pmesh->mb_indcs;
+    tneed(pmy_pack->pmesh->three_d, "a 3D mesh");
+    tneed(!kill_boost && !kill_flat, "trumpet weights (not killing_weights = boost / flat)");
+    tneed(!tb_shells || tflag("puncture_enabled"), "a puncture with tau_budget_bins = shells");
+    if (energy_variable == EnergyVariable::killing_full) {
+      // A's background part: the trumpet table (built for a moving background already)
+      tneed(tflag("puncture_enabled"), "a puncture with killing_full");
+      if (ttab.n == 0) {
+        BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                          pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+      }
+    }
+    int nmb = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+    Kokkos::realloc(tb_c, nmb, kTbNc, indcs.nx3, indcs.nx2, indcs.nx1);
+    if (energy_variable != EnergyVariable::valencia) {
+      Kokkos::realloc(tb_fv, nmb, 3, indcs.nx3 + 1, indcs.nx2 + 1, indcs.nx1 + 1);
+    }
+    if (kill_comov) {
+      Kokkos::realloc(tb_u, nmb, 4, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                      indcs.nx1 + 2*indcs.ng);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "<mhd> tau_budget_every = " << tb_every << ", bins = " << bins
+                << ", t in [" << tb_tmin << ", " << tb_tmax << "]" << std::endl;
+    }
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -227,13 +762,33 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
 
   // Select which CalculateFlux function to add based on rsolver_method.
   // CalcFlux requires metric in flux - must happen before z4ctoadm updates the metric
-  if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
+  if (metric_terms != MetricTerms::cell) {   // the face metric (metric_faces.hpp)
+    if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
+      pnr->QueueTask(
+        &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::llf_dyngr, true>,
+        this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else if (rsolver_method == DynGRMHD_RSolver::hlle_dyngr) {
+      pnr->QueueTask(
+        &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_dyngr, true>,
+        this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else if (rsolver_method == DynGRMHD_RSolver::hlle_frame_dyngr) {
+      pnr->QueueTask(&DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<
+                       DynGRMHD_RSolver::hlle_frame_dyngr, true>,
+                     this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+    } else {
+      abort();
+    }
+  } else if (rsolver_method == DynGRMHD_RSolver::llf_dyngr) {
     pnr->QueueTask(
            &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::llf_dyngr>,
            this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
   } else if (rsolver_method == DynGRMHD_RSolver::hlle_dyngr) {
     pnr->QueueTask(
            &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_dyngr>,
+           this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
+  } else if (rsolver_method == DynGRMHD_RSolver::hlle_frame_dyngr) {
+    pnr->QueueTask(
+           &DynGRMHDPS<EOSPolicy, ErrorPolicy>::CalcFluxes<DynGRMHD_RSolver::hlle_frame_dyngr>,
            this, MHD_Flux, "MHD_Flux", Task_Run, {MHD_CopyU});
   } else { // put more rsolvers here
     abort();
@@ -477,7 +1032,22 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
   auto *pmhd = pmy_pack->pmhd;
   const int nw = pmhd->w0.extent_int(1);
   const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
-  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0);
+  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 13 : 0);
+}
+
+//! the same variables as named groups (restart_state.hpp: the file's layout, so a later
+//! binary maps them by name)
+template<class EOSPolicy, class ErrorPolicy>
+std::string DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateLayout() {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nw = pmhd->w0.extent_int(1);
+  const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
+  std::string s = "dyngr.w0:" + std::to_string(nw);
+  if (nflag > 0) s += ",dyngr.flag:" + std::to_string(nflag);
+  s += ",dyngr.bcc0:3,dyngr.temp:1";
+  if (eos.de_persist > 1) s += ",dyngr.streak:1";
+  if (KfRst()) s += ",dyngr.kfprev:10,dyngr.kfbres:3";   // killing_full arm (ii), R-174 (b)
+  return s;
 }
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -516,6 +1086,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       dst(m, nn, k, j, i) = have ? static_cast<Real>(stk(m, k, j, i)) : 0.0;
     });
+    n += 1;
+  }
+  if (KfRst()) {   // kf_prev (zero before the first stage: kf_have_prev says so)
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 10), all, all, all),
+                      Kokkos::subview(kf_prev, mb, all, all, all, all));
+    n += 10;
+    // CFC's residual shift u_beta (the moving-background chord's current end): CFC keeps only
+    // its multigrid potentials, and a restart has no solve before the first stage (driver.cpp)
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 3), all, all, all),
+                      Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all));
   }
 }
 
@@ -555,6 +1135,73 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       stk(m, k, j, i) = static_cast<int>(src(m, nn, k, j, i));
     });
+    n += 1;
+  }
+  if (KfRst()) {   // a restart from before R-174 has no group: zero-filled, and kf_have_prev
+    Kokkos::deep_copy(Kokkos::subview(kf_prev, mb, all, all, all, all),   // (absent) = false
+                      Kokkos::subview(src, all, std::make_pair(n, n + 10), all, all, all));
+    n += 10;
+    Kokkos::deep_copy(Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
+    kf_rst_loaded = true;
+    kf_bres_stale = kf_pre_rst;   // the first stage's u_beta is no solve (KillingFull store)
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::DualEnergyRestartInit()
+//! \brief <mhd> dual_energy_restart_init (R-209): the K tracer of a dual-energy run restarted
+//! from a dual-energy-off file (same nscalars: the tracer's slot held a passive scalar), from
+//! the restored primitives on every cell (ghosts included, as restart_state restores them): Y = DualEnergyY(p/rho^gamma) (as PrimToCons, which also derives
+//! the tracer from P and rho), w0's tracer slot = Y and u0's = (densitized D) Y; no other
+//! variable changes; then the dual-energy flags from the restored primitives (UpdateShockFlags,
+//! as after every C2P). Prints the largest |K(Y)/(p/rho^gamma) - 1| over cells with rho > 0
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
+  auto *pmhd = pmy_pack->pmhd;
+  if (!eos.de_on || eos.de_idx < 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> dual_energy_restart_init needs <mhd> dual_energy = true" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  const int iy = pmhd->nmhd + eos.de_idx;
+  const Real kmax = eos.de_kmax, gam = eos.de_gamma, yp = eos.de_ypow;
+  auto &w0 = pmhd->w0;
+  auto &u0 = pmhd->u0;
+  const int nmb = pmy_pack->nmb_thispack;
+  par_for("de_restart_init", DevExeSpace(), 0, nmb-1, 0, w0.extent_int(2)-1,
+          0, w0.extent_int(3)-1, 0, w0.extent_int(4)-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real rho = w0(m, IDN, k, j, i);
+    const Real y = (rho > 0.0) ?
+        PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>::DualEnergyY(
+            w0(m, IPR, k, j, i)/pow(rho, gam), kmax, yp) : 0.0;
+    w0(m, iy, k, j, i) = y;
+    u0(m, iy, k, j, i) = u0(m, IDN, k, j, i)*y;
+  });
+  Real err = 0.0;
+  Kokkos::parallel_reduce("de_restart_init_chk",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExeSpace(), {0, 0, 0, 0},
+          {nmb, w0.extent_int(2), w0.extent_int(3), w0.extent_int(4)}),
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &e) {
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > 0.0)) return;
+    const Real kk = w0(m, IPR, k, j, i)/pow(rho, gam);
+    if (!(kk > 0.0) || kk > kmax) return;   // outside the tracer's range [0, kmax]: clipped
+    const Real kt = PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>::DualEnergyK(
+        w0(m, iy, k, j, i), kmax, yp);
+    e = fmax(e, fabs(kt/kk - 1.0));
+  }, Kokkos::Max<Real>(err));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &err, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  // the owner's shock flags from the restored primitives (as after a C2P): a DE-off file has
+  // no dyngr.flag, and the restored path runs no C2P before the first stage
+  eos.UpdateShockFlags();
+  if (global_variable::my_rank == 0) {
+    std::cout << "DEINIT dual_energy_restart_init: K tracer set from p/rho^gamma on every cell "
+              << "(Y = (K/" << kmax << ")^" << yp << "); max |K(Y)/(p/rho^gamma) - 1| = "
+              << err << std::endl;
   }
 }
 
@@ -592,14 +1239,58 @@ template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &prim,
     const DvceArray5D<Real> &bcc,
     const Real dt, DvceArray5D<Real> &rhs, int nghost) {
-  switch (nghost) {
-    case 2: AddCoordTermsEOS<2>(prim, bcc, dt, rhs);
-            break;
-    case 3: AddCoordTermsEOS<3>(prim, bcc, dt, rhs);
-            break;
-    case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
-            break;
+  if (metric_terms != MetricTerms::cell) {   // dyn_grmhd_metric.cpp
+    switch (nghost) {
+      case 2: AddCoordTermsFM<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddCoordTermsFM<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddCoordTermsFM<4>(prim, bcc, dt, rhs);
+              break;
+    }
+  } else {
+    switch (nghost) {
+      case 2: AddCoordTermsEOS<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddCoordTermsEOS<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddCoordTermsEOS<4>(prim, bcc, dt, rhs);
+              break;
+    }
   }
+  // <mhd> tau_budget_every (R-184; dyn_grmhd_taubudget.cpp): diagnostic kernels around the source
+  const bool tb = !fixed_evolution && TauBudgetOn();
+  if (tb) {
+    switch (nghost) {
+      case 2: TauBudgetPre<2>(prim, bcc, rhs);
+              break;
+      case 3: TauBudgetPre<3>(prim, bcc, rhs);
+              break;
+      case 4: TauBudgetPre<4>(prim, bcc, rhs);
+              break;
+    }
+  }
+  if ((tau_source_k != TauSourceK::xcfc || trace_diag) && !fixed_evolution) {
+    switch (nghost) {   // dyn_grmhd_killing.cpp (R-194; R-197 trace_diag)
+      case 2: AddTauSourceK<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddTauSourceK<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddTauSourceK<4>(prim, bcc, dt, rhs);
+              break;
+    }
+  }
+  if ((energy_variable != EnergyVariable::valencia || kill_diag) && !fixed_evolution) {
+    switch (nghost) {   // dyn_grmhd_killing.cpp
+      case 2: AddKillingTerms<2>(prim, bcc, dt, rhs);
+              break;
+      case 3: AddKillingTerms<3>(prim, bcc, dt, rhs);
+              break;
+      case 4: AddKillingTerms<4>(prim, bcc, dt, rhs);
+              break;
+    }
+  }
+  if (tb) TauBudgetPost(prim, dt, rhs);
 }
 
 //----------------------------------------------------------------------------------------

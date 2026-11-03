@@ -138,6 +138,9 @@ class Mesh {
   int *nprtcl_eachrank;    // number of particles on each rank
 
   Real time, dt, dtold, dt_last_completed, cfl_no;
+  // <time> dt_max (R-204 item 3, the common-dt speed scan): a cap on dt after the CFL
+  // minimum; 0 (the key absent) = off, read without GetOrAdd so an input without it is unchanged
+  Real dt_max = 0.0;
   int ncycle;
   EventCounters ecounter;
 

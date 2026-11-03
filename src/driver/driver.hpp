@@ -64,6 +64,7 @@ class Driver {
                                        bool mhd_restored = false);
 
  private:
+  bool embed_load_ = false;     // R1 embed load in progress (Initialize; MCLOSE regrid off)
   Kokkos::Timer run_time_;      // generalized timer for cpu/gpu/etc
   // <time> phase_timers (default true; R-062 item 2): fenced wall-clock totals per phase,
   // printed by rank 0 as a PHASE_TIMERS line every phase_timers_every cycles and at the

@@ -20,8 +20,8 @@
 //              L with dx_L <= lambda_J/N_J, N_J = amr_jeans_cells, capped at L_core
 //              (N_J = 0 disables)
 //   5. BH box: exactly tde_track's (amr_radius_bh/amr_level_bh, optional fine box)
-// Hysteresis: want_ref uses the thresholds above, want_deref relaxed ones (densities and
-// N_H, N_J times amr_deref_factor < 1, so want_deref >= want_ref). Flag +1 if level <
+// Hysteresis: want_ref uses the thresholds above, want_deref relaxed ones (densities times
+// amr_deref_factor < 1, N_H and N_J divided by it, so want_deref >= want_ref). Flag +1 if level <
 // want_ref; -1 if level > want_deref AND the block has sat at its level for >=
 // amr_min_residence cycles (tracked per rank by logical location; a block that migrated
 // ranks restarts its count, which only delays a de-refinement); else 0.
@@ -150,8 +150,13 @@ void TDEDebrisBlockWants(MeshBlockPack *pmbp, const TDEDebrisParams &p,
           if (!Kokkos::isfinite(grad)) grad = 0.0;
         }
         int la, lw, lj;
+        // de-refinement: the density thresholds are scaled DOWN (sc < 1, more cells qualify:
+        // want_deref >= want_ref), but the resolution tests need MORE cells, N/sc, so that
+        // the coarser level still holds >= N cells. sc*N (before R-140 item 9) gave
+        // want_deref = want_ref - 1 at sc = 1/2: blocks at want_ref derefined after
+        // amr_min_residence and were refined back (c130). sc = 1: N/1 = N exactly.
         TDEDebrisCellWant(rho, prs, grad, gate, sc*rho_a, rf, lnf, ladder, lcore, lfloor,
-                          lstream, sc*nh, sc*nj, dx_root, gam, la, lw, lj);
+                          lstream, nh/sc, nj/sc, dx_root, gam, la, lw, lj);
         const int c = (q - 1)%3;
         const int l = (c == 0) ? la : ((c == 1) ? lw : lj);
         lmax = fmax(lmax, static_cast<Real>(l));

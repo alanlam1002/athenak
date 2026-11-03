@@ -46,7 +46,11 @@ enum class MGNormType {max, l1, l2};
 // progressively more accuracy at higher resolution. rms: the fixed,
 // volume-weighted, mesh-resolution-invariant norm. See DEVELOPMENT.md's R3
 // entry (ported from ~/athenak_cfc's R3 fix) for the full derivation.
-enum class MGNormScaling {legacy, rms};
+// max (<cfc> mg_norm = max; the cfc branch's a0bd94a4 + 67af832e, R-058, adopted per R-213
+// in place of C-160's 65317471, whose arithmetic it shares): convergence on the per-channel
+// max |defect| over every MeshBlock cell (all refinement levels; the octet and root coarse
+// levels are not included), MPI-reduced, channels combined by max, no volume normalisation.
+enum class MGNormScaling {legacy, rms, max};
 
 //----------------------------------------------------------------------------------------
 // LogicalLocation hash and equality for std::unordered_map
@@ -494,6 +498,26 @@ class MultigridDriver {
   void ZeroFinestSolution();
   void LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh);
   Real TotalDefectNorm();
+  // Same channel combination as TotalDefectNorm, applied to the source (max norm for
+  // mg_norm = max, volume-weighted L2 otherwise). Reference for mg_rtol_ref = source.
+  Real TotalSourceNorm();
+  // Name used in the <cfc>/mg_log lines (the two vector-Poisson instances differ).
+  void SetLogName(const std::string &name) { mg_log_name_ = name; }
+  // <cfc> mg_regrid_norm (R-218 item 1): a temporary convergence override, used only around
+  // the post-regrid re-solve (CFC::ReinitializeMetricForAMR). Begin saves norm_mode_, eps_ and
+  // rtol_ and sets (mode, eps, rtol 0: an absolute target); End restores them. Nothing else
+  // changes (mg_min_vcycles, the stall rule for eps_ > 0, the 40-cycle limit).
+  void BeginConvergenceOverride(MGNormScaling mode, Real eps) {
+    ovr_norm_ = norm_mode_; ovr_eps_ = eps_; ovr_rtol_ = rtol_;
+    norm_mode_ = mode; eps_ = eps; rtol_ = 0.0;
+  }
+  void EndConvergenceOverride() { norm_mode_ = ovr_norm_; eps_ = ovr_eps_; rtol_ = ovr_rtol_; }
+  // the last SolveMG()'s V-cycle count and its initial / final defect (TotalDefectNorm),
+  // and the number of SolveMG() calls so far (<cfc> mg_log_vcycles, R-201): diagnostics only
+  int LastNVcycle() const { return last_nvcycle_; }
+  Real LastDef0() const { return last_def0_; }
+  Real LastDef() const { return last_def_; }
+  int64_t NSolve() const { return nsolve_; }
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -626,7 +650,13 @@ class MultigridDriver {
 
   virtual void SolveCoarsestGrid();
   Real CalculateDefectNorm(MGNormType nrm, int n);
+  Real CalculateSourceNorm(MGNormType nrm, int n);
   void CalculateMatrix(Real dt);
+  // Reads <block>/mg_rtol_ref, mg_log and mg_stall_cycles (R-058); defaults keep today's
+  // behavior.
+  void ReadConvergenceOptions(ParameterInput *pin, const std::string &block);
+  // One mg_log line per SolveIterative call (rank 0 prints; all ranks take part).
+  void LogSolve(int niter, Real def0, Real def, Real ref, Real target, double wall);
   Multigrid* FindMultigrid(int tgid);
   // container to hold names of TaskIDs
   MultigridTaskIDs id;
@@ -657,7 +687,29 @@ class MultigridDriver {
   // less (Q6 vs Q1, C-040); a fixed reference volume makes the threshold box-independent.
   Real norm_ref_vol_ = 0.0;
   Real rtol_;                 // <= 0 disables the relative criterion
+  // R-058 (cfc a0bd94a4 + 67af832e). rtol_source_: the relative target is rtol_ x the
+  // source norm ||F(u=0)|| (TotalSourceNorm) instead of rtol_ x the initial defect.
+  // mg_log_: 0 off; 1 one MGLOG line per solve (V-cycles, wall, initial/final convergence
+  // norm, reference, target, final volume-weighted L2 and max |defect|, source norms);
+  // 2 also the position and refinement level of max |defect|. Off by default, and when off
+  // nothing of it is evaluated, so production arithmetic is unchanged.
+  // mg_stall_cycles_ (mg_norm = max only): a stall is this many consecutive V-cycles that
+  // fail to cut the best defect so far by 10%. In-class initialisers, so every driver
+  // (gravity included) gets the defaults without depending on its constructor.
+  bool rtol_source_ = false;
+  int mg_log_ = 0;
+  int mg_stall_cycles_ = 3;
+  std::string mg_log_name_ = "mg";
+  MGNormScaling ovr_norm_ = MGNormScaling::legacy;   // BeginConvergenceOverride's saved state
+  Real ovr_eps_ = -1.0, ovr_rtol_ = 0.0;
   int niter_, npresmooth_, npostsmooth_;
+  // <cfc> mg_min_vcycles (CFC drivers; default 0 = off, bitwise): SolveIterative does at
+  // least this many V-cycles even when the warm start's defect is already <= the target
+  // (R-201: with 0, such a solve does none and the metric lags the matter)
+  int min_vcycles_ = 0;
+  int last_nvcycle_ = 0;
+  Real last_def0_ = 0.0, last_def_ = 0.0;
+  int64_t nsolve_ = 0;
   int os_, oe_;
   int coffset_;
   int fprolongation_;

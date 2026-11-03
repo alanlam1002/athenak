@@ -99,9 +99,32 @@ class CFC {
   // for -- see cfc.cpp's constructor for both.
   bool puncture_enabled_;
   Real puncture_mass_;
+  // x_BH of the last FillPunctureBackground (u_psi0/u_alpha0_psi0/beta0_u are centred on
+  // it): <dyn_grmhd> metric_terms evaluates the face background about the same point
+  Real bg_xbh_[3] = {0.0, 0.0, 0.0};
   // <cfc> alpha_floor (default 0.0): lower clamp on adm.alpha (AssembleLapseShiftK)
   // so the fluid update never sees a negative lapse. See DEVELOPMENT.md item 59.
   Real alpha_floor_;
+
+  // <cfc> residual_scale (R-140 item 6, D7): the hydro sees psi0 + f*delta_psi etc., the
+  // solves are unchanged. f = residual_scale (constant), or a C^1 smoothstep from
+  // residual_scale_f0 (default 1) at residual_scale_t0 to residual_scale_f1 at
+  // residual_scale_t1. No key = off (f = 1, bitwise-neutral: the scaled kernels never
+  // run while f == 1). f == 0 skips the four multigrid solves: background only.
+  bool rs_on_ = false;
+  // <cfc> mg_regrid_norm = max (R-218 item 1; default off = absent): the post-regrid re-solve
+  // (ReinitializeMetricForAMR: X, psi, alpha_psi, beta) converges on the max norm to
+  // <cfc> mg_regrid_threshold (default 1e-7, absolute); every other solve keeps the run's setting
+  bool regrid_max_ = false;
+  Real regrid_thr_ = 1.0e-7;
+  bool rs_ramp_ = false;
+  Real rs_const_ = 1.0, rs_f0_ = 1.0, rs_f1_ = 1.0, rs_t0_ = 0.0, rs_t1_ = 0.0;
+  int rs_log_ = 0;           // <cfc> residual_scale_log_interval (cycles; 0 = no log)
+  Real rs_f_ = 1.0;          // f of the state the current stage's CFC tasks see
+  bool rs_bg_only_ = false;  // rs_f_ == 0: skip the MG solves
+  Real ResidualScale(Real t) const;
+  void SetResidualScale(Real t, int stage, bool last_stage);
+  void AssemblePsiMetric(bool with_ghosts);
 
   // Running totals of what excision has removed from the grid over the whole run.
   // accreted_mass_ is ADM-weighted (int psi^5 E dV) and is what Step 3 hands to
@@ -120,6 +143,7 @@ class CFC {
   // M_BH by the swallowed energy.  Set false to keep the tally as a pure diagnostic,
   // which is how the psi^5-vs-psi^6 weighting A/B is run.
   bool accrete_to_puncture_;
+  bool freeze_puncture_mass_ = false;   // <cfc> freeze_puncture_mass (R-155 item 2)
   Real puncture_mass_init_ = 0.0;  // for reporting M_BH growth
 
   // ADM-mass surface integral (<cfc> adm_mass_r0, adm_mass_r1, ... ; adm_mass_dr,
@@ -452,6 +476,12 @@ class CFC {
   // re-derive the metric from the pgen's static t=0 ID, discarding CFC's own
   // dynamical evolution).
   void ReinitializeMetricForAMR(Driver *pdriver);
+  // R1 embedding at load (restart_state::EmbedFill): set padm->adm in the blocks with
+  // newmb(m) = 1 (ghosts included) to the zero-residual metric, i.e. what AssembleADM gives
+  // there with delta_psi = delta_alpha_psi = 0, b = 0 and Ahat = Ahat0: psi = psi0,
+  // alpha = (alpha psi)0/psi0 (alpha_floor), beta = beta0 + xidot, K_ij = psi0^-2 Ahat0_ij.
+  // Provisional: ReinitializeMetricForAMR re-solves it.
+  void FillEmbedADM(const DvceArray1D<int> &newmb, Real time);
 
   // Task-graph entry points (TaskStatus(Driver*, int), required by
   // NumericalRelativity::QueueTask). Each wraps the like-named private Step method
@@ -602,6 +632,12 @@ class CFC {
   void RescaleMatterSources(Driver *pdriver, int stage);      // step 4: rebuild S-tilde
   void SolveLapse(Driver *pdriver, int stage);           // step 5: eq. 74, alpha*psi
   void SolveShift(Driver *pdriver, int stage);            // step 6: eq. 75 -> u_p_beta
+  // <cfc> mg_log_vcycles (default false; diagnostics only, R-201): after the shift solve, rank
+  // 0 prints "MGV" with each CFC solve's V-cycle count and initial / final defect since the
+  // last MGV line (n = -1: that solver did not run in between)
+  bool mg_log_vcycles_ = false;
+  int64_t mglog_ns_[4] = {0, 0, 0, 0};
+  void LogVcycles(int stage);
 
   void ReconstructShift();  // CFC_ReconstructBeta: beta_u from u_p_beta
 
@@ -640,6 +676,7 @@ class CFC {
   // MG solvers' finest-level solutions (warm starts); loading marks the one-shot seeding
   // (SolveConformalFactor/SolveLapse) done
   int RestartStateVars() const;
+  std::string RestartStateLayout() const;   // named groups (restart_state.hpp)
   void SaveRestartState(DvceArray5D<Real> &dst, int ns);
   void LoadRestartState(const DvceArray5D<Real> &src, int ns);
   void SaveRestartScalars(ParameterInput *pin) const;   // the seed flags

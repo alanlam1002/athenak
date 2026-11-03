@@ -10453,3 +10453,30 @@ existing comoving decks are unchanged; set it explicitly. Mode, switch time, swi
 m_ref are written to restarts (frame_ctrl_mode, _tsw, _xdsw*, _m0); restarts written before
 this lack them and come back in remnant mode with the switch disabled unless
 frame_switch_mref is given.
+
+## R-140 item 6 (D7): `<cfc> residual_scale`, the self-gravity phase-out f(t)
+
+The hydro sees the solved CFC residual scaled by f: ψ = ψ0 + f δψ, αψ = (αψ)0 + f δ(αψ),
+β = β0 + f b (+ ξ̇), Â = Â0 + f (Â − Â0), K_ij = Â_ij/ψ² with the scaled ψ, and the same
+α floor (cfc_reconstruct.cpp AssembleConformalMetricScaled / AssembleLapseShiftKScaled). The
+elliptic solves are unchanged: they solve for the full residual from the evolved matter. Keys
+(read with DoesParameterExist, so a deck without them leaves the parameter block unchanged):
+`residual_scale = f` (constant), or `residual_scale_t0` (0), `_t1` (required), `_f0` (1),
+`_f1` (0): the C¹ smoothstep f0 + (f1 − f0) x²(3 − 2x), x = (t − t0)/(t1 − t0) clamped (exactly
+f0 / f1 at the ends). `residual_scale_log_interval` (10 cycles): rank 0 logs t and f.
+- **Off / f = 1 is bitwise:** the scaled kernels are separate and never run while f == 1
+  (CFC::AssemblePsiMetric, CFC::AssembleADM). f is evaluated once per stage at the stage time
+  (CFC::SetResidualScale from SolveVecXTask, the stage's first CFC task; stage 0 at
+  InitializeMetric / ReinitializeMetricForAMR), so every task of a stage sees one f.
+- **f = 0 is background only:** the four multigrid solves (X, ψ, αψ, shift) and the cheap
+  steps feeding only them (ADual, RescaleSrc, ReconstructBeta) are skipped; f·x is a signed
+  zero, so the metric is the background bitwise. The ghost-exchange tasks still run (on the
+  unchanged residual arrays), RefillMovingPuncture still runs, AccreteExcisedMass still runs.
+- **No restart state:** f is a function of t only; the residual arrays saved in the restart
+  are the last solved ones.
+- **Argued, f strictly between 0 and 1:** the solves read the conserved state densitized with
+  the hydro's (scaled) ψ, so the matter source carries an O(6(1 − f) δψ/ψ) ~ 1e-3 relative
+  inconsistency; immaterial for a phase-out.
+- CPU checks (athenak_run/cfc/c127_rs): keys absent bitwise vs 948fda79 (comoving CD and
+  BH-frame BD decks); `residual_scale = 1` bitwise in data; f = 0: mg time 0, the adm dumps
+  identical in time and to a run with ρ_c/2; a ramp restarted mid-run reproduces bitwise.

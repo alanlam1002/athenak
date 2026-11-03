@@ -21,7 +21,7 @@
     #error NHISTORY > NREDUCTION in outputs.hpp
 #endif
 
-#define NOUTPUT_CHOICES 155
+#define NOUTPUT_CHOICES 156
 // choices for output variables used in <ouput> blocks in input file
 // TO ADD MORE CHOICES:
 //   - add more strings to array below, change NOUTPUT_CHOICES above appropriately
@@ -102,7 +102,9 @@ static const char *var_choice[NOUTPUT_CHOICES] = {
   // Gravity (153)
   "grav_phi",
   // DynGRMHD dual-energy switch maps (154; <mhd> dual_energy_diag)
-  "mhd_de_diag"
+  "mhd_de_diag",
+  // DynGRMHD trace mismatch and TT remainder (155; <dyn_grmhd> trace_diag, R-197)
+  "mhd_trace_diag"
 };
 
 

@@ -283,6 +283,16 @@ class DynGRMHD {
   // the face flux's rest-mass weight w_D = alpha_f, and the rest-mass work -sqrt(g) D V^j d_j alpha
   // (full alpha) as a source; otherwise arm (ii)
   bool kf_rm = false;
+  // R-221 (KF_CFC-ta-bg, energy_variable = killing_fcfc_ta; supersedes R-206): KF_CFC's frozen
+  // weights and trace source with the rest mass explicit (kf_rm), and the background taken
+  // analytically (kf_bgw): the face weights are the trumpet's (alpha0, beta0 + xidot) evaluated at
+  // the face plus the two-cell average of the residual (kill_res 0: alpha - alpha0, 1-3: beta' -
+  // beta0 - xidot); in the source D_k beta0'^k = 6 xidot.grad ln psi0 and grad alpha0 are analytic,
+  // only the residual is Dx<NGHOST>'d (kill_res, kbg_ell = ln(psi/psi0)). <mhd> killing_full_bg =
+  // none: the same variable without the background (the cell average of the full metric at faces,
+  // Dx<NGHOST> of the full metric in the source), the "KF_CFC-ta" reference.
+  bool kf_bgw = false;
+  void KillingBgResidual();   // kill_res 0-3 and kbg_ell on every cell (ghosts included)
   DvceArray5D<Real> kf_prev;
   Real kf_tprev = 0.0, kf_tstage = 0.0;
   Real kf_m1u1 = 0.0;   // KCLOSE weights item: [M_s - M_1](u1), telescoped (KillingFullStage)

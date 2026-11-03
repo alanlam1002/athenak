@@ -396,6 +396,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
   const bool vk = val && (tau_source_k != TauSourceK::xcfc);   // R-194: Valencia, K replaced
   const bool kf = (energy_variable == EnergyVariable::killing_full);
   const bool rm = kf_rm;   // R-194 item 3: the face's rest-mass weight alpha_f
+  // R-221 (killing_fcfc_ta): the face weights of KillingFaceFluxes (KfBgFaceWeights)
+  const bool bgw = kf && kf_bgw;
+  const bool bpun = bgw && pcfc->puncture_enabled_;
+  const Real bcx = bgw ? pcfc->bg_xbh_[0] : 0.0, bcy = bgw ? pcfc->bg_xbh_[1] : 0.0;
+  const Real bcz = bgw ? pcfc->bg_xbh_[2] : 0.0;
+  const Real bm_bh = bgw ? pcfc->puncture_mass_ : 0.0;
+  auto &kres = kill_res;
   const bool ta = (energy_variable == EnergyVariable::killing_ta);
   const bool comov = kill_comov;
   const Real rhoc = tb_rhoc, rs2 = 0.64*tb_rstar*tb_rstar;
@@ -520,6 +527,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::TauBudgetPost(const DvceArray5D<Real> &
     }
     auto wface = [&](const int dir, const int k1, const int j1, const int i1, Real &al,
                      Real b[3]) {
+      if (bgw) {
+        const int k0 = k1 - (dir == 2), j0 = j1 - (dir == 1), i0 = i1 - (dir == 0);
+        const Real fx = ((dir == 0) ? LeftEdgeX(i1-is, nx1, sz.x1min, sz.x1max)
+                                    : CellCenterX(i1-is, nx1, sz.x1min, sz.x1max)) - bcx;
+        const Real fy = ((dir == 1) ? LeftEdgeX(j1-js, nx2, sz.x2min, sz.x2max)
+                                    : CellCenterX(j1-js, nx2, sz.x2min, sz.x2max)) - bcy;
+        const Real fz = ((dir == 2) ? LeftEdgeX(k1-ks, nx3, sz.x3min, sz.x3max)
+                                    : CellCenterX(k1-ks, nx3, sz.x3min, sz.x3max)) - bcz;
+        const Real rb0[3] = {kres(m, 1, k0, j0, i0), kres(m, 2, k0, j0, i0),
+                             kres(m, 3, k0, j0, i0)};
+        const Real rb1[3] = {kres(m, 1, k1, j1, i1), kres(m, 2, k1, j1, i1),
+                             kres(m, 3, k1, j1, i1)};
+        KfBgFaceWeights(td, th, tih, nt, bpun, bm_bh, xi[0], xi[1], xi[2], fx, fy, fz,
+                        kres(m, 0, k0, j0, i0), kres(m, 0, k1, j1, i1), rb0, rb1, al, b);
+        return;
+      }
       if (kf) {
         const int k0 = k1 - (dir == 2), j0 = j1 - (dir == 1), i0 = i1 - (dir == 0);
         al = (adm.alpha(m, k1, j1, i1) + adm.alpha(m, k0, j0, i0))*0.5;

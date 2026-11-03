@@ -131,6 +131,22 @@ void DynGRMHD::KillingFaceFluxes() {
     // R-194 item 3 (killing_full_rest_mass = explicit): the rest-mass weight w_f = alpha_f, as
     // killing_ta's (T = alpha tau - beta'.S), so F_D pairs with no weight gradient
     const bool rm = kf_rm;
+    // R-221 (killing_fcfc_ta): the background analytic at the face + the residual's two-cell
+    // average (KfBgFaceWeights, metric_faces.hpp), instead of the full metric's cell average
+    const bool bgw = kf_bgw;
+    auto *pcfc = pmy_pack->pcfc;
+    const bool pun = bgw && pcfc->puncture_enabled_;
+    const Real cx = bgw ? pcfc->bg_xbh_[0] : 0.0, cy = bgw ? pcfc->bg_xbh_[1] : 0.0;
+    const Real cz = bgw ? pcfc->bg_xbh_[2] : 0.0;
+    const Real m_bh = bgw ? pcfc->puncture_mass_ : 0.0;
+    const Real gx0 = pmy_pack->padm->frame_vel_u[0], gx1 = pmy_pack->padm->frame_vel_u[1];
+    const Real gx2 = pmy_pack->padm->frame_vel_u[2];
+    auto &td = ttab.d;
+    const Real th = ttab.h, tih = ttab.ih;
+    const int nt = ttab.n;
+    auto &res = kill_res;
+    auto &size = pmy_pack->pmb->mb_size;
+    const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
     for (int dir = 0; dir < 3; ++dir) {
       auto &f = (dir == 0) ? pmy_pack->pmhd->uflx.x1f :
                 ((dir == 1) ? pmy_pack->pmhd->uflx.x2f : pmy_pack->pmhd->uflx.x3f);
@@ -138,10 +154,24 @@ void DynGRMHD::KillingFaceFluxes() {
       par_for("kill_full_faces", DevExeSpace(), 0, nmb-1, ks, ke + sk, js, je + sj, is, ie + si,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         const int km = k - sk, jm = j - sj, im = i - si;
-        const Real al = (adm.alpha(m, k, j, i) + adm.alpha(m, km, jm, im))*0.5;
-        Real b[3];
-        for (int a = 0; a < 3; ++a) {
-          b[a] = (adm.beta_u(m, a, k, j, i) + adm.beta_u(m, a, km, jm, im))*0.5;
+        Real al, b[3];
+        if (bgw) {
+          const auto &sz = size.d_view(m);
+          const Real fx = (si ? LeftEdgeX(i-is, nx1, sz.x1min, sz.x1max)
+                              : CellCenterX(i-is, nx1, sz.x1min, sz.x1max)) - cx;
+          const Real fy = (sj ? LeftEdgeX(j-js, nx2, sz.x2min, sz.x2max)
+                              : CellCenterX(j-js, nx2, sz.x2min, sz.x2max)) - cy;
+          const Real fz = (sk ? LeftEdgeX(k-ks, nx3, sz.x3min, sz.x3max)
+                              : CellCenterX(k-ks, nx3, sz.x3min, sz.x3max)) - cz;
+          const Real rb0[3] = {res(m, 1, km, jm, im), res(m, 2, km, jm, im), res(m, 3, km, jm, im)};
+          const Real rb1[3] = {res(m, 1, k, j, i), res(m, 2, k, j, i), res(m, 3, k, j, i)};
+          KfBgFaceWeights(td, th, tih, nt, pun, m_bh, gx0, gx1, gx2, fx, fy, fz,
+                          res(m, 0, km, jm, im), res(m, 0, k, j, i), rb0, rb1, al, b);
+        } else {
+          al = (adm.alpha(m, k, j, i) + adm.alpha(m, km, jm, im))*0.5;
+          for (int a = 0; a < 3; ++a) {
+            b[a] = (adm.beta_u(m, a, k, j, i) + adm.beta_u(m, a, km, jm, im))*0.5;
+          }
         }
         Real ft = al*(f(m, IEN, k, j, i) + f(m, IDN, k, j, i))
                   - (b[0]*f(m, IM1, k, j, i) + b[1]*f(m, IM2, k, j, i)
@@ -324,6 +354,8 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
     for (int a = 0; a < 3; ++a) kf_xdstep[a] = fv[a];
     kf_have_xd = true;
   }
+  // R-221 (killing_fcfc_ta): this stage's residual, before KillingFaceFluxes reads it
+  if (kf_bgw && energy_variable == EnergyVariable::killing_full) KillingBgResidual();
   // tau_source_K = keff | ktr (R-194): Valencia, no T and no weights item
   if (pmclose == nullptr || energy_variable != EnergyVariable::killing_full) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -375,6 +407,44 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
     g = pdriver->gam0[stage-1]*v[0] + pdriver->gam1[stage-1]*kf_m1u1;
   }
   pmclose->KillWeights(stage, g);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHD::KillingBgResidual
+//! \brief R-221 (killing_fcfc_ta): the residual of this stage's metric on every cell (ghosts
+//! included), from the CFC background on the cells (u_alpha0_psi0, u_psi0, beta0_u, about
+//! bg_xbh_; no puncture: alpha0 = psi0 = 1, beta0 = 0) and xidot:
+//!   kill_res 0 = alpha - alpha0, 1-3 = beta'^i - beta0^i - xidot^i, kbg_ell = ln(psi/psi0).
+//! With no residual (alpha = alpha0 psi0/psi0, beta' = beta0 + xidot) they are 0 to round-off.
+void DynGRMHD::KillingBgResidual() {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int n3 = indcs.nx3 + 2*indcs.ng, n2 = indcs.nx2 + 2*indcs.ng;
+  const int n1 = indcs.nx1 + 2*indcs.ng;
+  if (kill_res.extent_int(0) < nmb || kill_res.extent_int(1) != 4) {
+    Kokkos::realloc(kill_res, nmb, 4, n3, n2, n1);
+  }
+  if (kbg_ell.extent_int(0) < nmb) Kokkos::realloc(kbg_ell, nmb, n3, n2, n1);
+  auto *pcfc = pmy_pack->pcfc;
+  const bool pun = pcfc->puncture_enabled_;
+  auto &psi0 = pcfc->u_psi0;
+  auto &ap0 = pcfc->u_alpha0_psi0;
+  auto &b0u = pcfc->beta0_u;
+  auto &adm = pmy_pack->padm->adm;
+  const Real gx0 = pmy_pack->padm->frame_vel_u[0], gx1 = pmy_pack->padm->frame_vel_u[1];
+  const Real gx2 = pmy_pack->padm->frame_vel_u[2];
+  auto &res = kill_res;
+  auto &el = kbg_ell;
+  par_for("kill_bg_res", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real p0 = pun ? psi0(m, 0, k, j, i) : 1.0;
+    const Real a0 = pun ? ap0(m, 0, k, j, i)/p0 : 1.0;
+    res(m, 0, k, j, i) = adm.alpha(m, k, j, i) - a0;
+    res(m, 1, k, j, i) = adm.beta_u(m, 0, k, j, i) - ((pun ? b0u(m, 0, k, j, i) : 0.0) + gx0);
+    res(m, 2, k, j, i) = adm.beta_u(m, 1, k, j, i) - ((pun ? b0u(m, 1, k, j, i) : 0.0) + gx1);
+    res(m, 3, k, j, i) = adm.beta_u(m, 2, k, j, i) - ((pun ? b0u(m, 2, k, j, i) : 0.0) + gx2);
+    el(m, k, j, i) = 0.25*log(adm.g_dd(m, 0, 0, k, j, i)) - log(p0);
+  });
 }
 
 //----------------------------------------------------------------------------------------
@@ -620,6 +690,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
   const bool fz = kf_fz;   // R-190 (KF_z)
   const bool fcfc = kf_fcfc;   // R-191 (KF_CFC)
   const bool rm = kf_rm;   // R-194 item 3 (rest mass explicit)
+  // R-221 (killing_fcfc_ta): the source's background parts analytic, the residual's Dx<NGHOST>
+  const bool bgw = kf_bgw;
+  const bool pun = pcfc->puncture_enabled_;
+  auto &res = kill_res;
+  auto &ell = kbg_ell;
   const Real srho = kf_split_rho, srmin2 = kf_split_rmin*kf_split_rmin;
   auto &scr = kill_scr;
   auto &fx1_ = pmy_pack->pmhd->uflx.x1f;
@@ -895,6 +970,22 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
       scr(m, 22, k-ks, j-js, i-is) = dn ? vol*W*prim(m, IDN, k, j, i)*dv : 0.0;
     }
     sT += sTb;
+    // R-221 (killing_fcfc_ta): the background's grad ln psi0 and grad alpha0, analytic (the
+    // trumpet table about the hole; no puncture: 0)
+    Real gl0[3] = {0.0, 0.0, 0.0}, ga0[3] = {0.0, 0.0, 0.0};
+    if (bgw && pun) {
+      const Real xr[3] = {CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx,
+                          CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy,
+                          CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz};
+      Real pt, apt, b0t[3], dps0, dal0, bb0, db0;
+      TrumpetTableBackground(td, th, tih, nt, m_bh, xr[0], xr[1], xr[2], pt, apt, b0t, dps0,
+                             dal0, bb0, db0);
+      const Real ir = 1.0/sqrt(xr[0]*xr[0] + xr[1]*xr[1] + xr[2]*xr[2] + 1.0e-30);
+      for (int a = 0; a < 3; ++a) {
+        gl0[a] = dps0/pt*xr[a]*ir;
+        ga0[a] = dal0*xr[a]*ir;
+      }
+    }
     if (fcfc) {   // R-191 (KF_CFC): -sqrt(g) (alpha/3) S D_k beta'^k, S = gamma_ij S^ij,
       // D_k beta'^k = d_k beta'^k + beta'^k 1/2 gamma^ij d_k gamma_ij (= d_k(psi^6 beta'^k)/psi^6)
       Real trS = 0.0, divb = 0.0;
@@ -907,6 +998,19 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
           for (int b = 0; b < 3; b++) dln += 0.5*g3u[imap[a][b]]*dg_ddd[c][a][b];
         }
         divb += dbeta_du[c][c] + beta[c]*dln;
+      }
+      if (bgw) {
+        // R-221: beta' = beta0 + xidot + beta_res, ln psi = ln psi0 + ell; the stationary
+        // trumpet's D_k beta0^k = 0 and xidot const, so D_k beta0'^k = 6 xidot.grad ln psi0
+        // (= 6 d_t' ln psi0, analytic) and the rest is the residual's:
+        //   D_k beta'^k = 6 xidot.grad ln psi0 + d_k beta_res^k (Dx) + 6 beta_res.grad ln psi0
+        //                 + 6 beta'.grad ell (Dx)
+        divb = 6.0*(gx[0]*gl0[0] + gx[1]*gl0[1] + gx[2]*gl0[2]);
+        for (int c = 0; c < 3; c++) {
+          divb += Dx<NGHOST>(c, idx, res, m, 1 + c, k, j, i)
+                  + 6.0*res(m, 1 + c, k, j, i)*gl0[c]
+                  + 6.0*beta[c]*Dx<NGHOST>(c, idx, ell, m, k, j, i);
+        }
       }
       sT += -vol*(alpha/3.0)*trS*divb;
     } else if (fz) {   // R-190 (KF_z): sqrt(g) 1/2 alpha S^ij (2 alpha K_ij - (Lie_beta' gamma)_ij)
@@ -927,7 +1031,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddKillingFullTerms(const DvceArray5D<R
     if (rm) {   // R-194 item 3: the rest-mass work -sqrt(g) D V^j d_j alpha, V^j = alpha v^j - beta^j
       const Real D = prim(m, IDN, k, j, i)*W;
       for (int a = 0; a < 3; a++) {
-        sT -= vol*D*(alpha*prim_pt[PVX + a]/W - beta[a])*dalpha_d[a];
+        // R-221: d_j alpha = d_j alpha0 (analytic) + d_j alpha_res (Dx)
+        const Real dja = bgw ? ga0[a] + Dx<NGHOST>(a, idx, res, m, 0, k, j, i) : dalpha_d[a];
+        sT -= vol*D*(alpha*prim_pt[PVX + a]/W - beta[a])*dja;
       }
     }
     const Real dT = -divf(IEN) + sT;

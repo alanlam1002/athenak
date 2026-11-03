@@ -102,6 +102,32 @@ void TrumpetTableBackground(const DvceArray2D<Real> &d, const Real h, const Real
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void KfBgFaceWeights
+//! \brief R-221 (killing_fcfc_ta, kf_bgw): T's face weights, the background evaluated
+//! analytically at the face (the trumpet table about the hole: alpha0 = (alpha0 psi0)/psi0,
+//! beta0; no puncture: alpha0 = 1, beta0 = 0) plus xidot, plus the two-cell average of the
+//! residual (kill_res: ra = alpha - alpha0, rb = beta' - beta0 - xidot at the two cells). One
+//! function for KillingFaceFluxes and the tau budget's inversion (dyn_grmhd_taubudget.cpp), so
+//! both evaluate the same arithmetic; it reads only the face position and the two cells, so a
+//! ghost's face and its owner's are bitwise equal.
+KOKKOS_INLINE_FUNCTION
+void KfBgFaceWeights(const DvceArray2D<Real> &d, const Real h, const Real ih, const int n,
+                     const bool pun, const Real m_bh, const Real gx0, const Real gx1,
+                     const Real gx2, const Real fx, const Real fy, const Real fz,
+                     const Real ra0, const Real ra1, const Real rb0[3], const Real rb1[3],
+                     Real &al, Real b[3]) {
+  Real a0 = 1.0, b0[3] = {0.0, 0.0, 0.0};
+  if (pun) {
+    Real p0, ap0, dp0, da0, bb0, db0;
+    TrumpetTableBackground(d, h, ih, n, m_bh, fx, fy, fz, p0, ap0, b0, dp0, da0, bb0, db0);
+    a0 = ap0/p0;
+  }
+  al = a0 + 0.5*(ra0 + ra1);
+  const Real gx[3] = {gx0, gx1, gx2};
+  for (int a = 0; a < 3; ++a) b[a] = (b0[a] + gx[a]) + 0.5*(rb0[a] + rb1[a]);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void TrumpetFaceDiff
 //! \brief <dyn_grmhd> killing_momentum_bg = face_diff (R-178): the background's centred face
 //! difference along one direction, (g0(xp) - g0(xm))*idx, of alpha0, beta0^b and psi0^4, with

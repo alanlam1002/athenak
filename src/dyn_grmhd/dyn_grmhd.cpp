@@ -359,10 +359,19 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     energy_variable = EnergyVariable::killing_full;
     kf_fz = true;
     kf_fcfc = true;
+  } else if (ev == "killing_fcfc_ta") {
+    // R-221 item 1 (KF_CFC-ta-bg): KF_CFC with T = sqrt(g) (alpha tau - beta'^k S_k) (w_D = alpha,
+    // the rest-mass work explicit) and the analytic background (kf_bgw, below)
+    energy_variable = EnergyVariable::killing_full;
+    kf_fz = true;
+    kf_fcfc = true;
+    kf_rm = true;
+    kf_bgw = true;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<mhd> energy_variable = '" << ev << "' (valencia, killing_t1, "
-              << "killing_ta, killing_full, killing_fz or killing_fcfc)" << std::endl;
+              << "killing_ta, killing_full, killing_fz, killing_fcfc or killing_fcfc_ta)"
+              << std::endl;
     std::exit(EXIT_FAILURE);
   }
   if (kill_mom_fd && (energy_variable != EnergyVariable::killing_t1 ||
@@ -390,8 +399,29 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     need(indcs.ng >= 2, "nghost >= 2");
     kf_dtg = pin->GetOrAddBoolean("mhd", "killing_full_dtg", false);
     need(!(kf_fz && kf_dtg), "killing_full_dtg = false with killing_fz/fcfc (frozen weights)");
+    if (kf_bgw) {   // R-221: killing_fcfc_ta (its rest mass is explicit by definition)
+      need(!pin->DoesParameterExist("mhd", "killing_full_rest_mass"),
+           "no <mhd> killing_full_rest_mass with killing_fcfc_ta (explicit by definition)");
+      if (pin->DoesParameterExist("mhd", "killing_full_bg")) {   // read without GetOrAdd
+        const std::string kb = pin->GetString("mhd", "killing_full_bg");
+        need(kb == "analytic" || kb == "none", "killing_full_bg = analytic | none");
+        kf_bgw = (kb == "analytic");
+      }
+      if (kf_bgw) {
+        int nmbr = std::max((pmy_pack->nmb_thispack), (pmy_pack->pmesh->nmb_maxperrank));
+        Kokkos::realloc(kill_res, nmbr, 4, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+        Kokkos::realloc(kbg_ell, nmbr, indcs.nx3 + 2*indcs.ng, indcs.nx2 + 2*indcs.ng,
+                        indcs.nx1 + 2*indcs.ng);
+        if (pin->DoesParameterExist("cfc", "puncture_enabled") &&
+            pin->GetBoolean("cfc", "puncture_enabled")) {   // the trumpet at faces and cells
+          BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),
+                            pin->GetOrAddReal("dyn_grmhd", "metric_table_h", 0.0025));
+        }
+      }
+    }
     // R-194 item 3: read without GetOrAdd, so an input without it is unchanged
-    if (pin->DoesParameterExist("mhd", "killing_full_rest_mass")) {
+    if (!kf_rm && pin->DoesParameterExist("mhd", "killing_full_rest_mass")) {
       const std::string rm = pin->GetString("mhd", "killing_full_rest_mass");
       need(rm == "paired" || rm == "explicit", "killing_full_rest_mass = paired | explicit");
       kf_rm = (rm == "explicit");

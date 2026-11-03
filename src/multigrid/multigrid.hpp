@@ -503,6 +503,15 @@ class MultigridDriver {
   Real TotalSourceNorm();
   // Name used in the <cfc>/mg_log lines (the two vector-Poisson instances differ).
   void SetLogName(const std::string &name) { mg_log_name_ = name; }
+  // <cfc> mg_regrid_norm (R-218 item 1): a temporary convergence override, used only around
+  // the post-regrid re-solve (CFC::ReinitializeMetricForAMR). Begin saves norm_mode_, eps_ and
+  // rtol_ and sets (mode, eps, rtol 0: an absolute target); End restores them. Nothing else
+  // changes (mg_min_vcycles, the stall rule for eps_ > 0, the 40-cycle limit).
+  void BeginConvergenceOverride(MGNormScaling mode, Real eps) {
+    ovr_norm_ = norm_mode_; ovr_eps_ = eps_; ovr_rtol_ = rtol_;
+    norm_mode_ = mode; eps_ = eps; rtol_ = 0.0;
+  }
+  void EndConvergenceOverride() { norm_mode_ = ovr_norm_; eps_ = ovr_eps_; rtol_ = ovr_rtol_; }
   // the last SolveMG()'s V-cycle count and its initial / final defect (TotalDefectNorm),
   // and the number of SolveMG() calls so far (<cfc> mg_log_vcycles, R-201): diagnostics only
   int LastNVcycle() const { return last_nvcycle_; }
@@ -691,6 +700,8 @@ class MultigridDriver {
   int mg_log_ = 0;
   int mg_stall_cycles_ = 3;
   std::string mg_log_name_ = "mg";
+  MGNormScaling ovr_norm_ = MGNormScaling::legacy;   // BeginConvergenceOverride's saved state
+  Real ovr_eps_ = -1.0, ovr_rtol_ = 0.0;
   int niter_, npresmooth_, npostsmooth_;
   // <cfc> mg_min_vcycles (CFC drivers; default 0 = off, bitwise): SolveIterative does at
   // least this many V-cycles even when the warm start's defect is already <= the target

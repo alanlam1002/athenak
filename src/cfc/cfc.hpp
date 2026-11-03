@@ -112,6 +112,11 @@ class CFC {
   // residual_scale_t1. No key = off (f = 1, bitwise-neutral: the scaled kernels never
   // run while f == 1). f == 0 skips the four multigrid solves: background only.
   bool rs_on_ = false;
+  // <cfc> mg_regrid_norm = max (R-218 item 1; default off = absent): the post-regrid re-solve
+  // (ReinitializeMetricForAMR: X, psi, alpha_psi, beta) converges on the max norm to
+  // <cfc> mg_regrid_threshold (default 1e-7, absolute); every other solve keeps the run's setting
+  bool regrid_max_ = false;
+  Real regrid_thr_ = 1.0e-7;
   bool rs_ramp_ = false;
   Real rs_const_ = 1.0, rs_f0_ = 1.0, rs_f1_ = 1.0, rs_t0_ = 0.0, rs_t1_ = 0.0;
   int rs_log_ = 0;           // <cfc> residual_scale_log_interval (cycles; 0 = no log)

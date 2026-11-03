@@ -426,6 +426,21 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
   mg_log_vcycles_ = pin->GetOrAddBoolean("cfc", "mg_log_vcycles", false);
+  // <cfc> mg_regrid_norm / mg_regrid_threshold (R-218 item 1; see cfc.hpp). Read without
+  // GetOrAdd, so an input without the keys leaves the parameter block unchanged.
+  if (pin->DoesParameterExist("cfc", "mg_regrid_norm")) {
+    std::string rn = pin->GetString("cfc", "mg_regrid_norm");
+    if (rn == "max") {
+      regrid_max_ = true;
+    } else if (rn != "off") {
+      std::cout << "### FATAL ERROR in CFC: <cfc> mg_regrid_norm must be 'off' or 'max'"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pin->DoesParameterExist("cfc", "mg_regrid_threshold")) {
+      regrid_thr_ = pin->GetReal("cfc", "mg_regrid_threshold");
+    }
+  }
   // <cfc> residual_scale (see cfc.hpp). Read without GetOrAdd, so an input without the
   // keys leaves the parameter block (and the restart files) unchanged.
   if (pin->DoesParameterExist("cfc", "residual_scale")) {
@@ -1371,6 +1386,13 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
                                   - u_psi0_(m,0,k,j,i);
   });
 
+  // <cfc> mg_regrid_norm = max (R-218 item 1): the four solves of this re-solve (X, psi
+  // here; alpha_psi, beta in RunLapseShiftAssemblePass below) converge on the max norm to
+  // regrid_thr_; restored after RunLapseShiftAssemblePass
+  MultigridDriver *rdrv[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
+  if (regrid_max_) {
+    for (auto *d : rdrv) d->BeginConvergenceOverride(MGNormScaling::max, regrid_thr_);
+  }
   RunXPsiSolvePass(pdriver);
   numrel::ChecksumAfterTask(pmy_pack, "regrid_xpsi", -1);
   // Interior-only: RescaleMatterSources (inside RunLapseShiftAssemblePass
@@ -1381,6 +1403,9 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   pmy_pack->pdyngr->ConToPrimBC(is, ie, js, je, ks, ke);
   numrel::ChecksumAfterTask(pmy_pack, "regrid_c2p", -1);
   RunLapseShiftAssemblePass(pdriver);
+  if (regrid_max_) {
+    for (auto *d : rdrv) d->EndConvergenceOverride();
+  }
   numrel::ChecksumAfterTask(pmy_pack, "regrid_lapse", -1);
 
   // dual_energy_flag_exchange (R-076 item 1): the owners decide the flags on the new

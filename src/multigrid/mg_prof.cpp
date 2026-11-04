@@ -46,6 +46,7 @@ const char *kStageName[kNStage] = {
   "solve_call", "iterative", "vcycle", "tasklist",
   "prepare_amr", "coeff", "setup",
   "smooth", "fas_rhs", "restrict", "prolong", "bnd_send", "bnd_recv", "bnd_other",
+  "bnd_start", "bnd_fill", "bnd_prolfc", "bnd_phys", "bnd_clear",
   "norm_dev", "norm_mpi",
   "toroot_dev", "toroot_mpi", "toroot_host", "fromroot_oct", "fromroot_set", "root_sync",
   "octet", "root", "log",

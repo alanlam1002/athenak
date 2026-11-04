@@ -33,21 +33,21 @@ void MultigridDriver::DoTaskListOneStage() {
 }
 
 TaskStatus MultigridDriver::ClearRecv(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndClear);
   TaskStatus tstat;
   tstat = pmg->pbval->ClearRecvMG();
   return tstat;
 }
 
 TaskStatus MultigridDriver::ClearSend(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndClear);
   TaskStatus tstat;
   tstat = pmg->pbval->ClearSendMG();
   return tstat;
 }
 
 TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndStart);
   // only switches the level's state; the receives are posted in SendBoundary after the
   // pre-send fence, so the previous round's UnpackMG no longer reads their buffer
   TaskStatus tstat = pmg->pbval->InitRecvMG(pmg->nvar_);
@@ -122,7 +122,7 @@ TaskStatus MultigridDriver::ProlongateBoundaryForProlongation(Driver *pdrive, in
 }
 
 TaskStatus MultigridDriver::FillFCBoundary(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndFill);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->FillFineCoarseMGGhosts(u);
@@ -130,7 +130,7 @@ TaskStatus MultigridDriver::FillFCBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::FillCoarseBoundary(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndFill);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->FillCoarseMG(u);
@@ -138,7 +138,7 @@ TaskStatus MultigridDriver::FillCoarseBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::ProlongateFCBoundary(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndProlFC);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->ProlongateFCMG(u);
@@ -146,7 +146,7 @@ TaskStatus MultigridDriver::ProlongateFCBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
-  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
+  mgprof::Timer pt(prof_id_, mgprof::sBndPhys);
   if (pmy_pack_->pmesh->strictly_periodic) return TaskStatus::complete;
 
   DvceArray5D<Real> u = pmg->GetCurrentData();

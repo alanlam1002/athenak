@@ -40,7 +40,12 @@ enum Stage : int {
   sProlong,         // Prolongate / FMGProlongate tasks
   sBndSend,         // SendBoundary task (pack + Isend + post Irecv)
   sBndRecv,         // RecvBoundary task (test/wait + unpack), every poll
-  sBndOther,        // StartReceive, Fill(Coarse|FC), ProlongateFC, Physical, Clear*
+  sBndOther,        // (unused since the split below)
+  sBndStart,        // StartReceive task
+  sBndFill,         // FillCoarseBoundary / FillFCBoundary tasks
+  sBndProlFC,       // ProlongateFCBoundary task (fine-coarse ghost prolongation)
+  sBndPhys,         // PhysicalBoundary task (outer BC: multipole / robin / zero)
+  sBndClear,        // ClearSend / ClearRecv tasks (wait for sends / receives)
   // convergence norms
   sNormDev,         // device defect (CalculateDefectPack) + reduction, per channel
   sNormMPI,         // MPI_Allreduce of the norm, per channel

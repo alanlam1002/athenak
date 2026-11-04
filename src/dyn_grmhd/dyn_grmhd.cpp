@@ -22,6 +22,7 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/mesh_refinement.hpp"
 #include "eos/eos.hpp"
 #include "bvals/bvals.hpp"
 #include "mhd/mhd.hpp"
@@ -267,6 +268,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
   }
   pmclose = new mclose::MassClosure(pp, pin);
+  if (pin->DoesParameterExist("mhd", "dint_tlag")) {   // D-int's lag (SaveRestartScalars)
+    dint_tlag = pin->GetReal("mhd", "dint_tlag");
+    dint_have = pin->GetBoolean("mhd", "dint_have");
+  }
   if (!pmclose->on) { delete pmclose; pmclose = nullptr; }
 
   // <dyn_grmhd> metric_terms (R-140 item 1; metric_faces.hpp). Default cell: nothing below.
@@ -1035,7 +1040,8 @@ int DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateVars() {
   auto *pmhd = pmy_pack->pmhd;
   const int nw = pmhd->w0.extent_int(1);
   const int nflag = pmhd->u0.extent_int(1) - (pmhd->nmhd + pmhd->nscalars);
-  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 13 : 0);
+  return nw + nflag + 3 + 1 + ((eos.de_persist > 1) ? 1 : 0) + (KfRst() ? 13 : 0) +
+         (eos.de_eint ? 1 : 0);
 }
 
 //! the same variables as named groups (restart_state.hpp: the file's layout, so a later
@@ -1050,6 +1056,7 @@ std::string DynGRMHDPS<EOSPolicy, ErrorPolicy>::RestartStateLayout() {
   s += ",dyngr.bcc0:3,dyngr.temp:1";
   if (eos.de_persist > 1) s += ",dyngr.streak:1";
   if (KfRst()) s += ",dyngr.kfprev:10,dyngr.kfbres:3";   // killing_full arm (ii), R-174 (b)
+  if (eos.de_eint) s += ",dyngr.rholag:1";   // D-int's lagged rho (AddDIntSource)
   return s;
 }
 
@@ -1099,6 +1106,19 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::SaveRestartState(DvceArray5D<Real> &dst
     // its multigrid potentials, and a restart has no solve before the first stage (driver.cpp)
     Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + 3), all, all, all),
                       Kokkos::subview(pmy_pack->pcfc->u_beta, mb, all, all, all, all));
+    n += 3;
+  }
+  if (eos.de_eint) {   // D-int's lagged rho (zero where absent; dint_have says whether it is used)
+    auto &rl = dint_rho;
+    const bool have = rl.extent_int(0) >= nmb && rl.extent_int(1) == dst.extent_int(2) &&
+                      rl.extent_int(2) == dst.extent_int(3) &&
+                      rl.extent_int(3) == dst.extent_int(4);
+    const int nn = n;
+    par_for("rst_save_rholag", DevExeSpace(), 0, nmb-1, 0, dst.extent_int(2)-1,
+            0, dst.extent_int(3)-1, 0, dst.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      dst(m, nn, k, j, i) = have ? rl(m, k, j, i) : 0.0;
+    });
   }
 }
 
@@ -1148,6 +1168,19 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LoadRestartState(const DvceArray5D<Real
                       Kokkos::subview(src, all, std::make_pair(n, n + 3), all, all, all));
     kf_rst_loaded = true;
     kf_bres_stale = kf_pre_rst;   // the first stage's u_beta is no solve (KillingFull store)
+    n += 3;
+  }
+  if (eos.de_eint) {
+    Kokkos::realloc(dint_rho, pmhd->w0.extent_int(0), src.extent_int(2), src.extent_int(3),
+                    src.extent_int(4));
+    auto &rl = dint_rho;
+    const int nn = n;
+    par_for("rst_load_rholag", DevExeSpace(), 0, nmb-1, 0, src.extent_int(2)-1,
+            0, src.extent_int(3)-1, 0, src.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      rl(m, k, j, i) = src(m, nn, k, j, i);
+    });
+    dint_rst_loaded = true;
   }
 }
 
@@ -1169,6 +1202,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
   }
   const int iy = pmhd->nmhd + eos.de_idx;
   const Real kmax = eos.de_kmax, gam = eos.de_gamma, yp = eos.de_ypow;
+  const bool eint = eos.de_eint;   // D-int: the partner is eps
   auto &w0 = pmhd->w0;
   auto &u0 = pmhd->u0;
   const int nmb = pmy_pack->nmb_thispack;
@@ -1176,9 +1210,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
           0, w0.extent_int(3)-1, 0, w0.extent_int(4)-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const Real rho = w0(m, IDN, k, j, i);
-    const Real y = (rho > 0.0) ?
+    const Real y = !(rho > 0.0) ? 0.0 : (eint ? w0(m, IPR, k, j, i)/((gam - 1.0)*rho) :
         PrimitiveSolverHydro<EOSPolicy, ErrorPolicy>::DualEnergyY(
-            w0(m, IPR, k, j, i)/pow(rho, gam), kmax, yp) : 0.0;
+            w0(m, IPR, k, j, i)/pow(rho, gam), kmax, yp));
     w0(m, iy, k, j, i) = y;
     u0(m, iy, k, j, i) = u0(m, IDN, k, j, i)*y;
   });
@@ -1293,7 +1327,95 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTerms(const DvceArray5D<Real> &
               break;
     }
   }
+  if (eos.de_on && eos.de_eint && !fixed_evolution) AddDIntSource(prim, dt, rhs);
   if (tb) TauBudgetPost(prim, dt, rhs);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::AddDIntSource
+//! \brief D-int (<mhd> dual_energy_variable = eint; R-223 addendum, R-225 item 2): the pdV source of
+//! the internal-energy partner E = sqrt(gamma) W rho eps = D eps (the tracer slot), whose flux is
+//! the mass flux times the upwind eps (dual_energy_flux = mass). The first law of an ideal fluid,
+//!   d_t E + d_i(E V^i) = -P [d_t(sqrt(gamma) W) + d_i(sqrt(gamma) W V^i)],   V^i = alpha v^i - beta^i,
+//! with sqrt(gamma) W = D/rho (D densitized, from the stage's primitives) in the continuity-update form:
+//!   d_t(D/rho) = (d_t D)/rho - D d_t rho/rho^2, d_t D = -d_i F_D (the stage's own mass fluxes: no
+//!   time difference), and the i-term from the mass-flux face velocities (Jiang et al. 2026):
+//!   (sqrt(gamma) W V^i)_face = F_D^i/rho_up (rho of the upwind cell of F_D^i), so
+//!   [ ] = sum_a [ D_a(F_D/rho_up) - (1/rho) D_a F_D ] - (D/rho^2) d_t rho,
+//! D_a the face difference over dx_a. THE ONE TIME DIFFERENCE: d_t rho = (rho_s - rho_lag)/(t_s - t_lag),
+//! rho_s this stage's primitive rho (the previous C2P) at the stage time t_s (SetSourceStage), rho_lag
+//! and t_lag those of the previous source call (SSP-RK3: t_s - t_lag = +dt/2 at a step's first stage,
+//! +dt, -dt/2). It is zero (not formed) at a fresh start and after a regrid (the MeshBlock key
+//! changed); a restart carries rho_lag (dyngr.rholag) and t_lag (<mhd> dint_tlag). Interior cells.
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddDIntSource(const DvceArray5D<Real> &prim,
+    const Real dt, DvceArray5D<Real> &rhs) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  const int nmb = pmy_pack->nmb_thispack;
+  const bool multi_d = pmy_pack->pmesh->multi_d, three_d = pmy_pack->pmesh->three_d;
+  auto *pmr = pmy_pack->pmesh->pmr;
+  const int key[3] = {(pmr != nullptr) ? pmr->nmb_created : 0,
+                      (pmr != nullptr) ? pmr->nmb_deleted : 0, nmb};
+  if (dint_rst_loaded) {   // rho_lag came with the restart, in this pack's MeshBlock order
+    for (int q = 0; q < 3; ++q) dint_key[q] = key[q];
+    dint_rst_loaded = false;
+  }
+  const int n3 = prim.extent_int(2), n2 = prim.extent_int(3), n1 = prim.extent_int(4);
+  const bool fit = dint_rho.extent_int(0) >= nmb && dint_rho.extent_int(1) == n3 &&
+                   dint_rho.extent_int(2) == n2 && dint_rho.extent_int(3) == n1;
+  const bool same = key[0] == dint_key[0] && key[1] == dint_key[1] && key[2] == dint_key[2];
+  const Real dtl = dint_tsrc - dint_tlag;
+  const bool tdo = dint_have && fit && same && dtl != 0.0;
+  const Real idtl = tdo ? 1.0/dtl : 0.0;
+  if (!fit) Kokkos::realloc(dint_rho, std::max(nmb, pmy_pack->pmesh->nmb_maxperrank), n3, n2, n1);
+  auto &rl = dint_rho;
+  auto &adm = pmy_pack->padm->adm;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &f1 = pmy_pack->pmhd->uflx.x1f;
+  auto &f2 = pmy_pack->pmhd->uflx.x2f;
+  auto &f3 = pmy_pack->pmhd->uflx.x3f;
+  const int iy = pmy_pack->pmhd->nmhd + eos.de_idx;
+  par_for("dint_src", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real rho = prim(m, IDN, k, j, i);
+    if (!(rho > 0.0)) return;
+    const Real gxx = adm.g_dd(m, 0, 0, k, j, i), gxy = adm.g_dd(m, 0, 1, k, j, i);
+    const Real gxz = adm.g_dd(m, 0, 2, k, j, i), gyy = adm.g_dd(m, 1, 1, k, j, i);
+    const Real gyz = adm.g_dd(m, 1, 2, k, j, i), gzz = adm.g_dd(m, 2, 2, k, j, i);
+    const Real ux = prim(m, IVX, k, j, i), uy = prim(m, IVY, k, j, i);
+    const Real uz = prim(m, IVZ, k, j, i);
+    const Real usq = gxx*ux*ux + gyy*uy*uy + gzz*uz*uz +
+                     2.0*(gxy*ux*uy + gxz*ux*uz + gyz*uy*uz);
+    const Real D = sqrt(adm::SpatialDet(gxx, gxy, gxz, gyy, gyz, gzz))*sqrt(1.0 + usq)*rho;
+    // sum_a [D_a(F_D/rho_up) - (1/rho) D_a F_D]
+    auto up = [](Real F, Real rm, Real rp) { return F/((F > 0.0) ? rm : rp); };
+    Real fd = (f1(m, IDN, k, j, i+1) - f1(m, IDN, k, j, i))/size.d_view(m).dx1;
+    Real gd = (up(f1(m, IDN, k, j, i+1), rho, prim(m, IDN, k, j, i+1)) -
+               up(f1(m, IDN, k, j, i), prim(m, IDN, k, j, i-1), rho))/size.d_view(m).dx1;
+    if (multi_d) {
+      fd += (f2(m, IDN, k, j+1, i) - f2(m, IDN, k, j, i))/size.d_view(m).dx2;
+      gd += (up(f2(m, IDN, k, j+1, i), rho, prim(m, IDN, k, j+1, i)) -
+             up(f2(m, IDN, k, j, i), prim(m, IDN, k, j-1, i), rho))/size.d_view(m).dx2;
+    }
+    if (three_d) {
+      fd += (f3(m, IDN, k+1, j, i) - f3(m, IDN, k, j, i))/size.d_view(m).dx3;
+      gd += (up(f3(m, IDN, k+1, j, i), rho, prim(m, IDN, k+1, j, i)) -
+             up(f3(m, IDN, k, j, i), prim(m, IDN, k-1, j, i), rho))/size.d_view(m).dx3;
+    }
+    const Real drdt = tdo ? (rho - rl(m, k, j, i))*idtl : 0.0;
+    const Real br = gd - fd/rho - D*drdt/(rho*rho);
+    rhs(m, iy, k, j, i) -= dt*prim(m, IPR, k, j, i)*br;
+  });
+  // this call's rho and time become the lag (after the kernel above has read the old ones)
+  par_for("dint_lag", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    rl(m, k, j, i) = prim(m, IDN, k, j, i);
+  });
+  dint_tlag = dint_tsrc;
+  dint_have = true;
+  for (int q = 0; q < 3; ++q) dint_key[q] = key[q];
 }
 
 //----------------------------------------------------------------------------------------

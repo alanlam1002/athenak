@@ -238,6 +238,12 @@ class PrimitiveSolverHydro {
   // used by this mode (the flag is still computed for the diagnostics).
   bool de_cond = false;
   Real de_q1 = 3.0e-4, de_q2 = 3.0e-3, de_qdel = 0.1;
+  // <mhd> dual_energy_variable = eint (D-int; R-223 addendum, R-225 item 2; needs dual_energy_mode =
+  // conditioning): the partner is the specific internal energy, Y = eps (the scalar slot holds
+  // D eps = sqrt(gamma) W rho eps = E), advected with the mass flux (dual_energy_flux = mass) and given
+  // the pdV source in DynGRMHDPS::AddDIntSource. The partner's state from (D, S, eps): h = 1 +
+  // gamma eps, W = sqrt(1 + S^2/(D h)^2), rho = D/W, P = (gamma - 1) rho eps; K_tr = P/rho^gamma.
+  bool de_eint = false;
   // Diagnostics of the last full (non-floors_only) C2P call, interior cells only:
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
@@ -1600,10 +1606,19 @@ class PrimitiveSolverHydro {
         de_ypow = 1.0/de_gamma;
       } else if (var == "k") {
         de_ypow = 1.0;
+      } else if (var == "eint") {
+        de_ypow = 1.0;
+        de_eint = true;
+        if (!de_cond) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> dual_energy_variable = eint needs "
+                    << "dual_energy_mode = conditioning" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
       } else {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "<" << block << "> dual_energy_variable = '" << var
-                  << "' (use k_1g or k)" << std::endl;
+                  << "' (use k_1g, k or eint)" << std::endl;
         std::exit(EXIT_FAILURE);
       }
       de_recon_rhoy = pin->GetOrAddBoolean(block, "dual_energy_recon_rhoy",
@@ -1619,6 +1634,13 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
       de_flux_hll = (fl == "hll");
+      if (de_eint && (de_flux_hll || de_recon_rhoy)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy_variable = eint needs "
+                  << "dual_energy_flux = mass and dual_energy_recon_rhoy = false (the partner "
+                  << "moves with the mass flux)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
     }
     Real mb = ps.GetEOS().GetBaryonMass();
     ps.GetEOSMutable().SetDensityFloor(pin->GetOrAddReal(block, "dfloor", (FLT_MIN))/mb);
@@ -1724,6 +1746,7 @@ class PrimitiveSolverHydro {
     const bool de_on_ = de_on;
     const int de_idx_ = de_idx;
     const Real de_kmax_ = de_kmax, de_gamma_ = de_gamma, de_ypow_ = de_ypow;
+    const bool de_eint_ = de_eint;
 
 
     par_for("pshyd_prim2cons", DevExeSpace(), 0, (nmb-1), kl, ku, jl, ju, il, iu,
@@ -1767,8 +1790,8 @@ class PrimitiveSolverHydro {
       if (de_on_) {
         // the K tracer is always derived from P and rho at prim->cons time
         Real rho_ = prim_pt[PRH]*mb;
-        prim_pt[PYF + de_idx_] = DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_,
-                                             de_ypow_);
+        prim_pt[PYF + de_idx_] = de_eint_ ? prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+            DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_);
         prim(m, nhyd + de_idx_, k, j, i) = prim_pt[PYF + de_idx_];
       }
 
@@ -2170,6 +2193,7 @@ class PrimitiveSolverHydro {
     const Real de_2tol_ = de_second_law_tol;
     const bool de_cond_ = de_cond;
     const Real de_q1_ = de_q1, de_q2_ = de_q2, de_qdel_ = de_qdel;
+    const bool de_eint_ = de_eint;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
     const int pcyc_ = pmy_pack->pmesh->ncycle;
@@ -2606,16 +2630,30 @@ class PrimitiveSolverHydro {
           Real qtr = -1.0, dken = 0.0, ddk = 0.0;
           int dec = 0;   // 1 tracer pressure, 2 energy + resync, 3 energy (tracer passive)
           if (dense && bzero) {
-            const Real K_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
             Real S_d[3] = {cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ]};
             Real S_u[3] = {g3u[S11]*S_d[0] + g3u[S12]*S_d[1] + g3u[S13]*S_d[2],
                            g3u[S12]*S_d[0] + g3u[S22]*S_d[1] + g3u[S23]*S_d[2],
                            g3u[S13]*S_d[0] + g3u[S23]*S_d[1] + g3u[S33]*S_d[2]};
             Real ssq = S_u[0]*S_d[0] + S_u[1]*S_d[1] + S_u[2]*S_d[2];
-            Real Wt = 1.0, ht = 1.0;
-            const bool inv = EntropyInversion(D, ssq, K_tr, de_gamma_, Wt, ht);
-            const Real rho_t = inv ? D/Wt : 0.0;
-            const Real P_t = inv ? K_tr*pow(rho_t, de_gamma_) : 0.0;
+            Real Wt = 1.0, ht = 1.0, K_tr = 0.0, rho_t = 0.0, P_t = 0.0;
+            bool inv = false;
+            if (de_eint_) {
+              // D-int: the partner's eps gives h directly (ideal gas: h = 1 + gamma eps)
+              const Real eps_t = cons_pt_old[CYD + de_idx_]/D;
+              if (eps_t > 0.0 && isfinite(eps_t) && isfinite(ssq)) {
+                ht = 1.0 + de_gamma_*eps_t;
+                Wt = sqrt(1.0 + ssq/(D*D*ht*ht));
+                rho_t = D/Wt;
+                P_t = (de_gamma_ - 1.0)*rho_t*eps_t;
+                K_tr = P_t/pow(rho_t, de_gamma_);
+                inv = isfinite(Wt) && isfinite(P_t);
+              }
+            } else {
+              K_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
+              inv = EntropyInversion(D, ssq, K_tr, de_gamma_, Wt, ht);
+              rho_t = inv ? D/Wt : 0.0;
+              P_t = inv ? K_tr*pow(rho_t, de_gamma_) : 0.0;
+            }
             if (inv && tau0 > 0.0) qtr = D*P_t/((de_gamma_ - 1.0)*rho_t)/tau0;
             if (bad || !(tau0 > 0.0)) {
               dec = inv ? 1 : 3;
@@ -2657,9 +2695,10 @@ class PrimitiveSolverHydro {
             } else if (dec == 2) {
               // two-way resync of the tracer to the energy solution (only D Y is written)
               const Real rho_ = prim_pt[PRH]*mb;
-              const Real yk = DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_,
-                                          de_ypow_);
-              ddk = DualEnergyK(yk, de_kmax_, de_ypow_)/fmax(K_tr, 1.0e-300) - 1.0;
+              const Real yk = de_eint_ ? prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+                  DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_);
+              ddk = (de_eint_ ? prim_pt[PPR]/pow(rho_, de_gamma_) :
+                     DualEnergyK(yk, de_kmax_, de_ypow_))/fmax(K_tr, 1.0e-300) - 1.0;
               prim_pt[PYF + de_idx_] = yk;
               cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
               dkeep = 2;
@@ -2667,8 +2706,9 @@ class PrimitiveSolverHydro {
           } else if (!(dense && bad)) {
             // not dense (or B != 0): K from the energy solution, as the legacy branch 0/4
             const Real rho_ = prim_pt[PRH]*mb;
-            const Real yk = (rho_ > 0.0) ?
-                DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_) : 0.0;
+            const Real yk = !(rho_ > 0.0) ? 0.0 : (de_eint_ ?
+                prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+                DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_));
             prim_pt[PYF + de_idx_] = yk;
             cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
             dkeep = 2;

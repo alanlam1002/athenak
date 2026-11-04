@@ -317,6 +317,14 @@ bool DynGRMHD::KfPrevValid() const {
          kf_key[2] == pmy_pack->nmb_thispack;
 }
 
+//! D-int (AddDIntSource): the time of the state this stage's source terms use, t + tau_{s-1} dt
+//! (the stage-time recursion of KillingFullStage below; MHD::MHDSrcTerms calls it each stage)
+void DynGRMHD::SetSourceStage(Driver *pdriver, int stage) {
+  Real tau = 0.0;
+  for (int q = 0; q < stage - 1; ++q) tau = pdriver->gam0[q]*tau + pdriver->beta[q];
+  dint_tsrc = pmy_pack->pmesh->time + tau*pmy_pack->pmesh->dt;
+}
+
 void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   // the time of the metric this stage's fluxes use: solved from the previous stage's state,
   // t + tau_{s-1} dt with tau_s = gam0 tau_{s-1} + beta (as CFC::StageTime, cfc.cpp:2945)

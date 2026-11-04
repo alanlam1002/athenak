@@ -651,6 +651,15 @@ class MultigridDriver {
   // moment integral (and hence no dependence on src_/coeff_ or MPI reductions).
   // Only active on faces a subclass sets to BoundaryFlag::mg_robin.
   int robin_order_;
+  // V-002 C2: PhysicalBoundary state. Device copy of mpcoeff_ (re-uploaded only when the
+  // coefficients change, checked against mpc_h_cache_) and, per face, the list of local
+  // MeshBlocks whose face is a physical boundary (rebuilt when the mesh changes).
+  DvceArray1D<Real> mpc_d_;
+  std::vector<Real> mpc_h_cache_;
+  DvceArray1D<int> bface_list_[6];
+  int bface_n_[6] = {0, 0, 0, 0, 0, 0};
+  int bface_seq_ = -1, bface_nmb_ = -1;
+  void BuildPhysicalFaceLists();
 
   // per-cell octets (Athena++ style)
   std::vector<MGOctet> *octets_;
@@ -750,6 +759,16 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   TaskStatus ProlongateFCMG(DvceArray5D<Real> &u);
 
   DvceArray5D<Real> coarse_buf_;
+
+  // V-002 C1: work list of the (MeshBlock, neighbour) pairs ProlongateFCMG acts on, one row
+  // per pair: m, ox1, ox2, ox3, f1, f2, kind (0 = finer face neighbour, 1 = coarser face
+  // neighbour, 2 = coarser edge/corner neighbour). Depends only on the mesh (not on the MG
+  // level), so it is rebuilt only when the mesh changes (amr/load-balance seq or nmb).
+  DvceArray2D<int> fc_pairs_;
+  int fc_npairs_ = 0;
+  int fc_pairs_seq_ = -1;
+  int fc_pairs_nmb_ = -1;
+  void BuildFCPairs();
 
   MGPerLevelIndcs send_mg_indcs_[56][kMaxMGLevels];
   MGPerLevelIndcs recv_mg_indcs_[56][kMaxMGLevels];

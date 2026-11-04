@@ -871,34 +871,47 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
      << " conv " << def << " ref " << ref << " target " << target << " l2 " << l2
      << " max " << mx << " src_l2 " << fl2 << " src_max " << fmx;
   if (mg_log_ >= 2 && mglevels_ != nullptr) {
-    // position of max |defect|: host copy of the finest per-block defect (just computed
-    // by the CalculateDefectNorm calls above), then a MAXLOC over ranks
-    auto def_h = Kokkos::create_mirror_view(mglevels_->GetCurrentDefect());
-    Kokkos::deep_copy(def_h, mglevels_->GetCurrentDefect());
+    // position of max |defect| (V-002 C5): a device MaxFirstLoc reduction over the finest
+    // per-block defect (just computed by the CalculateDefectNorm calls above), instead of a
+    // host copy of the whole defect and a host scan. MaxFirstLoc keeps the host scan's tie
+    // rule (first maximum in (m, v, k, j, i) order, strict >), so the result is identical.
+    auto def_d = mglevels_->GetCurrentDefect();
     int ngh = mglevels_->GetGhostCells();
-    int ncx = def_h.extent_int(4), ncy = def_h.extent_int(3), ncz = def_h.extent_int(2);
+    int ncx = def_d.extent_int(4), ncy = def_d.extent_int(3), ncz = def_d.extent_int(2);
     auto &size = pmy_pack_->pmb->mb_size.h_view;
     auto &gid_h = pmy_pack_->pmb->mb_gid.h_view;
     struct { double val; int rank; } loc_in{-1.0, global_variable::my_rank}, loc_out;
     double pos[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // x1, x2, x3, level, channel
-    for (int m = 0; m < pmy_pack_->nmb_thispack; ++m) {
-      for (int v = 0; v < nvar_; ++v) {
-        for (int k = ngh; k < ncz - ngh; ++k) {
-          for (int j = ngh; j < ncy - ngh; ++j) {
-            for (int i = ngh; i < ncx - ngh; ++i) {
-              double a = std::fabs(def_h(m, v, k, j, i));
-              if (a > loc_in.val) {
-                loc_in.val = a;
-                pos[0] = size(m).x1min + (i - ngh + 0.5)*size(m).dx1;
-                pos[1] = size(m).x2min + (j - ngh + 0.5)*size(m).dx2;
-                pos[2] = size(m).x3min + (k - ngh + 0.5)*size(m).dx3;
-                pos[3] = pmy_mesh_->lloc_eachmb[gid_h(m)].level - locrootlevel_;
-                pos[4] = v;
-              }
-            }
-          }
-        }
-      }
+    const int nmbl = pmy_pack_->nmb_thispack, nvl = nvar_;
+    const int nxi = ncx - 2*ngh, nyi = ncy - 2*ngh, nzi = ncz - 2*ngh;
+    const int64_t ntot = static_cast<int64_t>(nmbl)*nvl*nzi*nyi*nxi;
+    using MFL = Kokkos::MaxFirstLoc<Real, int64_t, Kokkos::HostSpace>;
+    typename MFL::value_type best;
+    Kokkos::parallel_reduce("MGLog_MaxLoc",
+      Kokkos::RangePolicy<DevExeSpace, Kokkos::IndexType<int64_t>>(0, ntot),
+      KOKKOS_LAMBDA(const int64_t idx, typename MFL::value_type &b) {
+        int64_t r = idx;
+        const int i = static_cast<int>(r % nxi); r /= nxi;
+        const int j = static_cast<int>(r % nyi); r /= nyi;
+        const int k = static_cast<int>(r % nzi); r /= nzi;
+        const int v = static_cast<int>(r % nvl); r /= nvl;
+        const int m = static_cast<int>(r);
+        Real a = Kokkos::fabs(def_d(m, v, k + ngh, j + ngh, i + ngh));
+        if (a > b.val || (a == b.val && idx < b.loc)) { b.val = a; b.loc = idx; }
+      }, MFL(best));
+    if (ntot > 0 && best.val > loc_in.val) {
+      int64_t r = best.loc;
+      const int i = static_cast<int>(r % nxi) + ngh; r /= nxi;
+      const int j = static_cast<int>(r % nyi) + ngh; r /= nyi;
+      const int k = static_cast<int>(r % nzi) + ngh; r /= nzi;
+      const int v = static_cast<int>(r % nvl); r /= nvl;
+      const int m = static_cast<int>(r);
+      loc_in.val = best.val;
+      pos[0] = size(m).x1min + (i - ngh + 0.5)*size(m).dx1;
+      pos[1] = size(m).x2min + (j - ngh + 0.5)*size(m).dx2;
+      pos[2] = size(m).x3min + (k - ngh + 0.5)*size(m).dx3;
+      pos[3] = pmy_mesh_->lloc_eachmb[gid_h(m)].level - locrootlevel_;
+      pos[4] = v;
     }
     loc_out = loc_in;
 #if MPI_PARALLEL_ENABLED

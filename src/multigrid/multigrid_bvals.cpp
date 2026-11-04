@@ -1106,11 +1106,74 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void MultigridBoundaryValues::BuildFCPairs()
+//! \brief V-002 C1: list the (m, neighbour) pairs ProlongateFCMG writes, in the same
+//! (ox3, ox2, ox1, f2, f1) order as the original per-block loop. Built from device copies of
+//! nghbr/mb_lev (exactly what the kernel used to read), so it cannot see stale host data.
+
+void MultigridBoundaryValues::BuildFCPairs() {
+  int nmb = pmy_pack->nmb_thispack;
+  int seq = pmy_pack->pmesh->GetAMRLoadBalanceUpdateSeq();
+  if (fc_pairs_seq_ == seq && fc_pairs_nmb_ == nmb && fc_pairs_.extent_int(0) > 0) return;
+  auto nghbr_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->nghbr.d_view);
+  auto mblev_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->mb_lev.d_view);
+  std::vector<int> rows;
+  for (int m = 0; m < nmb; ++m) {
+    int m_lev = mblev_h(m);
+    for (int ox3 = -1; ox3 <= 1; ++ox3) {
+      for (int ox2 = -1; ox2 <= 1; ++ox2) {
+        for (int ox1 = -1; ox1 <= 1; ++ox1) {
+          if (ox1 == 0 && ox2 == 0 && ox3 == 0) continue;
+          int nface = (ox1!=0?1:0) + (ox2!=0?1:0) + (ox3!=0?1:0);
+          int f2_max = (nface == 1) ? 1 : 0;
+          int f1_max = (nface <= 2) ? 1 : 0;
+          for (int f2 = 0; f2 <= f2_max; ++f2) {
+            for (int f1 = 0; f1 <= f1_max; ++f1) {
+              int n = NeighborIndex(ox1, ox2, ox3, f1, f2);
+              if (n < 0 || n >= 56) continue;
+              if (nghbr_h(m, n).gid < 0) continue;
+              int nlev = nghbr_h(m, n).lev;
+              int kind;
+              if (nlev > m_lev && nface == 1) {
+                kind = 0;
+              } else if (nlev >= m_lev) {
+                continue;
+              } else {
+                kind = (nface == 1) ? 1 : 2;
+              }
+              int r[7] = {m, ox1, ox2, ox3, f1, f2, kind};
+              rows.insert(rows.end(), r, r + 7);
+            }
+          }
+        }
+      }
+    }
+  }
+  fc_npairs_ = static_cast<int>(rows.size()/7);
+  Kokkos::realloc(fc_pairs_, std::max(fc_npairs_, 1), 7);
+  auto fc_h = Kokkos::create_mirror_view(fc_pairs_);
+  for (int p = 0; p < fc_npairs_; ++p)
+    for (int c = 0; c < 7; ++c) fc_h(p, c) = rows[7*p + c];
+  Kokkos::deep_copy(fc_pairs_, fc_h);
+  fc_pairs_seq_ = seq;
+  fc_pairs_nmb_ = nmb;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn TaskStatus MultigridBoundaryValues::ProlongateFCMG()
 //! \brief Prolongate from coarse_buf_ to fine ghost cells using the same flux-conserving
 //! formulas as FillFineCoarseMGGhosts.  For face neighbors at coarser level, uses
 //! gradient-based prolongation.  For edge/corner neighbors at coarser level, uses simple
 //! injection.  For finer neighbors, restriction was already done inline in unpack.
+//!
+//! V-002 C1: one team per (pair, variable) from the cached BuildFCPairs() list, team
+//! threads over the pair's ghost cells (formerly one work-item per MeshBlock with all loops
+//! serial). Every pair writes a disjoint ghost region and reads only coarse_buf_, interior
+//! cells and its own region; the one in-region dependence (finer-face neighbour, ngh > 1:
+//! the update reads the next cell along the face normal) is kept serial, in the original
+//! order, inside one thread. Arithmetic expressions are unchanged.
 
 TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
   if (pmy_mg == nullptr) return TaskStatus::complete;
@@ -1122,270 +1185,212 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
   int ncells = nx >> shift;
   if (ncells < 2) return TaskStatus::complete;
 
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  auto nghbr_d = pmy_pack->pmb->nghbr.d_view;
-  auto mblev_d = pmy_pack->pmb->mb_lev.d_view;
-  auto mbgid_d = pmy_pack->pmb->mb_gid.d_view;
+  BuildFCPairs();
+  if (fc_npairs_ == 0) return TaskStatus::complete;
+
+  auto pairs = fc_pairs_;
   auto fc_cx = pmy_mg->fc_childx_;
   auto fc_cy = pmy_mg->fc_childy_;
   auto fc_cz = pmy_mg->fc_childz_;
   auto cbuf = coarse_buf_;
 
-  int nvar_l = nvar;
-  int ngh_l = ngh;
-  int ncells_l = ncells;
-  int half = ncells / 2;
+  const int nvar_l = nvar;
+  const int ngh_l = ngh;
+  const int ncells_l = ncells;
+  const int half = ncells / 2;
   constexpr Real ot = 1.0/3.0;
 
+  using TeamPol = Kokkos::TeamPolicy<DevExeSpace>;
+  using Member = TeamPol::member_type;
   Kokkos::parallel_for("ProlongateFCMG",
-    Kokkos::RangePolicy<DevExeSpace>(0, nmb),
-    KOKKOS_LAMBDA(const int m) {
-      int m_lev = mblev_d(m);
-      int child_x = fc_cx(m);
-      int child_y = fc_cy(m);
-      int child_z = fc_cz(m);
+    TeamPol(fc_npairs_*nvar_l, Kokkos::AUTO),
+    KOKKOS_LAMBDA(const Member &tm) {
+      const int pv = tm.league_rank();
+      const int p = pv / nvar_l;
+      const int v = pv - p*nvar_l;
+      const int m = pairs(p, 0);
+      const int ox1 = pairs(p, 1), ox2 = pairs(p, 2), ox3 = pairs(p, 3);
+      const int f1 = pairs(p, 4), f2 = pairs(p, 5), kind = pairs(p, 6);
 
-      for (int ox3 = -1; ox3 <= 1; ++ox3) {
-        for (int ox2 = -1; ox2 <= 1; ++ox2) {
-          for (int ox1 = -1; ox1 <= 1; ++ox1) {
-            if (ox1 == 0 && ox2 == 0 && ox3 == 0) continue;
-            int nface = (ox1!=0?1:0) + (ox2!=0?1:0) + (ox3!=0?1:0);
-            int f2_max = (nface == 1) ? 1 : 0;
-            int f1_max = (nface <= 2) ? 1 : 0;
-
-            for (int f2 = 0; f2 <= f2_max; ++f2) {
-              for (int f1 = 0; f1 <= f1_max; ++f1) {
-                int n = NeighborIndex(ox1, ox2, ox3, f1, f2);
-                if (n < 0 || n >= 56) continue;
-                if (nghbr_d(m, n).gid < 0) continue;
-                int nlev = nghbr_d(m, n).lev;
-
-                // From finer face neighbor: apply FC correction.
-                // Ghost cells already contain restricted face avg from unpack.
-                if (nlev > m_lev && nface == 1) {
-                  int oi = (ox1 < 0) ? 1 : (ox1 > 0) ? -1 : 0;
-                  int oj = (ox2 < 0) ? 1 : (ox2 > 0) ? -1 : 0;
-                  int ok = (ox3 < 0) ? 1 : (ox3 > 0) ? -1 : 0;
-
-                  int sub_x = 0, sub_y = 0, sub_z = 0;
-                  if (ox1 != 0) {
-                    sub_y = f1; sub_z = f2;
-                  } else if (ox2 != 0) {
-                    sub_x = f1; sub_z = f2;
-                  } else {
-                    sub_x = f1; sub_y = f2;
-                  }
-
-                  int gis, gie, gjs, gje, gks, gke;
-                  if (ox1 < 0) {
-                    gis = 0; gie = ngh_l - 1;
-                  } else if (ox1 > 0) {
-                    gis = ngh_l + ncells_l;
-                    gie = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gis = ngh_l + sub_x*half;
-                    gie = ngh_l + sub_x*half + half - 1;
-                  }
-                  if (ox2 < 0) {
-                    gjs = 0; gje = ngh_l - 1;
-                  } else if (ox2 > 0) {
-                    gjs = ngh_l + ncells_l;
-                    gje = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gjs = ngh_l + sub_y*half;
-                    gje = ngh_l + sub_y*half + half - 1;
-                  }
-                  if (ox3 < 0) {
-                    gks = 0; gke = ngh_l - 1;
-                  } else if (ox3 > 0) {
-                    gks = ngh_l + ncells_l;
-                    gke = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gks = ngh_l + sub_z*half;
-                    gke = ngh_l + sub_z*half + half - 1;
-                  }
-
-                  for (int v = 0; v < nvar_l; ++v) {
-                    for (int gk = gks; gk <= gke; ++gk) {
-                      for (int gj = gjs; gj <= gje; ++gj) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          Real avg = u(m,v,gk,gj,gi);
-                          u(m,v,gk,gj,gi) =
-                              ot*(4.0*avg
-                              - u(m,v,gk+ok,gj+oj,gi+oi));
-                        }
-                      }
-                    }
-                  }
-                  continue;
-                }
-
-                if (nlev >= m_lev) continue;
-
-                // Face neighbor from coarser: flux-conserving prolongation
-                // from coarse_buf_ into fine ghost cells of u
-                if (nface == 1) {
-                  if (ox1 != 0) {
-                    int fig = (ox1 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fi  = (ox1 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int si  = (ox1 < 0) ? ngh_l - 1 : ngh_l + half;
-                    int sj0 = ngh_l;
-                    int sk0 = ngh_l;
-                    // Low-edge valid-read bound depends on which half of the coarse
-                    // neighbor's face this child actually received (compute_recv's icoar
-                    // block, ComputePerLevelIndices): a "high" child (fc_childy_/
-                    // fc_childz_ == 1) receives one extra overlap cell on the LOW side
-                    // that the original fixed (ngh_l) bound never read, degrading the
-                    // gradient at that edge to a wasted one-sided difference. The high
-                    // bound is deliberately left unconditional (always ngh_l+half): an
-                    // earlier attempt that also narrowed it for high children (mirroring
-                    // the low-edge fix) made things WORSE there -- so whatever cbuf holds
-                    // one past the nominal high edge is apparently still useful and must
-                    // not be clamped away. Only the low edge was ever actually wasted.
-                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
-                    int y_hi = ngh_l + half;
-                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
-                    int z_hi = ngh_l + half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sk = sk0; sk < sk0 + half; ++sk) {
-                        for (int sj = sj0; sj < sj0 + half; ++sj) {
-                          int fj = ngh_l + 2*(sj - sj0);
-                          int fk = ngh_l + 2*(sk - sk0);
-                          Real cc = cbuf(m,v,sk,sj,si);
-                          int sjm = (sj > y_lo) ? sj-1 : sj;
-                          int sjp = (sj < y_hi) ? sj+1 : sj;
-                          int skm = (sk > z_lo) ? sk-1 : sk;
-                          int skp = (sk < z_hi) ? sk+1 : sk;
-                          Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
-                          Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
-                          u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
-                          u(m,v,fk  ,fj+1,fig)=ot*(2.0*(cc+gy-gz)+u(m,v,fk  ,fj+1,fi));
-                          u(m,v,fk+1,fj  ,fig)=ot*(2.0*(cc-gy+gz)+u(m,v,fk+1,fj  ,fi));
-                          u(m,v,fk+1,fj+1,fig)=ot*(2.0*(cc+gy+gz)+u(m,v,fk+1,fj+1,fi));
-                        }
-                      }
-                    }
-                  } else if (ox2 != 0) {
-                    int fjg = (ox2 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fj  = (ox2 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int sj  = (ox2 < 0) ? ngh_l - 1 : ngh_l + half;
-                    int si0 = ngh_l;
-                    int sk0 = ngh_l;
-                    // See the ox1!=0 branch above for why the low bound depends on child
-                    // parity (fc_childx_/fc_childz_ here, since x,z are transverse to y)
-                    // while the high bound stays unconditional.
-                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
-                    int x_hi = ngh_l + half;
-                    int z_lo = child_z ? ngh_l - 1 : ngh_l;
-                    int z_hi = ngh_l + half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sk = sk0; sk < sk0 + half; ++sk) {
-                        for (int si = si0; si < si0 + half; ++si) {
-                          int fi = ngh_l + 2*(si - si0);
-                          int fk = ngh_l + 2*(sk - sk0);
-                          Real cc = cbuf(m,v,sk,sj,si);
-                          int sim = (si > x_lo) ? si-1 : si;
-                          int sip = (si < x_hi) ? si+1 : si;
-                          int skm = (sk > z_lo) ? sk-1 : sk;
-                          int skp = (sk < z_hi) ? sk+1 : sk;
-                          Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
-                          Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
-                          u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
-                          u(m,v,fk  ,fjg,fi+1)=ot*(2.0*(cc+gx-gz)+u(m,v,fk  ,fj,fi+1));
-                          u(m,v,fk+1,fjg,fi  )=ot*(2.0*(cc-gx+gz)+u(m,v,fk+1,fj,fi  ));
-                          u(m,v,fk+1,fjg,fi+1)=ot*(2.0*(cc+gx+gz)+u(m,v,fk+1,fj,fi+1));
-                        }
-                      }
-                    }
-                  } else {
-                    int fkg = (ox3 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
-                    int fk  = (ox3 < 0) ? ngh_l : ngh_l + ncells_l - 1;
-                    int sk  = (ox3 < 0) ? ngh_l - 1 : ngh_l + half;
-                    int si0 = ngh_l;
-                    int sj0 = ngh_l;
-                    // See the ox1!=0 branch above for why the low bound depends on child
-                    // parity (fc_childx_/fc_childy_ here, since x,y are transverse to z)
-                    // while the high bound stays unconditional.
-                    int x_lo = child_x ? ngh_l - 1 : ngh_l;
-                    int x_hi = ngh_l + half;
-                    int y_lo = child_y ? ngh_l - 1 : ngh_l;
-                    int y_hi = ngh_l + half;
-                    for (int v = 0; v < nvar_l; ++v) {
-                      for (int sj = sj0; sj < sj0 + half; ++sj) {
-                        for (int si = si0; si < si0 + half; ++si) {
-                          int fi = ngh_l + 2*(si - si0);
-                          int fj = ngh_l + 2*(sj - sj0);
-                          Real cc = cbuf(m,v,sk,sj,si);
-                          int sim = (si > x_lo) ? si-1 : si;
-                          int sip = (si < x_hi) ? si+1 : si;
-                          int sjm = (sj > y_lo) ? sj-1 : sj;
-                          int sjp = (sj < y_hi) ? sj+1 : sj;
-                          Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
-                          Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
-                          u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));
-                          u(m,v,fkg,fj  ,fi+1)=ot*(2.0*(cc+gx-gy)+u(m,v,fk,fj  ,fi+1));
-                          u(m,v,fkg,fj+1,fi  )=ot*(2.0*(cc-gx+gy)+u(m,v,fk,fj+1,fi  ));
-                          u(m,v,fkg,fj+1,fi+1)=ot*(2.0*(cc+gx+gy)+u(m,v,fk,fj+1,fi+1));
-                        }
-                      }
-                    }
-                  }
-                } else {
-                  int gis, gie, gjs, gje, gks, gke;
-                  if (ox1 < 0) {
-                    gis = 0; gie = ngh_l - 1;
-                  } else if (ox1 > 0) {
-                    gis = ngh_l + ncells_l;
-                    gie = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gis = ngh_l;
-                    gie = ngh_l + ncells_l - 1;
-                  }
-                  if (ox2 < 0) {
-                    gjs = 0; gje = ngh_l - 1;
-                  } else if (ox2 > 0) {
-                    gjs = ngh_l + ncells_l;
-                    gje = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gjs = ngh_l;
-                    gje = ngh_l + ncells_l - 1;
-                  }
-                  if (ox3 < 0) {
-                    gks = 0; gke = ngh_l - 1;
-                  } else if (ox3 > 0) {
-                    gks = ngh_l + ncells_l;
-                    gke = ngh_l + ncells_l + ngh_l - 1;
-                  } else {
-                    gks = ngh_l;
-                    gke = ngh_l + ncells_l - 1;
-                  }
-
-                  for (int v = 0; v < nvar_l; ++v) {
-                    for (int gk = gks; gk <= gke; ++gk) {
-                      for (int gj = gjs; gj <= gje; ++gj) {
-                        for (int gi = gis; gi <= gie; ++gi) {
-                          int ci, cj, ck;
-                          if (ox1 < 0)      ci = ngh_l - 1;
-                          else if (ox1 > 0) ci = ngh_l + half;
-                          else              ci = ngh_l + (gi - ngh_l)/2;
-                          if (ox2 < 0)      cj = ngh_l - 1;
-                          else if (ox2 > 0) cj = ngh_l + half;
-                          else              cj = ngh_l + (gj - ngh_l)/2;
-                          if (ox3 < 0)      ck = ngh_l - 1;
-                          else if (ox3 > 0) ck = ngh_l + half;
-                          else              ck = ngh_l + (gk - ngh_l)/2;
-
-                          u(m, v, gk, gj, gi) = cbuf(m, v, ck, cj, ci);
-                        }
-                      }
-                    }
-                  }
-                }
-              }
+      if (kind == 0) {
+        // From finer face neighbor: apply FC correction. Ghost cells already contain the
+        // restricted face avg from unpack. Threads over the two transverse directions,
+        // the face-normal direction serial in the original (ascending) order.
+        int oi = (ox1 < 0) ? 1 : (ox1 > 0) ? -1 : 0;
+        int oj = (ox2 < 0) ? 1 : (ox2 > 0) ? -1 : 0;
+        int ok = (ox3 < 0) ? 1 : (ox3 > 0) ? -1 : 0;
+        int sub_x = 0, sub_y = 0, sub_z = 0;
+        if (ox1 != 0) {
+          sub_y = f1; sub_z = f2;
+        } else if (ox2 != 0) {
+          sub_x = f1; sub_z = f2;
+        } else {
+          sub_x = f1; sub_y = f2;
+        }
+        int gis, gie, gjs, gje, gks, gke;
+        if (ox1 < 0) {
+          gis = 0; gie = ngh_l - 1;
+        } else if (ox1 > 0) {
+          gis = ngh_l + ncells_l; gie = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gis = ngh_l + sub_x*half; gie = ngh_l + sub_x*half + half - 1;
+        }
+        if (ox2 < 0) {
+          gjs = 0; gje = ngh_l - 1;
+        } else if (ox2 > 0) {
+          gjs = ngh_l + ncells_l; gje = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gjs = ngh_l + sub_y*half; gje = ngh_l + sub_y*half + half - 1;
+        }
+        if (ox3 < 0) {
+          gks = 0; gke = ngh_l - 1;
+        } else if (ox3 > 0) {
+          gks = ngh_l + ncells_l; gke = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gks = ngh_l + sub_z*half; gke = ngh_l + sub_z*half + half - 1;
+        }
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, half*half), [&](const int t) {
+          const int ta = t % half, tb = t / half;
+          if (ox1 != 0) {
+            const int gj = gjs + ta, gk = gks + tb;
+            for (int gi = gis; gi <= gie; ++gi) {
+              Real avg = u(m,v,gk,gj,gi);
+              u(m,v,gk,gj,gi) = ot*(4.0*avg - u(m,v,gk+ok,gj+oj,gi+oi));
+            }
+          } else if (ox2 != 0) {
+            const int gi = gis + ta, gk = gks + tb;
+            for (int gj = gjs; gj <= gje; ++gj) {
+              Real avg = u(m,v,gk,gj,gi);
+              u(m,v,gk,gj,gi) = ot*(4.0*avg - u(m,v,gk+ok,gj+oj,gi+oi));
+            }
+          } else {
+            const int gi = gis + ta, gj = gjs + tb;
+            for (int gk = gks; gk <= gke; ++gk) {
+              Real avg = u(m,v,gk,gj,gi);
+              u(m,v,gk,gj,gi) = ot*(4.0*avg - u(m,v,gk+ok,gj+oj,gi+oi));
             }
           }
+        });
+      } else if (kind == 1) {
+        // Face neighbor from coarser: flux-conserving prolongation from coarse_buf_ into
+        // fine ghost cells of u; one thread per coarse face cell (writes 4 fine ghosts).
+        // Low-edge valid-read bounds depend on the child parity, see the history note in
+        // DEVELOPMENT.md (the high bound is deliberately unconditional).
+        const int child_x = fc_cx(m), child_y = fc_cy(m), child_z = fc_cz(m);
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, half*half), [&](const int t) {
+          const int ta = t % half, tb = t / half;
+          if (ox1 != 0) {
+            int fig = (ox1 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
+            int fi  = (ox1 < 0) ? ngh_l : ngh_l + ncells_l - 1;
+            int si  = (ox1 < 0) ? ngh_l - 1 : ngh_l + half;
+            int sj0 = ngh_l, sk0 = ngh_l;
+            int y_lo = child_y ? ngh_l - 1 : ngh_l;
+            int y_hi = ngh_l + half;
+            int z_lo = child_z ? ngh_l - 1 : ngh_l;
+            int z_hi = ngh_l + half;
+            int sj = sj0 + ta, sk = sk0 + tb;
+            int fj = ngh_l + 2*(sj - sj0);
+            int fk = ngh_l + 2*(sk - sk0);
+            Real cc = cbuf(m,v,sk,sj,si);
+            int sjm = (sj > y_lo) ? sj-1 : sj;
+            int sjp = (sj < y_hi) ? sj+1 : sj;
+            int skm = (sk > z_lo) ? sk-1 : sk;
+            int skp = (sk < z_hi) ? sk+1 : sk;
+            Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
+            Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
+            u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
+            u(m,v,fk  ,fj+1,fig)=ot*(2.0*(cc+gy-gz)+u(m,v,fk  ,fj+1,fi));
+            u(m,v,fk+1,fj  ,fig)=ot*(2.0*(cc-gy+gz)+u(m,v,fk+1,fj  ,fi));
+            u(m,v,fk+1,fj+1,fig)=ot*(2.0*(cc+gy+gz)+u(m,v,fk+1,fj+1,fi));
+          } else if (ox2 != 0) {
+            int fjg = (ox2 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
+            int fj  = (ox2 < 0) ? ngh_l : ngh_l + ncells_l - 1;
+            int sj  = (ox2 < 0) ? ngh_l - 1 : ngh_l + half;
+            int si0 = ngh_l, sk0 = ngh_l;
+            int x_lo = child_x ? ngh_l - 1 : ngh_l;
+            int x_hi = ngh_l + half;
+            int z_lo = child_z ? ngh_l - 1 : ngh_l;
+            int z_hi = ngh_l + half;
+            int si = si0 + ta, sk = sk0 + tb;
+            int fi = ngh_l + 2*(si - si0);
+            int fk = ngh_l + 2*(sk - sk0);
+            Real cc = cbuf(m,v,sk,sj,si);
+            int sim = (si > x_lo) ? si-1 : si;
+            int sip = (si < x_hi) ? si+1 : si;
+            int skm = (sk > z_lo) ? sk-1 : sk;
+            int skp = (sk < z_hi) ? sk+1 : sk;
+            Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
+            Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
+            u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
+            u(m,v,fk  ,fjg,fi+1)=ot*(2.0*(cc+gx-gz)+u(m,v,fk  ,fj,fi+1));
+            u(m,v,fk+1,fjg,fi  )=ot*(2.0*(cc-gx+gz)+u(m,v,fk+1,fj,fi  ));
+            u(m,v,fk+1,fjg,fi+1)=ot*(2.0*(cc+gx+gz)+u(m,v,fk+1,fj,fi+1));
+          } else {
+            int fkg = (ox3 < 0) ? ngh_l - 1 : ngh_l + ncells_l;
+            int fk  = (ox3 < 0) ? ngh_l : ngh_l + ncells_l - 1;
+            int sk  = (ox3 < 0) ? ngh_l - 1 : ngh_l + half;
+            int si0 = ngh_l, sj0 = ngh_l;
+            int x_lo = child_x ? ngh_l - 1 : ngh_l;
+            int x_hi = ngh_l + half;
+            int y_lo = child_y ? ngh_l - 1 : ngh_l;
+            int y_hi = ngh_l + half;
+            int si = si0 + ta, sj = sj0 + tb;
+            int fi = ngh_l + 2*(si - si0);
+            int fj = ngh_l + 2*(sj - sj0);
+            Real cc = cbuf(m,v,sk,sj,si);
+            int sim = (si > x_lo) ? si-1 : si;
+            int sip = (si < x_hi) ? si+1 : si;
+            int sjm = (sj > y_lo) ? sj-1 : sj;
+            int sjp = (sj < y_hi) ? sj+1 : sj;
+            Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
+            Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
+            u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));
+            u(m,v,fkg,fj  ,fi+1)=ot*(2.0*(cc+gx-gy)+u(m,v,fk,fj  ,fi+1));
+            u(m,v,fkg,fj+1,fi  )=ot*(2.0*(cc-gx+gy)+u(m,v,fk,fj+1,fi  ));
+            u(m,v,fkg,fj+1,fi+1)=ot*(2.0*(cc+gx+gy)+u(m,v,fk,fj+1,fi+1));
+          }
+        });
+      } else {
+        // Edge/corner neighbor from coarser: injection, one thread per ghost cell.
+        int gis, gie, gjs, gje, gks, gke;
+        if (ox1 < 0) {
+          gis = 0; gie = ngh_l - 1;
+        } else if (ox1 > 0) {
+          gis = ngh_l + ncells_l; gie = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gis = ngh_l; gie = ngh_l + ncells_l - 1;
         }
+        if (ox2 < 0) {
+          gjs = 0; gje = ngh_l - 1;
+        } else if (ox2 > 0) {
+          gjs = ngh_l + ncells_l; gje = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gjs = ngh_l; gje = ngh_l + ncells_l - 1;
+        }
+        if (ox3 < 0) {
+          gks = 0; gke = ngh_l - 1;
+        } else if (ox3 > 0) {
+          gks = ngh_l + ncells_l; gke = ngh_l + ncells_l + ngh_l - 1;
+        } else {
+          gks = ngh_l; gke = ngh_l + ncells_l - 1;
+        }
+        const int ni = gie - gis + 1, nj = gje - gjs + 1, nk = gke - gks + 1;
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, ni*nj*nk), [&](const int t) {
+          const int gi = gis + t % ni;
+          const int gj = gjs + (t / ni) % nj;
+          const int gk = gks + t / (ni*nj);
+          int ci, cj, ck;
+          if (ox1 < 0)      ci = ngh_l - 1;
+          else if (ox1 > 0) ci = ngh_l + half;
+          else              ci = ngh_l + (gi - ngh_l)/2;
+          if (ox2 < 0)      cj = ngh_l - 1;
+          else if (ox2 > 0) cj = ngh_l + half;
+          else              cj = ngh_l + (gj - ngh_l)/2;
+          if (ox3 < 0)      ck = ngh_l - 1;
+          else if (ox3 > 0) ck = ngh_l + half;
+          else              ck = ngh_l + (gk - ngh_l)/2;
+          u(m, v, gk, gj, gi) = cbuf(m, v, ck, cj, ci);
+        });
       }
   });
 

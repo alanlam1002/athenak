@@ -288,7 +288,7 @@ class Multigrid {
   void ComputeCorrection();
   void CalculateMatrixPack(Real dt);
   void SetFromRootGrid(bool folddata);
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -556,6 +556,8 @@ class MultigridDriver {
 
   virtual void SolveCoarsestGrid();
   Real CalculateDefectNorm(MGNormType nrm, int n);
+  // V-002 C4: all channels' norms from ONE defect computation and one MPI_Allreduce
+  void CalculateDefectNormAll(MGNormType nrm, Real *out);
   Real CalculateSourceNorm(MGNormType nrm, int n);
   void CalculateMatrix(Real dt);
   // Reads <block>/mg_rtol_ref and mg_log (R-058); defaults keep today's behavior.

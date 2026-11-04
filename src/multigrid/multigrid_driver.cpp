@@ -33,6 +33,21 @@
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
 
+// V-002 C3: 25-moment sum for the team reduction in CalculateMultipoleCoefficients
+struct MGMP25 {
+  Real a[25];
+  KOKKOS_INLINE_FUNCTION MGMP25() { for (int c = 0; c < 25; ++c) a[c] = 0.0; }
+  KOKKOS_INLINE_FUNCTION MGMP25 &operator+=(const MGMP25 &o) {
+    for (int c = 0; c < 25; ++c) a[c] += o.a[c];
+    return *this;
+  }
+};
+namespace Kokkos {
+template <> struct reduction_identity<MGMP25> {
+  KOKKOS_FORCEINLINE_FUNCTION static MGMP25 sum() { return MGMP25(); }
+};
+}  // namespace Kokkos
+
 // constructor, initializes data structures and parameters
 
 MultigridDriver::MultigridDriver(MeshBlockPack *pmbp, int invar):
@@ -790,8 +805,24 @@ void MultigridDriver::SolveMG(Driver *pdriver) {
 Real MultigridDriver::TotalDefectNorm() {
   Real def = 0.0;
   if (norm_mode_ == MGNormScaling::max) {
+    if (mglevels_ != nullptr && nvar_ <= kMaxMultipoleChannels) {
+      Real d[kMaxMultipoleChannels];
+      CalculateDefectNormAll(MGNormType::max, d);
+      for (int v = 0; v < nvar_; ++v) def = std::max(def, d[v]);
+      return def;
+    }
     for (int v = 0; v < nvar_; ++v) {
       def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+    }
+    return def;
+  }
+  if (mglevels_ != nullptr && nvar_ <= kMaxMultipoleChannels) {
+    // V-002 C4: one defect computation and one Allreduce for all channels; the
+    // per-channel reductions and the combination below are unchanged
+    Real d[kMaxMultipoleChannels];
+    CalculateDefectNormAll(MGNormType::l2, d);
+    for (int v = 0; v < nvar_; ++v) {
+      def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d[v]) : def + d[v];
     }
     return def;
   }
@@ -1124,6 +1155,52 @@ void MultigridDriver::SolveCoarsestGrid() {
   return;
 }
 
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::CalculateDefectNormAll(MGNormType nrm, Real *out)
+//! \brief V-002 C4: CalculateDefectNorm for every channel with the defect computed once
+//! (CalculateDefectPack already fills all channels) and one MPI_Allreduce of nvar_ values.
+//! Per channel the same reduction kernel and the same post-processing as
+//! CalculateDefectNorm. Requires mglevels_ != nullptr. Collective.
+
+void MultigridDriver::CalculateDefectNormAll(MGNormType nrm, Real *out) {
+  Real loc[kMaxMultipoleChannels];
+  {
+    mgprof::Timer pt(prof_id_, in_log_ ? mgprof::sLog : mgprof::sNormDev);
+    for (int v = 0; v < nvar_; ++v) {
+      Real norm = 0.0;
+      Real mg_norm = mglevels_->CalculateDefectNorm(nrm, v, v == 0);
+      if (nrm == MGNormType::max) {
+        norm = Kokkos::max(norm, mg_norm);
+      } else {
+        norm += mg_norm;
+      }
+      loc[v] = norm;
+    }
+  }
+  #if MPI_PARALLEL_ENABLED
+  Real glob[kMaxMultipoleChannels];
+  {
+    mgprof::Timer pt(prof_id_, in_log_ ? mgprof::sLog : mgprof::sNormMPI);
+    MPI_Allreduce(loc, glob, nvar_, MPI_ATHENA_REAL,
+                  (nrm == MGNormType::max) ? MPI_MAX : MPI_SUM, MPI_COMM_WORLD);
+  }
+  for (int v = 0; v < nvar_; ++v) loc[v] = glob[v];
+  #endif
+  for (int v = 0; v < nvar_; ++v) {
+    Real norm = loc[v];
+    if (nrm != MGNormType::max) {
+      Real vol = (mgroot_->size_.x1max - mgroot_->size_.x1min)
+               * (mgroot_->size_.x2max - mgroot_->size_.x2min)
+               * (mgroot_->size_.x3max - mgroot_->size_.x3min);
+      norm /= vol;
+    }
+    if (nrm == MGNormType::l2) {
+      norm = Kokkos::sqrt(norm);
+    }
+    out[v] = norm;
+  }
+}
 
 //----------------------------------------------------------------------------------------
 //! \fn Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n)
@@ -3023,15 +3100,19 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
   bool skip_dipole = nodipole_;
   int ncoeff = nmpcoeff_;
 
-  DvceArray2D<Real> partial("mp_partial", nmb, nmpcoeff_);
-
-  // One channel at a time: gravity's nvar_=1 makes this loop a single, identical
-  // iteration to the pre-generalization behavior; CFC's vector Poisson solver
-  // (nvar_=3, P_x/P_y/P_z fully decoupled) needs each channel's own moments,
-  // since each component has its own, generally distinct, source distribution.
-  for (int v = 0; v < nvar_; ++v) {
-    par_for("MGMultipoleCoeffs", DevExeSpace(), 0, nmb-1,
-    KOKKOS_LAMBDA(const int m) {
+  // V-002 C3: one launch for all channels, one team per (MeshBlock, channel), threads over
+  // the block's cells, a hierarchical (team) reduction of the 25 moments. Same per-cell
+  // terms as before; only the summation order within a block changes (round-off). The
+  // per-block partials are then summed on the host in the original (m ascending) order.
+  const int nvl = nvar_;
+  const int ncell = nx1*nx2*nx3;
+  DvceArray3D<Real> partial("mp_partial", nmb, nvl, 25);
+  using TeamPol = Kokkos::TeamPolicy<DevExeSpace>;
+  using Member = TeamPol::member_type;
+  Kokkos::parallel_for("MGMultipoleCoeffs", TeamPol(nmb*nvl, Kokkos::AUTO),
+    KOKKOS_LAMBDA(const Member &tm) {
+      const int m = tm.league_rank() / nvl;
+      const int v = tm.league_rank() - m*nvl;
       Real dx1 = (mb_size.d_view(m).x1max - mb_size.d_view(m).x1min)
                  / static_cast<Real>(nx1);
       Real dx2 = (mb_size.d_view(m).x2max - mb_size.d_view(m).x2min)
@@ -3039,75 +3120,81 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
       Real dx3 = (mb_size.d_view(m).x3max - mb_size.d_view(m).x3min)
                  / static_cast<Real>(nx3);
       Real vol = dx1 * dx2 * dx3;
-
-      Real mp[25] = {};
-
-      for (int k = ngh; k < ngh + nx3; ++k) {
-        Real z = mb_size.d_view(m).x3min + (k - ngh + 0.5) * dx3 - zorigin;
-        Real z2 = z * z;
-        for (int j = ngh; j < ngh + nx2; ++j) {
+      MGMP25 res;
+      Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, ncell),
+        [&](const int idx, MGMP25 &acc) {
+          const int i = ngh + idx % nx1;
+          const int j = ngh + (idx / nx1) % nx2;
+          const int k = ngh + idx / (nx1*nx2);
+          Real *mp = acc.a;
+          Real z = mb_size.d_view(m).x3min + (k - ngh + 0.5) * dx3 - zorigin;
+          Real z2 = z * z;
           Real y = mb_size.d_view(m).x2min + (j - ngh + 0.5) * dx2 - yorigin;
           Real y2 = y * y;
           Real yz = y * z;
-          for (int i = ngh; i < ngh + nx1; ++i) {
-            Real x = mb_size.d_view(m).x1min + (i - ngh + 0.5) * dx1 - xorigin;
-            Real x2 = x * x;
-            Real xy = x * y;
-            Real zx = z * x;
-            Real r2 = x2 + y2 + z2;
-            Real s = src(m, v, k, j, i) * vol;
+          Real x = mb_size.d_view(m).x1min + (i - ngh + 0.5) * dx1 - xorigin;
+          Real x2 = x * x;
+          Real xy = x * y;
+          Real zx = z * x;
+          Real r2 = x2 + y2 + z2;
+          Real s = src(m, v, k, j, i) * vol;
 
-            mp[0] += s;
-            if (!skip_dipole) {
-              mp[1] += s * y;
-              mp[2] += s * z;
-              mp[3] += s * x;
-            }
-            Real hx2my2 = 0.5 * (x2 - y2);
-            mp[4] += s * xy;
-            mp[5] += s * yz;
-            mp[6] += s * (3.0 * z2 - r2);
-            mp[7] += s * zx;
-            mp[8] += s * hx2my2;
-
-            if (order == 4) {
-              Real tx2my2 = 3.0 * x2 - y2;
-              Real x2mty2 = x2 - 3.0 * y2;
-              Real fz2mr2 = 5.0 * z2 - r2;
-              mp[9]  += s * y * tx2my2;
-              mp[10] += s * xy * z;
-              mp[11] += s * y * fz2mr2;
-              mp[12] += s * z * (z2 - 3.0 * r2);
-              mp[13] += s * x * fz2mr2;
-              mp[14] += s * z * hx2my2;
-              mp[15] += s * x * x2mty2;
-              Real sz2mr2 = 7.0 * z2 - r2;
-              Real sz2mtr2 = 7.0 * z2 - 3.0 * r2;
-              mp[16] += s * xy * hx2my2;
-              mp[17] += s * yz * tx2my2;
-              mp[18] += s * xy * sz2mr2;
-              mp[19] += s * yz * sz2mtr2;
-              mp[20] += s * (35.0 * z2 * z2 - 30.0 * z2 * r2 + 3.0 * r2 * r2);
-              mp[21] += s * zx * sz2mtr2;
-              mp[22] += s * hx2my2 * sz2mr2;
-              mp[23] += s * zx * x2mty2;
-              mp[24] += s * 0.125 * (x2 * x2mty2 - y2 * tx2my2);
-            }
+          mp[0] += s;
+          if (!skip_dipole) {
+            mp[1] += s * y;
+            mp[2] += s * z;
+            mp[3] += s * x;
           }
-        }
-      }
-      for (int c = 0; c < ncoeff; ++c)
-        partial(m, c) = mp[c];
+          Real hx2my2 = 0.5 * (x2 - y2);
+          mp[4] += s * xy;
+          mp[5] += s * yz;
+          mp[6] += s * (3.0 * z2 - r2);
+          mp[7] += s * zx;
+          mp[8] += s * hx2my2;
+
+          if (order == 4) {
+            Real tx2my2 = 3.0 * x2 - y2;
+            Real x2mty2 = x2 - 3.0 * y2;
+            Real fz2mr2 = 5.0 * z2 - r2;
+            mp[9]  += s * y * tx2my2;
+            mp[10] += s * xy * z;
+            mp[11] += s * y * fz2mr2;
+            mp[12] += s * z * (z2 - 3.0 * r2);
+            mp[13] += s * x * fz2mr2;
+            mp[14] += s * z * hx2my2;
+            mp[15] += s * x * x2mty2;
+            Real sz2mr2 = 7.0 * z2 - r2;
+            Real sz2mtr2 = 7.0 * z2 - 3.0 * r2;
+            mp[16] += s * xy * hx2my2;
+            mp[17] += s * yz * tx2my2;
+            mp[18] += s * xy * sz2mr2;
+            mp[19] += s * yz * sz2mtr2;
+            mp[20] += s * (35.0 * z2 * z2 - 30.0 * z2 * r2 + 3.0 * r2 * r2);
+            mp[21] += s * zx * sz2mtr2;
+            mp[22] += s * hx2my2 * sz2mr2;
+            mp[23] += s * zx * x2mty2;
+            mp[24] += s * 0.125 * (x2 * x2mty2 - y2 * tx2my2);
+          }
+        }, Kokkos::Sum<MGMP25>(res));
+      Kokkos::single(Kokkos::PerTeam(tm), [&]() {
+        for (int c = 0; c < ncoeff; ++c) partial(m, v, c) = res.a[c];
+      });
     });
 
-    auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  auto partial_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), partial);
+  for (int v = 0; v < nvl; ++v) {
     for (int m = 0; m < nmb; ++m) {
       for (int c = 0; c < nmpcoeff_; ++c) {
-        mpcoeff_[v*25 + c] += partial_h(m, c);
+        mpcoeff_[v*25 + c] += partial_h(m, v, c);
       }
     }
   }
 
+  // NOTE (V-002 C3, flagged to the user, not changed here): the guard below is
+  // MPI_PARALLEL, which is never defined (the build defines MPI_PARALLEL_ENABLED; see
+  // DEVELOPMENT.md item on "#ifdef MPI_PARALLEL"), so this Allreduce never runs and every
+  // rank builds the multipole BC from its own MeshBlocks' moments only. Fixing it changes
+  // the X/beta solutions beyond round-off; kept as-is so C3 stays a round-off-only change.
 #ifdef MPI_PARALLEL
   MPI_Allreduce(MPI_IN_PLACE, mpcoeff_, nvar_ * 25, MPI_ATHENA_REAL,
                 MPI_SUM, MPI_COMM_WORLD);

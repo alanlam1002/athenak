@@ -198,6 +198,9 @@ class DynGRMHD {
   // restored primitives (DualEnergyRestartInit, right after restart_state::ApplyStaged)
   bool de_restart_init = false;
   virtual void DualEnergyRestartInit() {}
+  // c194 (R-227 (iii)) <mhd> lagrangian_tags: the tag scalars of a restart from a file without
+  // them (pgen.cpp's rst_nscal_extra), from the restored primitives (LagrangianTagInit)
+  virtual void LagrangianTagInit(ParameterInput *pin) {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
   // <mhd> mass_closure (eos/mass_closure.hpp): the itemized MCLOSE ledger; nullptr if off
   mclose::MassClosure *pmclose = nullptr;
@@ -474,6 +477,7 @@ class DynGRMHDPS : public DynGRMHD {
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
   void DualEnergyRestartInit() override;
+  void LagrangianTagInit(ParameterInput *pin) override;
   void SaveRestartScalars(ParameterInput *pin) override {
     eos.SaveTier3State(pin);
     eos.SaveDualEnergyTotal(pin);

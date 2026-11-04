@@ -172,6 +172,7 @@ class PrimitiveSolverHydro {
   // wave speeds and branch of D (the formula of the de_flux_hll tracer code, generalised),
   // and CalcFluxes skips the upwind F_D*Y_upwind for them.
   bool sf_hll = false;
+  int lt_n = 0;                    // <mhd> lagrangian_tags (c194): scalars 0..lt_n-1
   DvceArray4D<int> de_shock;       // per-cell shock flag from the previous primitives
   DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
   int de_dilate = 1;               // also flag the face neighbours of flagged cells
@@ -1505,6 +1506,25 @@ class PrimitiveSolverHydro {
       }
       Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);
+    }
+    // c194 (R-227 (iii)) <mhd> lagrangian_tags = N: scalars 0..N-1 are diagnostic tags (set
+    // on a restart from a file without them, DynGRMHD::LagrangianTagInit), advected like
+    // any scalar; their species limits are unreachable (SetSpeciesFractionLimits), so they
+    // never set the C2P's Y_adjusted -> cons_adjusted write-back. A tag never enters a
+    // hydro flux or decision: bitwise to the solution (the gate: tags on vs off)
+    lt_n = pin->GetOrAddInteger(block, "lagrangian_tags", 0);
+    if (lt_n > 0) {
+      const int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
+      const bool de = pin->GetOrAddBoolean(block, "dual_energy", false);
+      if (lt_n > nsc - (de ? 1 : 0)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> lagrangian_tags = " << lt_n
+                  << " needs nscalars >= lagrangian_tags (+1 with dual_energy)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      for (int n = 0; n < lt_n; ++n) {
+        ps.GetEOSMutable().SetSpeciesFractionLimits(n, -1.0e30, 1.0e30);
+      }
     }
     de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
     if (de_on) {

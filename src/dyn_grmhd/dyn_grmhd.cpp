@@ -10,6 +10,7 @@
 #include <math.h>
 
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -1239,6 +1240,55 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::DualEnergyRestartInit() {
     std::cout << "DEINIT dual_energy_restart_init: K tracer set from p/rho^gamma on every cell "
               << "(Y = (K/" << kmax << ")^" << yp << "); max |K(Y)/(p/rho^gamma) - 1| = "
               << err << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void DynGRMHDPS::LagrangianTagInit(ParameterInput *pin)
+//! \brief c194 (R-227 (iii)) <mhd> lagrangian_tags = N with <mhd> lagrangian_tag_rho =
+//! "lo0:hi0,lo1:hi1,...": on a restart from a file without the tags (rst_nscal_extra = N),
+//! tag n = 1 where lo_n <= rho < hi_n of the restored primitives, else 0, on every cell
+//! (ghosts included, as DualEnergyRestartInit): w0's slot n = tag, u0's = (densitized D) tag.
+//! No other variable changes. The tags are then advected like any scalar (the upwind mass
+//! flux unless scalar_flux_hll) and never enter a hydro flux or decision (their species
+//! limits are unreachable, primitive_solver_hyd.hpp lt_n)
+template<class EOSPolicy, class ErrorPolicy>
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::LagrangianTagInit(ParameterInput *pin) {
+  auto *pmhd = pmy_pack->pmhd;
+  const int nt = pmhd->rst_nscal_extra;
+  std::vector<Real> lo, hi;
+  std::istringstream in(pin->GetString("mhd", "lagrangian_tag_rho"));
+  for (std::string t; std::getline(in, t, ',');) {
+    const auto c = t.find(':');
+    if (c == std::string::npos) continue;
+    lo.push_back(std::stod(t.substr(0, c)));
+    hi.push_back(std::stod(t.substr(c + 1)));
+  }
+  if (static_cast<int>(lo.size()) != nt || nt != eos.lt_n) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<mhd> lagrangian_tag_rho needs one lo:hi band per tag (lagrangian_tags = "
+              << eos.lt_n << ", restart lacked " << nt << ", bands " << lo.size() << ")"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &w0 = pmhd->w0;
+  auto &u0 = pmhd->u0;
+  const int nmb = pmy_pack->nmb_thispack, nhyd = pmhd->nmhd;
+  for (int n = 0; n < nt; ++n) {
+    const Real l = lo[n], h = hi[n];
+    const int iy = nhyd + n;
+    par_for("lagrangian_tag_init", DevExeSpace(), 0, nmb-1, 0, w0.extent_int(2)-1,
+            0, w0.extent_int(3)-1, 0, w0.extent_int(4)-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      const Real rho = w0(m, IDN, k, j, i);
+      const Real y = (rho >= l && rho < h) ? 1.0 : 0.0;
+      w0(m, iy, k, j, i) = y;
+      u0(m, iy, k, j, i) = u0(m, IDN, k, j, i)*y;
+    });
+    if (global_variable::my_rank == 0) {
+      std::cout << "LTAG lagrangian_tag_init: tag " << n << " = 1 where " << l
+                << " <= rho < " << h << " (restored primitives, every cell)" << std::endl;
+    }
   }
 }
 

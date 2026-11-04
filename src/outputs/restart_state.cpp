@@ -113,6 +113,38 @@ void Stage(const DvceArray5D<Real> &src, int nvar, int version, const std::strin
 
 bool ApplyStaged(MeshBlockPack *pmbp) {
   if (staged_nvar == 0) return false;
+  // c194 (R-227 (iii)) <mhd> lagrangian_tags: a file without the tag scalars (pgen.cpp's
+  // rst_nscal_extra = xs) holds dyngr.w0 (the first group, nmhd + nscalars wide) without the
+  // xs leading scalar slots: insert them (zero; LagrangianTagInit sets them) so the block
+  // maps as one written by this configuration
+  const int xs = (pmbp->pmhd != nullptr) ? pmbp->pmhd->rst_nscal_extra : 0;
+  if (xs > 0) {
+    const int nhyd = pmbp->pmhd->nmhd;
+    auto all = Kokkos::ALL;
+    DvceArray5D<Real> ex("rst-state-xs", staged.extent_int(0), staged_nvar + xs,
+                         staged.extent_int(2), staged.extent_int(3), staged.extent_int(4));
+    Kokkos::deep_copy(Kokkos::subview(ex, all, std::make_pair(0, nhyd), all, all, all),
+                      Kokkos::subview(staged, all, std::make_pair(0, nhyd), all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(ex, all, std::make_pair(nhyd + xs, staged_nvar + xs),
+                                      all, all, all),
+                      Kokkos::subview(staged, all, std::make_pair(nhyd, staged_nvar), all, all,
+                                      all));
+    staged = ex;
+    staged_nvar += xs;
+    if (!staged_layout.empty()) {
+      auto v = Parse(staged_layout);
+      std::string l;
+      for (auto &g : v) {
+        if (g.first == "dyngr.w0") g.second += xs;
+        l += (l.empty() ? "" : ",") + g.first + ":" + std::to_string(g.second);
+      }
+      staged_layout = l;
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "restart_state: " << xs << " lagrangian tag scalar slot(s) inserted into "
+                << "dyngr.w0 (zero; set by LagrangianTagInit)" << std::endl;
+    }
+  }
   const int nvar = NumVars(pmbp);
   const std::string cur = Layout(pmbp);
   bool applied = false;

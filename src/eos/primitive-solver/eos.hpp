@@ -566,6 +566,14 @@ class EOS : public EOSPolicy, public ErrorPolicy {
     return max_Y[i];
   }
 
+  //! \brief Set the fraction limits of species i (host; c194 <mhd> lagrangian_tags: a
+  //         diagnostic tag gets unreachable limits, so SpeciesLimits never adjusts it and a
+  //         tag value can never set cons_adjusted, i.e. never rewrite D, S, tau)
+  void SetSpeciesFractionLimits(int i, Real ymin, Real ymax) {
+    min_Y[i] = ymin;
+    max_Y[i] = ymax;
+  }
+
   //! \fn const bool IsConservedFlooringFailure() const
   //  \brief Find out if the EOSPolicy fails flooring the conserved variables.
   //

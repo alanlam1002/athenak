@@ -96,6 +96,7 @@ class MHD {
 
   int nmhd;                // number of mhd variables (5/4 for ideal/isothermal EOS)
   int nscalars;            // number of passive scalars
+  int rst_nscal_extra = 0;  // c194: tag scalars the restart file lacked (pgen.cpp)
   int nflag = 0;           // <mhd> dual_energy_flag_exchange: owner-decided per-cell flag
                            // carried in u0/u1 after the evolved variables (R-069)
   DvceArray5D<Real> u0;    // conserved variables

@@ -339,6 +339,16 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     }
     pmesh->pmb_pack->pdyngr->DualEnergyRestartInit();
   }
+  // c194 <mhd> lagrangian_tags: the tags of a restart from a file without them (pgen.cpp)
+  if (res_flag && pmesh->pmb_pack->pdyngr != nullptr && pmesh->pmb_pack->pmhd != nullptr &&
+      pmesh->pmb_pack->pmhd->rst_nscal_extra > 0) {
+    if (!staged) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> lagrangian_tags needs the restart's restart_state block" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    pmesh->pmb_pack->pdyngr->LagrangianTagInit(pin);
+  }
   // <job> restart_embed_fill (R1, restart_state.hpp): the new outer blocks are filled, then
   // the load runs the regrid path once (ghost exchange, CFC::ReinitializeMetricForAMR's
   // re-solve and C2P), not the restored path; MCLOSE books it as regrid_embed (EmbedMark)

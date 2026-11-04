@@ -3190,12 +3190,7 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
     }
   }
 
-  // NOTE (V-002 C3, flagged to the user, not changed here): the guard below is
-  // MPI_PARALLEL, which is never defined (the build defines MPI_PARALLEL_ENABLED; see
-  // DEVELOPMENT.md item on "#ifdef MPI_PARALLEL"), so this Allreduce never runs and every
-  // rank builds the multipole BC from its own MeshBlocks' moments only. Fixing it changes
-  // the X/beta solutions beyond round-off; kept as-is so C3 stays a round-off-only change.
-#ifdef MPI_PARALLEL
+#if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, mpcoeff_, nvar_ * 25, MPI_ATHENA_REAL,
                 MPI_SUM, MPI_COMM_WORLD);
 #endif

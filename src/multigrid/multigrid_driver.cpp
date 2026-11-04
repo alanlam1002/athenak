@@ -139,6 +139,7 @@ MultigridDriver::~MultigridDriver() {
 void MultigridDriver::SyncRootToHost() {
   if (mgroot_->on_host_) return;
   if (root_sync_state_ != RootSyncState::DEVICE_MODIFIED) return;
+  mgprof::Timer pt(prof_id_, mgprof::sRootSync);
   int lev = mgroot_->current_level_;
   Kokkos::deep_copy(mgroot_->u_[lev].h_view, mgroot_->u_[lev].d_view);
   Kokkos::deep_copy(mgroot_->uold_[lev].h_view, mgroot_->uold_[lev].d_view);
@@ -154,6 +155,7 @@ void MultigridDriver::SyncRootToHost() {
 void MultigridDriver::SyncRootToDevice() {
   if (mgroot_->on_host_) return;
   if (root_sync_state_ != RootSyncState::HOST_MODIFIED) return;
+  mgprof::Timer pt(prof_id_, mgprof::sRootSync);
   int lev = mgroot_->current_level_;
   Kokkos::deep_copy(mgroot_->u_[lev].d_view, mgroot_->u_[lev].h_view);
   Kokkos::deep_copy(mgroot_->src_[lev].d_view, mgroot_->src_[lev].h_view);
@@ -186,6 +188,7 @@ void MultigridDriver::SubtractAverage(MGVariable type) {
 //  \brief initialize the source assuming that the source terms are already loaded
 
 void MultigridDriver::PrepareForAMR() {
+  mgprof::Timer pt(prof_id_, mgprof::sPrepareAMR);
   locrootlevel_ = pmy_mesh_->root_level;
 
   // Detect if mesh has changed (AMR and resulting load balancing).
@@ -244,6 +247,7 @@ void MultigridDriver::PrepareForAMR() {
 
 
 void MultigridDriver::SetupMultigrid(Real dt, bool ftrivial) {
+  mgprof::Timer pt(prof_id_, mgprof::sSetup);
   locrootlevel_ = pmy_mesh_->root_level;
   nrootlevel_ = mgroot_->GetNumberOfLevels();
   nmblevel_ = mglevels_->GetNumberOfLevels();
@@ -501,6 +505,8 @@ void MultigridDriver::TransferFromBlocksToRoot(bool initflag) {
   const int ngh_mb = mglevels_->ngh_;
   int nmmb = mglevels_->nmmb_ - 1;
   int padding = nslist_[global_variable::my_rank];
+  {
+  mgprof::Timer pt(prof_id_, mgprof::sToRootDev);
   par_for("Multigrid:SaveToRoot", DevExeSpace(), 0, nmmb, KOKKOS_LAMBDA(const int m) {
     for (int v = 0; v < nv; ++v) {
       rootbuf.d_view(v,    m+padding) = src(m, v, ngh_mb, ngh_mb, ngh_mb);
@@ -510,8 +516,11 @@ void MultigridDriver::TransferFromBlocksToRoot(bool initflag) {
   });
   rootbuf.template modify<DevExeSpace>();
   rootbuf.template sync<HostExeSpace>();
+  }
 #if MPI_PARALLEL_ENABLED
   int ncomm = initflag ? nv : 2*nv;
+  {
+  mgprof::Timer pt_ag(prof_id_, mgprof::sToRootMPI);
   for (int v = 0; v < ncomm; ++v) {
     MPI_Allgatherv(MPI_IN_PLACE,
         nblist_[global_variable::my_rank],
@@ -519,7 +528,9 @@ void MultigridDriver::TransferFromBlocksToRoot(bool initflag) {
         nblist_, nslist_, MPI_ATHENA_REAL,
         MPI_COMM_WORLD);
   }
+  }
 #endif
+  mgprof::Timer pt_host(prof_id_, mgprof::sToRootHost);
 
   const auto loc = pmy_mesh_->lloc_eachmb;
   int rootlevel = locrootlevel_;
@@ -572,9 +583,11 @@ void MultigridDriver::TransferFromBlocksToRoot(bool initflag) {
 void MultigridDriver::TransferFromRootToBlocks(bool folddata) {
   SyncRootToHost();
   if (nreflevel_ > 0) {
+    mgprof::Timer pt(prof_id_, mgprof::sFromRootOct);
     RestrictOctetsBeforeTransfer();
     SetOctetBoundariesBeforeTransfer(folddata);
   }
+  mgprof::Timer pt(prof_id_, mgprof::sFromRootSet);
   mglevels_->SetFromRootGrid(folddata);
   return;
 }
@@ -626,7 +639,8 @@ void MultigridDriver::FMGProlongate(Driver *pdriver) {
 void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
   int ngh = mgroot_->ngh_;
   if (current_level_ == nrootlevel_ + nreflevel_ - 1) {
-    MGRootBoundary();
+    { mgprof::Timer pt(prof_id_, mgprof::sRoot);
+      MGRootBoundary(); }
     TransferFromRootToBlocks(true);
   }
   if (current_level_ >= nrootlevel_ + nreflevel_ - 1) { // MeshBlocks
@@ -636,10 +650,12 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
     if (current_level_ == nrootlevel_ + nreflevel_ - 1) flag = 1;
 
     if (current_level_ == ntotallevel_ - 2) flag = 2;
+    mgprof::Timer pt(prof_id_, mgprof::sTaskList);
     SetMGTaskListToFiner(nsmooth, ngh, flag);
     pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_finer", 0);
     current_level_++;
   } else if (current_level_ >= nrootlevel_ - 1) { // octets
+    mgprof::Timer pt(prof_id_, mgprof::sOctet);
     if (current_level_ == nrootlevel_ - 1) {
       MGRootBoundary();
     } else {
@@ -654,6 +670,7 @@ void MultigridDriver::OneStepToFiner(Driver *pdriver, int nsmooth) {
       SmoothOctets(1 - coffset_);
     }
   } else { // root grid
+    mgprof::Timer pt(prof_id_, mgprof::sRoot);
     MGRootBoundary();
     mgroot_->ProlongateAndCorrectPack();
     MarkRootDeviceModified();
@@ -679,15 +696,20 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
   int ngh = mgroot_->ngh_;
   if (current_level_ >= nrootlevel_ + nreflevel_) { // MeshBlocks
     pmg = mglevels_;
-    SetMGTaskListToCoarser(nsmooth, ngh);
-    pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_coarser", 0);
+    {
+      mgprof::Timer pt(prof_id_, mgprof::sTaskList);
+      SetMGTaskListToCoarser(nsmooth, ngh);
+      pdriver->ExecuteTaskList(pmy_mesh_, "mg_to_coarser", 0);
+    }
     if (current_level_ == nrootlevel_ + nreflevel_) {
       TransferFromBlocksToRoot(false);
       if (nreflevel_ > 0) {
+        mgprof::Timer pt(prof_id_, mgprof::sOctet);
         PreRestrictOctetU();
       }
     }
   } else if (current_level_ > nrootlevel_ - 1) { // octets
+    mgprof::Timer pt(prof_id_, mgprof::sOctet);
     SetBoundariesOctets(false, false);
     if (current_level_ < fmglevel_) {
       StoreOldDataOctets();
@@ -701,6 +723,7 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
     }
     RestrictOctets();
   } else { // root grid
+    mgprof::Timer pt(prof_id_, mgprof::sRoot);
     MGRootBoundary();
     if (current_level_ < fmglevel_) {
       mgroot_->StoreOldData();
@@ -727,6 +750,7 @@ void MultigridDriver::OneStepToCoarser(Driver *pdriver, int nsmooth) {
 //! \brief Solve the V-cycle starting from the current level
 
 void MultigridDriver::SolveVCycle(Driver *pdriver, int npresmooth, int npostsmooth) {
+  mgprof::Timer pt(prof_id_, mgprof::sVCycle);
   int startlevel = current_level_;
   coffset_ ^= 1;
   while (current_level_ > 0) {
@@ -814,6 +838,7 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
   min_vcycles_ = pin->GetOrAddInteger(block, "mg_min_vcycles", 0);
+  if (mg_log_ >= 3) mgprof::on = true;   // stage profiler (mg_prof.hpp), off by default
 }
 
 //----------------------------------------------------------------------------------------
@@ -940,6 +965,7 @@ void MultigridDriver::SolveFMGCoarser() {
 //! \brief Solve iteratively until defect norm drops below eps_
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
+  mgprof::Timer pt(prof_id_, mgprof::sIterative);
   Real def = TotalDefectNorm();
   // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
   // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
@@ -1010,7 +1036,10 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   Kokkos::fence();
   if (mg_log_ > 0) {
     double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    mgprof::Timer ptl(prof_id_, mgprof::sLog);
+    in_log_ = true;
     LogSolve(ncyc, def0, def, ref, target, wall);
+    in_log_ = false;
   }
   return;
 }
@@ -1046,6 +1075,7 @@ void MultigridDriver::SolveIterativeFixedTimes(Driver *pdriver) {
 //! \brief Solve the coarsest root grid
 
 void MultigridDriver::SolveCoarsestGrid() {
+  mgprof::Timer pt(prof_id_, mgprof::sRoot);
   pmg = mgroot_;
   int ni = (std::max(nrbx1_, std::max(nrbx2_, nrbx3_))
             >> (nrootlevel_-1));
@@ -1089,6 +1119,7 @@ void MultigridDriver::SolveCoarsestGrid() {
 Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
   Real norm = 0.0;
   if (mglevels_ != nullptr) {
+    mgprof::Timer pt(prof_id_, in_log_ ? mgprof::sLog : mgprof::sNormDev);
     Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n);
     if (nrm == MGNormType::max) {
       norm = Kokkos::max(norm, mg_norm);
@@ -1098,10 +1129,13 @@ Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
   }
   #if MPI_PARALLEL_ENABLED
   Real global_norm = 0.0;
+  {
+  mgprof::Timer pt(prof_id_, in_log_ ? mgprof::sLog : mgprof::sNormMPI);
   if (nrm == MGNormType::max) {
     MPI_Allreduce(&norm, &global_norm, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
   } else {
     MPI_Allreduce(&norm, &global_norm, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  }
   }
   norm = global_norm;
   #endif

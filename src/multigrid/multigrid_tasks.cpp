@@ -33,18 +33,21 @@ void MultigridDriver::DoTaskListOneStage() {
 }
 
 TaskStatus MultigridDriver::ClearRecv(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   TaskStatus tstat;
   tstat = pmg->pbval->ClearRecvMG();
   return tstat;
 }
 
 TaskStatus MultigridDriver::ClearSend(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   TaskStatus tstat;
   tstat = pmg->pbval->ClearSendMG();
   return tstat;
 }
 
 TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   // only switches the level's state; the receives are posted in SendBoundary after the
   // pre-send fence, so the previous round's UnpackMG no longer reads their buffer
   TaskStatus tstat = pmg->pbval->InitRecvMG(pmg->nvar_);
@@ -52,6 +55,7 @@ TaskStatus MultigridDriver::StartReceive(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::SendBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndSend);
   DvceArray5D<Real> u = pmg->GetCurrentData();
   TaskStatus tstat = pmg->pbval->PackAndSendMG(u);
   if (tstat == TaskStatus::complete) {
@@ -61,37 +65,44 @@ TaskStatus MultigridDriver::SendBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::RecvBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndRecv);
   DvceArray5D<Real> u = pmg->GetCurrentData();
   TaskStatus tstat = pmg->pbval->RecvAndUnpackMG(u);
   return tstat;
 }
 
 TaskStatus MultigridDriver::SmoothRed(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sSmooth);
   pmg->SmoothPack(coffset_);
   return TaskStatus::complete;
 }
 
 TaskStatus MultigridDriver::SmoothBlack(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sSmooth);
   pmg->SmoothPack(1-coffset_);
   return TaskStatus::complete;
 }
 
 TaskStatus MultigridDriver::Restrict(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sRestrict);
   pmg->RestrictPack();
   return TaskStatus::complete;
 }
 
 TaskStatus MultigridDriver::Prolongate(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sProlong);
   pmg->ProlongateAndCorrectPack();
   return TaskStatus::complete;
 }
 
 TaskStatus MultigridDriver::FMGProlongateTask(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sProlong);
   pmg->FMGProlongatePack();
   return TaskStatus::complete;
 }
 
 TaskStatus MultigridDriver::CalculateFASRHS(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sFASRHS);
   if (current_level_ < fmglevel_) {
     pmg->StoreOldData();
     pmg->CalculateFASRHSPack();
@@ -111,6 +122,7 @@ TaskStatus MultigridDriver::ProlongateBoundaryForProlongation(Driver *pdrive, in
 }
 
 TaskStatus MultigridDriver::FillFCBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->FillFineCoarseMGGhosts(u);
@@ -118,6 +130,7 @@ TaskStatus MultigridDriver::FillFCBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::FillCoarseBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->FillCoarseMG(u);
@@ -125,6 +138,7 @@ TaskStatus MultigridDriver::FillCoarseBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::ProlongateFCBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->ProlongateFCMG(u);
@@ -132,6 +146,7 @@ TaskStatus MultigridDriver::ProlongateFCBoundary(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::PhysicalBoundary(Driver *pdrive, int stage) {
+  mgprof::Timer pt(prof_id_, mgprof::sBndOther);
   if (pmy_pack_->pmesh->strictly_periodic) return TaskStatus::complete;
 
   DvceArray5D<Real> u = pmg->GetCurrentData();

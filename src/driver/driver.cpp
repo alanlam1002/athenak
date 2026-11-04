@@ -6,12 +6,14 @@
 //! \file driver.cpp
 //  \brief implementation of functions in class Driver
 
+#include <chrono>
 #include <iostream>
 #include <iomanip>    // std::setprecision()
 #include <limits>
 #include <algorithm>
 #include <string> // string
 
+#include "multigrid/mg_prof.hpp"
 #include "athena.hpp"
 #include "globals.hpp"
 #include "parameter_input.hpp"
@@ -425,6 +427,8 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
     }
     while ((pmesh->time < tlim) && (pmesh->ncycle < nlim || nlim < 0) &&
            (elapsed_time < wall_time)) {
+      std::chrono::steady_clock::time_point mgprof_t0;
+      if (mgprof::on) { Kokkos::fence(); mgprof_t0 = std::chrono::steady_clock::now(); }
       pmesh->ClearMeshUpdated();
       if (global_variable::my_rank == 0) {OutputCycleDiagnostics(pmesh);}
       if (wdflag) {WatchDog(0);}
@@ -455,6 +459,11 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
       pmesh->time = pmesh->time + pmesh->dt;
       pmesh->ncycle++;
       pmesh->dt_last_completed = pmesh->dt;
+      if (mgprof::on) {
+        Kokkos::fence();
+        mgprof::CycleWall(pmesh->ncycle - 1, std::chrono::duration<double>(
+                          std::chrono::steady_clock::now() - mgprof_t0).count(), false);
+      }
       nmb_updated_ += pmesh->nmb_total;
       npart_updated_ += pmesh->nprtcl_total;
       // load balancing efficiency

@@ -23,6 +23,7 @@
 #include <vector>
 
 // AthenaK headers
+#include "mg_prof.hpp"
 #include "../athena.hpp"
 #include "../globals.hpp"
 #include "../mesh/mesh.hpp"
@@ -446,7 +447,10 @@ class MultigridDriver {
   // mg_norm = max, volume-weighted L2 otherwise). Reference for mg_rtol_ref = source.
   Real TotalSourceNorm();
   // Name used in the <cfc>/mg_log lines (the two vector-Poisson instances differ).
-  void SetLogName(const std::string &name) { mg_log_name_ = name; }
+  void SetLogName(const std::string &name) {
+    mg_log_name_ = name;
+    prof_id_ = mgprof::SolverId(name);
+  }
   // Damping factor applied to the FAS coarse-grid correction (u - uold) before
   // it's prolongated back onto the next-finer level, in ComputeCorrection() and
   // ProlongateAndCorrectOctets() alike. Default 1.0 = undamped (every existing
@@ -610,6 +614,8 @@ class MultigridDriver {
   // (with 0 such a solve does none, and the metric can lag a compact moving source).
   int min_vcycles_ = 0;
   std::string mg_log_name_;
+  int prof_id_ = mgprof::kCFC;
+  bool in_log_ = false;          // charge norms inside LogSolve to mg_prof sLog   // mg_prof.hpp row (set by SetLogName)
 
   bool full_multigrid_;
   int fmg_ncycle_;

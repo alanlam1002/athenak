@@ -379,6 +379,8 @@ MGCFCConformalFactorDriver::~MGCFCConformalFactorDriver() {
 
 void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
+  {
+  mgprof::Timer pt(prof_id_, mgprof::sCoeff);
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
   // One-time coefficient restriction through the octet hierarchy (a no-op when
@@ -391,6 +393,7 @@ void MGCFCConformalFactorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // that's still missing the octet-0-to-root contribution RestrictCoeffOctets()
   // just added, under any refined patch.
   mgroot_->RestrictCoefficients();
+  }
 
   if (mg_debug_analytic_residual_test_) {
     DebugDumpRootCoeffUnderOctet();

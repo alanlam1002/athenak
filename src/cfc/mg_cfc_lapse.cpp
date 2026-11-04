@@ -278,12 +278,15 @@ MGCFCLapseDriver::~MGCFCLapseDriver() {
 
 void MGCFCLapseDriver::Solve(Driver *pdriver, int stage, Real dt) {
   PrepareForAMR();
+  {
+  mgprof::Timer pt(prof_id_, mgprof::sCoeff);
   mglevels_->RestrictCoefficients();
   TransferCoeffToRoot();
   // Octet-hierarchy coefficient restriction and ordering, same reasoning as
   // MGCFCConformalFactorDriver::Solve.
   RestrictCoeffOctets();
   mgroot_->RestrictCoefficients();
+  }
 
   SetupMultigrid(dt, false);
 

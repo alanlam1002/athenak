@@ -290,6 +290,7 @@ void MGCFCVectorPoissonDriver::Solve(Driver *pdriver, int stage, Real dt) {
   // autompo_ is always false here (see constructor comment), so no
   // CalculateCenterOfMass() call -- mirrors gravity's own if(autompo_) gate.
   if (mporder_ > 0) {
+    mgprof::Timer pt(prof_id_, mgprof::sSetup);
     CalculateMultipoleCoefficients();
     SyncMultipoleToDevice();
   }

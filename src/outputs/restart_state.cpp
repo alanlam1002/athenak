@@ -45,7 +45,7 @@ bool IsCore(const std::string &g) {
 
 // groups added after version 0 whose zero fill is the feature-off state (killing_full arm
 // (ii), R-174 (b)): a version-0 file may lack them (ApplyStaged)
-const char *const kOptional[] = {"dyngr.kfprev", "dyngr.kfbres"};
+const char *const kOptional[] = {"dyngr.kfprev", "dyngr.kfbres", "dyngr.rholag"};   // + D-int (c190)
 
 bool IsOptional(const std::string &g) {
   for (const char *c : kOptional) if (g == c) return true;

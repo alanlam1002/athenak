@@ -3190,10 +3190,25 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
     }
   }
 
+  // mg_log >= 3 diagnostic (V-004 §1b): raw (unscaled) monopole and dipole moments, per
+  // rank before the sum and summed after it. Printing only; the solve is unchanged.
+  auto mp_print = [&](const char *tag) {
+    for (int v = 0; v < nvar_; ++v) {
+      std::ostringstream os;
+      os << std::scientific << std::setprecision(10) << "MPCOEFF " << mg_log_name_
+         << " cyc " << pmy_mesh_->ncycle << " " << tag << " rank "
+         << global_variable::my_rank << " ch " << v << " c0 " << mpcoeff_[v*25]
+         << " c1 " << mpcoeff_[v*25+1] << " c2 " << mpcoeff_[v*25+2]
+         << " c3 " << mpcoeff_[v*25+3] << "\n";
+      std::cout << os.str() << std::flush;
+    }
+  };
+  if (mg_log_ >= 3) mp_print("local");
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, mpcoeff_, nvar_ * 25, MPI_ATHENA_REAL,
                 MPI_SUM, MPI_COMM_WORLD);
 #endif
+  if (mg_log_ >= 3 && global_variable::my_rank == 0) mp_print("global");
 
   ScaleMultipoleCoefficients();
 }

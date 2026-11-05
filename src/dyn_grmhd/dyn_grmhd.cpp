@@ -28,6 +28,7 @@
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
+#include "dyn_grmhd/resistive/resistive_dyngr.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
@@ -159,9 +160,14 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
     Kokkos::realloc(temperature, nmb, 1, ncells3, ncells2, ncells1);
   }
+
+  if (pmy_pack->pmhd != nullptr && pmy_pack->pmhd->resist_params.enabled) {
+    presist = new resistive::ResistiveDynGR(pmy_pack, pin);
+  }
 }
 
 DynGRMHD::~DynGRMHD() {
+  if (presist != nullptr) delete presist;
 }
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -173,6 +179,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
   adm::ADM *padm = pmy_pack->padm;
   MHD *pmhd = pmy_pack->pmhd;
   NumericalRelativity *pnr = pmy_pack->pnr;
+
+  if (presist != nullptr) {
+    QueueResistiveTasks();
+    return;
+  }
 
   // Start task list
   pnr->QueueTask(&MHD::InitRecv, pmhd, MHD_Recv, "MHD_Recv", Task_Start);
@@ -252,6 +263,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueDynGRMHDTasks() {
 template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::PrimToConInit(int is, int ie, int js, int je,
                                                     int ks, int ke) {
+  if (presist != nullptr) {
+    ResistivePrimToCon(is, ie, js, je, ks, ke);
+    return;
+  }
   eos.PrimToCons(pmy_pack->pmhd->w0, pmy_pack->pmhd->bcc0, pmy_pack->pmhd->u0,
                  is, ie, js, je, ks, ke);
   if (pmy_pack->ptmunu != nullptr) {
@@ -305,6 +320,9 @@ template<class EOSPolicy, class ErrorPolicy>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int stage) {
   if (fixed_evolution) {
     return TaskStatus::complete;
+  }
+  if (presist != nullptr) {
+    return ResistiveConToPrim(pdrive, stage);
   }
 
   // Extract the indices

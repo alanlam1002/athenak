@@ -19,6 +19,8 @@ enum class DynGRMHD_EOS {eos_ideal, eos_piecewise_poly,
                       eos_compose, eos_hybrid};        // EOS policies for dynamical GR
 enum class DynGRMHD_Error {reset_floor};               // Error policies for dynamical GR
 
+namespace resistive { class ResistiveDynGR; }
+
 //----------------------------------------------------------------------------------------
 //! \struct DynGRMHDTaskIDs
 //  \brief container to hold TaskIDs of all dyngr tasks
@@ -103,6 +105,9 @@ class DynGRMHD {
   // Storage for temperature
   DvceArray5D<Real> temperature;
 
+  // Resistive GRMHD state and EOS-independent tasks (nullptr unless <mhd> resistive)
+  resistive::ResistiveDynGR *presist = nullptr;
+
  protected:
   MeshBlockPack *pmy_pack;  // ptr to MeshBlockPack containing this Hydro
   int scratch_level;        // GPU scratch level for flux and source calculations
@@ -144,6 +149,18 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                         const Real dt, DvceArray5D<Real> &u0);
+
+  // Resistive GRMHD (07_scoping_v2 §3.3), defined in resistive/resistive_dyngr_tasks.cpp
+  void QueueResistiveTasks();
+  TaskStatus ResistiveFluxes(Driver *d, int stage);
+  TaskStatus ResistivePre1(Driver *d, int stage);
+  TaskStatus ResistivePre2(Driver *d, int stage);
+  TaskStatus ResistiveC2PPre(Driver *d, int stage);
+  TaskStatus ResistiveImplicit(Driver *d, int stage);
+  TaskStatus ResistiveConToPrim(Driver *d, int stage);
+  void ResistiveImplicitSolve(Driver *d, int estage);
+  void ResistiveC2P();
+  void ResistivePrimToCon(int is, int ie, int js, int je, int ks, int ke);
 };
 
 // Factory function for generating DynGRMHD based on parameter input.

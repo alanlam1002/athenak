@@ -133,12 +133,8 @@ void CheckResistiveConfiguration(const ResistiveParams &rp,
     Fatal(__LINE__, "<mhd> resistive = true requires <time> integrator = "
           "imex2|imex3|imex2+ (got '" + integrator + "')");
   }
-  if (!rp.allow_incomplete) {
-    Fatal(__LINE__, "<mhd> resistive = true: the resistive update is not implemented yet "
-          "(plan step 1a). Set resistive_allow_incomplete = true only for development.");
-  }
-  std::cout << "### WARNING: resistive_allow_incomplete = true; resistive GRMHD is "
-            << "INCOMPLETE and results are not physical." << std::endl;
+  // Step 1a: flat/static-metric dyngr path only (constant metric is checked at run
+  // time by ResistiveDynGR); allow_incomplete is kept as a no-op for old inputs.
 }
 
 }  // namespace resistive

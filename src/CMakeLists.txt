@@ -56,6 +56,8 @@ add_executable(
         dyn_grmhd/dyn_grmhd_fofc.cpp
         dyn_grmhd/resistive/resistive_params.cpp
         dyn_grmhd/resistive/resistive_diagnostics.cpp
+        dyn_grmhd/resistive/resistive_dyngr.cpp
+        dyn_grmhd/resistive/resistive_dyngr_tasks.cpp
 
         eos/eos.cpp
         eos/ideal_hyd.cpp
@@ -160,6 +162,7 @@ add_executable(
         pgen/unit_tests/eos_compose.cpp
         pgen/unit_tests/gauss_legendre.cpp
         pgen/unit_tests/resistive_unit_tests.cpp
+        pgen/tests/resistive_tests.cpp
 
         radiation/radiation.cpp
         radiation/radiation_fluxes.cpp

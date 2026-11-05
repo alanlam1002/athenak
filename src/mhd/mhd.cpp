@@ -133,6 +133,18 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
       pin->DoesParameterExist("mhd","eta_ad")) {
     presist = new Resistivity(ppack, pin);
     const bool active = (presist->eta_ohm != 0.0 || presist->eta_ad != 0.0);
+    // The Resistivity class implements Newtonian Ohmic/ambipolar terms only; in SR/GR/
+    // dyngr it would silently add non-covariant EMFs/fluxes (risk R1).
+    if (active && (pmy_pack->pcoord->is_special_relativistic ||
+                   pmy_pack->pcoord->is_general_relativistic ||
+                   pmy_pack->pcoord->is_dynamical_relativistic)) {
+      std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line "<< __LINE__ << std::endl
+                << "<mhd> eta_ohm/eta_ad (Newtonian non-ideal MHD) cannot be used with "
+                << "SR/GR/dynamical GR." << std::endl
+                << "For relativistic resistive MHD use <mhd> resistive = true with "
+                << "resistive_sigma (dyngr only)." << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     has_sts_resistivity = active &&
         (presist->mode == parabolic::DiffusionSelection::sts_only);
     has_explicit_resistivity = active &&

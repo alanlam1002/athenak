@@ -36,8 +36,14 @@ for d in sys.argv[1:]:
         print(f'  cycles {int(a["cycle"])}-{int(b["cycle"])}: wall/cycle {w:.3f} s | ' + ' '.join(f'{k} {v:.3f}' for k, v in sp.items())
               + f' | mg share of stage loop {sp["mg"]/sp["stagen"]:.2f} | zone-cycles/s/GPU {cells/w/96:.3e} | M per wall-h {dt_sim/(b["wall"]-a["wall"])*3600:.2f}'
               + f' | dt {dt_sim/nc:.4f} | nmb {min(nmbs):.0f}-{max(nmbs):.0f} (lb bound {math.ceil(max(nmbs)/96)/(max(nmbs)/96):.2f}, blocks/rank {max(nmbs)/96:.1f})')
-    else:
-        print('  no 100->200 window:', sorted(by)[-3:] if by else 'no PHASE_TIMERS', fin[-1] if fin else '')
+    else:   # a run cut by the timeout: wall/cycle from the 'elapsed=' lines over cycles 100 -> last (no split)
+        el = {int(c): (float(e), float(t)) for e, c, t in re.findall(r'^elapsed=([-0-9.e+]+) cycle=(\d+) time=([-0-9.e+]+)', '\n'.join(log), re.M)}
+        if 100 in el and max(el) > 100:
+            c1 = max(el); (e0, t0), (e1, t1) = el[100], el[c1]
+            print(f'  cycles 100-{c1} (cut by the timeout; elapsed lines): wall/cycle {(e1-e0)/(c1-100):.3f} s | M per wall-h {(t1-t0)/(e1-e0)*3600:.2f}'
+                  + (f' | cycles 0-100 from PHASE_TIMERS: mg share {by[100]["mg"]/by[100]["stagen"]:.2f} regrid/cycle {by[100]["regrid"]/100:.3f} io/cycle {by[100]["io"]/100:.3f} nmb {by[100]["nmb"]:.0f}' if 100 in by else ''))
+        else:
+            print('  no 100->200 window:', sorted(by)[-3:] if by else 'no PHASE_TIMERS', fin[-1] if fin else '')
     fs = sorted(glob.glob(f'{d}/bin/*.prim_3d.*.bin'), key=lambda f: bc.read_binary(f)['time'])
     if fs:
         P = bc.read_binary(fs[-1]); g = np.asarray(P['mb_geometry'], float); w_ = g[:, 1] - g[:, 0]
@@ -53,7 +59,7 @@ for d in sys.argv[1:]:
         print(f'    dense: M(>=0.01) {m[dn[0]].sum():.6e} K01 {(m[dn[0]]*K[dn[0]]).sum()/m[dn[0]].sum():+.4e} '
               f'K1 {(m[dn[1]]*K[dn[1]]).sum()/m[dn[1]].sum():+.4e} rho_max/rho_c {rho.max()/RC:.6f}')
     try:
-        mem = [float(x) for x in re.findall(r'(\d+)\s*$', open(f'{d}/mem.log').read(), re.M)]
+        mem = [float(x) for x in re.findall(r'[Mm]emory [Uu]sed\D*([\d.]+)', open(f'{d}/mem.log').read())]
         print(f'  GPU memory used samples (xpu-smi, node 1 tile 0): {mem[:3]} ... max {max(mem) if mem else "n/a"}')
     except Exception as e:
         print('  mem.log:', e)

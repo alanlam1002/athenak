@@ -45,8 +45,11 @@ class Coordinates;
 // standard requires signed int tag, with MPI_TAG_UB>=2^15-1 = 32,767 (inclusive). In fact
 // virtually every library allows this limit to be exceeded. As of 2025, the Intel MPI
 // library provided the most stringent limit of 20 bits per tag. Six bits are needed to
-// store the buffer ID, leaving NUM_BITS_LID=14
+// store the buffer ID, leaving NUM_BITS_LID=14. Libraries with an 18-bit tag bound
+// (e.g. Aurora MPICH, MPI_TAG_UB=262143) need -DNUM_BITS_LID=12 for 2D/3D meshes.
+#ifndef NUM_BITS_LID
 #define NUM_BITS_LID 14
+#endif
 
 #define SQR(x) ( (x)*(x) )
 #define SIGN(x) ( ((x) < 0.0) ? -1.0 : 1.0 )

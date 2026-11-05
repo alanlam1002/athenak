@@ -70,6 +70,17 @@ struct TDERefineParams {
   // resolution floor (dx 1 over the old +-64 box in the +-128 mesh) is never derefined.
   int  pin_level = -1;
   Real pin_box = 0.0;
+  // <problem> amr_level_debris_fine (R-236 item 2, variant A; default -1 = off): a second,
+  // star-only debris level above lev_debris for blocks above a second, higher cut
+  // rho > amr_density_frac_fine*rho_max (default = amr_density_frac), with its own buffer
+  // (amr_buffer_fine, default amr_buffer) and hysteresis (amr_deref_frac_fine, default
+  // amr_density_frac_fine*amr_deref_frac/amr_density_frac). With the fine cut equal to the
+  // first one, the target level is max(lev_debris, lev_debris_fine): today's refinement
+  // with amr_level_debris = lev_debris_fine.
+  int  lev_debris_fine = -1;
+  Real rho_frac_fine = 0.0;
+  Real deref_frac_fine = 0.0;
+  Real buffer_fine = 0.0;
 };
 TDERefineParams tde_ref;
 } // namespace
@@ -922,6 +933,28 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                 << "amr_deref_frac must not exceed amr_density_frac" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    tde_ref.lev_debris_fine = pin->GetOrAddInteger("problem", "amr_level_debris_fine", -1);
+    if (tde_ref.lev_debris_fine >= 0) {
+      tde_ref.rho_frac_fine = pin->GetOrAddReal("problem", "amr_density_frac_fine",
+                                                tde_ref.rho_frac);
+      tde_ref.deref_frac_fine = pin->GetOrAddReal("problem", "amr_deref_frac_fine",
+          tde_ref.rho_frac_fine*(tde_ref.deref_frac/tde_ref.rho_frac));
+      tde_ref.buffer_fine = pin->GetOrAddReal("problem", "amr_buffer_fine", tde_ref.buffer);
+      // the fine cuts nest inside the first ones (a fine-warm block is always warm, so the
+      // buffer's block list below is unchanged), and the buffer is on for both or neither
+      if (tde_ref.lev_debris_fine <= tde_ref.lev_debris ||
+          tde_ref.rho_frac_fine < tde_ref.rho_frac ||
+          tde_ref.deref_frac_fine < tde_ref.deref_frac ||
+          tde_ref.deref_frac_fine > tde_ref.rho_frac_fine ||
+          (tde_ref.buffer_fine > 0.0) != (tde_ref.buffer > 0.0)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "amr_level_debris_fine needs: amr_level_debris_fine > amr_level_debris, "
+                  << "amr_density_frac <= amr_density_frac_fine, amr_deref_frac <= "
+                  << "amr_deref_frac_fine <= amr_density_frac_fine, and amr_buffer_fine > 0 "
+                  << "exactly when amr_buffer > 0" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
     user_ref_func = &TDERefineTracker;
   } else if (amr_cond == "tde_debris") {
     // BH box (shared with tde_track) and, for amr_dryrun, tde_track's own debris cut
@@ -1386,6 +1419,9 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   const Real r2_bh_fine = SQR(tde_ref.rad_bh_fine);
   const Real rho_cut    = tde_ref.rho_frac*rho_max;
   const Real rho_dcut   = tde_ref.deref_frac*rho_max;
+  const bool fine_on    = (tde_ref.lev_debris_fine >= 0);
+  const Real rho_cut_f  = tde_ref.rho_frac_fine*rho_max;     // used only when fine_on
+  const Real rho_dcut_f = tde_ref.deref_frac_fine*rho_max;
 
   // Buffer: the AABBs of every block (all ranks) above the derefinement cut, with a
   // flag for whether it is also above the refinement cut. A block wants the debris
@@ -1393,15 +1429,20 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   // while it lies within `buffer` of a "warm" one. With buffer = 0 only the block's
   // own maximum counts, and with deref_frac = rho_frac there is no hysteresis.
   const bool use_buf = (tde_ref.buffer > 0.0);
-  std::vector<Real> hot;   // 7 per block: x1min x1max x2min x2max x3min x3max is_hot
+  // 7 per block: x1min x1max x2min x2max x3min x3max is_hot; with the fine level on, 9:
+  // + is_hot_fine is_warm_fine (fine-warm implies warm, so the block list is the same)
+  const int nhv = fine_on ? 9 : 7;
+  std::vector<Real> hot;
   if (use_buf && rho_max_ok) {
     std::vector<Real> mine;
     for (int m = 0; m < nmb; ++m) {
       if (block_rho_max_h(m) > rho_dcut) {
         const auto &sz = size.h_view(m);
-        Real v[7] = {sz.x1min, sz.x1max, sz.x2min, sz.x2max, sz.x3min, sz.x3max,
-                     (block_rho_max_h(m) > rho_cut) ? 1.0 : 0.0};
-        mine.insert(mine.end(), v, v + 7);
+        Real v[9] = {sz.x1min, sz.x1max, sz.x2min, sz.x2max, sz.x3min, sz.x3max,
+                     (block_rho_max_h(m) > rho_cut) ? 1.0 : 0.0,
+                     (fine_on && block_rho_max_h(m) > rho_cut_f) ? 1.0 : 0.0,
+                     (fine_on && block_rho_max_h(m) > rho_dcut_f) ? 1.0 : 0.0};
+        mine.insert(mine.end(), v, v + nhv);
       }
     }
 #if MPI_PARALLEL_ENABLED
@@ -1417,6 +1458,7 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
 #endif
   }
   const Real buf2 = SQR(tde_ref.buffer);
+  const Real buf2_f = SQR(tde_ref.buffer_fine);
 
   for (int m = 0; m < nmb; ++m) {
     Real &x1min = size.h_view(m).x1min;
@@ -1449,22 +1491,35 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     if (d2_bh < r2_bh)                          { want = std::max(want, tde_ref.lev_bh); }
     if (r2_bh_fine > 0.0 && d2_bh < r2_bh_fine) { want = std::max(want, tde_ref.lev_bh_fine); }
     bool deb_hot = false, deb_warm = false;
+    bool fin_hot = false, fin_warm = false;   // the fine level (fine_on only)
     if (rho_max_ok && !use_buf) {
       deb_hot  = (block_rho_max_h(m) > rho_cut);
       deb_warm = (block_rho_max_h(m) > rho_dcut);
+      if (fine_on) {
+        fin_hot  = (block_rho_max_h(m) > rho_cut_f);
+        fin_warm = (block_rho_max_h(m) > rho_dcut_f);
+      }
     } else if (rho_max_ok) {
-      for (std::size_t h = 0; h + 7 <= hot.size() && !deb_hot; h += 7) {
+      // the scan stops once every answer is known (fin_hot implies deb_hot: nested cuts)
+      for (std::size_t h = 0; h + nhv <= hot.size() && !(deb_hot && (!fine_on || fin_hot));
+           h += nhv) {
         // squared distance between this block's AABB and block h's AABB
         Real dx = std::fmax(0.0, std::fmax(hot[h+0] - x1max, x1min - hot[h+1]));
         Real dy = std::fmax(0.0, std::fmax(hot[h+2] - x2max, x2min - hot[h+3]));
         Real dz = std::fmax(0.0, std::fmax(hot[h+4] - x3max, x3min - hot[h+5]));
-        if (SQR(dx) + SQR(dy) + SQR(dz) < buf2) {
+        Real d2 = SQR(dx) + SQR(dy) + SQR(dz);
+        if (d2 < buf2) {
           deb_warm = true;
           if (hot[h+6] > 0.5) deb_hot = true;
+        }
+        if (fine_on && d2 < buf2_f) {
+          if (hot[h+8] > 0.5) fin_warm = true;
+          if (hot[h+7] > 0.5) fin_hot = true;
         }
       }
     }
     if (deb_hot) { want = std::max(want, tde_ref.lev_debris); }
+    if (fin_hot) { want = std::max(want, tde_ref.lev_debris_fine); }
     if (tde_ref.pin_level >= 0 && x1min < tde_ref.pin_box && x1max > -tde_ref.pin_box &&
         x2min < tde_ref.pin_box && x2max > -tde_ref.pin_box &&
         x3min < tde_ref.pin_box && x3max > -tde_ref.pin_box) {
@@ -1478,6 +1533,8 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     else                      { flag = -1; }
     // hysteresis: a block at or below the debris level near warm gas is held
     if (flag == -1 && deb_warm && level <= tde_ref.lev_debris) { flag = 0; }
+    // and a block at or below the fine level near fine-warm gas
+    if (flag == -1 && fin_warm && level <= tde_ref.lev_debris_fine) { flag = 0; }
     refine_flag.h_view(m + mbs) = flag;
   }
 

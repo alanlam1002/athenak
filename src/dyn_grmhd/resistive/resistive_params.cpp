@@ -31,7 +31,8 @@ const std::vector<std::string> &ResistiveKeys() {
     "resistive_sigma", "resistive_sigma_model", "resistive_sigma_in",
     "resistive_sigma_out", "resistive_rho_transition", "resistive_sigma_width",
     "resistive_rsolver", "resistive_charge_flux", "resistive_newton_fallback",
-    "resistive_newton_tol", "resistive_newton_maxit", "resistive_allow_incomplete"};
+    "resistive_newton_tol", "resistive_newton_maxit", "resistive_allow_incomplete",
+    "resistive_freeze_background"};
   return keys;
 }
 
@@ -128,6 +129,8 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   if (rp.newton_maxit < 1) {
     Fatal(__LINE__, "<" + block + "> resistive_newton_maxit must be >= 1");
   }
+  rp.freeze_background =
+      pin->GetOrAddBoolean(block, "resistive_freeze_background", false);
   return rp;
 }
 

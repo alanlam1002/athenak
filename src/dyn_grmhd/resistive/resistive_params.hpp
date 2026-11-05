@@ -20,6 +20,9 @@
 //!   resistive_newton_tol   = 1e-11
 //!   resistive_newton_maxit = 30
 //!   resistive_allow_incomplete = false  (developer switch while steps are unfinished)
+//!   resistive_freeze_background = false (test only: subtract the initial discrete E~
+//!                                        RHS every stage, i.e. eta-compensation of the
+//!                                        initial equilibrium; no restart, no AMR)
 
 #include <string>
 
@@ -45,6 +48,7 @@ struct ResistiveParams {
   NewtonFallback newton_fallback = NewtonFallback::lagged_v;
   Real newton_tol = 1.0e-11;
   int newton_maxit = 30;
+  bool freeze_background = false;
 };
 
 // True only if <block>/resistive exists and is true. Never adds keys to pin.

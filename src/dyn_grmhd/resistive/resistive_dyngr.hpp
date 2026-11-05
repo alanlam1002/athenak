@@ -61,6 +61,9 @@ class ResistiveDynGR {
   DvceEdgeFld4D<Real> hfld;
   DvceArray5D<Real> emc;
   DvceArray5D<Real> cwork;
+  // resistive_freeze_background only: -(initial discrete dE~/dt), added in CTE
+  DvceFaceFld4D<Real> esrc;
+  bool esrc_set = false;
 
   // Separate boundary objects, one per E~ exchange round within a stage (each owns its
   // own MPI communicators and buffers): explicit round (+ h* edge sync), post-implicit
@@ -108,6 +111,8 @@ class ResistiveDynGR {
   void AddImexSources(Driver *d, int istage);
   // Checks that the ADM metric is spatially uniform and static (Step 1a/2 scope).
   void CheckConstantMetric() const;
+  // resistive_freeze_background (test only), called from CTE
+  void FreezeBackground(Real gam0, Real gam1, Real beta_dt, int mode);
 
  private:
   MeshBlockPack *pmy_pack;

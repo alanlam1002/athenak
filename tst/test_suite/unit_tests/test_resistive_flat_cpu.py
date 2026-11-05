@@ -78,7 +78,7 @@ def _cleanup():
     if os.environ.get("RESIST_KEEP", "0") == "1":
         return
     for pat in ["resist_*.athinput", "*.resist.dat", "*.state.*.txt", "rt_*.rst",
-                "rst", "rt_rr", "rt_*.hst"]:
+                "rst", "rt_rr", "rt_*.hst", "rt_*.log"]:
         for fn in glob.glob(pat):
             if os.path.isdir(fn):
                 shutil.rmtree(fn)
@@ -390,18 +390,21 @@ def _hist(name):
 
 
 def _scan(names, keys, flags):
-    """Run the scan members concurrently (one launcher each) if launchers are given."""
+    """Run the scan members concurrently (one launcher each) if launchers are given.
+    Output goes to <name>.log (a pipe per run would block once its buffer is full)."""
     procs = []
     for n, (name, fl) in enumerate(zip(names, flags)):
         launch = _HL[n % len(_HL)] if _HL else None
-        procs.append(subprocess.Popen(_cmd(name, keys, fl, launch=launch),
-                                      stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      universal_newlines=True))
+        with open(name + ".log", "w") as log:
+            procs.append(subprocess.Popen(_cmd(name, keys, fl + ["time/ndiag=100"],
+                                               launch=launch),
+                                          stdout=log, stderr=subprocess.STDOUT))
         if not _HL:
             procs[-1].wait()
-    for p in procs:
-        out = p.communicate()[0]
-        _check(out, p.returncode)
+    for name, p in zip(names, procs):
+        p.wait()
+        with open(name + ".log") as log:
+            _check(log.read(), p.returncode)
     return [_dat(n) for n in names]
 
 
@@ -431,56 +434,97 @@ _HARRIS_KEYS = ["a_sheet = 0.1", "eps = 1.0e-6", "user_hist = true", "<output1>"
 _VA = 1.0/math.sqrt(2.0)
 
 
+def _tearing_linear(s, ka):
+    """Linear tearing growth rate gamma tau_A of a Harris sheet from the general
+    (FKR/Coppi) inner-layer dispersion relation, Delta' delta = -(pi/8) Q^(5/4)
+    Gamma((Q^(3/2) - 1)/4)/Gamma((Q^(3/2) + 5)/4), delta = a (ka S)^(-1/3),
+    gamma tau_A = Q (ka)^(2/3) S^(-1/3); Q -> 0 recovers FKR 0.55 (Delta'a)^(4/5)
+    (ka)^(2/5) S^(-3/5)."""
+    rhs = 2.0*(1.0/ka - ka)*(ka*s)**(-1.0/3.0)
+
+    def f(q):
+        x = q**1.5
+        return -math.pi/8.0*q**1.25*math.gamma(0.25*(x - 1.0))/math.gamma(0.25*(x + 5.0))
+
+    lo, hi = 1.0e-8, 1.0 - 1.0e-12
+    for _ in range(200):
+        mid = 0.5*(lo + hi)
+        lo, hi = (mid, hi) if f(mid) < rhs else (lo, mid)
+    return 0.5*(lo + hi)*ka**(2.0/3.0)*s**(-1.0/3.0)
+
+
 @pytest.mark.skipif(not _HEAVY, reason="heavy (GPU): set RESIST_HEAVY=1")
 def test_tearing_scaling():
-    """Resistive tearing of a force-free double Harris sheet (ka = 0.5, a/dx = 32):
-    linear growth rate gamma tau_A vs S follows the FKR S^-3/5 law within tolerance."""
-    svals = (1000, 2000, 4000, 8000)
+    """Resistive tearing of a force-free double Harris sheet (ka = 0.5, a/dy = 32): the
+    linear growth rate gamma tau_A tracks the inner-layer dispersion relation over
+    S = 250-2000. resistive_freeze_background (eta-compensation) keeps the equilibrium
+    from diffusing on the tearing time scale, so the eigenmode rate is fitted after the
+    initial transient (psi/psi0 = 10-1000). At these S the inner layer is not thin
+    (delta/a ~ 0.1-0.15), so gamma is 0.7-0.95 of the asymptotic rate and approaches it
+    monotonically with S; a/dy = 64 agrees within 6% (07 v2.1 4.1)."""
+    svals = (250, 500, 1000, 2000)
     names = ["rt_tear%d" % s for s in svals]
     lx = 2.0*math.pi/5.0
     base = ["problem/test=harris", "problem/rho=0.2", "problem/pgas=0.2",
-            "mesh/nx1=400", "mesh/nx2=512", "meshblock/nx1=400", "meshblock/nx2=256",
+            "mesh/nx1=32", "mesh/nx2=512", "meshblock/nx1=32", "meshblock/nx2=512",
             "mesh/x1min=%.17g" % (-0.5*lx), "mesh/x1max=%.17g" % (0.5*lx),
             "mesh/x2min=-0.8", "mesh/x2max=0.8"]
-    tl = {1000: 80, 2000: 120, 4000: 170, 8000: 250}
+    tl = {250: 45, 500: 60, 1000: 85, 2000: 120}
     fl = [base + ["mhd/resistive_sigma=%.17g" % (s/(0.1*_VA)), "time/tlim=%g" % tl[s]]
           for s in svals]
-    res = _scan(names, _HARRIS_KEYS, fl)
+    keys = _HARRIS_KEYS[:2] + ["<mhd>", "resistive_freeze_background = true",
+                               "<problem>"] + _HARRIS_KEYS[2:]
+    res = _scan(names, keys, fl)
     tau = 0.1/_VA
-    g = []
-    for name, r in zip(names, res):
+    g, th = [], []
+    for s, name, r in zip(svals, names, res):
         assert r["max_divb"] < 1e-10 and r["newton_fail"] == 0
         t, _, psi = _hist(name)
-        g.append(_fit_growth(t, psi, 5.0, 1.0e3)*tau)
+        g.append(_fit_growth(t, psi, 10.0, 1000.0)*tau)
+        th.append(_tearing_linear(s, 0.5))
     k = _slope(svals, g)
-    print("tearing gamma*tau_A", g, "slope", k)
-    assert -0.8 < k < -0.4, (g, k)
-    for s, gg in zip(svals, g):
-        fkr = 0.55*3.0**0.8*0.5**0.4*s**-0.6
-        assert 0.3*fkr < gg < 2.0*fkr, (s, gg, fkr)
+    ratio = [a/b for a, b in zip(g, th)]
+    print("tearing gamma*tau_A", g, "linear theory", th, "ratio", ratio, "slope", k)
+    assert all(0.65 < r < 1.1 for r in ratio), ratio
+    assert all(b > a - 0.02 for a, b in zip(ratio, ratio[1:])), ratio
+    assert -0.7 < k < -0.4, (g, k)
 
 
 @pytest.mark.skipif(not _HEAVY, reason="heavy (GPU): set RESIST_HEAVY=1")
 def test_sweet_parker_scaling():
-    """Driven (X-point) reconnection of the double Harris sheet: the peak reconnection
-    rate d psi/dt / (b0 v_A) scales as S_L^-1/2 (Sweet-Parker), L = 0.5."""
-    svals = (100, 200, 400, 800)
+    """X-point driven reconnection of a double Harris sheet (a = 0.06, 1024^2, eta-
+    compensated background): after t ~ 2 the reconnection rate d psi/dt / (b0 v_A) is
+    steady to ~10% (Sweet-Parker plateau) and its mean over t = 2-9 scales as S_L^-1/2,
+    S_L = L v_A sigma with L = 0.5. delta_SP = L S_L^-1/2 is 4-8 cells here, so the
+    slope (-0.42 at 1024^2, -0.25 at 512^2) is resolution-limited: [VERIFY] 2048^2."""
+    svals = (1000, 2000, 4000)
     names = ["rt_sp%d" % s for s in svals]
-    keys = ["a_sheet = 0.03", "eps = 0.4", "lam = 0.25", "pert = xpoint",
+    keys = ["a_sheet = 0.06", "eps = 0.1", "lam = 0.25", "pert = xpoint",
+            "<mhd>", "resistive_freeze_background = true", "<problem>",
             "user_hist = true", "<output1>", "file_type = hst", "dt = 0.05",
             "user_hist_only = true"]
     base = ["problem/test=harris", "problem/rho=0.2", "problem/pgas=0.2",
-            "mesh/nx1=512", "mesh/nx2=512", "meshblock/nx1=256", "meshblock/nx2=256",
-            "mesh/x1min=-1", "mesh/x1max=1", "mesh/x2min=-1", "mesh/x2max=1",
-            "time/tlim=6"]
+            "mesh/nx1=1024", "mesh/nx2=1024", "meshblock/nx1=1024",
+            "meshblock/nx2=1024", "mesh/x1min=-1", "mesh/x1max=1", "mesh/x2min=-1",
+            "mesh/x2max=1", "time/tlim=9"]
     fl = [base + ["mhd/resistive_sigma=%.17g" % (s/(0.5*_VA))] for s in svals]
     res = _scan(names, keys, fl)
+
+    def mean_rate(t, psi, lo, hi):
+        sel = [(a, b) for a, b in zip(t, psi) if lo <= a <= hi]
+        ma = sum(a for a, _ in sel)/len(sel)
+        mb = sum(b for _, b in sel)/len(sel)
+        return (sum((a - ma)*(b - mb) for a, b in sel) /
+                sum((a - ma)**2 for a, _ in sel))/_VA
+
     rate = []
-    for name, r in zip(names, res):
+    for s, name, r in zip(svals, names, res):
         assert r["max_divb"] < 1e-10 and r["newton_fail"] == 0
         t, _, psi = _hist(name)
-        d = [(psi[i+2] - psi[i-2])/(t[i+2] - t[i-2]) for i in range(2, len(t) - 2)]
-        rate.append(max(d)/_VA)
+        r1, r2 = mean_rate(t, psi, 2.0, 5.5), mean_rate(t, psi, 5.5, 9.0)
+        assert abs(r2/r1 - 1.0) < 0.15, (s, r1, r2)
+        rate.append(mean_rate(t, psi, 2.0, 9.0))
+        assert 0.3 < rate[-1]*math.sqrt(s) < 1.0, (s, rate[-1])
     k = _slope(svals, rate)
     print("sweet-parker rate", rate, "slope", k)
     assert -0.65 < k < -0.35, (rate, k)

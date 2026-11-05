@@ -9,6 +9,7 @@
 //!        the ImEx bookkeeping of the stiff Ohmic source (07_scoping_v2 §2.2, §3.3).
 
 #include <algorithm>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -54,6 +55,7 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     hfld("resist_h", 1, 1, 1, 1),
     emc("resist_emc", 1, 1, 1, 1, 1),
     cwork("resist_cwork", 1, 1, 1, 1, 1),
+    esrc("resist_esrc", 1, 1, 1, 1),
     pbval_e(nullptr), pbval_ei(nullptr), pbval_ep(nullptr), pbval_ep2(nullptr),
     psync{nullptr, nullptr, nullptr, nullptr},
     e0_alias("resist_e0a", 1, 1, 1, 1, 1),
@@ -105,6 +107,16 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
   Kokkos::realloc(hfld.x3e, nmb, n3, n2+1, n1+1);
   Kokkos::realloc(emc, nmb, kNEMC, n3, n2, n1);
   Kokkos::realloc(cwork, nmb, kNWORK, n3, n2, n1);
+  if (params.freeze_background) {
+    if (pp->pmesh->adaptive) {
+      std::cout << "### FATAL ERROR: <mhd> resistive_freeze_background is not "
+                << "supported with adaptive mesh refinement" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    Kokkos::realloc(esrc.x1f, nmb, n3, n2, n1+1);
+    Kokkos::realloc(esrc.x2f, nmb, n3, n2+1, n1);
+    Kokkos::realloc(esrc.x3f, nmb, n3+1, n2, n1);
+  }
 
   pbval_e = new MeshBoundaryValuesFC(pp, pin);
   pbval_e->InitializeBuffers(3);
@@ -537,6 +549,18 @@ TaskStatus ResistiveDynGR::CTE(Driver *pdriver, int stage) {
   auto h3 = hfld.x3e;
   auto &mbsize = pmy_pack->pmb->mb_size;
 
+  // freeze_background: record E~_pre = gam0 E~ + gam1 E~(n) before the first update
+  const bool frz = params.freeze_background;
+  const bool capture = frz && !esrc_set;
+  if (capture) {
+    if (pmy_pack->pmesh->ncycle != 0 || stage != 1) {
+      std::cout << "### FATAL ERROR: <mhd> resistive_freeze_background must start at "
+                << "cycle 0 (restarts are not supported)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    FreezeBackground(gam0, gam1, beta_dt, 0);
+  }
+
   auto ex1 = e0.x1f, ex1o = e1.x1f, q1 = qflx.x1f;
   par_for("CTE-e1", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -571,7 +595,44 @@ TaskStatus ResistiveDynGR::CTE(Driver *pdriver, int stage) {
     }
     ex3(m,k,j,i) = v - beta_dt*q3(m,k,j,i);
   });
+  if (frz) {
+    if (capture) FreezeBackground(gam0, gam1, beta_dt, 1);
+    FreezeBackground(gam0, gam1, beta_dt, 2);
+  }
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! resistive_freeze_background (test only): eta-compensation of the initial state. The
+//! discrete explicit E~ RHS of the initial data, -[curl h* + qflx](t=0), is recorded once
+//! and subtracted in every later stage, so that the initial equilibrium is an exact
+//! discrete steady state (its resistive and numerical diffusion are cancelled) while
+//! perturbations evolve normally. mode 0: esrc = E~_pre; 1: esrc = -(E~ - esrc)/(beta
+//! dt); 2: E~ += beta dt esrc.
+
+void ResistiveDynGR::FreezeBackground(Real gam0, Real gam1, Real beta_dt, int mode) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int is = indcs.is, ie = indcs.ie;
+  int js = indcs.js, je = indcs.je;
+  int ks = indcs.ks, ke = indcs.ke;
+  int nmb1 = pmy_pack->nmb_thispack - 1;
+  for (int d = 0; d < 3; ++d) {
+    auto ex = (d == 0) ? e0.x1f : ((d == 1) ? e0.x2f : e0.x3f);
+    auto eo = (d == 0) ? e1.x1f : ((d == 1) ? e1.x2f : e1.x3f);
+    auto es = (d == 0) ? esrc.x1f : ((d == 1) ? esrc.x2f : esrc.x3f);
+    par_for("resist_freeze", DevExeSpace(), 0, nmb1, ks, ke + (d == 2), js,
+            je + (d == 1), is, ie + (d == 0),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      if (mode == 0) {
+        es(m,k,j,i) = gam0*ex(m,k,j,i) + gam1*eo(m,k,j,i);
+      } else if (mode == 1) {
+        es(m,k,j,i) = -(ex(m,k,j,i) - es(m,k,j,i))/beta_dt;
+      } else {
+        ex(m,k,j,i) += beta_dt*es(m,k,j,i);
+      }
+    });
+  }
+  if (mode == 1) esrc_set = true;
 }
 
 //----------------------------------------------------------------------------------------

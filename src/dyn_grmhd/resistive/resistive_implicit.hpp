@@ -30,6 +30,15 @@
 
 #include <cmath>
 
+// The cell solve calls the full hydro c2p from many sites (Newton, FD Jacobian, retry,
+// continuation, fallback); inlining all of them makes the SYCL AOT device compile (ocloc)
+// run for hours. Calls are cheap next to a c2p, so keep these out of line.
+#if defined(__GNUC__) || defined(__clang__)
+#define RESISTIVE_NOINLINE __attribute__((noinline))
+#else
+#define RESISTIVE_NOINLINE
+#endif
+
 #include "athena.hpp"
 #include "eos/primitive-solver/ps_types.hpp"
 #include "eos/primitive-solver/ps_error.hpp"
@@ -128,7 +137,7 @@ Real MaxAbs3(const Real a[3]) {
 
 // One residual evaluation g(u) = u - u_new(u). Returns false if the hydro c2p fails.
 template <class PSolver>
-KOKKOS_INLINE_FUNCTION
+KOKKOS_INLINE_FUNCTION RESISTIVE_NOINLINE
 bool Residual(const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[NSPMETRIC], const Real sg,
               const Real sdt, const Real cons_tot[NCONS], const Real B[3],
               const Real R[3], const Real u[3], Real prim[NPRIM], Real E[3],
@@ -242,7 +251,7 @@ bool MomentumResidual(const PSolver &ps, Real g3d[NSPMETRIC], const Real sg,
 
 // Residual of the selected form; ok = admissible (no failure, no floor).
 template <class PSolver>
-KOKKOS_INLINE_FUNCTION
+KOKKOS_INLINE_FUNCTION RESISTIVE_NOINLINE
 bool EvalForm(const int form, const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[NSPMETRIC],
               const Real sg, const Real sdt, const Real cons_tot[NCONS], const Real B[3],
               const Real R[3], const Real u[3], Real prim[NPRIM], Real E[3], Real r[3],
@@ -258,7 +267,7 @@ bool EvalForm(const int form, const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[N
 // at u on entry (ok0: that evaluation was admissible). Returns true if converged; then
 // prim/E hold the converged state.
 template <class PSolver>
-KOKKOS_INLINE_FUNCTION
+KOKKOS_INLINE_FUNCTION RESISTIVE_NOINLINE
 bool Newton(const int form, const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[NSPMETRIC],
             const Real sg, const Real sdt, const Real cons_tot[NCONS], const Real B[3],
             const Real R[3], Real u[3], Real gk[3], const bool ok0, const Real tol,
@@ -327,7 +336,7 @@ bool Newton(const int form, const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[NSP
 //! u0       : initial guess for u^i (normally the previous-stage value)
 //! On return prim/E hold the accepted state (converged or lagged-v fallback).
 template <class PSolver>
-KOKKOS_INLINE_FUNCTION
+KOKKOS_INLINE_FUNCTION RESISTIVE_NOINLINE
 CellSolveResult ResistiveCellSolve(const PSolver &ps, const Real g3d_in[NSPMETRIC],
                                    const Real g3u_in[NSPMETRIC], const Real sdt,
                                    const Real cons_tot[NCONS], const Real B[3],

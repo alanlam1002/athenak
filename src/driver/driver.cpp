@@ -35,6 +35,103 @@
 #include <mpi.h>
 #endif
 
+#include <cstdint>
+#include <cstdio>
+#include <vector>
+#include "coordinates/adm.hpp"
+
+//----------------------------------------------------------------------------------------
+// Debug: per-MeshBlock bitwise state checksums (<time> state_checksum, default 0 = off).
+// For locating run-to-run non-determinism: each array's raw double bits are summed as
+// uint64 (weighted by an odd index factor), separately over interior and ghost cells.
+// Integer sums are order-independent, so the checksum itself is deterministic.
+// 1 = after every cycle, 2 = also after every RK stage. Rows go to cksum.<rank>.txt.
+namespace {
+int cs_level = 0, cs_cmin = 0, cs_cmax = -1;
+std::FILE *cs_file = nullptr;
+
+void CkArr(const DvceArray5D<Real> &a, int nmb, int il, int iu, int jl, int ju,
+           int kl, int ku, std::vector<uint64_t> &out, int col, int ncol) {
+  const int nv = a.extent_int(1), nk = a.extent_int(2), nj = a.extent_int(3),
+            ni = a.extent_int(4);
+  const int ncell = nv*nk*nj*ni;
+  DvceArray2D<uint64_t> res("statecs", nmb, 2);
+  Kokkos::parallel_for("statecs", Kokkos::TeamPolicy<>(DevExeSpace(), nmb, Kokkos::AUTO),
+  KOKKOS_LAMBDA(const TeamMember_t &tm) {
+    const int m = tm.league_rank();
+    uint64_t si = 0, sg = 0;
+    Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, ncell),
+    [&](const int idx, uint64_t &acc) {
+      int t = idx;
+      const int i = t%ni; t /= ni; const int j = t%nj; t /= nj; const int k = t%nk;
+      const bool in = (i >= il && i <= iu && j >= jl && j <= ju && k >= kl && k <= ku);
+      const uint64_t b = Kokkos::bit_cast<uint64_t>(a(m, t/nk, k, j, i));
+      acc += in ? b*(2ull*static_cast<uint64_t>(idx) + 1ull) : 0ull;
+    }, si);
+    Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tm, ncell),
+    [&](const int idx, uint64_t &acc) {
+      int t = idx;
+      const int i = t%ni; t /= ni; const int j = t%nj; t /= nj; const int k = t%nk;
+      const bool in = (i >= il && i <= iu && j >= jl && j <= ju && k >= kl && k <= ku);
+      const uint64_t b = Kokkos::bit_cast<uint64_t>(a(m, t/nk, k, j, i));
+      acc += in ? 0ull : b*(2ull*static_cast<uint64_t>(idx) + 1ull);
+    }, sg);
+    Kokkos::single(Kokkos::PerTeam(tm), [&]() { res(m, 0) = si; res(m, 1) = sg; });
+  });
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), res);
+  for (int m = 0; m < nmb; ++m) {
+    out[m*ncol + col] = h(m, 0);
+    out[m*ncol + col + 1] = h(m, 1);
+  }
+}
+
+// face field component as a 5D view with one variable
+DvceArray5D<Real> Face5D(const DvceArray4D<Real> &f) {
+  return DvceArray5D<Real>(f.data(), f.extent(0), 1, f.extent(1), f.extent(2),
+                           f.extent(3));
+}
+
+void StateChecksum(Mesh *pm, int stage) {
+  if (cs_level <= 0 || pm->ncycle < cs_cmin || (cs_cmax >= 0 && pm->ncycle > cs_cmax)) {
+    return;
+  }
+  if (stage > 0 && cs_level < 2) {return;}
+  auto *pack = pm->pmb_pack;
+  const int nmb = pack->nmb_thispack;
+  auto &id = pm->mb_indcs;
+  const int is = id.is, ie = id.ie, js = id.js, je = id.je, ks = id.ks, ke = id.ke;
+  // columns: (interior, ghost) for u0, w0, b0.x1f, b0.x2f, b0.x3f, u_adm
+  constexpr int ncol = 12;
+  std::vector<uint64_t> out(static_cast<size_t>(nmb)*ncol, 0ull);
+  if (pack->pmhd != nullptr) {
+    auto *pmhd = pack->pmhd;
+    CkArr(pmhd->u0, nmb, is, ie, js, je, ks, ke, out, 0, ncol);
+    CkArr(pmhd->w0, nmb, is, ie, js, je, ks, ke, out, 2, ncol);
+    CkArr(Face5D(pmhd->b0.x1f), nmb, is, ie+1, js, je, ks, ke, out, 4, ncol);
+    CkArr(Face5D(pmhd->b0.x2f), nmb, is, ie, js, je+1, ks, ke, out, 6, ncol);
+    CkArr(Face5D(pmhd->b0.x3f), nmb, is, ie, js, je, ks, ke+1, out, 8, ncol);
+  }
+  if (pack->padm != nullptr) {
+    CkArr(pack->padm->u_adm, nmb, is, ie, js, je, ks, ke, out, 10, ncol);
+  }
+  if (cs_file == nullptr) {
+    char fn[64];
+    std::snprintf(fn, sizeof(fn), "cksum.%05d.txt", global_variable::my_rank);
+    cs_file = std::fopen(fn, "a");
+    if (cs_file == nullptr) {cs_level = 0; return;}
+  }
+  for (int m = 0; m < nmb; ++m) {
+    std::fprintf(cs_file, "%d %d %d", pm->ncycle, stage, pack->gids + m);
+    for (int c = 0; c < ncol; ++c) {
+      std::fprintf(cs_file, " %016llx",
+                   static_cast<unsigned long long>(out[m*ncol + c]));  // NOLINT
+    }
+    std::fprintf(cs_file, "\n");
+  }
+  std::fflush(cs_file);
+}
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 // constructor, initializes data structures and parameters
 //
@@ -425,6 +522,12 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
     if (wall_time > 0.) {
       elapsed_time = UpdateWallClock();
     }
+    if (pin->DoesParameterExist("time", "state_checksum")) {
+      cs_level = pin->GetInteger("time", "state_checksum");
+      cs_cmin = pin->GetOrAddInteger("time", "state_checksum_cmin", 0);
+      cs_cmax = pin->GetOrAddInteger("time", "state_checksum_cmax", -1);
+    }
+    StateChecksum(pmesh, -1);
     while ((pmesh->time < tlim) && (pmesh->ncycle < nlim || nlim < 0) &&
            (elapsed_time < wall_time)) {
       std::chrono::steady_clock::time_point mgprof_t0;
@@ -450,6 +553,7 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         // hpp's CFC_* tasks, and dyn_grmhd.cpp's MHD_C2P/MHD_Newdt optional deps).
         ExecuteTaskList(pmesh, "stagen", stage);
         ExecuteTaskList(pmesh, "after_stagen", stage);
+        StateChecksum(pmesh, stage);
       }
 
       // Work after time integrator indicated by "1" in stage
@@ -464,6 +568,7 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         mgprof::CycleWall(pmesh->ncycle - 1, std::chrono::duration<double>(
                           std::chrono::steady_clock::now() - mgprof_t0).count(), false);
       }
+      StateChecksum(pmesh, 0);
       nmb_updated_ += pmesh->nmb_total;
       npart_updated_ += pmesh->nprtcl_total;
       // load balancing efficiency

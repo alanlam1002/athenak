@@ -77,7 +77,10 @@ bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag);
 // <job> restart_embed_fill (R1, R-150 item 6; research REGRID_SPEC §2): a restart written by
 // scripts/r1_embed.py, the old box (<job> restart_embed_box = x1min,x1max,...,x3max)
 // embedded bitwise into a box twice as wide, its new outer blocks zero. Once (sets <job>
-// restart_embed_done = ncycle, kept by later restarts; a deck cannot unset it): the
+// restart_embed_done = ncycle and restart_embed_sig = the embedding's identity, both kept
+// by later restarts; a restart whose restart_embed_sig matches the deck's embedding skips
+// the fill, a different one is a stale flag and the fill is applied, restart_embed_done
+// without a signature stops the run (R-234 item 1)): the
 // blocks outside the old box get the zero-residual CFC metric (CFC::FillEmbedADM) and the
 // floor atmosphere at rest (rho = dfloor, P = rho tfloor, u^i = 0, as the pgen's vacuum
 // branch) converted with that metric, every other block's u0 and w0 unchanged bitwise;

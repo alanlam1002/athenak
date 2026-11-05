@@ -75,7 +75,7 @@ def zkey(lx, ly, lz, lev, lmax):
     return k
 
 
-def edit_par(text, old, new_box, deck=False):
+def edit_par(text, old, new_box, deck=False, src=None):
     """the parameter edits; text is the PAR_DUMP (or an input deck)"""
     out, block = [], None
     seen = set()
@@ -88,6 +88,8 @@ def edit_par(text, old, new_box, deck=False):
                 out.append(f'restart_embed_fill = true   # R1 (r1_embed.py): fill the new outer blocks at load')
                 out.append('restart_embed_box = ' + ','.join(repr(v) for v in old)
                            + '   # R1: the embedded (old) box x1min,x1max,x2min,x2max,x3min,x3max')
+                if src is not None:
+                    out.append(f'restart_embed_src = {src}   # R1: the source restart (R-234 embed-box guard signature)')
                 seen.add('job')
             continue
         kv = re.match(r'^(\s*)([A-Za-z0-9_]+)(\s*=\s*)([^#\s]+)(.*)$', line)
@@ -102,7 +104,7 @@ def edit_par(text, old, new_box, deck=False):
                 nv = str(int(val) + 1)
             elif block == 'problem' and key in LEVEL_KEYS:
                 nv = str(int(val) + 1)
-            elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box', 'restart_embed_done'):
+            elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box', 'restart_embed_done', 'restart_embed_src'):
                 continue                      # an earlier embedding's keys (replaced above); restart_embed_done
                                               # (set at the earlier fill, restart_state.cpp:347) would make the
                                               # load hook skip this fill (restart_state.cpp:250-251; C-136)
@@ -140,6 +142,7 @@ def main():
     ap.add_argument('--manifest')
     a = ap.parse_args()
     r = read(a.inp)
+    src = f"{os.path.basename(a.inp)}:{r['ncycle']}"   # R-234: the embedding's source identity
     R = r['root']
     mi = r['mesh_indcs']
     # RegionIndcs: ng, nx1, nx2, nx3, is, ie, js, je, ks, ke, cnx1, cnx2, cnx3, cis, cie, cjs, cje, cks, cke
@@ -213,7 +216,7 @@ def main():
 
     # parameters
     par_txt = r['par'].decode()
-    new_par, seen = edit_par(par_txt, old, new_box)
+    new_par, seen = edit_par(par_txt, old, new_box, src=src)
     new_par_b = new_par.encode()
     nnew = sum(1 for b in blocks if b[4] < 0)
     ds = r['dsize']
@@ -254,7 +257,7 @@ def main():
         sys.exit(f'bitwise check failed: {nbad} old blocks differ')
 
     if a.deck:
-        d, _ = edit_par(open(a.deck).read(), old, new_box, deck=True)
+        d, _ = edit_par(open(a.deck).read(), old, new_box, deck=True, src=src)
         open(a.deck_out, 'w').write(d)
     man = dict(tool='r1_embed.py', input=os.path.abspath(a.inp), output=os.path.abspath(a.out),
                t=r['time'], ncycle=r['ncycle'], old_box=old, new_box=new_box, n_root=n, offset_root_blocks=o,

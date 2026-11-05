@@ -307,10 +307,56 @@ bool Seed(Mesh *pm, ParameterInput *pin, bool res_flag) {
   return true;
 }
 
+// R-234 item 1: the identity of the embedding the deck asks for: the old box (<job>
+// restart_embed_box, re-printed at full precision), the current mesh extent and logical
+// root/max levels (the embedded box), and <job> restart_embed_src (r1_embed.py: the source
+// restart's file name and ncycle) when present
+static std::string EmbedSignature(Mesh *pm, ParameterInput *pin) {
+  std::vector<Real> box;
+  {
+    std::stringstream ss(pin->GetString("job", "restart_embed_box"));
+    std::string tok;
+    while (std::getline(ss, tok, ',')) box.push_back(std::stod(tok));
+  }
+  std::ostringstream os;
+  os.precision(17);
+  os << "box";
+  for (Real v : box) os << ":" << v;
+  const RegionSize &ms = pm->mesh_size;
+  os << "|mesh:" << ms.x1min << ":" << ms.x1max << ":" << ms.x2min << ":" << ms.x2max << ":"
+     << ms.x3min << ":" << ms.x3max << "|lev:" << pm->root_level << ":" << pm->max_level;
+  if (pin->DoesParameterExist("job", "restart_embed_src")) {
+    os << "|src:" << pin->GetString("job", "restart_embed_src");
+  }
+  return os.str();
+}
+
 bool EmbedFill(Mesh *pm, ParameterInput *pin) {
-  if (!pin->GetOrAddBoolean("job", "restart_embed_fill", false) ||
-      pin->DoesParameterExist("job", "restart_embed_done")) {
+  if (!pin->GetOrAddBoolean("job", "restart_embed_fill", false)) {
     return false;
+  }
+  // R-234 item 1 (the embed-box guard): a fill is skipped only if the restart records this
+  // very embedding (<job> restart_embed_sig, set below and kept by later restarts). A
+  // signature from a different embedding is stale (C-136: an earlier embed's flag carried
+  // into the next embed's restart) and the new embed is applied. A restart_embed_done
+  // without a signature (written before this guard) cannot be matched: stop.
+  const std::string sig = EmbedSignature(pm, pin);
+  if (pin->DoesParameterExist("job", "restart_embed_sig")) {
+    const std::string had = pin->GetString("job", "restart_embed_sig");
+    if (had == sig) return false;
+    if (global_variable::my_rank == 0) {
+      std::cout << "restart_state: R1 embed: the restart's embed signature (" << had
+                << ") is not this deck's (" << sig << "): a stale flag from an earlier "
+                << "embedding; applying the new embed" << std::endl;
+    }
+  } else if (pin->DoesParameterExist("job", "restart_embed_done")) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<job> restart_embed_fill is set and the restart carries restart_embed_done ("
+              << pin->GetString("job", "restart_embed_done") << ") without restart_embed_sig "
+              << "(written before the R-234 embed-box guard): cannot tell whether this "
+              << "embedding (" << sig << ") was applied. Unset restart_embed_fill if it was; "
+              << "if not, re-embed the source restart with scripts/r1_embed.py." << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   MeshBlockPack *pmbp = pm->pmb_pack;
   if (pmbp->pcfc == nullptr || pmbp->pdyngr == nullptr || pmbp->pmhd == nullptr) {
@@ -406,6 +452,7 @@ bool EmbedFill(Mesh *pm, ParameterInput *pin) {
     pmbp->pcoord->UpdateExcisionMasks();
   }
   pin->SetInteger("job", "restart_embed_done", pm->ncycle);
+  pin->SetString("job", "restart_embed_sig", sig);
   if (global_variable::my_rank == 0) {
     std::cout << "restart_state: R1 embed: " << nnew << " new MeshBlocks outside the old box "
               << box[0] << "," << box[1] << "," << box[2] << "," << box[3] << "," << box[4]

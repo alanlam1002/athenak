@@ -159,7 +159,7 @@ class DynGRMHDPS : public DynGRMHD {
   TaskStatus ResistiveImplicit(Driver *d, int stage);
   TaskStatus ResistiveConToPrim(Driver *d, int stage);
   void ResistiveImplicitSolve(Driver *d, int estage);
-  void ResistiveC2P();
+  void ResistiveC2P(bool record = false);
   void ResistivePrimToCon(int is, int ie, int js, int je, int ks, int ke);
 };
 

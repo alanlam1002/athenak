@@ -6,6 +6,7 @@
 //! \file resistive_params.cpp
 //! \brief Parsing and validation of resistive GRMHD input keys.
 
+#include <cfloat>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -32,7 +33,7 @@ const std::vector<std::string> &ResistiveKeys() {
     "resistive_sigma_out", "resistive_rho_transition", "resistive_sigma_width",
     "resistive_rsolver", "resistive_charge_flux", "resistive_newton_fallback",
     "resistive_newton_tol", "resistive_newton_maxit", "resistive_allow_incomplete",
-    "resistive_freeze_background"};
+    "resistive_freeze_background", "resistive_implicit_residual", "resistive_hist_dt"};
   return keys;
 }
 
@@ -131,6 +132,22 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   }
   rp.freeze_background =
       pin->GetOrAddBoolean(block, "resistive_freeze_background", false);
+  std::string ir = pin->GetOrAddString(block, "resistive_implicit_residual", "c2p");
+  if (ir == "c2p") {
+    rp.implicit_residual = ImplicitResidual::c2p;
+  } else if (ir == "momentum") {
+    rp.implicit_residual = ImplicitResidual::momentum;
+  } else {
+    Fatal(__LINE__, "<" + block + "> resistive_implicit_residual = '" + ir +
+          "' not recognised; use c2p|momentum");
+  }
+  // sigma_M ceiling (decision 10 A): same key and meaning as the ideal path's ceiling
+  rp.sigma_max = pin->GetOrAddReal(block, "sigma_max", (FLT_MAX));
+  if (!(rp.sigma_max > 0.0)) {
+    Fatal(__LINE__, "<" + block + "> sigma_max must be > 0");
+  }
+  // K5-run histogram output interval (<= 0: the dt of the first hst output, if any)
+  rp.hist_dt = pin->GetOrAddReal(block, "resistive_hist_dt", -1.0);
   return rp;
 }
 

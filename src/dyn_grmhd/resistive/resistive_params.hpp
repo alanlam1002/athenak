@@ -23,6 +23,9 @@
 //!   resistive_freeze_background = false (test only: subtract the initial discrete E~
 //!                                        RHS every stage, i.e. eta-compensation of the
 //!                                        initial equilibrium; no restart, no AMR)
+//!   resistive_implicit_residual = c2p|momentum (decision 10 B: g or Mignone Eq. 56 f)
+//!   sigma_max              = FLT_MAX (decision 10 A: rho >= B^2/sigma_max after c2p)
+//!   resistive_hist_dt      = -1 (K5-run histogram interval; <= 0: hst output dt)
 
 #include <string>
 
@@ -36,6 +39,7 @@ enum class ChargeFlux {upwind, rusanov};
 enum class RSolver {mhllc, lf};
 enum class SigmaModel {uniform, density};
 enum class NewtonFallback {lagged_v, fail};
+enum class ImplicitResidual {c2p, momentum};
 
 struct ResistiveParams {
   bool enabled = false;
@@ -49,6 +53,9 @@ struct ResistiveParams {
   Real newton_tol = 1.0e-11;
   int newton_maxit = 30;
   bool freeze_background = false;
+  ImplicitResidual implicit_residual = ImplicitResidual::c2p;
+  Real sigma_max = 0.0;   // <mhd> sigma_max: fluid density floor rho >= B^2/sigma_max
+  Real hist_dt = -1.0;    // K5-run histogram output interval
 };
 
 // True only if <block>/resistive exists and is true. Never adds keys to pin.

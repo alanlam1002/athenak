@@ -29,6 +29,8 @@
 //! refinement only (no AMR), imex2/imex3. Unsupported configurations stop with a fatal
 //! error.
 
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
@@ -55,6 +57,7 @@ class ResistiveDynGR {
   ResistiveParams params;
   Conductivity cond;
   NewtonStats newton;
+  SigmaMHist hist;        // K5-run histogram, written to <basename>.rhist.txt
 
   DvceFaceFld4D<Real> e0, e1, coarse_e0;
   DvceFaceFld4D<Real> qflx;
@@ -113,10 +116,15 @@ class ResistiveDynGR {
   void CheckConstantMetric() const;
   // resistive_freeze_background (test only), called from CTE
   void FreezeBackground(Real gam0, Real gam1, Real beta_dt, int mode);
+  // Writes and resets the K5-run histogram when t_end reaches the next output time.
+  void MaybeWriteHist(Real t_end, int cycle);
 
  private:
   MeshBlockPack *pmy_pack;
   bool multilevel;
+  Real hist_dt = -1.0, hist_next = 0.0;
+  bool hist_header = false;
+  std::string hist_fname;
   TaskStatus SyncSend(int r);
   TaskStatus SyncRecv(int r);
   void RestrictE();

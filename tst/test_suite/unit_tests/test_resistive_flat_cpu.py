@@ -1,10 +1,12 @@
 """
 Flat-space mesh tests of resistive GRMHD on the dyngr path (07_scoping_v2 step 1a):
 1D/2D convergence and limits, ideal-limit regression, constraints C1-C5 (C3 with SMR),
-CP Alfven, rotor, ideal-gas and tabulated EOS.  Uses pgen resistive_tests
-(inputs/resistive_flat.athinput).  The tearing and Sweet-Parker S-scans are heavy (GPU)
-and run only with RESIST_HEAVY=1; RESIST_HEAVY_LAUNCHERS="cmd1;cmd2;..." runs the scan
-members concurrently with one launcher each.
+CP Alfven, rotor, ideal-gas and tabulated EOS; step 1b sigma(rho) closure, sigma_max
+ceiling and sigma_M histogram on the KH layer (inputs/resistive_kh.athinput, T-S2 smoke).
+Uses pgen resistive_tests (inputs/resistive_flat.athinput). The tearing and Sweet-
+Parker S-scans are heavy (GPU) and run only with RESIST_HEAVY=1;
+RESIST_HEAVY_LAUNCHERS="cmd1;cmd2;..." runs the scan members concurrently with one
+launcher each.
 """
 
 import glob
@@ -19,8 +21,8 @@ _INPUT = "inputs/resistive_flat.athinput"
 _LAUNCH = os.environ.get("ATHENA_LAUNCHER", "").split()
 
 
-def _cmd(name, extra_keys=(), flags=(), restart=None, launch=None):
-    with open(_INPUT) as f:
+def _cmd(name, extra_keys=(), flags=(), restart=None, launch=None, base=_INPUT):
+    with open(base) as f:
         text = f.read()
     text += "".join(k + "\n" for k in extra_keys)
     inp = "resist_" + name + ".athinput"
@@ -78,7 +80,7 @@ def _cleanup():
     if os.environ.get("RESIST_KEEP", "0") == "1":
         return
     for pat in ["resist_*.athinput", "*.resist.dat", "*.state.*.txt", "rt_*.rst",
-                "rst", "rt_rr", "rt_*.hst", "rt_*.log"]:
+                "rst", "rt_rr", "rt_*.hst", "rt_*.log", "rt_*.rhist.txt"]:
         for fn in glob.glob(pat):
             if os.path.isdir(fn):
                 shutil.rmtree(fn)
@@ -528,3 +530,62 @@ def test_sweet_parker_scaling():
     k = _slope(svals, rate)
     print("sweet-parker rate", rate, "slope", k)
     assert -0.65 < k < -0.35, (rate, k)
+
+
+_KH_FLAGS = ["mesh/nx1=32", "mesh/nx2=64", "meshblock/nx1=32", "meshblock/nx2=32",
+             "time/tlim=1.0", "time/ndiag=100"]
+_KH_DENSITY = ["resistive_sigma_model = density", "resistive_sigma_in = 1.0e5",
+               "resistive_sigma_out = 10.0", "resistive_rho_transition = 0.1",
+               "resistive_sigma_width = 0.5", "resistive_hist_dt = 0.5"]
+
+
+def _run_kh(name, mhd_keys, flags=()):
+    """KH layer (T-S2 setup) with extra <mhd> keys: they are spliced into the <mhd>
+    block of inputs/resistive_kh.athinput (new keys cannot be set on the command line)."""
+    with open("inputs/resistive_kh.athinput") as f:
+        text = f.read()
+    text = text.replace("<mhd>\n", "<mhd>\n" + "".join(k + "\n" for k in mhd_keys))
+    inp = "resist_" + name + "_kh.athinput"
+    with open(inp, "w") as f:
+        f.write(text)
+    proc = subprocess.run(_cmd(name, flags=list(_KH_FLAGS) + list(flags), base=inp),
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True)
+    _check(proc.stdout, proc.returncode)
+    rows = [list(map(float, ln.split())) for ln in open(name + ".rhist.txt")
+            if not ln.startswith("#")]
+    hst = [list(map(float, ln.split())) for ln in open(name + ".user.hst")
+           if not ln.startswith("#")]
+    os.remove(name + ".user.hst")
+    return _dat(name), rows, hst
+
+
+def test_kh_sigma_rho_histogram():
+    """Step 1b (07 v2.2 3.2, T-S2 smoke): density-dependent sigma(rho) on the KH layer
+    with both implicit residual forms; every cell converges (no retry, continuation or
+    fallback), the sigma_M histogram accounts for all interior cells, constraints hold,
+    and forms g (c2p) and f (momentum) give the same KH amplitude."""
+    dvy = []
+    for form in ("c2p", "momentum"):
+        r, rows, hst = _run_kh("rt_kh" + form, _KH_DENSITY +
+                               ["resistive_implicit_residual = " + form])
+        assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
+        assert r["max_divb"] < 1e-12 and abs(r["charge"]) < 1e-14
+        cells = sum(x[4] for x in rows)
+        assert cells == sum(x[5] for x in rows) and cells > 0
+        assert sum(x[6] + x[7] + x[12] for x in rows) == 0     # retry, fallback, cont.
+        assert len({x[0] for x in rows}) == 2                   # t = 0.5, 1.0
+        dvy.append(hst[-1][4])
+    assert abs(dvy[1]/dvy[0] - 1.0) < 1e-6, dvy
+
+
+def test_sigma_max_ceiling():
+    """sigma_max (07 v2.2 3.2) caps b^2/rho at 50 on the KH layer (initially ~200 in the
+    light fluid): ceiling events are counted, no cell is left above 10^2, and the run
+    keeps div B and charge conservation."""
+    r, rows, _ = _run_kh("rt_khcap", _KH_DENSITY + ["sigma_max = 50.0"],
+                         ["time/tlim=0.5"])
+    assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
+    assert r["max_divb"] < 1e-12 and abs(r["charge"]) < 1e-14
+    assert sum(x[9] for x in rows) > 0
+    assert sum(x[4] for x in rows if x[3] >= 2) == 0

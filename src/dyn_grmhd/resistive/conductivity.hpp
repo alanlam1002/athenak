@@ -12,8 +12,9 @@
 //! density : log sigma = log sigma_out + s (log sigma_in - log sigma_out),
 //!           s = 1/2 [1 + tanh((log10 rho - log10 rho_t)/width)]
 //!           (smooth, monotone in rho; sigma_in for rho >> rho_t, sigma_out for
-//!           rho << rho_t). Functional form [VERIFY] against Palenzuela et al. 2013
-//!           (PRD 88, 043011); see notes proposal on the sigma(rho) form.
+//!           rho << rho_t). This is our own closure (07 v2.2 §1 #3, §5); it is not
+//!           Palenzuela et al. 2013 (MNRAS 431, 1853, Eqs. 57-58), who keep scalar
+//!           sigma constant and make the anisotropic part density dependent.
 //!
 //! The functor returns parallel and perpendicular conductivities (flag F1); for the
 //! isotropic phase-1 closure they are equal.

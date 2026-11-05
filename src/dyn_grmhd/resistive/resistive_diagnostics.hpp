@@ -18,6 +18,7 @@
 //!  * ECellFaceMismatch: max and volume-mean |E_c - avg(E_f)| per component (D4).
 //!  * NewtonStats     : device counters for the cell Newton (iterations, fallbacks,
 //!                      failures).
+//!  * SigmaMHist      : K5-run per-sigma_M-decade histogram of the implicit solve.
 //! All reductions are over the local MeshBlockPack and, with MPI, over all ranks.
 
 #include "athena.hpp"
@@ -66,6 +67,32 @@ struct NewtonStats {
   }
   // Host copy, reduced over MPI ranks.
   void Read(int64_t out[kNewtonNCounters]) const;
+};
+
+// K5-run histogram (07 v2.2 §4.1, decision 10): counters per decade of the
+// magnetisation sigma_M = B^2/rho (Eulerian B^2), interior cells only, accumulated over
+// an output interval. Bins: <1e-2, [1e-2,1e-1), ..., [1e3,1e4), >=1e4.
+enum HistCounter {kHCells = 0, kHConverged = 1, kHRetry = 2, kHFallback = 3,
+                  kHPrestep = 4, kHCeiling = 5, kHFloor = 6, kHEgtB = 7, kHContinued = 8,
+                  kHNCounters = 9};
+constexpr int kHistBins = 8;
+
+struct SigmaMHist {
+  DvceArray2D<int64_t> d;
+  SigmaMHist() : d("resist_sigm_hist", kHistBins, kHNCounters) {}
+  void Reset() const { Kokkos::deep_copy(d, 0); }
+  KOKKOS_INLINE_FUNCTION
+  static int Bin(const Real b2, const Real rho) {
+    if (!(rho > 0.0) || !(b2 > 0.0)) return (b2 > 0.0) ? kHistBins - 1 : 0;
+    const int b = static_cast<int>(floor(log10(b2/rho))) + 3;
+    return (b < 0) ? 0 : ((b > kHistBins - 1) ? kHistBins - 1 : b);
+  }
+  KOKKOS_INLINE_FUNCTION
+  void Add(const int bin, const int c) const {
+    Kokkos::atomic_add(&d(bin, c), static_cast<int64_t>(1));
+  }
+  // Host copy summed over MPI ranks.
+  void Read(int64_t out[kHistBins][kHNCounters]) const;
 };
 
 }  // namespace resistive

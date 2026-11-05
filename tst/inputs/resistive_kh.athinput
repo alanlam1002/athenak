@@ -1,0 +1,84 @@
+# T-S2: relativistic magnetised KH double shear layer (Mignone et al. 2019 MNRAS 486,
+# 4252, sec. 5.6) on the resistive dyngr path, 07_scoping_v2 step 1b.  Pre-registered
+# run matrix and pass criteria: athenak-resistive-notes proposals/2026-11-05-code-ts2-*.
+# Production: nx1 = 256/512, nx2 = 512/1024; sigma via <mhd> resistive_sigma or
+# resistive_sigma_model = density (sigma_in, sigma_out, rho_transition, sigma_width).
+
+<comment>
+problem   = resistive KH (T-S2)
+reference = Mignone et al. 2019 MNRAS 486, 4252
+
+<job>
+basename  = KH
+
+<mesh>
+nghost    = 2
+nx1       = 256
+x1min     = -0.5
+x1max     = 0.5
+ix1_bc    = periodic
+ox1_bc    = periodic
+
+nx2       = 512
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 128
+nx2       = 128
+nx3       = 1
+
+<coord>
+minkowski   = true
+
+<adm>
+
+<time>
+evolution  = dynamic
+integrator = imex2
+cfl_number = 0.4
+nlim       = -1
+tlim       = 15.0
+ndiag      = 100
+
+<mhd>
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.3333333333333333
+tfloor      = 1.0e-10
+dfloor      = 1.0e-12
+dyn_eos     = ideal
+eos         = ideal
+dyn_error   = reset_floor
+resistive   = true
+resistive_sigma = 1.0e5
+resistive_rsolver = mhllc
+
+<problem>
+pgen_name  = resistive_tests
+test       = kh
+rho        = 1.0
+pgas       = 1.0
+v_sh       = 0.5
+a_kh       = 0.01
+rho_h      = 1.0
+rho_l      = 0.01
+a0_kh      = 0.1
+alpha_kh   = 0.1
+mu_p       = 0.01
+mu_t       = 1.0
+user_hist  = true
+dump_state = false
+
+<output1>
+file_type  = hst
+dt         = 0.05
+user_hist_only = true

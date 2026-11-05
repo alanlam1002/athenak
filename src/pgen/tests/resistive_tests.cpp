@@ -29,6 +29,12 @@
 //!               (Sweet-Parker: localised A_z bump of size lam at x = 0 on each sheet).
 //!               With <problem> user_hist = true the history output has B_y^2 integral
 //!               ("by2") and the reconnected flux of sheet 1 ("psi" = 0.5 int |B_y| dx)
+//!   kh          double shear layer (Mignone et al. 2019 sec. 5.6, T-S2):
+//!               phi = (|y|-1/2)/a_kh,
+//!               v_x = v_sh tanh phi, rho = rho_h (1+tanh phi)/2 + rho_l (1-tanh phi)/2,
+//!               v_y = sign(y) a0_kh v_sh sin(2 pi x) exp(-(phi a_kh/alpha_kh)^2),
+//!               B = (sqrt(2 p mu_p), 0, sqrt(2 p mu_t)), ideal E.  user_hist adds
+//!               "dvy" = (max v^y - min v^y)/2 and "bp2" = int (B_x^2 + B_y^2) dV
 //! Passive scalars (e.g. Y_e for a tabulated EOS) are set uniformly to <problem> ye.
 //!
 //! The same pgen runs with <mhd> resistive = false (ideal dyngr) for ideal-limit
@@ -61,7 +67,7 @@
 namespace {
 
 enum RTestType {kEMWave = 0, kTelegraph = 1, kCurSheet = 2, kRiemann = 3, kOT = 4,
-                kCPAlfven = 5, kRotor = 6, kHarris = 7};
+                kCPAlfven = 5, kRotor = 6, kHarris = 7, kKH = 8};
 
 struct RTest {
   int type;
@@ -84,6 +90,9 @@ struct RTest {
   // harris sheet
   Real ash, ly, eps, lam;
   bool xpoint;
+  // KH double shear layer (Mignone et al. 2019 §5.6): v_sh, a, rho_h, rho_l, A0, alpha,
+  // B = (bxkh, 0, bzkh)
+  Real vsh, akh, rhoh, rhol, a0kh, alkh, bxkh, bzkh;
 
   KOKKOS_INLINE_FUNCTION
   void Fluid(const Real x, const Real y, Real w[5]) const {
@@ -106,6 +115,13 @@ struct RTest {
       w[0] = rho + (rhoin - rho)*f;
       w[2] = -f*omg*y;
       w[3] = f*omg*x;
+    } else if (type == kKH) {
+      const Real phi = (fabs(y) - 0.5)/akh;
+      const Real th = tanh(phi);
+      w[0] = 0.5*(1.0 + th)*rhoh + 0.5*(1.0 - th)*rhol;
+      w[2] = vsh*th;
+      w[3] = ((y < 0.0) ? -1.0 : 1.0)*a0kh*vsh*sin(2.0*M_PI*x)
+             *exp(-phi*phi*akh*akh/(alkh*alkh));
     }
   }
 
@@ -154,6 +170,9 @@ struct RTest {
         for (int a = 0; a < 3; ++a) B[a] = (x < x0) ? bl[a] : br[a];
       } else if (type == kRotor) {
         B[0] = b0;
+      } else if (type == kKH) {
+        B[0] = bxkh;
+        B[2] = bzkh;
       } else {
         const Real tpi = 2.0*M_PI;
         B[0] = -bot*sin(tpi*y);
@@ -341,6 +360,8 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
     rt.type = kRotor;
   } else if (test == "harris") {
     rt.type = kHarris;
+  } else if (test == "kh") {
+    rt.type = kKH;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<problem> test = '" << test << "' unknown" << std::endl;
@@ -387,6 +408,14 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   rt.eps = pin->GetOrAddReal("problem", "eps", 1.0e-3);
   rt.lam = pin->GetOrAddReal("problem", "lam", 0.1);
   rt.xpoint = (pin->GetOrAddString("problem", "pert", "mode") == "xpoint");
+  rt.vsh = pin->GetOrAddReal("problem", "v_sh", 0.5);
+  rt.akh = pin->GetOrAddReal("problem", "a_kh", 1.0e-2);
+  rt.rhoh = pin->GetOrAddReal("problem", "rho_h", 1.0);
+  rt.rhol = pin->GetOrAddReal("problem", "rho_l", 1.0e-2);
+  rt.a0kh = pin->GetOrAddReal("problem", "a0_kh", 0.1);
+  rt.alkh = pin->GetOrAddReal("problem", "alpha_kh", 0.1);
+  rt.bxkh = sqrt(2.0*rt.pgas*pin->GetOrAddReal("problem", "mu_p", 1.0e-2));
+  rt.bzkh = sqrt(2.0*rt.pgas*pin->GetOrAddReal("problem", "mu_t", 1.0));
   if (rt.type == kCPAlfven) {
     using C = std::complex<double>;
     const Real gm = pin->GetReal("mhd", "gamma");
@@ -591,11 +620,15 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
 }
 
 // User history: by2 = int B_y^2 dV (tearing growth), psi = 0.5 int |B_y| dx along the
-// x2 faces at y = -L_y/4 (reconnected flux of sheet 1, Sweet-Parker rate).
+// x2 faces at y = -L_y/4 (reconnected flux of sheet 1, Sweet-Parker rate),
+// dvy = (max v^y - min v^y)/2 (KH growth, Mignone 2019 sec. 5.6),
+// bp2 = int (B_x^2 + B_y^2) dV (poloidal field amplification).
 void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 2;
+  pdata->nhist = 4;
   pdata->label[0] = "by2";
   pdata->label[1] = "psi";
+  pdata->label[2] = "dvy";
+  pdata->label[3] = "bp2";
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -621,8 +654,34 @@ void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
     const Real yf = LeftEdgeX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
     if (fabs(yf - ysh) < 0.25*dx2) s2 += 0.5*fabs(by)*dx1;
   }, Kokkos::Sum<Real>(by2), Kokkos::Sum<Real>(psi));
+  auto w0 = pmbp->pmhd->w0;
+  auto bcc = pmbp->pmhd->bcc0;
+  Real vmax = -1.0, vmin = 1.0, bp2 = 0.0;
+  Kokkos::parallel_reduce("rt_hist2", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &mx, Real &mn, Real &sb) {
+    const int m = idx/nkji;
+    int rr = idx - m*nkji;
+    const int k = rr/nji + ks;
+    rr -= (k-ks)*nji;
+    const int j = rr/nx1 + js;
+    const int i = rr - (j-js)*nx1 + is;
+    const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i);
+    const Real uz = w0(m, IVZ, k, j, i);
+    const Real vy = uy/sqrt(1.0 + ux*ux + uy*uy + uz*uz);  // flat background
+    mx = fmax(mx, vy);
+    mn = fmin(mn, vy);
+    const Real bx = bcc(m, IBX, k, j, i), by = bcc(m, IBY, k, j, i);
+    sb += (bx*bx + by*by)*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+  }, Kokkos::Max<Real>(vmax), Kokkos::Min<Real>(vmin), Kokkos::Sum<Real>(bp2));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &vmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &vmin, 1, MPI_ATHENA_REAL, MPI_MIN, MPI_COMM_WORLD);
+#endif
   pdata->hdata[0] = by2;
   pdata->hdata[1] = psi;
+  // the history writer sums hdata over ranks: dvy (already global) only on rank 0
+  pdata->hdata[2] = (global_variable::my_rank == 0) ? 0.5*(vmax - vmin) : 0.0;
+  pdata->hdata[3] = bp2;
 }
 
 }  // namespace

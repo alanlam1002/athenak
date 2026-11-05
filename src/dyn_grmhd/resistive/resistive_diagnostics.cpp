@@ -156,4 +156,15 @@ void NewtonStats::Read(int64_t out[kNewtonNCounters]) const {
 #endif
 }
 
+//----------------------------------------------------------------------------------------
+void SigmaMHist::Read(int64_t out[kHistBins][kHNCounters]) const {
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), d);
+  for (int b = 0; b < kHistBins; ++b)
+    for (int c = 0; c < kHNCounters; ++c) out[b][c] = h(b, c);
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &out[0][0], kHistBins*kHNCounters, MPI_INT64_T, MPI_SUM,
+                MPI_COMM_WORLD);
+#endif
+}
+
 }  // namespace resistive

@@ -12,6 +12,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -267,7 +268,11 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver *d, int
     presist->CheckConstantMetric();
     presist->ExchangeEBlocking();
   }
-  ResistiveC2P();
+  ResistiveC2P(stage > 0);
+  if (stage == d->nexp_stages) {
+    presist->MaybeWriteHist(pmy_pack->pmesh->time + pmy_pack->pmesh->dt,
+                            pmy_pack->pmesh->ncycle + 1);
+  }
   return TaskStatus::complete;
 }
 
@@ -482,6 +487,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
   const bool fallback =
       (presist->params.newton_fallback == resistive::NewtonFallback::lagged_v);
   const Real adt = pdriver->a_impl*(pmy_pack->pmesh->dt);
+  resistive::CellSolveOptions opt;
+  opt.form = (presist->params.implicit_residual == resistive::ImplicitResidual::momentum)
+             ? resistive::kResidualMomentum : resistive::kResidualC2P;
+  const resistive::SigmaMHist hist = presist->hist;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
+  const int je = (indcs.nx2 > 1) ? indcs.je : js;
+  const int ke = (indcs.nx3 > 1) ? indcs.ke : ks;
 
   par_for("resist_impl_cell", DevExeSpace(), 0, nmb1, 0, n3-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -508,8 +520,19 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
     const Real sdt = cond(w0_(m, IDN, k, j, i)).par*pm.alpha*adt;
     Real prim[NPRIM], E[3];
     resistive::CellSolveResult res = resistive::ResistiveCellSolve(
-        ps_, pm.g, gu, sdt, cons, B, R, ug, tol, maxit, fallback, prim, E);
+        ps_, pm.g, gu, sdt, cons, B, R, ug, tol, maxit, fallback, prim, E, opt);
     nstat.Record(res.iterations, res.fallback, res.failed);
+    if (i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
+      const Real rho = res.failed ? w0_(m, IDN, k, j, i) : prim[PRH]*mb;
+      const int bin = resistive::SigmaMHist::Bin(resistive::Dot(pm.g, B, B), rho);
+      hist.Add(bin, resistive::kHCells);
+      if (res.converged) hist.Add(bin, resistive::kHConverged);
+      if (res.retry) hist.Add(bin, resistive::kHRetry);
+      if (res.fallback) hist.Add(bin, resistive::kHFallback);
+      if (res.prestep_inadmissible) hist.Add(bin, resistive::kHPrestep);
+      if (res.floor) hist.Add(bin, resistive::kHFloor);
+      if (res.continued) hist.Add(bin, resistive::kHContinued);
+    }
     Real u[3] = {ug[0], ug[1], ug[2]};
     if (!res.failed) {
       for (int a = 0; a < 3; ++a) u[a] = prim[PVX + a];
@@ -555,15 +578,16 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
         R[a] = 0.5*(cw(m, resistive::kWR + a, cL[2], cL[1], cL[0]) +
                     cw(m, resistive::kWR + a, cR[2], cR[1], cR[0]));
       }
-      const Real sdt = 0.5*(cw(m, resistive::kWS, cL[2], cL[1], cL[0]) +
-                            cw(m, resistive::kWS, cR[2], cR[1], cR[0]));
+      // each side keeps its own sigma (07 §3.2 step 2 with sigma(rho), Step 1b)
+      const Real sdtl = cw(m, resistive::kWS, cL[2], cL[1], cL[0]);
+      const Real sdtr = cw(m, resistive::kWS, cR[2], cR[1], cR[0]);
       auto &ex = (d == 0) ? ef.x1f : ((d == 1) ? ef.x2f : ef.x3f);
       auto &bx = (d == 0) ? bf.x1f : ((d == 1) ? bf.x2f : bf.x3f);
       const Real eold = ex(m, k, j, i);
       R[d] = eold/sg;
       B[d] = bx(m, k, j, i)/sg;
       Real E[3];
-      resistive::OhmicFaceE(pm.g, sg, sdt, ul, ur, B, R, E);
+      resistive::OhmicFaceE(pm.g, sg, sdtl, sdtr, ul, ur, B, R, E);
       const Real enew = sg*E[d];
       rs(s, m, d, k, j, i) = (enew - eold)/adt;
       ex(m, k, j, i) = enew;
@@ -576,7 +600,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
 //! the EM part from (S_i, tau), hydro c2p with B = 0. Sets w0, temperature, bcc0 and emc.
 
 template<class EOSPolicy, class ErrorPolicy>
-void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P() {
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int n1 = indcs.nx1 + 2*indcs.ng;
   const int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*indcs.ng) : 1;
@@ -595,6 +619,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P() {
   DvceFaceFld4D<Real> bf = pmy_pack->pmhd->b0;
   DvceFaceFld4D<Real> ef = presist->e0;
   const int nkji = n3*n2*n1, nji = n2*n1;
+  const resistive::SigmaMHist hist = presist->hist;
+  const Real sigmax = presist->params.sigma_max;
+  const bool ceiling = (sigmax < 0.1*std::numeric_limits<float>::max());
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
+  const int je = (indcs.nx2 > 1) ? indcs.je : js;
+  const int ke = (indcs.nx3 > 1) ? indcs.ke : ks;
 
   int nerr = 0;
   Kokkos::parallel_reduce("resist_c2p", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
@@ -633,6 +663,23 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P() {
     for (int n = 0; n < NSPMETRIC; ++n) g[n] = pm.g[n];
     Primitive::SolverResult res = ps_.ConToPrim(prim, cons, bz, g, gu);
     if (res.error != Primitive::Error::SUCCESS) sumerr++;
+    // sigma_M ceiling (decision 10 A): add fluid mass at fixed u, T, Y; E~, B~ untouched
+    const Real b2 = resistive::Dot(pm.g, B, B);
+    bool ceil_on = false;
+    if (ceiling && prim[PRH]*mb < b2/sigmax) {
+      ceil_on = true;
+      Real Y[MAX_SPECIES] = {0.0};
+      for (int n = 0; n < nscal; ++n) Y[n] = prim[PYF + n];
+      prim[PRH] = b2/(sigmax*mb);
+      prim[PPR] = ps_.GetEOS().GetPressure(prim[PRH], prim[PTM], Y);
+      ps_.PrimToCon(prim, cons, bz, g);
+      res.cons_adjusted = true;
+    }
+    if (record && i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
+      const int bin = resistive::SigmaMHist::Bin(b2, prim[PRH]*mb);
+      if (ceil_on) hist.Add(bin, resistive::kHCeiling);
+      if (resistive::Dot(pm.g, E, E) > b2) hist.Add(bin, resistive::kHEgtB);
+    }
     w0_(m, IDN, k, j, i) = prim[PRH]*mb;
     w0_(m, IVX, k, j, i) = prim[PVX];
     w0_(m, IVY, k, j, i) = prim[PVY];
@@ -734,7 +781,7 @@ template TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicit(Driver
 template TaskStatus \
     DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver*, int); \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver*, int); \
-template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(); \
+template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(bool); \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistivePrimToCon(int, int, int, int, \
                                                                      int, int);
 

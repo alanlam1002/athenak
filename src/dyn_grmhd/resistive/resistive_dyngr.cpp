@@ -9,11 +9,14 @@
 //!        the ImEx bookkeeping of the stiff Ohmic source (07_scoping_v2 §2.2, §3.3).
 
 #include <algorithm>
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 
 #include "athena.hpp"
+#include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "mesh/mesh_refinement.hpp"
@@ -117,6 +120,19 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     Kokkos::realloc(esrc.x2f, nmb, n3, n2+1, n1);
     Kokkos::realloc(esrc.x3f, nmb, n3+1, n2, n1);
   }
+
+  // K5-run histogram interval: resistive_hist_dt, else the dt of the first hst output
+  hist_dt = params.hist_dt;
+  for (int n = 1; n < 100 && !(hist_dt > 0.0); ++n) {
+    const std::string blk = "output" + std::to_string(n);
+    if (pin->DoesBlockExist(blk) && pin->DoesParameterExist(blk, "file_type") &&
+        pin->GetString(blk, "file_type") == "hst" &&
+        pin->DoesParameterExist(blk, "dt")) {
+      hist_dt = pin->GetReal(blk, "dt");
+    }
+  }
+  hist_fname = pin->GetString("job", "basename") + ".rhist.txt";
+  hist_next = pp->pmesh->time + hist_dt;
 
   pbval_e = new MeshBoundaryValuesFC(pp, pin);
   pbval_e->InitializeBuffers(3);
@@ -662,6 +678,34 @@ void ResistiveDynGR::AddImexSources(Driver *pdriver, int istage) {
       if (j < n2 && i < n1) ex3(m,k,j,i) += w*rs(s,m,2,k,j,i);
     }
   });
+}
+
+//----------------------------------------------------------------------------------------
+//! K5-run histogram output: one row per sigma_M decade with the counts accumulated since
+//! the previous row (cells of the implicit solve, converged, C-retry, lagged-v fallback,
+//! pre-step inadmissible, sigma_M-ceiling activations, floored, E^2 > B^2, converged
+//! through the sigma dt continuation).
+
+void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
+  if (!(hist_dt > 0.0) || t_end < hist_next*(1.0 - 1.0e-12)) return;
+  while (hist_next <= t_end*(1.0 + 1.0e-12)) hist_next += hist_dt;
+  int64_t h[kHistBins][kHNCounters];
+  hist.Read(h);
+  hist.Reset();
+  if (global_variable::my_rank != 0) return;
+  FILE *fp = std::fopen(hist_fname.c_str(), hist_header ? "a" : "w");
+  if (fp == nullptr) return;
+  if (!hist_header) {
+    std::fprintf(fp, "# time cycle bin log10_sigmaM_lo cells converged retry fallback "
+                     "prestep_inadmissible ceiling floor e_gt_b continued\n");
+    hist_header = true;
+  }
+  for (int b = 0; b < kHistBins; ++b) {
+    std::fprintf(fp, "%.10e %d %d %d", t_end, cycle, b, (b == 0) ? -99 : b - 3);
+    for (int c = 0; c < kHNCounters; ++c) std::fprintf(fp, " %" PRId64, h[b][c]);
+    std::fprintf(fp, "\n");
+  }
+  std::fclose(fp);
 }
 
 }  // namespace resistive

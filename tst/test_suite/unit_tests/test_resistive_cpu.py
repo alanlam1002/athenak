@@ -1,6 +1,6 @@
 """
-Unit tests for resistive GRMHD building blocks (07_scoping_v2 step 0: K1, K6,
-diagnostics) and the input guards (risk R1, configuration checks).
+Unit tests for resistive GRMHD building blocks (07_scoping_v2 K1, K3e, K4-K7 incl.
+K5 with the SFHo table, diagnostics) and the input guards (risk R1, config checks).
 """
 
 # Modules

@@ -125,6 +125,14 @@ bool Residual(const PSolver &ps, Real g3d[NSPMETRIC], Real g3u[NSPMETRIC], const
   Primitive::SolverResult res = ps.ConToPrim(prim, cons, b0, g3d, g3u);
   if (res.error != Primitive::Error::SUCCESS) return false;
   floor = res.cons_floor || res.prim_floor || res.cons_adjusted;
+  // Tabulated EOSs clamp T to the table range inside the c2p without reporting a floor;
+  // such states do not reproduce the fluid energy and are treated as floored.
+  if (!floor) {
+    Real chk[NCONS];
+    ps.PrimToCon(prim, chk, b0, g3d);
+    const Real tau = cons_tot[CTA] - e_em;
+    if (fabs(chk[CTA] - tau) > 1.0e-9*(fabs(tau) + cons_tot[CDN])) floor = true;
+  }
   for (int a = 0; a < 3; ++a) {
     gres[a] = u[a] - prim[PVX+a];
     if (!(fabs(gres[a]) < 1.0e300)) return false;  // also rejects NaN

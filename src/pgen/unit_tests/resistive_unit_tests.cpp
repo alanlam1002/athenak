@@ -16,7 +16,8 @@
 //!  K4  implicit Ohmic step: closed form solves the implicit equation; sigma -> 0 and
 //!      sigma -> inf limits; Newton from the exact u stops at the lagged-v state and
 //!      from a nearby guess converges locally to it.
-//!  K5  Newton statistics over sigma_M = B^2/rho in 1e-2..1e4, W <= 10 (ideal gas):
+//!  K5  Newton statistics over sigma_M = B^2/rho in 1e-2..1e4, W <= 10 (ideal gas and
+//!      the CompOSE table <problem> k5_table if given):
 //!      converged roots must reproduce the input totals; fallbacks and other roots
 //!      are counted.
 //!  K6  Conductivity functor values, limits, monotonicity and smoothness.
@@ -43,6 +44,8 @@
 #include "eos/ideal_c2p_mhd.hpp"
 #include "eos/primitive-solver/primitive_solver.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
+#include "eos/primitive-solver/eos_compose.hpp"
+#include "eos/primitive-solver/logs.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
 #include "dyn_grmhd/resistive/resistive_params.hpp"
 #include "dyn_grmhd/resistive/resistive_em.hpp"
@@ -55,6 +58,8 @@
 namespace {
 
 using PS = Primitive::PrimitiveSolver<Primitive::IdealGas, Primitive::ResetFloor>;
+using PST = Primitive::PrimitiveSolver<Primitive::EOSCompOSE<Primitive::NormalLogs>,
+                                       Primitive::ResetFloor>;
 
 bool g_failed = false;
 
@@ -555,24 +560,71 @@ struct CellTrialOut {
   Real err;    // max relative error vs the reference state (converged trials)
   Real cmis;   // max relative mismatch of the solved state's totals vs the input totals
   Real sigm;   // magnetisation B^2/rho of the trial
+  Real rho, temp, ye;  // input fluid state (temp: solved T for tabulated EOS)
   int iters;
   int calls;
   int status;  // 0 converged, 1 fallback, 2 failed
 };
 
+// Thermodynamic state of a K5 trial: (rho, p, h, Y_e) and the enthalpy of a solved state.
+// Ideal gas: rho, p from the random state. Tabulated: rho, T, Y_e drawn inside the table.
+KOKKOS_INLINE_FUNCTION
+void TrialThermo(const PS &, const RandomState &r, uint64_t &, const Real, Real &rho,
+                 Real &p, Real &h, Real &ye) {
+  rho = r.rho;
+  p = r.p;
+  h = 1.0 + kGam/(kGam - 1.0)*p/rho;
+  ye = 0.0;
+}
+
+KOKKOS_INLINE_FUNCTION
+Real SolvedEnthalpy(const PS &ps, const Real prim[NPRIM]) {
+  const Real rho = prim[PRH]*ps.GetEOS().GetBaryonMass();
+  return 1.0 + kGam/(kGam - 1.0)*prim[PPR]/rho;
+}
+
+KOKKOS_INLINE_FUNCTION
+void TrialThermo(const PST &ps, const RandomState &, uint64_t &s, const Real tc,
+                 Real &rho, Real &p, Real &h, Real &ye) {
+  // log-uniform in n and T, uniform in Y_e, strictly inside the table (n in EOS units;
+  // tc converts the table temperature to code units)
+  const auto &eos = ps.GetEOS();
+  const Real n = pow(10.0, Uniform(s, log10(eos.GetMinimumDensity()) + 1.0,
+                                   log10(eos.GetMaximumDensity()) - 1.0));
+  const Real T = pow(10.0, Uniform(s, log10(eos.GetMinimumTemperature()*tc) + 0.3,
+                                   log10(eos.GetMaximumTemperature()*tc) - 0.3));
+  rho = n*eos.GetBaryonMass();
+  Real Y[MAX_SPECIES] = {0.0};
+  ye = Uniform(s, eos.GetMinimumSpeciesFraction(0) + 0.02,
+               eos.GetMaximumSpeciesFraction(0) - 0.02);
+  Y[0] = ye;
+  p = eos.GetPressure(n, T, Y);
+  h = eos.GetEnthalpy(n, T, Y);
+}
+
+KOKKOS_INLINE_FUNCTION
+Real SolvedEnthalpy(const PST &ps, const Real prim[NPRIM]) {
+  Real Y[MAX_SPECIES] = {0.0};
+  Y[0] = prim[PYF];
+  return ps.GetEOS().GetEnthalpy(prim[PRH], prim[PTM], Y);
+}
+
 // Build totals from an exact state that is a fixed point of the implicit step
 // (E* = closed form at the true u), then solve from a perturbed guess.
 // lsig: log10 range of the magnetisation B^2/rho; lsdt: log10 range of sigma dt.
+template <class PSolver>
 KOKKOS_INLINE_FUNCTION
-CellTrialOut CellSolveTrial(const PS &ps, const int t, const Real lsig_lo,
+CellTrialOut CellSolveTrial(const PSolver &ps, const int t, const Real lsig_lo,
                             const Real lsig_hi, const Real lsdt_lo, const Real lsdt_hi,
-                            const Real wmax, const Real pert) {
+                            const Real wmax, const Real pert, const Real tconv = 1.0) {
   using namespace resistive;  // NOLINT
   RandomState r;
   MakeRandomState(t, r);
   uint64_t s = 0xBEEF0000ULL + static_cast<uint64_t>(t)*15485863ULL;
   const Real sdt = pow(10.0, Uniform(s, lsdt_lo, lsdt_hi));
   const Real sigm = pow(10.0, Uniform(s, lsig_lo, lsig_hi));
+  Real rho, prs, h, ye;
+  TrialThermo(ps, r, s, tconv, rho, prs, h, ye);
   const Real sg = SqrtDet(r.g);
   Real gi[NSPMETRIC];
   Inverse3(r.g, gi);
@@ -584,19 +636,19 @@ CellTrialOut CellSolveTrial(const PS &ps, const int t, const Real lsig_lo,
   // field with B^2/rho = sigm
   Real B[3];
   const Real bn = sqrt(Dot(r.g, r.Bcode, r.Bcode));
-  for (int a = 0; a < 3; ++a) B[a] = r.Bcode[a]*sqrt(sigm*r.rho)/bn;
+  for (int a = 0; a < 3; ++a) B[a] = r.Bcode[a]*sqrt(sigm*rho)/bn;
   Real R[3];
-  for (int a = 0; a < 3; ++a) R[a] = r.Ernd[a]*sqrt(sigm*r.rho);
+  for (int a = 0; a < 3; ++a) R[a] = r.Ernd[a]*sqrt(sigm*rho);
   Real Es[3];
   OhmicE(r.g, sg, sdt, u, B, R, Es);
-  const Real h = 1.0 + kGam/(kGam - 1.0)*r.p/r.rho;
   Real idn, im[3], ien;
-  PrimToConsDyn(r.g, r.rho, r.p, h, u, Es, B, idn, im, ien);
+  PrimToConsDyn(r.g, rho, prs, h, u, Es, B, idn, im, ien);
   Real cons[NCONS];
   for (int n = 0; n < NCONS; ++n) cons[n] = 0.0;
   cons[CDN] = idn/sg;
   for (int a = 0; a < 3; ++a) cons[CSX+a] = im[a]/sg;
   cons[CTA] = ien/sg;
+  cons[CYD] = cons[CDN]*ye;
   Real ug[3];
   for (int a = 0; a < 3; ++a) {
     ug[a] = u[a]*(1.0 + pert*Uniform(s, -1.0, 1.0)) + pert*Uniform(s, -1.0, 1.0);
@@ -611,6 +663,9 @@ CellTrialOut CellSolveTrial(const PS &ps, const int t, const Real lsig_lo,
   out.err = 0.0;
   out.cmis = 0.0;
   out.sigm = sigm;
+  out.rho = rho;
+  out.temp = prim[PTM];
+  out.ye = ye;
   if (res.converged) {
     const Real us = 1.0 + sqrt(Dot(r.g, u, u));
     const Real es = sqrt(Dot(r.g, Es, Es)) + sqrt(Dot(r.g, B, B));
@@ -619,12 +674,12 @@ CellTrialOut CellSolveTrial(const PS &ps, const int t, const Real lsig_lo,
       out.err = fmax(out.err, fabs(E[a] - Es[a])/es);
     }
     const Real mb = ps.GetEOS().GetBaryonMass();
-    out.err = fmax(out.err, RelErr(prim[PRH]*mb, r.rho, r.rho));
+    out.err = fmax(out.err, RelErr(prim[PRH]*mb, rho, rho));
     // A root is valid if (prim, E(u)) reproduces the input totals. At high sigma_M the
     // implicit system can have more than one such root (see STATUS / proposals).
     {
       const Real rho2 = prim[PRH]*mb, p2 = prim[PPR];
-      const Real h2 = 1.0 + kGam/(kGam - 1.0)*p2/rho2;
+      const Real h2 = SolvedEnthalpy(ps, prim);
       Real u2[3] = {prim[PVX], prim[PVY], prim[PVZ]};
       Real E2[3];
       OhmicE(r.g, sg, sdt, u2, B, R, E2);
@@ -667,22 +722,25 @@ void RunK4(const std::string &where, const int ntrial) {
 }
 
 // K5: Newton statistics over sigma_M = B^2/rho in 1e-2..1e4, sigma dt in 1e-3..1e6,
-// W up to 10, guesses perturbed by 5%, 1% and 0.1%. Ideal-gas EOS (tabulated EOS: see
-// STATUS). Gates: every converged root reproduces the input totals; no hard failures.
+// W up to 10, guesses perturbed by 5%, 1% and 0.1%. Ideal gas, and the CompOSE table
+// given by <problem> k5_table (states drawn inside the table). Gates: every converged
+// root reproduces the input totals; no hard failures.
 // Fallbacks and converged roots other than the reference root are counted and reported.
-void RunK5(const int ntrial) {
-  PS ps = MakeSolver();
+template <class PSolver>
+void RunK5(const PSolver &ps, const std::string &eosname, const int ntrial,
+           const Real tconv = 1.0) {
   Kokkos::View<CellTrialOut*, DevExeSpace> out("k5out", ntrial);
   const Real perts[3] = {0.05, 0.01, 0.001};
   for (const Real pert : perts) {
     Kokkos::parallel_for("K5", Kokkos::RangePolicy<DevExeSpace>(0, ntrial),
     KOKKOS_LAMBDA(const int t) {
-      out(t) = CellSolveTrial(ps, t, -2.0, 4.0, -3.0, 6.0, 10.0, pert);
+      out(t) = CellSolveTrial(ps, t, -2.0, 4.0, -3.0, 6.0, 10.0, pert, tconv);
     });
     auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
     int nconv = 0, nfb = 0, nfb0 = 0, nfail = 0, nother = 0, itmax = 0;
     double itsum = 0.0, callsum = 0.0;
     Real cmismax = 0.0;
+    int tworst = 0;
     int nbad_sig[4] = {0, 0, 0, 0}, nsig[4] = {0, 0, 0, 0};  // decades of sigma_M
     for (int t = 0; t < ntrial; ++t) {
       const int d = std::min(3, std::max(0, static_cast<int>(floor(log10(h(t).sigm)))+1));
@@ -692,7 +750,7 @@ void RunK5(const int ntrial) {
         itsum += h(t).iters;
         callsum += h(t).calls;
         itmax = std::max(itmax, h(t).iters);
-        cmismax = fmax(cmismax, h(t).cmis);
+        if (h(t).cmis > cmismax) { cmismax = h(t).cmis; tworst = t; }
         if (h(t).err > 1.0e-6) ++nother;
       } else {
         ++nbad_sig[d];
@@ -705,7 +763,8 @@ void RunK5(const int ntrial) {
       }
     }
     if (global_variable::my_rank == 0) {
-      std::cout << "  K5 guess pert " << std::fixed << std::setprecision(3) << pert
+      std::cout << "  K5 [" << eosname << "] guess pert " << std::fixed
+                << std::setprecision(3) << pert
                 << ": converged " << nconv << "/" << ntrial << ", fallback " << nfb
                 << " (" << nfb0 << " before any Newton step)"
                 << ", failed " << nfail << ", mean iters " << std::setprecision(2)
@@ -714,11 +773,14 @@ void RunK5(const int ntrial) {
                 << ", other root " << nother << std::endl
                 << "     not converged by sigma_M decade [<1, 1-10, 10-100, >100]: ";
       for (int d = 0; d < 4; ++d) std::cout << nbad_sig[d] << "/" << nsig[d] << " ";
-      std::cout << std::endl;
+      std::cout << std::endl << "     worst totals mismatch: rho " << std::scientific
+                << h(tworst).rho << " T " << h(tworst).temp << " Ye " << h(tworst).ye
+                << " sigma_M " << h(tworst).sigm << " iters " << h(tworst).iters
+                << std::endl;
     }
-    Report("K5 converged roots reproduce totals (pert " + std::to_string(pert) + ")",
-           cmismax, 1.0e-9);
-    Report("K5 no hard failures (pert " + std::to_string(pert) + ")",
+    Report("K5 " + eosname + " roots reproduce totals (pert " + std::to_string(pert)
+           + ")", cmismax, 1.0e-9);
+    Report("K5 " + eosname + " no hard failures (pert " + std::to_string(pert) + ")",
            static_cast<Real>(nfail), 0.0);
   }
 }
@@ -833,7 +895,22 @@ void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restar
   RunDiagnostics(pmy_mesh_->pmb_pack);
   RunK4<DevExeSpace>("device", ntrial);
   RunK4<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
-  RunK5(pin->GetOrAddInteger("problem", "ntrial_k5", 16384));
+  const int ntrial_k5 = pin->GetOrAddInteger("problem", "ntrial_k5", 16384);
+  RunK5(MakeSolver(), "ideal", ntrial_k5);
+  // K5 with the CompOSE table (e.g. inputs/tables/SFHo_reduced.athtab), if given
+  if (pin->DoesParameterExist("problem", "k5_table")) {
+    PST pst;
+    pst.GetEOSMutable().SetCodeUnitSystem(Primitive::MakeGeometricSolar());
+    pst.GetEOSMutable().ReadTableFromFile(pin->GetString("problem", "k5_table"));
+    pst.GetEOSMutable().SetDensityFloor(1.0e-16);
+    pst.GetEOSMutable().SetTemperatureFloor(0.01);
+    pst.GetEOSMutable().SetMaxVelocity(sqrt(1.0 - 1.0/(100.0*100.0)));
+    pst.tol = 1.0e-15;
+    pst.GetRootSolverMutable().iterations = 60;
+    const Real tconv =
+        Primitive::MakeNuclear().TemperatureConversion(Primitive::MakeGeometricSolar());
+    RunK5(pst, "tabulated", ntrial_k5, tconv);
+  }
   RunK7<DevExeSpace>("device", ntrial);
   RunK7<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
 

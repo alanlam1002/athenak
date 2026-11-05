@@ -12,6 +12,8 @@ import subprocess
 import pytest
 
 _INPUT = "inputs/resistive_flat.athinput"
+# optional launcher prefix, e.g. "mpiexec -n 1 gpu_tile_compact.sh" for GPU builds
+_LAUNCH = os.environ.get("ATHENA_LAUNCHER", "").split()
 
 
 def _run(name, extra_keys=(), flags=(), restart=None, cwd=None):
@@ -24,9 +26,9 @@ def _run(name, extra_keys=(), flags=(), restart=None, cwd=None):
     with open(inp, "w") as f:
         f.write(text)
     if restart is None:
-        cmd = ["./athena", "-i", inp, "job/basename=" + name] + list(flags)
+        cmd = _LAUNCH + ["./athena", "-i", inp, "job/basename=" + name] + list(flags)
     else:
-        cmd = [os.path.abspath("athena"), "-r", restart]
+        cmd = _LAUNCH + [os.path.abspath("athena"), "-r", restart]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           universal_newlines=True, cwd=cwd)
     assert proc.returncode == 0, proc.stdout[-3000:]
@@ -188,7 +190,7 @@ def _tab_input(name, extra_flags):
              "meshblock/nx1=128", "problem/dump_state=true", "mesh/ix1_bc=outflow",
              "mesh/ox1_bc=outflow", "mhd/dfloor=1.28e-13", "mhd/tfloor=0.01",
              "job/basename=" + name] + extra_flags
-    proc = subprocess.run(["./athena", "-i", inp] + flags, stdout=subprocess.PIPE,
+    proc = subprocess.run(_LAUNCH + ["./athena", "-i", inp] + flags, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT, universal_newlines=True)
     assert proc.returncode == 0, proc.stdout[-3000:]
     assert "resistive c2p failed" not in proc.stdout, proc.stdout[-3000:]

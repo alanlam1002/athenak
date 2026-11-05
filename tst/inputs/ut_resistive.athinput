@@ -48,3 +48,4 @@ rsolver = advect
 <problem>
 pgen_name = resistive_unit_tests
 ntrial    = 4096
+k5_table  = inputs/tables/SFHo_reduced.athtab  # K5 tabulated (path relative to tst/)

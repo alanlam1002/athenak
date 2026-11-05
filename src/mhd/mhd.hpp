@@ -17,6 +17,7 @@
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
 #include "bvals/bvals.hpp"
+#include "dyn_grmhd/resistive/resistive_params.hpp"
 
 // forward declarations
 class EquationOfState;
@@ -122,6 +123,9 @@ class MHD {
   Resistivity *presist = nullptr;
   Conduction *pcond = nullptr;
   SourceTerms *psrc = nullptr;
+
+  // Resistive GRMHD (staggered face-centred E, dyngr path); disabled by default
+  resistive::ResistiveParams resist_params;
 
   // following only used for time-evolving flow
   DvceArray5D<Real> u1;       // conserved variables, second register

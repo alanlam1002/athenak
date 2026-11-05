@@ -54,6 +54,7 @@ add_executable(
         dyn_grmhd/dyn_grmhd.cpp
         dyn_grmhd/dyn_grmhd_fluxes.cpp
         dyn_grmhd/dyn_grmhd_fofc.cpp
+        dyn_grmhd/resistive/resistive_params.cpp
 
         eos/eos.cpp
         eos/ideal_hyd.cpp

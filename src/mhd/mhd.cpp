@@ -194,6 +194,15 @@ MHD::MHD(MeshBlockPack *ppack, ParameterInput *pin) :
     psrc = new SourceTerms("mhd_srcterms", ppack, pin);
   }
 
+  // Resistive GRMHD keys (pin is left untouched unless <mhd>/resistive = true)
+  resist_params = resistive::ParseResistiveParams(pin, "mhd");
+  if (resist_params.enabled) {
+    std::string integ = pin->DoesParameterExist("time", "integrator") ?
+                        pin->GetString("time", "integrator") : std::string("");
+    resistive::CheckResistiveConfiguration(resist_params,
+        pmy_pack->pcoord->is_dynamical_relativistic, integ);
+  }
+
   // (3) read time-evolution option [already error checked in driver constructor]
   // Then initialize memory and algorithms for reconstruction and Riemann solvers
   std::string evolution_t = pin->GetString("time","evolution");

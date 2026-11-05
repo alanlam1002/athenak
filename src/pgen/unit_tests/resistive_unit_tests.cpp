@@ -4,7 +4,7 @@
 // Licensed under the 3-clause BSD License (the "LICENSE")
 //========================================================================================
 //! \file resistive_unit_tests.cpp
-//! \brief Unit tests for resistive GRMHD building blocks (07_scoping_v2 §4.1, step 0).
+//! \brief Unit tests for resistive GRMHD building blocks (07_scoping_v2 §4.1).
 //!
 //!  K1  prim<->cons with E != 0 for both IEN conventions on random non-diagonal metrics:
 //!      (a) ideal limit E = -v x B reproduces SingleP2C_IdealGRMHD (fixed-metric
@@ -12,12 +12,21 @@
 //!      (b) fluid part agrees with PrimitiveSolver::PrimToCon (dyngr sqrt(gamma) tau);
 //!      (c) round trip prim -> cons(E,B) -> subtract EM -> PrimitiveSolver c2p -> prim,
 //!          for both dyngr and fixed-metric IEN.
+//!  K3e ideal-limit edge EMF e_k = alpha E_k + beta^a B~^b - beta^b B~^a equals e_cc.
+//!  K4  implicit Ohmic step: closed form solves the implicit equation; sigma -> 0 and
+//!      sigma -> inf limits; Newton from the exact u stops at the lagged-v state and
+//!      from a nearby guess converges locally to it.
+//!  K5  Newton statistics over sigma_M = B^2/rho in 1e-2..1e4, W <= 10 (ideal gas):
+//!      converged roots must reproduce the input totals; fallbacks and other roots
+//!      are counted.
 //!  K6  Conductivity functor values, limits, monotonicity and smoothness.
+//!  K7  edge 2D solver: Mignone 2019 Eqs. 46-47 and 1D HLL reduction with GR speeds.
 //!  D   Diagnostics on synthetic mesh fields: Q == boundary flux, q~ for linear E,
 //!      div B of a CT-built field, E_c mismatch, Newton counters.
 //! Each kernel test is run on the default device and on the host execution space.
 //! The run exits with EXIT_FAILURE if any test fails.
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -39,6 +48,8 @@
 #include "dyn_grmhd/resistive/resistive_em.hpp"
 #include "dyn_grmhd/resistive/conductivity.hpp"
 #include "dyn_grmhd/resistive/resistive_diagnostics.hpp"
+#include "dyn_grmhd/resistive/resistive_implicit.hpp"
+#include "dyn_grmhd/resistive/resistive_edge.hpp"
 #include "pgen/pgen.hpp"
 
 namespace {
@@ -475,6 +486,334 @@ void RunDiagnostics(MeshBlockPack *pmbp) {
   Report("D  Newton counters", ok ? 0.0 : 1.0, 0.0);
 }
 
+//----------------------------------------------------------------------------------------
+// K4: implicit Ohmic step (closed form) and K5: resistive c2p (Newton-Broyden)
+
+// K4a: the closed form solves E = R - sdt [W E + u x B - (E.u) v] (sdt in 1e-3..1e8)
+KOKKOS_INLINE_FUNCTION
+Real K4ResidualTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  uint64_t s = 0xA11CE000ULL + static_cast<uint64_t>(t)*104729ULL;
+  const Real sdt = pow(10.0, Uniform(s, -3.0, 8.0));
+  const Real sg = SqrtDet(r.g);
+  Real E[3];
+  OhmicE(r.g, sg, sdt, r.wv, r.Bcode, r.Ernd, E);
+  const Real W = LorentzFromU(r.g, r.wv);
+  Real ud[3], Bd[3], uxb[3];
+  Lower(r.g, r.wv, ud);
+  Lower(r.g, r.Bcode, Bd);
+  CrossUp(sg, ud, Bd, uxb);
+  const Real eu = Dot(r.g, E, r.wv);
+  Real res = 0.0, scale = 0.0;
+  for (int a = 0; a < 3; ++a) {
+    const Real v = r.wv[a]/W;
+    res = fmax(res, fabs(E[a] - (r.Ernd[a] - sdt*(W*E[a] + uxb[a] - eu*v))));
+    scale = fmax(scale, fabs(r.Ernd[a]) +
+                 sdt*(W*fabs(E[a]) + fabs(uxb[a]) + fabs(eu*v)));
+  }
+  return res/scale;
+}
+
+// K4b: sigma -> 0 leaves E unchanged (exactly)
+KOKKOS_INLINE_FUNCTION
+Real K4VacuumTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  Real E[3];
+  OhmicE(r.g, SqrtDet(r.g), 0.0, r.wv, r.Bcode, r.Ernd, E);
+  return fmax(fabs(E[0] - r.Ernd[0]), fmax(fabs(E[1] - r.Ernd[1]),
+                                           fabs(E[2] - r.Ernd[2])));
+}
+
+// K4c: sigma -> inf gives E -> -v x B with error proportional to 1/(sigma dt):
+// returns |log10(err(sdt=1e4)/err(sdt=1e6)) - 2|
+KOKKOS_INLINE_FUNCTION
+Real K4IdealLimitTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  const Real sg = SqrtDet(r.g);
+  const Real W = LorentzFromU(r.g, r.wv);
+  Real v[3] = {r.wv[0]/W, r.wv[1]/W, r.wv[2]/W};
+  Real Eid[3];
+  IdealE(r.g, sg, v, r.Bcode, Eid);
+  Real err[2];
+  const Real sdts[2] = {1.0e4, 1.0e6};
+  for (int n = 0; n < 2; ++n) {
+    Real E[3];
+    OhmicE(r.g, sg, sdts[n], r.wv, r.Bcode, r.Ernd, E);
+    Real d[3] = {E[0] - Eid[0], E[1] - Eid[1], E[2] - Eid[2]};
+    err[n] = sqrt(Dot(r.g, d, d));
+  }
+  return fabs(log10(err[0]/err[1]) - 2.0);
+}
+
+struct CellTrialOut {
+  Real err;    // max relative error vs the reference state (converged trials)
+  Real cmis;   // max relative mismatch of the solved state's totals vs the input totals
+  Real sigm;   // magnetisation B^2/rho of the trial
+  int iters;
+  int calls;
+  int status;  // 0 converged, 1 fallback, 2 failed
+};
+
+// Build totals from an exact state that is a fixed point of the implicit step
+// (E* = closed form at the true u), then solve from a perturbed guess.
+// lsig: log10 range of the magnetisation B^2/rho; lsdt: log10 range of sigma dt.
+KOKKOS_INLINE_FUNCTION
+CellTrialOut CellSolveTrial(const PS &ps, const int t, const Real lsig_lo,
+                            const Real lsig_hi, const Real lsdt_lo, const Real lsdt_hi,
+                            const Real wmax, const Real pert) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  uint64_t s = 0xBEEF0000ULL + static_cast<uint64_t>(t)*15485863ULL;
+  const Real sdt = pow(10.0, Uniform(s, lsdt_lo, lsdt_hi));
+  const Real sigm = pow(10.0, Uniform(s, lsig_lo, lsig_hi));
+  const Real sg = SqrtDet(r.g);
+  Real gi[NSPMETRIC];
+  Inverse3(r.g, gi);
+  // four-velocity with W in [1, wmax]
+  const Real umag = Uniform(s, 0.0, sqrt(wmax*wmax - 1.0));
+  const Real u0n = sqrt(Dot(r.g, r.wv, r.wv));
+  Real u[3];
+  for (int a = 0; a < 3; ++a) u[a] = r.wv[a]*umag/fmax(u0n, 1.0e-12);
+  // field with B^2/rho = sigm
+  Real B[3];
+  const Real bn = sqrt(Dot(r.g, r.Bcode, r.Bcode));
+  for (int a = 0; a < 3; ++a) B[a] = r.Bcode[a]*sqrt(sigm*r.rho)/bn;
+  Real R[3];
+  for (int a = 0; a < 3; ++a) R[a] = r.Ernd[a]*sqrt(sigm*r.rho);
+  Real Es[3];
+  OhmicE(r.g, sg, sdt, u, B, R, Es);
+  const Real h = 1.0 + kGam/(kGam - 1.0)*r.p/r.rho;
+  Real idn, im[3], ien;
+  PrimToConsDyn(r.g, r.rho, r.p, h, u, Es, B, idn, im, ien);
+  Real cons[NCONS];
+  for (int n = 0; n < NCONS; ++n) cons[n] = 0.0;
+  cons[CDN] = idn/sg;
+  for (int a = 0; a < 3; ++a) cons[CSX+a] = im[a]/sg;
+  cons[CTA] = ien/sg;
+  Real ug[3];
+  for (int a = 0; a < 3; ++a) {
+    ug[a] = u[a]*(1.0 + pert*Uniform(s, -1.0, 1.0)) + pert*Uniform(s, -1.0, 1.0);
+  }
+  Real prim[NPRIM], E[3];
+  CellSolveResult res = ResistiveCellSolve(ps, r.g, gi, sdt, cons, B, R, ug, 1.0e-11, 30,
+                                           true, prim, E);
+  CellTrialOut out;
+  out.iters = res.iterations;
+  out.calls = res.c2p_calls;
+  out.status = res.converged ? 0 : (res.fallback ? 1 : 2);
+  out.err = 0.0;
+  out.cmis = 0.0;
+  out.sigm = sigm;
+  if (res.converged) {
+    const Real us = 1.0 + sqrt(Dot(r.g, u, u));
+    const Real es = sqrt(Dot(r.g, Es, Es)) + sqrt(Dot(r.g, B, B));
+    for (int a = 0; a < 3; ++a) {
+      out.err = fmax(out.err, fabs(prim[PVX+a] - u[a])/us);
+      out.err = fmax(out.err, fabs(E[a] - Es[a])/es);
+    }
+    const Real mb = ps.GetEOS().GetBaryonMass();
+    out.err = fmax(out.err, RelErr(prim[PRH]*mb, r.rho, r.rho));
+    // A root is valid if (prim, E(u)) reproduces the input totals. At high sigma_M the
+    // implicit system can have more than one such root (see STATUS / proposals).
+    {
+      const Real rho2 = prim[PRH]*mb, p2 = prim[PPR];
+      const Real h2 = 1.0 + kGam/(kGam - 1.0)*p2/rho2;
+      Real u2[3] = {prim[PVX], prim[PVY], prim[PVZ]};
+      Real E2[3];
+      OhmicE(r.g, sg, sdt, u2, B, R, E2);
+      Real idn2, im2[3], ien2;
+      PrimToConsDyn(r.g, rho2, p2, h2, u2, E2, B, idn2, im2, ien2);
+      Real cm = fabs(idn2 - idn)/fabs(idn);
+      const Real ms = fabs(im[0]) + fabs(im[1]) + fabs(im[2]);
+      for (int a = 0; a < 3; ++a) cm = fmax(cm, fabs(im2[a] - im[a])/ms);
+      cm = fmax(cm, fabs(ien2 - ien)/fabs(ien));
+      out.cmis = cm;
+    }
+  }
+  return out;
+}
+
+template <class ExecSpace>
+void RunK4(const std::string &where, const int ntrial) {
+  PS ps = MakeSolver();
+  Real e = MaxOverTrials<ExecSpace>("K4a", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K4ResidualTrial(t); });
+  Report("K4a closed form solves implicit eq. [" + where + "]", e, 1.0e-13);
+  e = MaxOverTrials<ExecSpace>("K4b", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K4VacuumTrial(t); });
+  Report("K4b sigma->0: E unchanged [" + where + "]", e, 0.0);
+  e = MaxOverTrials<ExecSpace>("K4c", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K4IdealLimitTrial(t); });
+  Report("K4c sigma->inf: |E+vxB| ~ 1/(sigma dt) [" + where + "]", e, 2.0e-2);
+  // Newton from the exact u stops at the lagged-v closed form; from a nearby guess it
+  // converges locally to the same root.
+  e = MaxOverTrials<ExecSpace>("K4d", ntrial, KOKKOS_LAMBDA(const int t) {
+    CellTrialOut o = CellSolveTrial(ps, t, -2.0, 2.0, -2.0, 4.0, 5.0, 0.0);
+    return (o.status == 0 && o.iters == 0) ? o.err : 1.0;
+  });
+  Report("K4d guess = exact: lagged-v, 0 iterations [" + where + "]", e, 1.0e-10);
+  e = MaxOverTrials<ExecSpace>("K4e", ntrial, KOKKOS_LAMBDA(const int t) {
+    CellTrialOut o = CellSolveTrial(ps, t, -2.0, 2.0, -2.0, 4.0, 5.0, 1.0e-6);
+    return (o.status == 0) ? o.err : 1.0;
+  });
+  Report("K4e Newton local convergence to fixed point [" + where + "]", e, 1.0e-9);
+}
+
+// K5: Newton statistics over sigma_M = B^2/rho in 1e-2..1e4, sigma dt in 1e-3..1e6,
+// W up to 10, guesses perturbed by 5%, 1% and 0.1%. Ideal-gas EOS (tabulated EOS: see
+// STATUS). Gates: every converged root reproduces the input totals; no hard failures.
+// Fallbacks and converged roots other than the reference root are counted and reported.
+void RunK5(const int ntrial) {
+  PS ps = MakeSolver();
+  Kokkos::View<CellTrialOut*, DevExeSpace> out("k5out", ntrial);
+  const Real perts[3] = {0.05, 0.01, 0.001};
+  for (const Real pert : perts) {
+    Kokkos::parallel_for("K5", Kokkos::RangePolicy<DevExeSpace>(0, ntrial),
+    KOKKOS_LAMBDA(const int t) {
+      out(t) = CellSolveTrial(ps, t, -2.0, 4.0, -3.0, 6.0, 10.0, pert);
+    });
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), out);
+    int nconv = 0, nfb = 0, nfb0 = 0, nfail = 0, nother = 0, itmax = 0;
+    double itsum = 0.0, callsum = 0.0;
+    Real cmismax = 0.0;
+    int nbad_sig[4] = {0, 0, 0, 0}, nsig[4] = {0, 0, 0, 0};  // decades of sigma_M
+    for (int t = 0; t < ntrial; ++t) {
+      const int d = std::min(3, std::max(0, static_cast<int>(floor(log10(h(t).sigm)))+1));
+      ++nsig[d];
+      if (h(t).status == 0) {
+        ++nconv;
+        itsum += h(t).iters;
+        callsum += h(t).calls;
+        itmax = std::max(itmax, h(t).iters);
+        cmismax = fmax(cmismax, h(t).cmis);
+        if (h(t).err > 1.0e-6) ++nother;
+      } else {
+        ++nbad_sig[d];
+        if (h(t).status == 1) {
+          ++nfb;
+          if (h(t).iters == 0) ++nfb0;
+        } else {
+          ++nfail;
+        }
+      }
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "  K5 guess pert " << std::fixed << std::setprecision(3) << pert
+                << ": converged " << nconv << "/" << ntrial << ", fallback " << nfb
+                << " (" << nfb0 << " before any Newton step)"
+                << ", failed " << nfail << ", mean iters " << std::setprecision(2)
+                << itsum/std::max(nconv, 1) << ", max iters " << itmax
+                << ", mean c2p calls " << callsum/std::max(nconv, 1)
+                << ", other root " << nother << std::endl
+                << "     not converged by sigma_M decade [<1, 1-10, 10-100, >100]: ";
+      for (int d = 0; d < 4; ++d) std::cout << nbad_sig[d] << "/" << nsig[d] << " ";
+      std::cout << std::endl;
+    }
+    Report("K5 converged roots reproduce totals (pert " + std::to_string(pert) + ")",
+           cmismax, 1.0e-9);
+    Report("K5 no hard failures (pert " + std::to_string(pert) + ")",
+           static_cast<Real>(nfail), 0.0);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+// K7: edge 2D solver; K3 (edge part): ideal-limit e_k equals AthenaK e_cc
+
+// K7a: unit light speeds reproduce Mignone et al. 2019 Eqs. 46-47
+KOKKOS_INLINE_FUNCTION
+Real K7MignoneTrial(const int t) {
+  using resistive::EdgeUpwind;
+  uint64_t s = 0x7ED6E000ULL + static_cast<uint64_t>(t)*2654435761ULL;
+  Real ez[2][2], bz[2][2], hz[2][2];
+  Real sez = 0.0, sbz = 0.0;
+  for (int i = 0; i < 2; ++i)
+    for (int j = 0; j < 2; ++j) {
+      ez[i][j] = Uniform(s, -1., 1.); bz[i][j] = Uniform(s, -1., 1.);
+      hz[i][j] = -bz[i][j];
+      sez += ez[i][j]; sbz += bz[i][j];
+    }
+  const Real bxl = Uniform(s, -1., 1.), bxr = Uniform(s, -1., 1.);  // across y
+  const Real byl = Uniform(s, -1., 1.), byr = Uniform(s, -1., 1.);  // across x
+  const Real exl = Uniform(s, -1., 1.), exr = Uniform(s, -1., 1.);
+  const Real eyl = Uniform(s, -1., 1.), eyr = Uniform(s, -1., 1.);
+  const Real e = EdgeUpwind(ez, bxr - bxl, byr - byl, 1.0, 1.0, 1.0, 1.0);
+  const Real eq46 = 0.25*sez - 0.5*(bxr - bxl) + 0.5*(byr - byl);
+  const Real h = EdgeUpwind(hz, exr - exl, eyr - eyl, 1.0, 1.0, 1.0, 1.0);
+  const Real eq47 = 0.25*sbz + 0.5*(exr - exl) - 0.5*(eyr - eyl);
+  return fmax(fabs(e - eq46), fabs(-h - eq47));
+}
+
+// K7b: with states uniform along one transverse direction the edge value reduces to the
+// 1D HLL flux in the other, with GR light-cone speeds (random metric, lapse, shift).
+KOKKOS_INLINE_FUNCTION
+Real K7ReductionTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  Real gi[NSPMETRIC];
+  Inverse3(r.g, gi);
+  Real aap, aam, abp, abm;
+  LightSpeeds(r.alpha, r.beta[0], gi[S11], aap, aam);
+  LightSpeeds(r.alpha, r.beta[1], gi[S22], abp, abm);
+  uint64_t s = 0x7ED60000ULL + static_cast<uint64_t>(t)*40503ULL;
+  const Real fl = Uniform(s, -1., 1.), fr = Uniform(s, -1., 1.);
+  const Real du = Uniform(s, -1., 1.);
+  // uniform along b: 1D problem along a, flux of U^b along a is -f
+  Real fa[2][2] = {{fl, fl}, {fr, fr}};
+  const Real ea = EdgeUpwind(fa, 0.0, du, aap, aam, abp, abm);
+  const Real hlla = (aap*fl + aam*fr + aap*aam*du)/(aap + aam);
+  // uniform along a: 1D problem along b, flux of U^a along b is +f
+  Real fb[2][2] = {{fl, fr}, {fl, fr}};
+  const Real eb = EdgeUpwind(fb, du, 0.0, aap, aam, abp, abm);
+  const Real hllb = (abp*fl + abm*fr - abp*abm*du)/(abp + abm);
+  return fmax(fabs(ea - hlla), fabs(eb - hllb));
+}
+
+// K3e: with E = -v x B, e_k = alpha E_k + beta^a B~^b - beta^b B~^a equals
+// B~^a (alpha v^b - beta^b) - B~^b (alpha v^a - beta^a)  (mhd_corner_e.cpp e_cc)
+KOKKOS_INLINE_FUNCTION
+Real K3EdgeIdealTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  const Real sg = SqrtDet(r.g);
+  const Real W = LorentzFromU(r.g, r.wv);
+  Real v[3] = {r.wv[0]/W, r.wv[1]/W, r.wv[2]/W};
+  Real E[3], Ed[3], bt[3];
+  IdealE(r.g, sg, v, r.Bcode, E);
+  Lower(r.g, E, Ed);
+  for (int a = 0; a < 3; ++a) bt[a] = sg*r.Bcode[a];
+  Real err = 0.0, scale = 0.0;
+  for (int k = 0; k < 3; ++k) {
+    const int a = (k + 1) % 3, b = (k + 2) % 3;
+    const Real e = EdgeEMF(r.alpha, r.beta[a], r.beta[b], Ed[k], bt[a], bt[b]);
+    const Real ecc = bt[a]*(r.alpha*v[b] - r.beta[b]) - bt[b]*(r.alpha*v[a] - r.beta[a]);
+    err = fmax(err, fabs(e - ecc));
+    scale = fmax(scale, fabs(bt[a]) + fabs(bt[b]));
+  }
+  return err/scale;
+}
+
+template <class ExecSpace>
+void RunK7(const std::string &where, const int ntrial) {
+  Real e = MaxOverTrials<ExecSpace>("K7a", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K7MignoneTrial(t); });
+  Report("K7a edge solver = Mignone Eqs. 46-47 [" + where + "]", e, 1.0e-15);
+  e = MaxOverTrials<ExecSpace>("K7b", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K7ReductionTrial(t); });
+  Report("K7b 1D reduction = HLL, GR speeds [" + where + "]", e, 1.0e-14);
+  e = MaxOverTrials<ExecSpace>("K3e", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K3EdgeIdealTrial(t); });
+  Report("K3e ideal-limit e_k = e_cc [" + where + "]", e, 1.0e-14);
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -484,14 +823,19 @@ void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restar
   if (restart) return;
   const int ntrial = pin->GetOrAddInteger("problem", "ntrial", 4096);
   if (global_variable::my_rank == 0) {
-    std::cout << "Resistive GRMHD unit tests (K1, K6, diagnostics), ntrial = " << ntrial
-              << std::endl;
+    std::cout << "Resistive GRMHD unit tests (K1, K3e, K4-K7, diagnostics), ntrial = "
+              << ntrial << std::endl;
   }
   RunK1<DevExeSpace>("device", ntrial);
   RunK1<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
   RunK6<DevExeSpace>("device");
   RunK6<Kokkos::DefaultHostExecutionSpace>("host");
   RunDiagnostics(pmy_mesh_->pmb_pack);
+  RunK4<DevExeSpace>("device", ntrial);
+  RunK4<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
+  RunK5(pin->GetOrAddInteger("problem", "ntrial_k5", 16384));
+  RunK7<DevExeSpace>("device", ntrial);
+  RunK7<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
 
   if (g_failed) {
     std::cout << "### FATAL ERROR: resistive unit tests FAILED" << std::endl;

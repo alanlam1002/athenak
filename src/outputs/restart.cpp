@@ -29,7 +29,42 @@
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "dyn_grmhd/resistive/resistive_dyngr.hpp"
 //#include "outputs.hpp"
+
+namespace {
+// Write one face-centred field, one MeshBlock at a time, in the same layout as b0.
+void WriteFaceFieldRst(IOWrapper &resfile, const HostFaceFld4D<Real> &f, int nmbmin,
+                       int nmbmax, int nmb_thisrank, IOWrapperSizeT data_size,
+                       IOWrapperSizeT &myoffset, bool single_file_per_rank,
+                       const char *name) {
+  for (int m=0; m<nmbmax; ++m) {
+    if (m >= nmb_thisrank) continue;
+    const bool coll = (m < nmbmin);
+    auto x1fptr = Kokkos::subview(f.x1f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    auto x2fptr = Kokkos::subview(f.x2f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    auto x3fptr = Kokkos::subview(f.x3f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    Real *ptr[3] = {x1fptr.data(), x2fptr.data(), x3fptr.data()};
+    size_t cnt[3] = {x1fptr.size(), x2fptr.size(), x3fptr.size()};
+    for (int d=0; d<3; ++d) {
+      size_t nw = coll ?
+          resfile.Write_any_type_at_all(ptr[d], cnt[d], myoffset, "Real",
+                                        single_file_per_rank) :
+          resfile.Write_any_type_at(ptr[d], cnt[d], myoffset, "Real",
+                                    single_file_per_rank);
+      if (nw != cnt[d]) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << name << " data not written correctly to rst file, "
+                  << "restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      myoffset += cnt[d]*sizeof(Real);
+    }
+    myoffset += data_size - (cnt[0] + cnt[1] + cnt[2])*sizeof(Real);
+  }
+}
+}  // namespace
 
 //----------------------------------------------------------------------------------------
 // constructor: also calls BaseTypeOutput base class constructor
@@ -148,6 +183,8 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   adm::ADM* padm = pm->pmb_pack->padm;
+  resistive::ResistiveDynGR* presist =
+      (pm->pmb_pack->pdyngr != nullptr) ? pm->pmb_pack->pdyngr->presist : nullptr;
   int nhydro=0, nmhd=0, nrad=0, nforce=3, nz4c=0, nadm=0, nco=0;
   if (phydro != nullptr) {
     nhydro = phydro->nhydro + phydro->nscalars;
@@ -278,6 +315,11 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     data_size += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
     data_size += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
     data_size += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+  }
+  if (presist != nullptr) {
+    data_size += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
+    data_size += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
+    data_size += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
   }
   if (prad != nullptr) {
     data_size += nout1*nout2*nout3*nrad*sizeof(Real);   // radiation i0
@@ -474,6 +516,25 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
     offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
     offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+    myoffset = offset_myrank;
+  }
+  if (presist != nullptr) {
+    const int nmb = pm->pmb_pack->nmb_thispack;
+    HostFaceFld4D<Real> efield("rst-e0", 1, 1, 1, 1);
+    Kokkos::realloc(efield.x1f, nmb, nout3, nout2, nout1+1);
+    Kokkos::realloc(efield.x2f, nmb, nout3, nout2+1, nout1);
+    Kokkos::realloc(efield.x3f, nmb, nout3+1, nout2, nout1);
+    Kokkos::deep_copy(efield.x1f, Kokkos::subview(presist->e0.x1f,
+                      std::make_pair(0,nmb), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::deep_copy(efield.x2f, Kokkos::subview(presist->e0.x2f,
+                      std::make_pair(0,nmb), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    Kokkos::deep_copy(efield.x3f, Kokkos::subview(presist->e0.x3f,
+                      std::make_pair(0,nmb), Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+    WriteFaceFieldRst(resfile, efield, noutmbs_min, noutmbs_max, pm->nmb_thisrank,
+                      data_size, myoffset, single_file_per_rank, "resistive e0");
+    offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
+    offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
+    offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
     myoffset = offset_myrank;
   }
 

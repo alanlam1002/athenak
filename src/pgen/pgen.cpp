@@ -27,6 +27,8 @@
 #include "z4c/z4c.hpp"
 #include "radiation/radiation.hpp"
 #include "srcterms/turb_driver.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "dyn_grmhd/resistive/resistive_dyngr.hpp"
 #include "pgen.hpp"
 
 
@@ -93,6 +95,47 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm) :
   }
 }
 
+namespace {
+// Read one face-centred field written by WriteFaceFieldRst (restart.cpp) into f (device).
+void ReadFaceFieldRst(IOWrapper &resfile, DvceFaceFld4D<Real> &f, int nmb, int nout1,
+                      int nout2, int nout3, int nmbmin, int nmbmax, int nmb_thisrank,
+                      IOWrapperSizeT data_size, IOWrapperSizeT &myoffset,
+                      bool single_file_per_rank, const char *name) {
+  HostFaceFld4D<Real> fcin("rst-fc-in2", 1, 1, 1, 1);
+  Kokkos::realloc(fcin.x1f, nmb, nout3, nout2, nout1+1);
+  Kokkos::realloc(fcin.x2f, nmb, nout3, nout2+1, nout1);
+  Kokkos::realloc(fcin.x3f, nmb, nout3+1, nout2, nout1);
+  for (int m=0; m<nmbmax; ++m) {
+    if (m >= nmb_thisrank) continue;
+    const bool coll = (m < nmbmin);
+    auto x1fptr = Kokkos::subview(fcin.x1f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    auto x2fptr = Kokkos::subview(fcin.x2f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    auto x3fptr = Kokkos::subview(fcin.x3f, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+    Real *ptr[3] = {x1fptr.data(), x2fptr.data(), x3fptr.data()};
+    size_t cnt[3] = {x1fptr.size(), x2fptr.size(), x3fptr.size()};
+    for (int d=0; d<3; ++d) {
+      size_t nr = coll ?
+          resfile.Read_Reals_at_all(ptr[d], cnt[d], myoffset, single_file_per_rank) :
+          resfile.Read_Reals_at(ptr[d], cnt[d], myoffset, single_file_per_rank);
+      if (nr != cnt[d]) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "Input " << name << " field not read correctly from "
+                  << "rst file, restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      myoffset += cnt[d]*sizeof(Real);
+    }
+    myoffset += data_size - (cnt[0] + cnt[1] + cnt[2])*sizeof(Real);
+  }
+  Kokkos::deep_copy(Kokkos::subview(f.x1f, std::make_pair(0,nmb), Kokkos::ALL,
+                    Kokkos::ALL, Kokkos::ALL), fcin.x1f);
+  Kokkos::deep_copy(Kokkos::subview(f.x2f, std::make_pair(0,nmb), Kokkos::ALL,
+                    Kokkos::ALL, Kokkos::ALL), fcin.x2f);
+  Kokkos::deep_copy(Kokkos::subview(f.x3f, std::make_pair(0,nmb), Kokkos::ALL,
+                    Kokkos::ALL, Kokkos::ALL), fcin.x3f);
+}
+}  // namespace
+
 //----------------------------------------------------------------------------------------
 // constructor for restarts
 // When called, data needed to rebuild mesh has been read from restart file by
@@ -126,6 +169,8 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   hydro::Hydro* phydro = pm->pmb_pack->phydro;
   mhd::MHD* pmhd = pm->pmb_pack->pmhd;
   adm::ADM* padm = pm->pmb_pack->padm;
+  resistive::ResistiveDynGR* presist =
+      (pm->pmb_pack->pdyngr != nullptr) ? pm->pmb_pack->pdyngr->presist : nullptr;
   z4c::Z4c* pz4c = pm->pmb_pack->pz4c;
   radiation::Radiation* prad=pm->pmb_pack->prad;
   TurbulenceDriver* pturb=pm->pmb_pack->pturb;
@@ -247,6 +292,11 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     data_size_ += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
     data_size_ += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
     data_size_ += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+  }
+  if (presist != nullptr) {
+    data_size_ += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
+    data_size_ += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
+    data_size_ += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
   }
   if (prad != nullptr) {
     data_size_ += nout1*nout2*nout3*nrad*sizeof(Real);   // rad i0
@@ -463,6 +513,15 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // mhd b0.x1f
     offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // mhd b0.x2f
     offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // mhd b0.x3f
+    myoffset = offset_myrank;
+  }
+  if (presist != nullptr) {
+    ReadFaceFieldRst(resfile, presist->e0, nmb, nout1, nout2, nout3, noutmbs_min,
+                     noutmbs_max, pm->nmb_thisrank, data_size, myoffset,
+                     single_file_per_rank, "resistive e0");
+    offset_myrank += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
+    offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
+    offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
     myoffset = offset_myrank;
   }
 
@@ -972,6 +1031,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     GaussLegendre(pin, is_restart);
   } else if (pgen_fun_name.compare("resistive_unit_tests") == 0) {
     ResistiveUnitTests(pin, is_restart);
+  } else if (pgen_fun_name.compare("resistive_tests") == 0) {
+    ResistiveTests(pin, is_restart);
 
   } else {
     // name not set on command line or input file, print warning and quit

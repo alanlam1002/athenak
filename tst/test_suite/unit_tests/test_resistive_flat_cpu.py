@@ -114,7 +114,7 @@ def test_emwave_2d_convergence():
 
 
 @pytest.mark.parametrize("sigma,ecut,rmin", [(1, 2.0e-7, 1.8), (10, 2.0e-8, 1.8),
-                                              (1000, 5.0e-9, None)])
+                                             (1000, 5.0e-9, None)])
 def test_telegraph(sigma, ecut, rmin):
     r = [_run("rt_tg%d" % n, flags=["mesh/nx1=%d" % n, "meshblock/nx1=%d" % n,
                                     "problem/test=telegraph",
@@ -186,6 +186,43 @@ def test_riemann_mhllc():
         assert err[("mhllc", 1000000)][c] < 0.9*err[("lf", 1000000)][c], err
 
 
+# Komissarov (2007, MNRAS 382, 995; arXiv:0708.0323) sec. 6.1.1-2 stationary shocks,
+# Gamma = 4/3: (rho, p, u = gamma v, B) left/right, tlim
+_KOM = {"fast": ((1.0, 10.0, (0.6082, 0, 0), (5.0, 3.511, 0)),
+                 (1.485, 17.03, (0.4096, -0.2147, 0), (5.0, 2.287, 0)), 3.0),
+        "slow": ((1.0, 10.0, (4.925, 0, 0), (5.0, 15.08, 0)),
+                 (7.930, 274.1, (0.6209, 0.1009, 0), (5.0, 28.92, 0)), 4.0)}
+
+
+@pytest.mark.parametrize("shock", ["fast", "slow"])
+@pytest.mark.parametrize("sigma", [100, 1000000])
+def test_komissarov_stationary_shock(shock, sigma):
+    """Stationary shock stays at x = 0 with the ideal jump states (100 cells on
+    [-1, 1]; sigma = 100 is the paper's eta = 0.01)."""
+    left, right, tlim = _KOM[shock]
+    keys, dens = ["x0 = 0"], []
+    for side, (rho, p, u, b) in (("l", left), ("r", right)):
+        g = math.sqrt(1.0 + sum(x*x for x in u))
+        keys += ["rho_%s = %.17g" % (side, rho), "p_%s = %.17g" % (side, p)]
+        keys += ["v%s_%s = %.17g" % (a, side, x/g) for a, x in zip("xyz", u)]
+        keys += ["b%s_%s = %.17g" % (a, side, x) for a, x in zip("xyz", b)]
+        dens.append(rho*g)
+    name = "rt_kom%s%d" % (shock, sigma)
+    r = _run(name, keys, ["problem/test=riemann", "time/tlim=%g" % tlim,
+                          "mesh/nx1=100", "meshblock/nx1=100", "mesh/x1min=-1",
+                          "mesh/x1max=1", "mesh/ix1_bc=outflow", "mesh/ox1_bc=outflow",
+                          "problem/dump_state=true", "time/cfl_number=0.3",
+                          "mhd/resistive_sigma=%g" % sigma])
+    assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
+    st = _state(name)
+    d = [float.fromhex(st[k][0]) for k in sorted(st)]
+    x = [-1.0 + 0.02*(k[2] + 0.5) for k in sorted(st)]
+    mid = 0.5*(dens[0] + dens[1])
+    xs = [x[i] for i in range(len(d) - 1) if (d[i] - mid)*(d[i+1] - mid) <= 0]
+    assert len(xs) == 1 and abs(xs[0]) < 0.05, xs
+    assert abs(d[5]/dens[0] - 1) < 0.01 and abs(d[-5]/dens[1] - 1) < 0.01, (d[5], d[-5])
+
+
 _OT = ["problem/test=orszag_tang", "mesh/nx1=64", "mesh/nx2=64", "time/tlim=0.25",
        "problem/dump_state=true"]
 
@@ -196,8 +233,8 @@ def test_orszag_tang_constraints_and_decomposition():
                                     "mhd/resistive_sigma=1e6"])
     b = _run("rt_ot4", flags=_OT + ["meshblock/nx1=32", "meshblock/nx2=16",
                                     "mhd/resistive_sigma=1e6"])
-    i = _run("rt_oti", flags=_OT + ["meshblock/nx1=64", "meshblock/nx2=64",
-                                    "mhd/resistive=false"])
+    _run("rt_oti", flags=_OT + ["meshblock/nx1=64", "meshblock/nx2=64",
+                                "mhd/resistive=false"])
     for x in (a, b):
         assert x["max_divb"] < 1e-12
         assert abs(x["charge"] - x["charge0"]) < 1e-14
@@ -271,8 +308,9 @@ def _tab_input(name, extra_flags):
              "meshblock/nx1=128", "problem/dump_state=true", "mesh/ix1_bc=outflow",
              "mesh/ox1_bc=outflow", "mhd/dfloor=1.28e-13", "mhd/tfloor=0.01",
              "job/basename=" + name] + extra_flags
-    proc = subprocess.run(_LAUNCH + ["./athena", "-i", inp] + flags, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, universal_newlines=True)
+    proc = subprocess.run(_LAUNCH + ["./athena", "-i", inp] + flags,
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True)
     assert proc.returncode == 0, proc.stdout[-3000:]
     assert "resistive c2p failed" not in proc.stdout, proc.stdout[-3000:]
     out = {}
@@ -289,8 +327,8 @@ def test_tabulated_eos_riemann():
     r = _tab_input("rt_tab", ["mhd/resistive_sigma=1e6"])
     assert r["newton_fail"] == 0 and r["newton_fallback"] == 0 and r["newton_cells"] > 0
     d = _l1(_state("rt_tab"), _state("rt_tabi"), 7)   # 5 cons + Y_e, then b0 x1, x2
-    # |B^y| = 1e-3; the residual is confined to the shocks, where resistive LF (light-speed
-    # dissipation) and the ideal solver (cold-plasma wave speeds) differ.
+    # |B^y| = 1e-3; the residual is confined to the shocks, where resistive LF
+    # (light-speed dissipation) and the ideal solver (cold-plasma wave speeds) differ.
     assert d < 1.0e-5, d
 
 

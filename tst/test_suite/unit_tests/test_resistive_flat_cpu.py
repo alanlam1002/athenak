@@ -144,13 +144,19 @@ _RFLAGS = ["problem/test=riemann", "mhd/gamma=2", "time/tlim=0.4", "mesh/nx1=400
            "mesh/ox1_bc=outflow"]
 
 
-def test_riemann_ideal_limit():
-    _run("rt_rpi", _RIEMANN, _RFLAGS + ["mhd/resistive=false"])
+# Palenzuela et al. (2009, MNRAS 394, 1727) sec. 5.1.3 Brio-Wu variant: B^x = 0
+_RIEMANN_P09 = ["x0 = 0.5", "rho_l = 1", "p_l = 1", "rho_r = 0.125", "p_r = 0.1",
+                "by_l = 0.5", "by_r = -0.5"]
+
+
+@pytest.mark.parametrize("keys", [_RIEMANN, _RIEMANN_P09], ids=["bx05", "palenzuela09"])
+def test_riemann_ideal_limit(keys):
+    _run("rt_rpi", keys, _RFLAGS + ["mhd/resistive=false"])
     ref = _state("rt_rpi")
     d = []
     for s in (10, 100, 1000, 1000000):
-        r = _run("rt_rp%d" % s, _RIEMANN, _RFLAGS + ["mhd/resistive_sigma=%g" % s,
-                                                     "mhd/resistive_rsolver=lf"])
+        r = _run("rt_rp%d" % s, keys, _RFLAGS + ["mhd/resistive_sigma=%g" % s,
+                                                 "mhd/resistive_rsolver=lf"])
         assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
         d.append(_l1(_state("rt_rp%d" % s), ref, 6))     # B^y face (b0.x2f)
     assert all(d[i+1] < 0.5*d[i] for i in range(len(d) - 1)), d

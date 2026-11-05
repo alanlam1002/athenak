@@ -15,6 +15,7 @@
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/mesh_refinement.hpp"
 #include "driver/driver.hpp"
 #include "bvals/bvals.hpp"
 #include "coordinates/adm.hpp"
@@ -54,11 +55,19 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     emc("resist_emc", 1, 1, 1, 1, 1),
     cwork("resist_cwork", 1, 1, 1, 1, 1),
     pbval_e(nullptr), pbval_ei(nullptr), pbval_ep(nullptr), pbval_ep2(nullptr),
-    pmy_pack(pp) {
-  // Step 1a/2 scope (07 §4): uniform grid, static metric, imex2/imex3, ng >= 2
-  if (pp->pmesh->multilevel) {
-    Fatal(__LINE__, "<mhd> resistive = true: SMR/AMR is not supported yet (face sync of "
-          "E~ at fine/coarse boundaries, 07 D3, is deferred)");
+    psync{nullptr, nullptr, nullptr, nullptr},
+    e0_alias("resist_e0a", 1, 1, 1, 1, 1),
+    pmy_pack(pp),
+    multilevel(pp->pmesh->multilevel) {
+  // Step 1a/2 scope (07 §4): static refinement, static metric, imex2/imex3, ng >= 2
+  if (pp->pmesh->adaptive) {
+    Fatal(__LINE__, "<mhd> resistive = true: AMR (refine/derefine of E~) is not "
+          "supported yet; static mesh refinement is");
+  }
+  if (multilevel && pin->DoesParameterExist("mesh_refinement", "prolong_primitives") &&
+      pin->GetBoolean("mesh_refinement", "prolong_primitives")) {
+    Fatal(__LINE__, "<mhd> resistive = true: <mesh_refinement> prolong_primitives "
+          "uses the ideal c2p and is not supported");
   }
   if (pp->pz4c != nullptr || pp->padm == nullptr) {
     Fatal(__LINE__, "<mhd> resistive = true: only a fixed <adm> background is supported "
@@ -105,6 +114,23 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
   pbval_ep->InitializeBuffers(3);
   pbval_ep2 = new MeshBoundaryValuesFC(pp, pin);
   pbval_ep2->InitializeBuffers(3);
+
+  if (multilevel) {
+    int nc1 = indcs.cnx1 + 2*indcs.ng;
+    int nc2 = (indcs.cnx2 > 1)? (indcs.cnx2 + 2*indcs.ng) : 1;
+    int nc3 = (indcs.cnx3 > 1)? (indcs.cnx3 + 2*indcs.ng) : 1;
+    Kokkos::realloc(coarse_e0.x1f, nmb, nc3, nc2, nc1+1);
+    Kokkos::realloc(coarse_e0.x2f, nmb, nc3, nc2+1, nc1);
+    Kokkos::realloc(coarse_e0.x3f, nmb, nc3+1, nc2, nc1);
+    // e0 is LayoutRight (nmb,n3,n2,n1[+1]): the same memory read as (nmb,1,n3,n2,n1[+1])
+    e0_alias.x1f = DvceArray5D<Real>(e0.x1f.data(), nmb, 1, n3, n2, n1+1);
+    e0_alias.x2f = DvceArray5D<Real>(e0.x2f.data(), nmb, 1, n3, n2+1, n1);
+    e0_alias.x3f = DvceArray5D<Real>(e0.x3f.data(), nmb, 1, n3+1, n2, n1);
+    for (int r = 0; r < kNSync; ++r) {
+      psync[r] = new MeshBoundaryValuesCC(pp, pin, false);
+      psync[r]->InitializeBuffers(1);
+    }
+  }
 }
 
 ResistiveDynGR::~ResistiveDynGR() {
@@ -112,6 +138,7 @@ ResistiveDynGR::~ResistiveDynGR() {
   delete pbval_ei;
   delete pbval_ep;
   delete pbval_ep2;
+  for (int r = 0; r < kNSync; ++r) delete psync[r];
 }
 
 //----------------------------------------------------------------------------------------
@@ -171,6 +198,13 @@ TaskStatus ResistiveDynGR::InitRecv(Driver *d, int stage) {
     ts = pbval_ep->InitRecv(3);
     if (ts != TaskStatus::complete) return ts;
     ts = pbval_ep2->InitRecv(3);
+    if (ts != TaskStatus::complete) return ts;
+  }
+  if (multilevel) {
+    for (int r = (stage == 1)? 0 : kSyncE; r < kNSync; ++r) {
+      ts = psync[r]->InitFluxRecv(1);
+      if (ts != TaskStatus::complete) return ts;
+    }
   }
   return ts;
 }
@@ -186,6 +220,13 @@ TaskStatus ResistiveDynGR::ClearSend(Driver *d, int stage) {
     ts = pbval_ep->ClearSend();
     if (ts != TaskStatus::complete) return ts;
     ts = pbval_ep2->ClearSend();
+    if (ts != TaskStatus::complete) return ts;
+  }
+  if (multilevel) {
+    for (int r = (stage == 1)? 0 : kSyncE; r < kNSync; ++r) {
+      ts = psync[r]->ClearFluxSend();
+      if (ts != TaskStatus::complete) return ts;
+    }
   }
   return ts;
 }
@@ -201,6 +242,13 @@ TaskStatus ResistiveDynGR::ClearRecv(Driver *d, int stage) {
     ts = pbval_ep->ClearRecv();
     if (ts != TaskStatus::complete) return ts;
     ts = pbval_ep2->ClearRecv();
+    if (ts != TaskStatus::complete) return ts;
+  }
+  if (multilevel) {
+    for (int r = (stage == 1)? 0 : kSyncE; r < kNSync; ++r) {
+      ts = psync[r]->ClearFluxRecv();
+      if (ts != TaskStatus::complete) return ts;
+    }
   }
   return ts;
 }
@@ -221,12 +269,14 @@ TaskStatus ResistiveDynGR::RecvH(Driver *d, int stage) {
   return pbval_e->RecvAndUnpackFluxFC(hfld);
 }
 TaskStatus ResistiveDynGR::SendE(Driver *d, int stage) {
+  RestrictE();
   return pbval_e->PackAndSendFC(e0, coarse_e0);
 }
 TaskStatus ResistiveDynGR::RecvE(Driver *d, int stage) {
   return pbval_e->RecvAndUnpackFC(e0, coarse_e0);
 }
 TaskStatus ResistiveDynGR::SendEI(Driver *d, int stage) {
+  RestrictE();
   return pbval_ei->PackAndSendFC(e0, coarse_e0);
 }
 TaskStatus ResistiveDynGR::RecvEI(Driver *d, int stage) {
@@ -234,6 +284,7 @@ TaskStatus ResistiveDynGR::RecvEI(Driver *d, int stage) {
 }
 TaskStatus ResistiveDynGR::SendEP(Driver *d, int stage) {
   if (stage != 1) return TaskStatus::complete;
+  RestrictE();
   return pbval_ep->PackAndSendFC(e0, coarse_e0);
 }
 TaskStatus ResistiveDynGR::RecvEP(Driver *d, int stage) {
@@ -242,6 +293,7 @@ TaskStatus ResistiveDynGR::RecvEP(Driver *d, int stage) {
 }
 TaskStatus ResistiveDynGR::SendEP2(Driver *d, int stage) {
   if (stage != 1) return TaskStatus::complete;
+  RestrictE();
   return pbval_ep2->PackAndSendFC(e0, coarse_e0);
 }
 TaskStatus ResistiveDynGR::RecvEP2(Driver *d, int stage) {
@@ -249,10 +301,54 @@ TaskStatus ResistiveDynGR::RecvEP2(Driver *d, int stage) {
   return pbval_ep2->RecvAndUnpackFC(e0, coarse_e0);
 }
 
+// SMR: fine->coarse sync of the shared faces after each E~ update (before the ghost
+// exchange). The CC flux-correction routines overwrite the coarse face with the area
+// average of the finer faces, which is the required operation (07 D3).
+TaskStatus ResistiveDynGR::SyncSend(int r) {
+  if (!multilevel) return TaskStatus::complete;
+  return psync[r]->PackAndSendFluxCC(e0_alias);
+}
+TaskStatus ResistiveDynGR::SyncRecv(int r) {
+  if (!multilevel) return TaskStatus::complete;
+  return psync[r]->RecvAndUnpackFluxCC(e0_alias);
+}
+TaskStatus ResistiveDynGR::SyncSendEP(Driver *d, int stage) {
+  return (stage == 1)? SyncSend(kSyncEP) : TaskStatus::complete;
+}
+TaskStatus ResistiveDynGR::SyncRecvEP(Driver *d, int stage) {
+  return (stage == 1)? SyncRecv(kSyncEP) : TaskStatus::complete;
+}
+TaskStatus ResistiveDynGR::SyncSendEP2(Driver *d, int stage) {
+  return (stage == 1)? SyncSend(kSyncEP2) : TaskStatus::complete;
+}
+TaskStatus ResistiveDynGR::SyncRecvEP2(Driver *d, int stage) {
+  return (stage == 1)? SyncRecv(kSyncEP2) : TaskStatus::complete;
+}
+TaskStatus ResistiveDynGR::SyncSendE(Driver *d, int stage) { return SyncSend(kSyncE); }
+TaskStatus ResistiveDynGR::SyncRecvE(Driver *d, int stage) { return SyncRecv(kSyncE); }
+TaskStatus ResistiveDynGR::SyncSendEI(Driver *d, int stage) { return SyncSend(kSyncEI); }
+TaskStatus ResistiveDynGR::SyncRecvEI(Driver *d, int stage) { return SyncRecv(kSyncEI); }
+
+void ResistiveDynGR::RestrictE() {
+  if (multilevel) pmy_pack->pmesh->pmr->RestrictFC(e0, coarse_e0);
+}
+
+// Fill fine ghost faces at fine/coarse boundaries from the received coarse E~ (the B~
+// operators: every fine cell gets the coarse divergence, i.e. q~ piecewise constant).
+void ResistiveDynGR::ProlongE() {
+  if (!multilevel) return;
+  pbval_e->FillCoarseInBndryFC(e0, coarse_e0);
+  if (!(pmy_pack->pmesh->strictly_periodic)) {
+    MeshBoundaryValues::BFieldBCsCoarse(pmy_pack, pbval_e->b_in, coarse_e0);
+  }
+  pbval_e->ProlongateFC(e0, coarse_e0);
+}
+
 // Physical BCs for E~ use the face-field helpers (outflow copies faces; periodic is
 // handled by the exchange). [VERIFY] reflecting walls flip the normal component, which
 // is the conducting-wall condition for B but not for E; only periodic/outflow are tested.
 TaskStatus ResistiveDynGR::ApplyBCsE(Driver *d, int stage) {
+  ProlongE();
   if (pmy_pack->pmesh->strictly_periodic) return TaskStatus::complete;
   MeshBoundaryValues::BFieldBCs(pmy_pack, pbval_e->b_in, e0);
   return TaskStatus::complete;
@@ -263,6 +359,17 @@ TaskStatus ResistiveDynGR::ApplyBCsEP(Driver *d, int stage) {
 }
 
 void ResistiveDynGR::ExchangeEBlocking() {
+  if (multilevel) {
+    psync[kSyncE]->InitFluxRecv(1);
+    psync[kSyncE]->PackAndSendFluxCC(e0_alias);
+    TaskStatus ts;
+    do {
+      ts = psync[kSyncE]->RecvAndUnpackFluxCC(e0_alias);
+    } while (ts != TaskStatus::complete);
+    psync[kSyncE]->ClearFluxSend();
+    psync[kSyncE]->ClearFluxRecv();
+  }
+  RestrictE();
   pbval_e->InitRecv(3);
   pbval_e->PackAndSendFC(e0, coarse_e0);
   pbval_e->ClearSend();

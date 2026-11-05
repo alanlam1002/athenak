@@ -18,8 +18,16 @@
 //!  * cwork   : cell work array of the implicit step: u^i, R_e^i, B^i, sdt.
 //! The Ohmic stiff sources of E~ are stored in Driver::impl_src_e.
 //!
-//! Step 1a scope: static, spatially constant metric (no coordinate source terms), uniform
-//! grid (no SMR/AMR), imex2/imex3. Unsupported configurations stop with a fatal error.
+//! SMR (static refinement, 07 D3): E~ is restricted (face-area average) before and
+//! prolongated (shared-face minmod + Toth-Roe internal, the B~ operators) after every
+//! E~ ghost exchange; h* uses the FC edge flux correction; and after every update of
+//! E~ the coarse face shared with finer blocks is overwritten by the area average of
+//! the fine faces (fine->coarse message, CC flux-correction machinery on an alias of
+//! E~), so the face flux of E~ is single valued and charge is conserved to roundoff.
+//!
+//! Step 1a scope: static, spatially constant metric (no coordinate source terms), static
+//! refinement only (no AMR), imex2/imex3. Unsupported configurations stop with a fatal
+//! error.
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -61,6 +69,10 @@ class ResistiveDynGR {
   MeshBoundaryValuesFC *pbval_ei;
   MeshBoundaryValuesFC *pbval_ep;
   MeshBoundaryValuesFC *pbval_ep2;
+  // SMR only: fine->coarse shared-face sync of E~, one object per E~ update round.
+  enum SyncRound {kSyncEP = 0, kSyncEP2 = 1, kSyncE = 2, kSyncEI = 3, kNSync = 4};
+  MeshBoundaryValuesCC *psync[kNSync];
+  DvceFaceFld5D<Real> e0_alias;  // unmanaged (nmb,1,...) view of e0 for psync
 
   // task functions (EOS independent)
   TaskStatus InitRecv(Driver *d, int stage);
@@ -77,6 +89,14 @@ class ResistiveDynGR {
   TaskStatus RecvEP(Driver *d, int stage);
   TaskStatus SendEP2(Driver *d, int stage);
   TaskStatus RecvEP2(Driver *d, int stage);
+  TaskStatus SyncSendEP(Driver *d, int stage);
+  TaskStatus SyncRecvEP(Driver *d, int stage);
+  TaskStatus SyncSendEP2(Driver *d, int stage);
+  TaskStatus SyncRecvEP2(Driver *d, int stage);
+  TaskStatus SyncSendE(Driver *d, int stage);
+  TaskStatus SyncRecvE(Driver *d, int stage);
+  TaskStatus SyncSendEI(Driver *d, int stage);
+  TaskStatus SyncRecvEI(Driver *d, int stage);
   TaskStatus ApplyBCsE(Driver *d, int stage);
   TaskStatus ApplyBCsEP(Driver *d, int stage);
   TaskStatus ClearSend(Driver *d, int stage);
@@ -91,6 +111,11 @@ class ResistiveDynGR {
 
  private:
   MeshBlockPack *pmy_pack;
+  bool multilevel;
+  TaskStatus SyncSend(int r);
+  TaskStatus SyncRecv(int r);
+  void RestrictE();
+  void ProlongE();
 };
 
 }  // namespace resistive

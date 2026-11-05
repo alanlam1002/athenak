@@ -5,9 +5,10 @@
 //========================================================================================
 //! \file resistive_dyngr_tasks.cpp
 //! \brief EOS-dependent part of resistive GRMHD on the dyngr path (07_scoping_v2 §3.3):
-//!        task queue, LF fluxes of the total (fluid + EM) conserved variables and of the
-//!        charge, the implicit Ohmic step (cell Newton + face closed form, D2/D5) and
-//!        the final resistive c2p (D4). Explicitly instantiated for all dyngr policies.
+//!        task queue, MHLLC/LF fluxes of the total (fluid + EM) conserved variables
+//!        and of the charge, the implicit Ohmic step (cell Newton + face closed form,
+//!        D2/D5) and the final resistive c2p (D4). Explicitly instantiated for all
+//!        dyngr policies.
 
 #include <cmath>
 #include <iostream>
@@ -26,6 +27,7 @@
 #include "dyn_grmhd/resistive/resistive_em.hpp"
 #include "dyn_grmhd/resistive/resistive_edge.hpp"
 #include "dyn_grmhd/resistive/resistive_implicit.hpp"
+#include "dyn_grmhd/resistive/resistive_riemann.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
@@ -45,11 +47,8 @@ constexpr int kNW = 5 + MAX_SPECIES;
 // physical flux F along direction d (undensitised, including lapse and shift).
 template <class PSolver>
 KOKKOS_INLINE_FUNCTION
-void SideState(const PSolver &ps, const Real g_in[NSPMETRIC], const Real sg,
-               const Real alpha, const Real beta[3], const int d, const Real mb,
-               const Real w[kNW], const int nscal, const Real em[6],
-               Real U[NCONS], Real F[NCONS]) {
-  Real prim[NPRIM];
+void SidePrim(const PSolver &ps, const Real mb, const Real w[kNW], const int nscal,
+              Real prim[NPRIM]) {
   for (int n = 0; n < NPRIM; ++n) prim[n] = 0.0;
   prim[PRH] = w[0]/mb;
   prim[PVX] = w[1];
@@ -60,6 +59,16 @@ void SideState(const PSolver &ps, const Real g_in[NSPMETRIC], const Real sg,
   prim[PTM] = ps.GetEOS().GetTemperatureFromP(prim[PRH], prim[PPR], &prim[PYF]);
   ps.GetEOS().ApplyPrimitiveFloor(prim[PRH], &prim[PVX], prim[PPR], prim[PTM],
                                   &prim[PYF]);
+}
+
+template <class PSolver>
+KOKKOS_INLINE_FUNCTION
+void SideState(const PSolver &ps, const Real g_in[NSPMETRIC], const Real sg,
+               const Real alpha, const Real beta[3], const int d, const Real mb,
+               const Real w[kNW], const int nscal, const Real em[6],
+               Real U[NCONS], Real F[NCONS]) {
+  Real prim[NPRIM];
+  SidePrim(ps, mb, w, nscal, prim);
   Real g[NSPMETRIC];
   for (int n = 0; n < NSPMETRIC; ++n) g[n] = g_in[n];
   Real bz[NMAG] = {0.0, 0.0, 0.0};
@@ -136,16 +145,24 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueResistiveTasks() {
   pnr->QueueTask(&ResistiveDynGR::CopyE, pr, MHD_RCopyE, "MHD_RCopyE", Task_Run);
   pnr->QueueTask(&Self::ResistivePre1, this, MHD_RPre1, "MHD_RPre1", Task_Run,
                  {MHD_CopyU, MHD_RCopyE});
+  pnr->QueueTask(&ResistiveDynGR::SyncSendEP, pr, MHD_RSyncSEP, "MHD_RSyncSEP",
+                 Task_Run, {MHD_RPre1});
+  pnr->QueueTask(&ResistiveDynGR::SyncRecvEP, pr, MHD_RSyncREP, "MHD_RSyncREP",
+                 Task_Run, {MHD_RSyncSEP});
   pnr->QueueTask(&ResistiveDynGR::SendEP, pr, MHD_RSendEP, "MHD_RSendEP", Task_Run,
-                 {MHD_RPre1});
+                 {MHD_RSyncREP});
   pnr->QueueTask(&ResistiveDynGR::RecvEP, pr, MHD_RRecvEP, "MHD_RRecvEP", Task_Run,
                  {MHD_RSendEP});
   pnr->QueueTask(&ResistiveDynGR::ApplyBCsEP, pr, MHD_RBCsEP, "MHD_RBCsEP", Task_Run,
                  {MHD_RRecvEP});
   pnr->QueueTask(&Self::ResistivePre2, this, MHD_RPre2, "MHD_RPre2", Task_Run,
                  {MHD_RBCsEP});
+  pnr->QueueTask(&ResistiveDynGR::SyncSendEP2, pr, MHD_RSyncSEP2, "MHD_RSyncSEP2",
+                 Task_Run, {MHD_RPre2});
+  pnr->QueueTask(&ResistiveDynGR::SyncRecvEP2, pr, MHD_RSyncREP2, "MHD_RSyncREP2",
+                 Task_Run, {MHD_RSyncSEP2});
   pnr->QueueTask(&ResistiveDynGR::SendEP2, pr, MHD_RSendEP2, "MHD_RSendEP2", Task_Run,
-                 {MHD_RPre2});
+                 {MHD_RSyncREP2});
   pnr->QueueTask(&ResistiveDynGR::RecvEP2, pr, MHD_RRecvEP2, "MHD_RRecvEP2", Task_Run,
                  {MHD_RSendEP2});
   pnr->QueueTask(&ResistiveDynGR::ApplyBCsEP, pr, MHD_RBCsEP2, "MHD_RBCsEP2", Task_Run,
@@ -181,8 +198,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueResistiveTasks() {
   pnr->QueueTask(&MHD::RestrictB, pmhd, MHD_RestB, "MHD_RestB", Task_Run, {MHD_CT});
   pnr->QueueTask(&MHD::SendB, pmhd, MHD_SendB, "MHD_SendB", Task_Run, {MHD_RestB});
   pnr->QueueTask(&MHD::RecvB, pmhd, MHD_RecvB, "MHD_RecvB", Task_Run, {MHD_SendB});
+  pnr->QueueTask(&ResistiveDynGR::SyncSendE, pr, MHD_RSyncSE, "MHD_RSyncSE",
+                 Task_Run, {MHD_RCTE});
+  pnr->QueueTask(&ResistiveDynGR::SyncRecvE, pr, MHD_RSyncRE, "MHD_RSyncRE",
+                 Task_Run, {MHD_RSyncSE});
   pnr->QueueTask(&ResistiveDynGR::SendE, pr, MHD_RSendE, "MHD_RSendE", Task_Run,
-                 {MHD_RCTE});
+                 {MHD_RSyncRE});
   pnr->QueueTask(&ResistiveDynGR::RecvE, pr, MHD_RRecvE, "MHD_RRecvE", Task_Run,
                  {MHD_RSendE});
   pnr->QueueTask(&MHD::Prolongate, pmhd, MHD_Prolong, "MHD_Prolong", Task_Run,
@@ -195,8 +216,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::QueueResistiveTasks() {
   // implicit Ohmic step, E~ exchange, final c2p
   pnr->QueueTask(&Self::ResistiveImplicit, this, MHD_RImpl, "MHD_RImpl", Task_Run,
                  {MHD_BCS, MHD_RBCsE});
+  pnr->QueueTask(&ResistiveDynGR::SyncSendEI, pr, MHD_RSyncSEI, "MHD_RSyncSEI",
+                 Task_Run, {MHD_RImpl});
+  pnr->QueueTask(&ResistiveDynGR::SyncRecvEI, pr, MHD_RSyncREI, "MHD_RSyncREI",
+                 Task_Run, {MHD_RSyncSEI});
   pnr->QueueTask(&ResistiveDynGR::SendEI, pr, MHD_RSendEI, "MHD_RSendEI", Task_Run,
-                 {MHD_RImpl});
+                 {MHD_RSyncREI});
   pnr->QueueTask(&ResistiveDynGR::RecvEI, pr, MHD_RRecvEI, "MHD_RRecvEI", Task_Run,
                  {MHD_RSendEI});
   pnr->QueueTask(&ResistiveDynGR::ApplyBCsE, pr, MHD_RBCsEI, "MHD_RBCsEI", Task_Run,
@@ -247,7 +272,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver *d, int
 }
 
 //----------------------------------------------------------------------------------------
-//! LF fluxes of (D, S_i, tau, D Y) with the EM stress included, and the convective
+//! Tetrad MHLLC (default) or LF fluxes of (D, S_i, tau, D Y) with the EM stress included,
+//! and the convective
 //! charge current qflx on every face used by CTE (07 §2.2, §2.3).
 
 template<class EOSPolicy, class ErrorPolicy>
@@ -274,6 +300,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveFluxes(Driver *pdriver,
   auto uflx = pmy_pack->pmhd->uflx;
   auto &mbsize = pmy_pack->pmb->mb_size;
   const bool rusanov = (presist->params.charge_flux == resistive::ChargeFlux::rusanov);
+  const bool mhllc = (presist->params.rsolver == resistive::RSolver::mhllc);
 
   for (int d = 0; d < 3; ++d) {
     if (!act[d]) continue;
@@ -329,14 +356,21 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveFluxes(Driver *pdriver,
       eml[d] = emr[d] = en/sg;
       eml[3+d] = emr[3+d] = bn/sg;
 
-      Real UL[NCONS], FL[NCONS], UR[NCONS], FR[NCONS];
-      SideState(ps_, pm.g, sg, pm.alpha, pm.beta, d, mb, wl, nscal, eml, UL, FL);
-      SideState(ps_, pm.g, sg, pm.alpha, pm.beta, d, mb, wr, nscal, emr, UR, FR);
       const Real a = fabs(pm.beta[d]) + pm.alpha*sqrt(resistive::InverseDiag(gu, d));
-
       Real flx[NCONS];
-      for (int n = 0; n < NCONS; ++n) {
-        flx[n] = 0.5*sg*((FL[n] + FR[n]) - a*(UR[n] - UL[n]));
+      if (mhllc) {
+        Real priml[NPRIM], primr[NPRIM];
+        SidePrim(ps_, mb, wl, nscal, priml);
+        SidePrim(ps_, mb, wr, nscal, primr);
+        resistive::MHLLCFace(ps_, pm.g, gu, sg, pm.alpha, pm.beta, d, priml, primr,
+                             nscal, eml, emr, flx);
+      } else {
+        Real UL[NCONS], FL[NCONS], UR[NCONS], FR[NCONS];
+        SideState(ps_, pm.g, sg, pm.alpha, pm.beta, d, mb, wl, nscal, eml, UL, FL);
+        SideState(ps_, pm.g, sg, pm.alpha, pm.beta, d, mb, wr, nscal, emr, UR, FR);
+        for (int n = 0; n < NCONS; ++n) {
+          flx[n] = 0.5*sg*((FL[n] + FR[n]) - a*(UR[n] - UL[n]));
+        }
       }
       auto &fx = (d == 0) ? uflx.x1f : ((d == 1) ? uflx.x2f : uflx.x3f);
       fx(m, IDN, k, j, i) = flx[CDN];

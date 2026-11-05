@@ -30,8 +30,8 @@ const std::vector<std::string> &ResistiveKeys() {
   static const std::vector<std::string> keys = {
     "resistive_sigma", "resistive_sigma_model", "resistive_sigma_in",
     "resistive_sigma_out", "resistive_rho_transition", "resistive_sigma_width",
-    "resistive_charge_flux", "resistive_newton_fallback", "resistive_newton_tol",
-    "resistive_newton_maxit", "resistive_allow_incomplete"};
+    "resistive_rsolver", "resistive_charge_flux", "resistive_newton_fallback",
+    "resistive_newton_tol", "resistive_newton_maxit", "resistive_allow_incomplete"};
   return keys;
 }
 
@@ -88,6 +88,16 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   } else {
     Fatal(__LINE__, "<" + block + "> resistive_sigma_model = '" + model +
           "' not recognised; use uniform|density");
+  }
+
+  std::string rs = pin->GetOrAddString(block, "resistive_rsolver", "mhllc");
+  if (rs == "mhllc") {
+    rp.rsolver = RSolver::mhllc;
+  } else if (rs == "lf") {
+    rp.rsolver = RSolver::lf;
+  } else {
+    Fatal(__LINE__, "<" + block + "> resistive_rsolver = '" + rs +
+          "' not recognised; use mhllc|lf");
   }
 
   std::string cflux = pin->GetOrAddString(block, "resistive_charge_flux", "upwind");

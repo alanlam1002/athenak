@@ -12,6 +12,10 @@
 //!      (b) fluid part agrees with PrimitiveSolver::PrimToCon (dyngr sqrt(gamma) tau);
 //!      (c) round trip prim -> cons(E,B) -> subtract EM -> PrimitiveSolver c2p -> prim,
 //!          for both dyngr and fixed-metric IEN.
+//!  K2  tetrad MHLLC: (a) face triad orthonormal/right-handed, coordinate <-> triad
+//!      round trip; (b) SR limit (alpha=1, beta=0, gamma=delta) reproduces the flat
+//!      MHLLC bitwise in each direction; (c) exact stationary contact.
+//!  K3c ideal-limit (E = -v x B) MHLLC flux equals the dyngr ideal physical flux.
 //!  K3e ideal-limit edge EMF e_k = alpha E_k + beta^a B~^b - beta^b B~^a equals e_cc.
 //!  K4  implicit Ohmic step: closed form solves the implicit equation; sigma -> 0 and
 //!      sigma -> inf limits; Newton from the exact u stops at the lagged-v state and
@@ -22,6 +26,7 @@
 //!      are counted.
 //!  K6  Conductivity functor values, limits, monotonicity and smoothness.
 //!  K7  edge 2D solver: Mignone 2019 Eqs. 46-47 and 1D HLL reduction with GR speeds.
+//!  C3  SMR prolongation of E~: fine q~ equals the coarse q~ (Toth-Roe), 2D and 3D.
 //!  D   Diagnostics on synthetic mesh fields: Q == boundary flux, q~ for linear E,
 //!      div B of a CT-built field, E_c mismatch, Newton counters.
 //! Each kernel test is run on the default device and on the host execution space.
@@ -39,6 +44,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "mesh/prolongation.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "eos/eos.hpp"
 #include "eos/ideal_c2p_mhd.hpp"
@@ -47,12 +53,16 @@
 #include "eos/primitive-solver/eos_compose.hpp"
 #include "eos/primitive-solver/logs.hpp"
 #include "eos/primitive-solver/reset_floor.hpp"
+#include "dyn_grmhd/dyn_grmhd.hpp"
+#include "eos/primitive_solver_hyd.hpp"
 #include "dyn_grmhd/resistive/resistive_params.hpp"
 #include "dyn_grmhd/resistive/resistive_em.hpp"
 #include "dyn_grmhd/resistive/conductivity.hpp"
 #include "dyn_grmhd/resistive/resistive_diagnostics.hpp"
 #include "dyn_grmhd/resistive/resistive_implicit.hpp"
 #include "dyn_grmhd/resistive/resistive_edge.hpp"
+#include "dyn_grmhd/resistive/resistive_riemann.hpp"
+#include "dyn_grmhd/rsolvers/llf_dyn_grmhd.hpp"
 #include "pgen/pgen.hpp"
 
 namespace {
@@ -60,6 +70,7 @@ namespace {
 using PS = Primitive::PrimitiveSolver<Primitive::IdealGas, Primitive::ResetFloor>;
 using PST = Primitive::PrimitiveSolver<Primitive::EOSCompOSE<Primitive::NormalLogs>,
                                        Primitive::ResetFloor>;
+using PSH = PrimitiveSolverHydro<Primitive::IdealGas, Primitive::ResetFloor>;
 
 bool g_failed = false;
 
@@ -786,6 +797,81 @@ void RunK5(const PSolver &ps, const std::string &eosname, const int ntrial,
 }
 
 //----------------------------------------------------------------------------------------
+// C3 (07 D3): the B~ face prolongation (ProlongFCShared*Face + Toth-Roe internal)
+// applied to a random coarse E~ (q~ != 0) gives every fine cell exactly the divergence
+// of its parent coarse cell (C++ analogue of scripts/toth_roe_div_test.py); the fine
+// shared faces also restrict (area average) to the coarse face.
+void RunC3(const int ntrial) {
+  for (int dim = 2; dim <= 3; ++dim) {
+    const bool three_d = (dim == 3);
+    const int c3 = three_d ? 3 : 1, f3 = three_d ? 2 : 1;
+    DvceFaceFld4D<Real> cb("c3_cb", ntrial, c3, 3, 3), fb("c3_fb", ntrial, f3, 2, 2);
+    const int kc = three_d ? 1 : 0;
+    Real err_div = 0.0, err_res = 0.0;
+    Kokkos::parallel_reduce("C3", Kokkos::RangePolicy<>(DevExeSpace(), 0, ntrial),
+    KOKKOS_LAMBDA(const int t, Real &ed, Real &er) {
+      uint64_t s = 0xC3C30000ULL + static_cast<uint64_t>(t)*7919ULL +
+                   static_cast<uint64_t>(dim);
+      for (int k = 0; k < c3; ++k) {
+        for (int j = 0; j < 3; ++j) {
+          for (int i = 0; i < 4; ++i) cb.x1f(t, k, j, i) = Uniform(s, -1.0, 1.0);
+        }
+      }
+      for (int k = 0; k < c3; ++k) {
+        for (int j = 0; j < 4; ++j) {
+          for (int i = 0; i < 3; ++i) cb.x2f(t, k, j, i) = Uniform(s, -1.0, 1.0);
+        }
+      }
+      for (int k = 0; k < c3 + 1; ++k) {
+        for (int j = 0; j < 3; ++j) {
+          for (int i = 0; i < 3; ++i) cb.x3f(t, k, j, i) = Uniform(s, -1.0, 1.0);
+        }
+      }
+      // shared faces of the central coarse cell (kc,1,1)
+      for (int o = 0; o < 2; ++o) {
+        ProlongFCSharedX1Face(t, kc, 1, 1 + o, 0, 0, 2*o, true, three_d, cb.x1f, fb.x1f);
+        ProlongFCSharedX2Face(t, kc, 1 + o, 1, 0, 2*o, 0, three_d, cb.x2f, fb.x2f);
+        if (three_d) {
+          ProlongFCSharedX3Face(t, kc + o, 1, 1, 2*o, 0, 0, true, cb.x3f, fb.x3f);
+        }
+      }
+      ProlongFCInternal(t, 0, 0, 0, three_d, fb);
+      const Real cdiv = (cb.x1f(t, kc, 1, 2) - cb.x1f(t, kc, 1, 1)) +
+                        (cb.x2f(t, kc, 2, 1) - cb.x2f(t, kc, 1, 1)) +
+                        (three_d ? (cb.x3f(t, kc + 1, 1, 1) - cb.x3f(t, kc, 1, 1)) : 0.0);
+      for (int k = 0; k < f3; ++k) {
+        for (int j = 0; j < 2; ++j) {
+          for (int i = 0; i < 2; ++i) {
+            Real fdiv = (fb.x1f(t, k, j, i+1) - fb.x1f(t, k, j, i)) +
+                        (fb.x2f(t, k, j+1, i) - fb.x2f(t, k, j, i));
+            if (three_d) fdiv += fb.x3f(t, k+1, j, i) - fb.x3f(t, k, j, i);
+            ed = fmax(ed, fabs(2.0*fdiv - cdiv));   // fine dx = coarse dx/2
+          }
+        }
+      }
+      // restriction of the fine shared faces
+      const Real w = three_d ? 0.25 : 0.5;
+      for (int o = 0; o < 2; ++o) {
+        Real a1 = 0.0, a2 = 0.0, a3 = 0.0;
+        for (int p = 0; p < f3; ++p) {
+          for (int q = 0; q < 2; ++q) {
+            a1 += w*fb.x1f(t, p, q, 2*o);
+            a2 += w*fb.x2f(t, p, 2*o, q);
+            if (three_d) a3 += w*fb.x3f(t, 2*o, p, q);
+          }
+        }
+        er = fmax(er, fabs(a1 - cb.x1f(t, kc, 1, 1 + o)));
+        er = fmax(er, fabs(a2 - cb.x2f(t, kc, 1 + o, 1)));
+        if (three_d) er = fmax(er, fabs(a3 - cb.x3f(t, kc + o, 1, 1)));
+      }
+    }, Kokkos::Max<Real>(err_div), Kokkos::Max<Real>(err_res));
+    const std::string d = three_d ? "3D" : "2D";
+    Report("C3 fine q~ = coarse q~ (Toth-Roe, " + d + ")", err_div, 1.0e-13);
+    Report("C3 fine shared faces restrict to coarse (" + d + ")", err_res, 1.0e-14);
+  }
+}
+
+//----------------------------------------------------------------------------------------
 // K7: edge 2D solver; K3 (edge part): ideal-limit e_k equals AthenaK e_cc
 
 // K7a: unit light speeds reproduce Mignone et al. 2019 Eqs. 46-47
@@ -863,6 +949,212 @@ Real K3EdgeIdealTrial(const int t) {
   return err/scale;
 }
 
+// K2a: face triad is orthonormal, right-handed, e_A^d = 0 (A = 1, 2), and the
+// coordinate <-> triad maps of vectors and covectors round-trip (random metrics).
+KOKKOS_INLINE_FUNCTION
+Real K2TetradTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  Real gu[NSPMETRIC];
+  Inverse3(r.g, gu);
+  const int d = t % 3;
+  FaceTetrad T;
+  BuildFaceTetrad(r.g, gu, r.alpha, d, T);
+  Real err = 0.0;
+  for (int A = 0; A < 3; ++A) {
+    for (int B = 0; B < 3; ++B) {
+      const Real o = T.w[A][0]*T.e[B][0] + T.w[A][1]*T.e[B][1] + T.w[A][2]*T.e[B][2];
+      err = fmax(err, fabs(o - ((A == B) ? 1.0 : 0.0)));
+    }
+    if (A > 0) err = fmax(err, fabs(T.e[A][d]));
+  }
+  const int c0 = d, c1 = (d + 1) % 3, c2 = (d + 2) % 3;
+  const Real det = T.e[0][c0]*(T.e[1][c1]*T.e[2][c2] - T.e[1][c2]*T.e[2][c1])
+                 - T.e[0][c1]*(T.e[1][c0]*T.e[2][c2] - T.e[1][c2]*T.e[2][c0])
+                 + T.e[0][c2]*(T.e[1][c0]*T.e[2][c1] - T.e[1][c1]*T.e[2][c0]);
+  if (!(det > 0.0)) err = 1.0;
+  err = fmax(err, fabs(T.a - r.alpha*sqrt(gu[SymIdx(d, d)])));
+  Real vt[3], v2[3], st[3], s2[3];
+  VecToTetrad(T, r.Ernd, vt);
+  VecFromTetrad(T, vt, v2);
+  CovToTetrad(T, r.Bcode, st);
+  CovFromTetrad(T, st, s2);
+  for (int a = 0; a < 3; ++a) {
+    err = fmax(err, fabs(v2[a] - r.Ernd[a]));
+    err = fmax(err, fabs(s2[a] - r.Bcode[a]));
+  }
+  const Real n2 = vt[0]*vt[0] + vt[1]*vt[1] + vt[2]*vt[2];
+  err = fmax(err, fabs(n2 - Dot(r.g, r.Ernd, r.Ernd))/n2);
+  return err;
+}
+
+KOKKOS_INLINE_FUNCTION
+void RandomSRSide(uint64_t &s, const Real en, const Real bn, resistive::MHLLCSide &x) {
+  const Real rho = Uniform(s, 0.1, 2.0), p = Uniform(s, 0.01, 2.0);
+  Real v[3];
+  for (int a = 0; a < 3; ++a) v[a] = Uniform(s, -0.55, 0.55);
+  const Real W = 1.0/sqrt(1.0 - (v[0]*v[0] + v[1]*v[1] + v[2]*v[2]));
+  const Real h = 1.0 + kGam/(kGam - 1.0)*p/rho;
+  x.D = rho*W;
+  for (int a = 0; a < 3; ++a) {
+    x.v[a] = v[a];
+    x.Q[a] = rho*h*W*W*v[a];
+  }
+  const Real tau = rho*h*W*W - p - x.D;
+  x.Eh = tau + x.D;
+  x.p = p;
+  x.cs2 = kGam*p/(rho*h);
+  x.E[0] = en;
+  x.B[0] = bn;
+  for (int a = 1; a < 3; ++a) {
+    x.E[a] = Uniform(s, -1., 1.);
+    x.B[a] = Uniform(s, -1., 1.);
+  }
+}
+
+// K2b: SR limit. With alpha = 1, beta = 0, gamma = delta, the coordinate MHLLC flux in
+// each direction d reproduces the flat (triad) MHLLC bitwise, components permuted.
+KOKKOS_INLINE_FUNCTION
+Real K2SRLimitTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  uint64_t s = 0x2B2B0000ULL + static_cast<uint64_t>(t)*104729ULL;
+  const Real en = Uniform(s, -1., 1.), bn = Uniform(s, -1., 1.);
+  MHLLCSide L, R;
+  RandomSRSide(s, en, bn, L);
+  RandomSRSide(s, en, bn, R);
+  Real U0[5 + MAX_SPECIES], H0[5 + MAX_SPECIES];
+  bool ok;
+  MHLLCTetrad(L, R, 0.0, 0, U0, H0, ok);
+  const Real g[NSPMETRIC] = {1.0, 0.0, 0.0, 1.0, 0.0, 1.0};
+  const Real beta[3] = {0.0, 0.0, 0.0};
+  Real err = 0.0;
+  for (int d = 0; d < 3; ++d) {
+    const int c[3] = {d, (d + 1) % 3, (d + 2) % 3};
+    FaceTetrad T;
+    BuildFaceTetrad(g, g, 1.0, d, T);
+    MHLLCSide side[2];
+    for (int k = 0; k < 2; ++k) {
+      const MHLLCSide &x = (k == 0) ? L : R;
+      Real S[3], v[3], E[3], B[3];
+      for (int A = 0; A < 3; ++A) {
+        S[c[A]] = x.Q[A];
+        v[c[A]] = x.v[A];
+        E[c[A]] = x.E[A];
+        B[c[A]] = x.B[A];
+      }
+      FillMHLLCSide(T, x.D, S, x.Eh - x.D, x.p, v, x.cs2, x.Y, 0, E, B, side[k]);
+    }
+    Real U[5 + MAX_SPECIES], H[5 + MAX_SPECIES], flx[NCONS];
+    MHLLCTetrad(side[0], side[1], beta[d]/T.a, 0, U, H, ok);
+    MHLLCCoordFlux(T, 1.0, beta[d], 0, U, H, flx);
+    err = fmax(err, fabs(flx[CDN] - H0[0]));
+    for (int A = 0; A < 3; ++A) err = fmax(err, fabs(flx[CSX + c[A]] - H0[1 + A]));
+    err = fmax(err, fabs(flx[CTA] - H0[4]));
+  }
+  return err;
+}
+
+// K2c: HLLC resolves an isolated stationary contact exactly (no EM jump): mass and
+// energy fluxes vanish and the momentum flux is p (LF/HLL would diffuse it).
+KOKKOS_INLINE_FUNCTION
+Real K2ContactTrial(const int t) {
+  using namespace resistive;  // NOLINT
+  uint64_t s = 0xC0C00000ULL + static_cast<uint64_t>(t)*7907ULL;
+  const Real en = Uniform(s, -1., 1.), bn = Uniform(s, -1., 1.);
+  MHLLCSide L, R;
+  RandomSRSide(s, en, bn, L);
+  RandomSRSide(s, en, bn, R);
+  R.p = L.p;
+  for (int a = 0; a < 3; ++a) {
+    L.v[a] = R.v[a] = 0.0;
+    L.Q[a] = R.Q[a] = 0.0;
+    R.E[a] = L.E[a];
+    R.B[a] = L.B[a];
+  }
+  const Real rl = Uniform(s, 0.1, 1.0), rr = Uniform(s, 1.0, 10.0);
+  const Real hl = 1.0 + kGam/(kGam - 1.0)*L.p/rl, hr = 1.0 + kGam/(kGam - 1.0)*R.p/rr;
+  L.D = rl;
+  R.D = rr;
+  L.Eh = rl*hl - L.p;
+  R.Eh = rr*hr - R.p;
+  L.cs2 = kGam*L.p/(rl*hl);
+  R.cs2 = kGam*R.p/(rr*hr);
+  Real U[5 + MAX_SPECIES], H[5 + MAX_SPECIES], Uem[4], Fem[4];
+  bool ok;
+  MHLLCTetrad(L, R, 0.0, 0, U, H, ok);
+  EMStateFlux(L.E, L.B, Uem, Fem);
+  Real err = ok ? 0.0 : 1.0;
+  err = fmax(err, fabs(H[0]));
+  err = fmax(err, fabs(H[1] - Fem[0] - L.p)/L.p);
+  err = fmax(err, fabs(H[2] - Fem[1]));
+  err = fmax(err, fabs(H[3] - Fem[2]));
+  err = fmax(err, fabs(H[4] - Fem[3]));
+  return err;
+}
+
+// K3 (cell): ideal limit E = -v x B, single state (L = R): the resistive MHLLC face flux
+// of the total T^{mu nu} rows equals the physical flux of the ideal dyngr solver
+// (SingleStateLLF_DYNGR with identical states has no dissipative part).
+KOKKOS_INLINE_FUNCTION
+Real K3CellTrial(const PSH &eosh, const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  const int d = t % 3;
+  Real gu[NSPMETRIC];
+  Inverse3(r.g, gu);
+  const Real sg = SqrtDet(r.g);
+  Real prim[NPRIM];
+  FillPrim(eosh.ps, r, prim);
+  const Real W = LorentzFromU(r.g, r.wv);
+  const Real v[3] = {r.wv[0]/W, r.wv[1]/W, r.wv[2]/W};
+  Real E[3];
+  IdealE(r.g, sg, v, r.Bcode, E);
+  const Real em[6] = {E[0], E[1], E[2], r.Bcode[0], r.Bcode[1], r.Bcode[2]};
+  Real flx[NCONS];
+  MHLLCFace(eosh.ps, r.g, gu, sg, r.alpha, r.beta, d, prim, prim, 0, em, em, flx);
+
+  Real pl[NPRIM], pr[NPRIM], g[NSPMETRIC];
+  Real beta[3] = {r.beta[0], r.beta[1], r.beta[2]};
+  for (int n = 0; n < NPRIM; ++n) pl[n] = pr[n] = prim[n];
+  for (int n = 0; n < NSPMETRIC; ++n) g[n] = r.g[n];
+  Real bl[NPRIM], br[NPRIM];
+  for (int a = 0; a < 3; ++a) bl[a] = br[a] = sg*r.Bcode[a];
+  Real fid[NCONS], bfid[NMAG];
+  if (d == 0) {
+    dyngr::SingleStateLLF_DYNGR<IVX>(eosh, pl, pr, bl, br, 0, 0, g, beta, r.alpha,
+                                     fid, bfid);
+  } else if (d == 1) {
+    dyngr::SingleStateLLF_DYNGR<IVY>(eosh, pl, pr, bl, br, 0, 0, g, beta, r.alpha,
+                                     fid, bfid);
+  } else {
+    dyngr::SingleStateLLF_DYNGR<IVZ>(eosh, pl, pr, bl, br, 0, 0, g, beta, r.alpha,
+                                     fid, bfid);
+  }
+  const int rows[5] = {CDN, CSX, CSY, CSZ, CTA};
+  Real scale = 0.0, err = 0.0;
+  for (int n = 0; n < 5; ++n) scale = fmax(scale, fabs(fid[rows[n]]));
+  for (int n = 0; n < 5; ++n) err = fmax(err, fabs(flx[rows[n]] - fid[rows[n]]));
+  return err/scale;
+}
+
+template <class ExecSpace>
+void RunK2K3(const std::string &where, const int ntrial, const PSH &eosh) {
+  Real e = MaxOverTrials<ExecSpace>("K2a", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K2TetradTrial(t); });
+  Report("K2a triad orthonormal, round trip [" + where + "]", e, 1.0e-13);
+  e = MaxOverTrials<ExecSpace>("K2b", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K2SRLimitTrial(t); });
+  Report("K2b SR limit = flat MHLLC (bitwise) [" + where + "]", e, 0.0);
+  e = MaxOverTrials<ExecSpace>("K2c", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K2ContactTrial(t); });
+  Report("K2c HLLC exact stationary contact [" + where + "]", e, 1.0e-13);
+  e = MaxOverTrials<ExecSpace>("K3c", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K3CellTrial(eosh, t); });
+  Report("K3c ideal-limit flux = dyngr physical [" + where + "]", e, 1.0e-12);
+}
+
 template <class ExecSpace>
 void RunK7(const std::string &where, const int ntrial) {
   Real e = MaxOverTrials<ExecSpace>("K7a", ntrial,
@@ -885,7 +1177,7 @@ void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restar
   if (restart) return;
   const int ntrial = pin->GetOrAddInteger("problem", "ntrial", 4096);
   if (global_variable::my_rank == 0) {
-    std::cout << "Resistive GRMHD unit tests (K1, K3e, K4-K7, diagnostics), ntrial = "
+    std::cout << "Resistive GRMHD unit tests (K1-K7, diagnostics), ntrial = "
               << ntrial << std::endl;
   }
   RunK1<DevExeSpace>("device", ntrial);
@@ -913,6 +1205,13 @@ void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restar
   }
   RunK7<DevExeSpace>("device", ntrial);
   RunK7<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
+  {
+    PSH eosh("resistive_ut_eos", pmy_mesh_->pmb_pack, pin);
+    eosh.ps.GetEOSMutable().SetGamma(kGam);
+    RunK2K3<DevExeSpace>("device", ntrial, eosh);
+    RunK2K3<Kokkos::DefaultHostExecutionSpace>("host", ntrial, eosh);
+    RunC3(ntrial);
+  }
 
   if (g_failed) {
     std::cout << "### FATAL ERROR: resistive unit tests FAILED" << std::endl;

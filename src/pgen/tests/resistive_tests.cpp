@@ -16,6 +16,19 @@
 //!               (Komissarov 2007)
 //!   riemann     shock tube with ideal E = -v x B on both sides (sigma scan)
 //!   orszag_tang relativistic Orszag-Tang vortex with ideal E (ideal-limit regression)
+//!               optional uniform B_z = bz_ot gives in-plane E and charge (SMR tests)
+//!   cpalfven    circularly polarised Alfven wave along B_x = b0 (1D): exact damped
+//!               eigenmode of the linearised resistive equations (dispersion
+//!               (w^2-k^2)(w + i sigma b0^2/h) + i sigma w^2 = 0,
+//!               h = rho + gamma p/(gamma-1))
+//!   rotor       relativistic rotor (Del Zanna et al. 2003): rho_in, omega, r0, r1 taper
+//!   harris      force-free periodic double Harris sheet B_x = b0 [tanh((y-y1)/a) -
+//!               tanh((y-y2)/a) - 1], B_z = sqrt(b0^2 - B_x^2), y1,2 = -/+ L_y/4,
+//!               E = J/sigma (mesh centred on x = y = 0);
+//!               pert = mode (tearing: A_z += eps b0 a cos(kx) per sheet) or xpoint
+//!               (Sweet-Parker: localised A_z bump of size lam at x = 0 on each sheet).
+//!               With <problem> user_hist = true the history output has B_y^2 integral
+//!               ("by2") and the reconnected flux of sheet 1 ("psi" = 0.5 int |B_y| dx)
 //! Passive scalars (e.g. Y_e for a tabulated EOS) are set uniformly to <problem> ye.
 //!
 //! The same pgen runs with <mhd> resistive = false (ideal dyngr) for ideal-limit
@@ -24,6 +37,7 @@
 //! <problem> dump_state = true, <basename>.state.<rank>.txt (exact hex dump of u0, b0
 //! and E~ per global cell) for the decomposition (C4) and restart (C5) tests.
 
+#include <algorithm>
 #include <cinttypes>
 #include <cmath>
 #include <complex>
@@ -42,10 +56,12 @@
 #include "dyn_grmhd/resistive/resistive_dyngr.hpp"
 #include "dyn_grmhd/resistive/resistive_diagnostics.hpp"
 #include "pgen/pgen.hpp"
+#include "outputs/outputs.hpp"
 
 namespace {
 
-enum RTestType {kEMWave = 0, kTelegraph = 1, kCurSheet = 2, kRiemann = 3, kOT = 4};
+enum RTestType {kEMWave = 0, kTelegraph = 1, kCurSheet = 2, kRiemann = 3, kOT = 4,
+                kCPAlfven = 5, kRotor = 6, kHarris = 7};
 
 struct RTest {
   int type;
@@ -60,7 +76,14 @@ struct RTest {
   // riemann
   Real x0, wl[5], wr[5], bl[3], br[3];
   // orszag-tang
-  Real vot, bot;
+  Real vot, bot, bzot;
+  // cp alfven: complex amplitudes (re, im) of v_y, B_y, E_z; omega = (omr, omi)
+  Real cv[2], cb[2], ce[2], omr, omi;
+  // rotor
+  Real rhoin, omg, r0, r1;
+  // harris sheet
+  Real ash, ly, eps, lam;
+  bool xpoint;
 
   KOKKOS_INLINE_FUNCTION
   void Fluid(const Real x, const Real y, Real w[5]) const {
@@ -72,7 +95,23 @@ struct RTest {
       const Real tpi = 2.0*M_PI;
       w[2] = -vot*sin(tpi*y);
       w[3] = vot*sin(tpi*x);
+    } else if (type == kCPAlfven) {
+      // y polarisation Re(c e^{ikx}); z polarisation Re(-i c e^{ikx})
+      const Real cs = cos(kx*x), sn = sin(kx*x);
+      w[3] = cv[0]*cs - cv[1]*sn;
+      w[4] = cv[1]*cs + cv[0]*sn;
+    } else if (type == kRotor) {
+      const Real r = sqrt(x*x + y*y);
+      const Real f = (r < r0) ? 1.0 : ((r < r1) ? (r1 - r)/(r1 - r0) : 0.0);
+      w[0] = rho + (rhoin - rho)*f;
+      w[2] = -f*omg*y;
+      w[3] = f*omg*x;
     }
+  }
+
+  KOKKOS_INLINE_FUNCTION
+  Real HarrisBx(const Real y) const {
+    return b0*(tanh((y + 0.25*ly)/ash) - tanh((y - 0.25*ly)/ash) - 1.0);
   }
 
   KOKKOS_INLINE_FUNCTION
@@ -90,15 +129,36 @@ struct RTest {
       const Real d = sqrt(4.0*eta*tsh);
       B[1] = b0*erf(x/d);
       E[2] = eta*b0*exp(-x*x/(d*d))*2.0/(sqrt(M_PI)*d);
+    } else if (type == kCPAlfven) {
+      const Real g = exp(omi*t);
+      const Real cs = cos(kx*x - omr*t), sn = sin(kx*x - omr*t);
+      B[0] = b0;
+      B[1] = g*(cb[0]*cs - cb[1]*sn);
+      E[2] = g*(ce[0]*cs - ce[1]*sn);
+      B[2] = g*(cb[1]*cs + cb[0]*sn);
+      E[1] = -g*(ce[1]*cs + ce[0]*sn);
+    } else if (type == kHarris) {
+      // background only (the A_z perturbation enters through the potential)
+      const Real s1 = 1.0/cosh((y + 0.25*ly)/ash), s2 = 1.0/cosh((y - 0.25*ly)/ash);
+      const Real bx = HarrisBx(y);
+      const Real dbx = b0*(s1*s1 - s2*s2)/ash;
+      const Real bz = sqrt(fmax(b0*b0 - bx*bx, 0.0));
+      B[0] = bx;
+      B[2] = bz;
+      E[0] = (bz > 0.0) ? -eta*bx*dbx/bz : 0.0;  // eta J_x = eta dB_z/dy
+      E[2] = -eta*dbx;                            // eta J_z = -eta dB_x/dy
     } else {
       Real w[5];
       Fluid(x, y, w);
       if (type == kRiemann) {
         for (int a = 0; a < 3; ++a) B[a] = (x < x0) ? bl[a] : br[a];
+      } else if (type == kRotor) {
+        B[0] = b0;
       } else {
         const Real tpi = 2.0*M_PI;
         B[0] = -bot*sin(tpi*y);
         B[1] = bot*sin(2.0*tpi*x);
+        B[2] = bzot;
       }
       const Real *v = &w[2];
       E[0] = -(v[1]*B[2] - v[2]*B[1]);
@@ -111,6 +171,17 @@ struct RTest {
   KOKKOS_INLINE_FUNCTION
   Real Az(const Real x, const Real y, const Real t) const {
     if (type == kEMWave) return -(amp1/kmag)*cos(kx*x + ky*y - kmag*t);
+    if (type == kHarris) {
+      const Real y1 = -0.25*ly, y2 = 0.25*ly;
+      Real a = b0*(ash*log(cosh((y - y1)/ash)) - ash*log(cosh((y - y2)/ash)) - y);
+      if (xpoint) {
+        a += eps*b0*lam*(exp(-(x*x + (y - y1)*(y - y1))/(lam*lam)) -
+                         exp(-(x*x + (y - y2)*(y - y2))/(lam*lam)));
+      } else {
+        a += eps*b0*ash*cos(kx*x)*(1.0/cosh((y - y1)/ash) - 1.0/cosh((y - y2)/ash));
+      }
+      return a;
+    }
     const Real tpi = 2.0*M_PI;
     return bot*(cos(2.0*tpi*x)/(2.0*tpi) + cos(tpi*y)/tpi);
   }
@@ -208,12 +279,45 @@ void SetFaceFields(MeshBlockPack *pmbp, const RTest &r, const Real t,
 }
 
 void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm);
+void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm);
+
+// Root of the CP Alfven dispersion cubic with the largest real part (Durand-Kerner,
+// then Newton polish).
+std::complex<double> CPAlfvenOmega(Real k, Real sigma, Real b2) {
+  using C = std::complex<double>;
+  const C c2(0.0, sigma*(1.0 + b2)), c1(-k*k, 0.0), c0(0.0, -sigma*b2*k*k);
+  auto f = [&](C w) { return ((w + c2)*w + c1)*w + c0; };
+  auto df = [&](C w) { return (3.0*w + 2.0*c2)*w + c1; };
+  const double rad = 1.0 + std::max(std::abs(c2), std::max(std::abs(c1), std::abs(c0)));
+  C z[3] = {rad*C(0.4, 0.9), rad*C(0.4, 0.9)*C(0.4, 0.9), rad*std::pow(C(0.4, 0.9), 3)};
+  for (int it = 0; it < 5000; ++it) {
+    for (int a = 0; a < 3; ++a) {
+      C den(1.0, 0.0);
+      for (int b = 0; b < 3; ++b) {
+        if (b != a) den *= (z[a] - z[b]);
+      }
+      z[a] -= f(z[a])/den;
+    }
+  }
+  int ib = 0;
+  for (int a = 1; a < 3; ++a) {
+    if (z[a].real() > z[ib].real()) ib = a;
+  }
+  C w = z[ib];
+  for (int it = 0; it < 20; ++it) {
+    const C d = df(w);
+    if (std::abs(d) == 0.0) break;
+    w -= f(w)/d;
+  }
+  return w;
+}
 
 }  // namespace
 
 //----------------------------------------------------------------------------------------
 void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   pgen_final_func = ResistiveTestsFinal;
+  user_hist_func = ResistiveTestsHistory;
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   if (pmbp->pmhd == nullptr || pmbp->pdyngr == nullptr || pmbp->padm == nullptr) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
@@ -231,6 +335,12 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
     rt.type = kRiemann;
   } else if (test == "orszag_tang") {
     rt.type = kOT;
+  } else if (test == "cpalfven") {
+    rt.type = kCPAlfven;
+  } else if (test == "rotor") {
+    rt.type = kRotor;
+  } else if (test == "harris") {
+    rt.type = kHarris;
   } else {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<problem> test = '" << test << "' unknown" << std::endl;
@@ -238,7 +348,7 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   }
   auto &ms = pmy_mesh_->mesh_size;
   const Real lx = ms.x1max - ms.x1min, ly = ms.x2max - ms.x2min;
-  rt.potential = (rt.type == kEMWave || rt.type == kOT);
+  rt.potential = (rt.type == kEMWave || rt.type == kOT || rt.type == kHarris);
   rt.rho = pin->GetOrAddReal("problem", "rho", 1.0);
   rt.pgas = pin->GetOrAddReal("problem", "pgas", 1.0);
   rt.amp1 = pin->GetOrAddReal("problem", "amp1", 1.0e-3);
@@ -264,8 +374,37 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   }
   rt.vot = pin->GetOrAddReal("problem", "v_ot", 0.5);
   rt.bot = pin->GetOrAddReal("problem", "b_ot", 1.0/sqrt(4.0*M_PI));
+  rt.bzot = pin->GetOrAddReal("problem", "bz_ot", 0.0);
   if (rt.type == kTelegraph) {
     TelegraphAmplitudes(rt.amp1, sigma, rt.kx, 0.0, rt.et, rt.bt);
+  }
+  rt.rhoin = pin->GetOrAddReal("problem", "rho_in", 10.0);
+  rt.omg = pin->GetOrAddReal("problem", "omega", 9.95);
+  rt.r0 = pin->GetOrAddReal("problem", "r0", 0.1);
+  rt.r1 = pin->GetOrAddReal("problem", "r1", 0.115);
+  rt.ash = pin->GetOrAddReal("problem", "a_sheet", 0.1);
+  rt.ly = ly;
+  rt.eps = pin->GetOrAddReal("problem", "eps", 1.0e-3);
+  rt.lam = pin->GetOrAddReal("problem", "lam", 0.1);
+  rt.xpoint = (pin->GetOrAddString("problem", "pert", "mode") == "xpoint");
+  if (rt.type == kCPAlfven) {
+    using C = std::complex<double>;
+    const Real gm = pin->GetReal("mhd", "gamma");
+    const Real h = rt.rho + gm/(gm - 1.0)*rt.pgas;
+    const Real b2 = rt.b0*rt.b0/h;
+    const C w = CPAlfvenOmega(rt.kx, sigma, b2);
+    rt.omr = w.real();
+    rt.omi = w.imag();
+    const C ce = rt.amp1*std::abs(w)/rt.kx;                  // |B_y| = amp1
+    const C cb = -(rt.kx/w)*ce;
+    const C cj = sigma*ce/(1.0 + C(0.0, sigma*b2)/w);
+    const C cv = C(0.0, 1.0)*cj*rt.b0/(w*h);
+    rt.ce[0] = ce.real(); rt.ce[1] = ce.imag();
+    rt.cb[0] = cb.real(); rt.cb[1] = cb.imag();
+    rt.cv[0] = cv.real(); rt.cv[1] = cv.imag();
+    if (global_variable::my_rank == 0) {
+      std::printf("cpalfven: omega = %.12e %+.12e i\n", rt.omr, rt.omi);
+    }
   }
   if (restart) return;
 
@@ -420,7 +559,7 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
   if (r.type == kCurSheet) r.tsh += t;
   Real err_e[3] = {0, 0, 0}, err_b[3] = {0, 0, 0};
   const bool analytic = (r.type == kEMWave || r.type == kTelegraph ||
-                         r.type == kCurSheet);
+                         r.type == kCurSheet || r.type == kCPAlfven);
   if (analytic) FaceErrors(pmbp, r, t, err_e, err_b);
   resistive::ChargeDiag cd = {0.0, 0.0, 0.0};
   int64_t ns[resistive::kNewtonNCounters] = {0, 0, 0, 0, 0};
@@ -449,6 +588,41 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
     std::fprintf(fp, "%s %" PRId64 "\n", nn[n], static_cast<int64_t>(ns[n]));
   }
   std::fclose(fp);
+}
+
+// User history: by2 = int B_y^2 dV (tearing growth), psi = 0.5 int |B_y| dx along the
+// x2 faces at y = -L_y/4 (reconnected flux of sheet 1, Sweet-Parker rate).
+void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
+  pdata->nhist = 2;
+  pdata->label[0] = "by2";
+  pdata->label[1] = "psi";
+  MeshBlockPack *pmbp = pm->pmb_pack;
+  auto &indcs = pm->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2;
+  const int nkji = indcs.nx3*nx2*nx1, nji = nx2*nx1;
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  auto b2f = pmbp->pmhd->b0.x2f;
+  const Real ysh = -0.25*rt.ly;
+  Real by2 = 0.0, psi = 0.0;
+  Kokkos::parallel_reduce("rt_hist", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &s1, Real &s2) {
+    const int m = idx/nkji;
+    int rr = idx - m*nkji;
+    const int k = rr/nji + ks;
+    rr -= (k-ks)*nji;
+    const int j = rr/nx1 + js;
+    const int i = rr - (j-js)*nx1 + is;
+    const Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2;
+    const Real dv = dx1*dx2*size.d_view(m).dx3;
+    const Real by = b2f(m, k, j, i);
+    s1 += by*by*dv;
+    const Real yf = LeftEdgeX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    if (fabs(yf - ysh) < 0.25*dx2) s2 += 0.5*fabs(by)*dx1;
+  }, Kokkos::Sum<Real>(by2), Kokkos::Sum<Real>(psi));
+  pdata->hdata[0] = by2;
+  pdata->hdata[1] = psi;
 }
 
 }  // namespace

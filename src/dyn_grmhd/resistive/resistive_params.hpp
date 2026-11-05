@@ -14,6 +14,7 @@
 //!   resistive_sigma_model  = uniform|density
 //!   resistive_sigma_in, resistive_sigma_out, resistive_rho_transition,
 //!   resistive_sigma_width  (density model, see conductivity.hpp)
+//!   resistive_rsolver      = mhllc|lf     (tetrad MHLLC, default; or light-speed LF)
 //!   resistive_charge_flux  = upwind|rusanov
 //!   resistive_newton_fallback = lagged_v|fail
 //!   resistive_newton_tol   = 1e-11
@@ -29,6 +30,7 @@ class ParameterInput;
 namespace resistive {
 
 enum class ChargeFlux {upwind, rusanov};
+enum class RSolver {mhllc, lf};
 enum class SigmaModel {uniform, density};
 enum class NewtonFallback {lagged_v, fail};
 
@@ -38,6 +40,7 @@ struct ResistiveParams {
   SigmaModel sigma_model = SigmaModel::uniform;
   Real sigma = 0.0;
   Real sigma_in = 0.0, sigma_out = 0.0, rho_transition = 0.0, sigma_width = 0.0;
+  RSolver rsolver = RSolver::mhllc;
   ChargeFlux charge_flux = ChargeFlux::upwind;
   NewtonFallback newton_fallback = NewtonFallback::lagged_v;
   Real newton_tol = 1.0e-11;

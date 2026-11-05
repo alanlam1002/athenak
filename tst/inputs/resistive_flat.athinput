@@ -57,6 +57,7 @@ eos         = ideal
 dyn_error   = reset_floor
 resistive   = true
 resistive_sigma = 0.0
+resistive_rsolver = mhllc
 
 <problem>
 pgen_name  = resistive_tests

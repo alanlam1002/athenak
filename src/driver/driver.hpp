@@ -48,6 +48,9 @@ class Driver {
   // data
   TimeEvolution time_evolution;
   DvceArray6D<Real> impl_src;  // stiff source terms used in ImEx integrators
+  // stiff (Ohmic) sources of the face-centred E~ in resistive GRMHD, shape
+  // (nimp_stages, nmb, 3, nc3+1, nc2+1, nc1+1); component d lives on x_d faces
+  DvceArray6D<Real> impl_src_e;
   STSController sts;
 
   // folowing data only relevant for runs involving time evolution

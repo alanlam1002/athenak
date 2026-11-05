@@ -516,6 +516,28 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     Kokkos::realloc(impl_src, nimp_stages, nmb, 8, ncells3, ncells2, ncells1);
   }
 
+  // resistive GRMHD: implicit Ohmic sources on face-centred E~ (only when enabled)
+  if (pmhd != nullptr && pmhd->resist_params.enabled) {
+    if (pionn != nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Resistive GRMHD cannot be combined with IonNeutral."
+          << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (nimp_stages == 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Resistive GRMHD can only be run with ImEx integrators."
+          << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    int nmb = std::max((pmesh->pmb_pack->nmb_thispack), (pmesh->nmb_maxperrank));
+    auto &indcs = pmesh->mb_indcs;
+    int ncells1 = indcs.nx1 + 2*(indcs.ng);
+    int ncells2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*(indcs.ng)) : 1;
+    int ncells3 = (indcs.nx3 > 1)? (indcs.nx3 + 2*(indcs.ng)) : 1;
+    Kokkos::realloc(impl_src_e, nimp_stages, nmb, 3, ncells3+1, ncells2+1, ncells1+1);
+  }
+
   return;
 }
 

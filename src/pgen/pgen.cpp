@@ -264,6 +264,21 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   const int nstate = pin->GetOrAddInteger("job", "restart_state_nvar", 0);
   data_size_ += nout1*nout2*nout3*nstate*sizeof(Real);
 
+  // c194 (R-227 (iii)) <mhd> lagrangian_tags = N: a file written without the N tag scalars
+  // (N fewer MHD variables) loads with its scalars into the LAST slots (the dual-energy
+  // tracer stays last) and the tags zero; DynGRMHD::LagrangianTagInit then sets them
+  int rst_xs = 0;
+  if (pmhd != nullptr && data_size_ != data_size) {
+    const int lt = pin->GetOrAddInteger("mhd", "lagrangian_tags", 0);
+    const IOWrapperSizeT cell = nout1*nout2*nout3*sizeof(Real);
+    if (lt > 0 && lt <= pmhd->nscalars && data_size_ == data_size + lt*cell) {
+      rst_xs = lt;
+      nmhd -= lt;
+      data_size_ = data_size;
+    }
+  }
+  if (pmhd != nullptr) pmhd->rst_nscal_extra = rst_xs;
+
   if (data_size_ != data_size) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "CC data size read from restart file not equal to size "
@@ -363,7 +378,22 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
         myoffset += data_size;
       }
     }
-    if (pmhd->u0.extent_int(1) == nmhd) {
+    if (rst_xs > 0) {
+      // c194: the file's hydro variables to [0, nhyd), its scalars to [nhyd + xs, ...), the
+      // xs leading (tag) scalar slots zero
+      const int nhyd = pmhd->nmhd;
+      DvceArray5D<Real> ccin_d("rst-cc-in-d", nmb, nmhd, nout3, nout2, nout1);
+      Kokkos::deep_copy(ccin_d, ccin);
+      auto all = Kokkos::ALL;
+      auto u0s = Kokkos::subview(pmhd->u0, std::make_pair(0,nmb), all, all, all, all);
+      Kokkos::deep_copy(Kokkos::subview(u0s, all, std::make_pair(0, nhyd), all, all, all),
+                        Kokkos::subview(ccin_d, all, std::make_pair(0, nhyd), all, all, all));
+      Kokkos::deep_copy(Kokkos::subview(u0s, all, std::make_pair(nhyd, nhyd + rst_xs), all,
+                                        all, all), 0.0);
+      Kokkos::deep_copy(Kokkos::subview(u0s, all, std::make_pair(nhyd + rst_xs, nmhd + rst_xs),
+                                        all, all, all),
+                        Kokkos::subview(ccin_d, all, std::make_pair(nhyd, nmhd), all, all, all));
+    } else if (pmhd->u0.extent_int(1) == nmhd) {
       Kokkos::deep_copy(Kokkos::subview(pmhd->u0, std::make_pair(0,nmb), Kokkos::ALL,
                         Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
     } else {

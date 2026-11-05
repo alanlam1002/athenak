@@ -3215,7 +3215,7 @@ void MultigridDriver::CalculateMultipoleCoefficients() {
     }
   }
 
-#ifdef MPI_PARALLEL
+#if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, mpcoeff_, nvar_ * 25, MPI_ATHENA_REAL,
                 MPI_SUM, MPI_COMM_WORLD);
 #endif
@@ -3335,7 +3335,7 @@ void MultigridDriver::CalculateCenterOfMass() {
     }
   }
 
-#ifdef MPI_PARALLEL
+#if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, totals, 4, MPI_ATHENA_REAL,
                 MPI_SUM, MPI_COMM_WORLD);
 #endif

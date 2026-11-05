@@ -172,6 +172,7 @@ class PrimitiveSolverHydro {
   // wave speeds and branch of D (the formula of the de_flux_hll tracer code, generalised),
   // and CalcFluxes skips the upwind F_D*Y_upwind for them.
   bool sf_hll = false;
+  int lt_n = 0;                    // <mhd> lagrangian_tags (c194): scalars 0..lt_n-1
   DvceArray4D<int> de_shock;       // per-cell shock flag from the previous primitives
   DvceArray4D<int> de_shock2;      // scratch for the dilation (de_dilate)
   int de_dilate = 1;               // also flag the face neighbours of flagged cells
@@ -221,6 +222,29 @@ class PrimitiveSolverHydro {
   // there is the energy equation's numerical loss (V4F's tidal caps, RESULTS §11.5)
   bool de_second_law = true;
   Real de_second_law_tol = -1.0e-3; // entropy solution if K_en <= K_tr (1 + tol): ignore drops < 1e-3
+  // <mhd> dual_energy_mode = legacy (default) | conditioning (D-ent; R-223 item 2, R-225; C-190).
+  // conditioning: the pressure is chosen by the conditioning of the energy equation, not by a
+  // shock sensor, and the stored tau, S, D are never overwritten. Per dense (D > rho_switch),
+  // B = 0 cell, from the cell's own stored (D, S, tau, D Y) and the energy C2P only:
+  //   K_tr = K(Y), (rho_tr, eps_tr) from EntropyInversion(D, S, K_tr), q_tr = D eps_tr/tau;
+  //   K_en, eps_en from the energy solution, q_en = D eps_en/tau;
+  //   safeguard: q_tr >= eta1 and K_en < (1 - delta) K_tr  -> the tracer's pressure, no resync
+  //   else q_en >= eta2                                      -> the energy's pressure, resync
+  //                                                             (two-way: Y from K_en)
+  //   else q_tr < eta1                                       -> the tracer's pressure
+  //   else                                                   -> the energy's pressure, the
+  //                                                             tracer passive
+  // <mhd> dual_energy_q_eta1 (3e-4), dual_energy_q_eta2 (3e-3), dual_energy_q_delta (0.1);
+  // read without GetOrAdd. The shock flag, the second-law guard and dual_energy_eta1 are not
+  // used by this mode (the flag is still computed for the diagnostics).
+  bool de_cond = false;
+  Real de_q1 = 3.0e-4, de_q2 = 3.0e-3, de_qdel = 0.1;
+  // <mhd> dual_energy_variable = eint (D-int; R-223 addendum, R-225 item 2; needs dual_energy_mode =
+  // conditioning): the partner is the specific internal energy, Y = eps (the scalar slot holds
+  // D eps = sqrt(gamma) W rho eps = E), advected with the mass flux (dual_energy_flux = mass) and given
+  // the pdV source in DynGRMHDPS::AddDIntSource. The partner's state from (D, S, eps): h = 1 +
+  // gamma eps, W = sqrt(1 + S^2/(D h)^2), rho = D/W, P = (gamma - 1) rho eps; K_tr = P/rho^gamma.
+  bool de_eint = false;
   // Diagnostics of the last full (non-floors_only) C2P call, interior cells only:
   // dense cells, cells on the entropy branch, and the energy the tau resync added
   // (sum of sqrt(gamma) dtau dV); de_dE_total accumulates the latter over all calls.
@@ -1483,6 +1507,25 @@ class PrimitiveSolverHydro {
       Kokkos::realloc(zone_acc, 2*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);
     }
+    // c194 (R-227 (iii)) <mhd> lagrangian_tags = N: scalars 0..N-1 are diagnostic tags (set
+    // on a restart from a file without them, DynGRMHD::LagrangianTagInit), advected like
+    // any scalar; their species limits are unreachable (SetSpeciesFractionLimits), so they
+    // never set the C2P's Y_adjusted -> cons_adjusted write-back. A tag never enters a
+    // hydro flux or decision: bitwise to the solution (the gate: tags on vs off)
+    lt_n = pin->GetOrAddInteger(block, "lagrangian_tags", 0);
+    if (lt_n > 0) {
+      const int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
+      const bool de = pin->GetOrAddBoolean(block, "dual_energy", false);
+      if (lt_n > nsc - (de ? 1 : 0)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> lagrangian_tags = " << lt_n
+                  << " needs nscalars >= lagrangian_tags (+1 with dual_energy)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      for (int n = 0; n < lt_n; ++n) {
+        ps.GetEOSMutable().SetSpeciesFractionLimits(n, -1.0e30, 1.0e30);
+      }
+    }
     de_on = pin->GetOrAddBoolean(block, "dual_energy", false);
     if (de_on) {
       int nsc = pin->GetOrAddInteger(block, "nscalars", 0);
@@ -1552,15 +1595,50 @@ class PrimitiveSolverHydro {
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
+      if (pin->DoesParameterExist(block, "dual_energy_mode")) {   // R-225 (no GetOrAdd)
+        std::string md = pin->GetString(block, "dual_energy_mode");
+        if (md == "conditioning") {
+          de_cond = true;
+        } else if (md != "legacy") {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> dual_energy_mode = '" << md
+                    << "' (use legacy or conditioning)" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
+      if (de_cond) {
+        if (pin->DoesParameterExist(block, "dual_energy_q_eta1"))
+          de_q1 = pin->GetReal(block, "dual_energy_q_eta1");
+        if (pin->DoesParameterExist(block, "dual_energy_q_eta2"))
+          de_q2 = pin->GetReal(block, "dual_energy_q_eta2");
+        if (pin->DoesParameterExist(block, "dual_energy_q_delta"))
+          de_qdel = pin->GetReal(block, "dual_energy_q_delta");
+        if (!(de_q1 > 0.0) || !(de_q2 >= de_q1) || !(de_qdel >= 0.0 && de_qdel < 1.0)) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> dual_energy_mode = conditioning needs "
+                    << "0 < dual_energy_q_eta1 <= dual_energy_q_eta2 and 0 <= "
+                    << "dual_energy_q_delta < 1" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
         de_ypow = 1.0/de_gamma;
       } else if (var == "k") {
         de_ypow = 1.0;
+      } else if (var == "eint") {
+        de_ypow = 1.0;
+        de_eint = true;
+        if (!de_cond) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> dual_energy_variable = eint needs "
+                    << "dual_energy_mode = conditioning" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
       } else {
         std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                   << std::endl << "<" << block << "> dual_energy_variable = '" << var
-                  << "' (use k_1g or k)" << std::endl;
+                  << "' (use k_1g, k or eint)" << std::endl;
         std::exit(EXIT_FAILURE);
       }
       de_recon_rhoy = pin->GetOrAddBoolean(block, "dual_energy_recon_rhoy",
@@ -1576,6 +1654,13 @@ class PrimitiveSolverHydro {
         std::exit(EXIT_FAILURE);
       }
       de_flux_hll = (fl == "hll");
+      if (de_eint && (de_flux_hll || de_recon_rhoy)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy_variable = eint needs "
+                  << "dual_energy_flux = mass and dual_energy_recon_rhoy = false (the partner "
+                  << "moves with the mass flux)" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
     }
     Real mb = ps.GetEOS().GetBaryonMass();
     ps.GetEOSMutable().SetDensityFloor(pin->GetOrAddReal(block, "dfloor", (FLT_MIN))/mb);
@@ -1681,6 +1766,7 @@ class PrimitiveSolverHydro {
     const bool de_on_ = de_on;
     const int de_idx_ = de_idx;
     const Real de_kmax_ = de_kmax, de_gamma_ = de_gamma, de_ypow_ = de_ypow;
+    const bool de_eint_ = de_eint;
 
 
     par_for("pshyd_prim2cons", DevExeSpace(), 0, (nmb-1), kl, ku, jl, ju, il, iu,
@@ -1724,8 +1810,8 @@ class PrimitiveSolverHydro {
       if (de_on_) {
         // the K tracer is always derived from P and rho at prim->cons time
         Real rho_ = prim_pt[PRH]*mb;
-        prim_pt[PYF + de_idx_] = DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_,
-                                             de_ypow_);
+        prim_pt[PYF + de_idx_] = de_eint_ ? prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+            DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_);
         prim(m, nhyd + de_idx_, k, j, i) = prim_pt[PYF + de_idx_];
       }
 
@@ -2125,6 +2211,9 @@ class PrimitiveSolverHydro {
     const Real de_gamma_ = de_gamma, de_ypow_ = de_ypow;
     const bool de_2law_ = de_second_law;
     const Real de_2tol_ = de_second_law_tol;
+    const bool de_cond_ = de_cond;
+    const Real de_q1_ = de_q1, de_q2_ = de_q2, de_qdel_ = de_qdel;
+    const bool de_eint_ = de_eint;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
     const int pcyc_ = pmy_pack->pmesh->ncycle;
@@ -2539,7 +2628,129 @@ class PrimitiveSolverHydro {
         }
 
         // ---- dual energy (see de_on): choose the energy or the entropy solution.
-        if (de_on_) {
+        // dkeep (conditioning only): 0 the legacy write-back below; 1 the stored state is
+        // left bitwise (the tracer supplies the pressure); 2 only the tracer slot is written
+        int dkeep = 0;
+        if (de_on_ && de_cond_) {
+          // D-ent (dual_energy_mode = conditioning; see de_cond). Inputs: this cell's stored
+          // (D, S, tau, D Y) and its energy C2P (prim_pt): the same in a ghost and its owner
+          const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
+                                 k >= ks && k <= ke_);
+          const Real D = cons_pt_old[CDN];
+          const Real tau0 = cons_pt_old[CTA];
+          const bool dense = D > de_rho_sw_;
+          const bool bzero = (b3u[IBX] == 0.0 && b3u[IBY] == 0.0 && b3u[IBZ] == 0.0);
+          const bool bad = result.prim_floor ||
+                           (result.error != Primitive::Error::SUCCESS);
+          // branch codes (de_diag 0): 0 not dense; 11 tracer (q_tr < eta1); 12 tracer
+          // (safeguard); 13 tracer (energy C2P floored/failed, or tau <= 0); 14 energy + two-way
+          // resync (q_en >= eta2); 15 energy, tracer passive; 16 energy (floored), no tracer
+          // solution; 17 dense, B != 0: as not dense
+          int dbr = 0;
+          Real qtr = -1.0, dken = 0.0, ddk = 0.0;
+          int dec = 0;   // 1 tracer pressure, 2 energy + resync, 3 energy (tracer passive)
+          if (dense && bzero) {
+            Real S_d[3] = {cons_pt_old[CSX], cons_pt_old[CSY], cons_pt_old[CSZ]};
+            Real S_u[3] = {g3u[S11]*S_d[0] + g3u[S12]*S_d[1] + g3u[S13]*S_d[2],
+                           g3u[S12]*S_d[0] + g3u[S22]*S_d[1] + g3u[S23]*S_d[2],
+                           g3u[S13]*S_d[0] + g3u[S23]*S_d[1] + g3u[S33]*S_d[2]};
+            Real ssq = S_u[0]*S_d[0] + S_u[1]*S_d[1] + S_u[2]*S_d[2];
+            Real Wt = 1.0, ht = 1.0, K_tr = 0.0, rho_t = 0.0, P_t = 0.0;
+            bool inv = false;
+            if (de_eint_) {
+              // D-int: the partner's eps gives h directly (ideal gas: h = 1 + gamma eps)
+              const Real eps_t = cons_pt_old[CYD + de_idx_]/D;
+              if (eps_t > 0.0 && isfinite(eps_t) && isfinite(ssq)) {
+                ht = 1.0 + de_gamma_*eps_t;
+                Wt = sqrt(1.0 + ssq/(D*D*ht*ht));
+                rho_t = D/Wt;
+                P_t = (de_gamma_ - 1.0)*rho_t*eps_t;
+                K_tr = P_t/pow(rho_t, de_gamma_);
+                inv = isfinite(Wt) && isfinite(P_t);
+              }
+            } else {
+              K_tr = DualEnergyK(cons_pt_old[CYD + de_idx_]/D, de_kmax_, de_ypow_);
+              inv = EntropyInversion(D, ssq, K_tr, de_gamma_, Wt, ht);
+              rho_t = inv ? D/Wt : 0.0;
+              P_t = inv ? K_tr*pow(rho_t, de_gamma_) : 0.0;
+            }
+            if (inv && tau0 > 0.0) qtr = D*P_t/((de_gamma_ - 1.0)*rho_t)/tau0;
+            if (bad || !(tau0 > 0.0)) {
+              dec = inv ? 1 : 3;
+              dbr = inv ? 13 : 16;
+            } else {
+              const Real rho_e = prim_pt[PRH]*mb;
+              const Real P_e = prim_pt[PPR];
+              const Real K_en = P_e/pow(rho_e, de_gamma_);
+              const Real qen = D*P_e/((de_gamma_ - 1.0)*rho_e)/tau0;
+              dken = K_en/fmax(K_tr, 1.0e-300) - 1.0;
+              if (!inv) {
+                dec = (qen >= de_q2_) ? 2 : 3;
+                dbr = (qen >= de_q2_) ? 14 : 15;
+              } else if (qtr >= de_q1_ && K_en < (1.0 - de_qdel_)*K_tr) {
+                dec = 1; dbr = 12;
+              } else if (qen >= de_q2_) {
+                dec = 2; dbr = 14;
+              } else if (qtr < de_q1_) {
+                dec = 1; dbr = 11;
+              } else {
+                dec = 3; dbr = 15;
+              }
+            }
+            if (dec == 1) {
+              // the tracer's pressure; the stored state stays as it is (dkeep = 1)
+              for (int n = 0; n < NCONS; ++n) { cons_pt[n] = cons_pt_old[n]; }
+              prim_pt[PRH] = rho_t/mb;
+              prim_pt[PPR] = P_t;
+              prim_pt[PVX] = S_u[0]/(D*ht);
+              prim_pt[PVY] = S_u[1]/(D*ht);
+              prim_pt[PVZ] = S_u[2]/(D*ht);
+              for (int n = 0; n < nscal; n++) {
+                prim_pt[PYF + n] = cons_pt_old[CYD + n]/D;
+              }
+              prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], P_t, &prim_pt[PYF]);
+              crec = false;
+              dkeep = 1;
+              if (interior) nent_r += 1.0;
+            } else if (dec == 2) {
+              // two-way resync of the tracer to the energy solution (only D Y is written)
+              const Real rho_ = prim_pt[PRH]*mb;
+              const Real yk = de_eint_ ? prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+                  DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_);
+              ddk = (de_eint_ ? prim_pt[PPR]/pow(rho_, de_gamma_) :
+                     DualEnergyK(yk, de_kmax_, de_ypow_))/fmax(K_tr, 1.0e-300) - 1.0;
+              prim_pt[PYF + de_idx_] = yk;
+              cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
+              dkeep = 2;
+            }
+          } else if (!(dense && bad)) {
+            // not dense (or B != 0): K from the energy solution, as the legacy branch 0/4
+            const Real rho_ = prim_pt[PRH]*mb;
+            const Real yk = !(rho_ > 0.0) ? 0.0 : (de_eint_ ?
+                prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+                DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_));
+            prim_pt[PYF + de_idx_] = yk;
+            cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
+            dkeep = 2;
+            dbr = dense ? 17 : 0;
+          } else {
+            dbr = 17;
+          }
+          if (interior && dense) { nden_r += 1.0; }
+          if (ddon_) {
+            dd_(m, 0, k, j, i) = dbr;
+            dd_(m, 2, k, j, i) = de_shock_(m, k, j, i);
+            dd_(m, 3, k, j, i) = dken;
+            dd_(m, 4, k, j, i) = ddk;
+            dd_(m, 5, k, j, i) = qtr;   // conditioning: slot 5 = q_tr (-1 where not formed)
+            if (dstg_ >= 1 && dstg_ <= 3) dd_(m, 9 + dstg_, k, j, i) = dken;
+            if (dd_.extent_int(1) > 15) {
+              dd_(m, 14, k, j, i) = dd_(m, 1, k, j, i);
+              dd_(m, 15, k, j, i) = dd_(m, 13, k, j, i);
+            }
+          }
+          if (dcnt_) dbr_(m, k, j, i) = dbr;
+        } else if (de_on_) {
           const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
                                  k >= ks && k <= ke_);
           const Real D = cons_pt_old[CDN];
@@ -2695,7 +2906,7 @@ class PrimitiveSolverHydro {
               crx_r += 1.0;
             }
           }
-        } else if (result.cons_floor || result.cons_adjusted || de_write) {
+        } else if (dkeep != 1 && (result.cons_floor || result.cons_adjusted || de_write)) {
           /*if (fabs((cons_pt[CDN] - cons_pt_old[CDN])/cons_pt_old[CDN]) > 1e-12) {
             Real &x1min = size.d_view(m).x1min;
             Real &x1max = size.d_view(m).x1max;
@@ -2730,6 +2941,9 @@ class PrimitiveSolverHydro {
           for (int n = 0; n < nscal; n++) {
             cons(m, nhyd + n, k, j, i) = cons_pt[CYD + n]*sdetg;
           }
+        } else if (dkeep == 2) {
+          // conditioning's resync: the tracer slot only (D, S, tau bitwise unchanged)
+          cons(m, nhyd + de_idx_, k, j, i) = cons_pt[CYD + de_idx_]*sdetg;
         }
         if (crec_ && cint) {
           // BH-frame Killing energy of the final state (as the zone's ekill): bound if < 0

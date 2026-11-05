@@ -193,8 +193,12 @@ mass_closure_full = true      # R-115 Q5: SCLOSE1/2/3 + ECLOSE (S_i, tau closure
 nscalars = 1
 dual_energy_diag = true          # R-044 §4 item 2: switch maps (K_en/K_tr, flagged fraction)
 dual_energy = true                # V5 (user-approved): F + J + second-law guard (items 71-73), L4
-dual_energy_kmax = 1.0
-dual_energy_rho_switch = 3.2e-8
+dual_energy_mode = conditioning   # D-ent, the production DE (user 2026-11-05; C-191/C-195)
+dual_energy_q_eta1 = 3.0e-4
+dual_energy_q_eta2 = 3.0e-3
+dual_energy_q_delta = 0.05   # C-195
+dual_energy_kmax = 1000.0   # ceiling 8.1e4 K0 (c198 1D check; user 2026-11-05)
+dual_energy_rho_switch = 3.24e-10   # 1e-6 rho_c (C-194/C-195; user 2026-11-05)
 # R-087 item 4 (user-approved 2026-10-23): explicit tracer-flux, FOFC and cold-recovery keys,
 # so no default change or solver change can silently revert them. Needs proj/tde >= cc441bb5.
 dual_energy_flux = hll            # the tracer's flux: HLL flux of D*Y (hlle_dyn_grmhd.hpp)

@@ -198,6 +198,9 @@ class DynGRMHD {
   // restored primitives (DualEnergyRestartInit, right after restart_state::ApplyStaged)
   bool de_restart_init = false;
   virtual void DualEnergyRestartInit() {}
+  // c194 (R-227 (iii)) <mhd> lagrangian_tags: the tag scalars of a restart from a file without
+  // them (pgen.cpp's rst_nscal_extra), from the restored primitives (LagrangianTagInit)
+  virtual void LagrangianTagInit(ParameterInput *pin) {}
   virtual void SaveRestartScalars(ParameterInput *pin) {}   // per-cycle scalars (tier 3)
   // <mhd> mass_closure (eos/mass_closure.hpp): the itemized MCLOSE ledger; nullptr if off
   mclose::MassClosure *pmclose = nullptr;
@@ -342,6 +345,14 @@ class DynGRMHD {
   // a restart whose restart_state block was not applied (restart_state::ApplyStaged)
   void RestartStateIgnored() { kf_bres_stale = KfRst(); }
   int kill_stage = 0;             // the RK stage of the current killing source call
+  // D-int (<mhd> dual_energy_variable = eint; R-225 item 2; AddDIntSource): the time of the stage's
+  // source (SetSourceStage, from MHD::MHDSrcTerms) and the lagged rho of the previous source call,
+  // the one time difference of the pdV term (d_t rho); restart state dyngr.rholag + <mhd> dint_*
+  Real dint_tsrc = 0.0, dint_tlag = 0.0;
+  bool dint_have = false, dint_rst_loaded = false;
+  int dint_key[3] = {-1, -1, -1};
+  DvceArray4D<Real> dint_rho;
+  void SetSourceStage(Driver *pdriver, int stage);
 
   // <mhd> tau_budget_every (R-184 items 1-4; dyn_grmhd_taubudget.cpp): the per-cell tau
   // budget against Valencia's update from the same state, binned (density band x surface /
@@ -466,10 +477,15 @@ class DynGRMHDPS : public DynGRMHD {
   void SaveRestartState(DvceArray5D<Real> &dst, int ns) override;
   void LoadRestartState(const DvceArray5D<Real> &src, int ns) override;
   void DualEnergyRestartInit() override;
+  void LagrangianTagInit(ParameterInput *pin) override;
   void SaveRestartScalars(ParameterInput *pin) override {
     eos.SaveTier3State(pin);
     eos.SaveDualEnergyTotal(pin);
     SaveKillingScalars(pin);
+    if (eos.de_eint) {   // D-int's lag (dyngr.rholag holds its rho)
+      pin->SetReal("mhd", "dint_tlag", dint_tlag);
+      pin->SetBoolean("mhd", "dint_have", dint_have);
+    }
   }
   virtual bool GetDualEnergyStats(Real out[4]) {
     if (!eos.de_on) return false;
@@ -482,6 +498,8 @@ class DynGRMHDPS : public DynGRMHD {
 
   virtual void AddCoordTerms(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                              const Real dt, DvceArray5D<Real> &u0, int nghost);
+  // D-int's pdV source on the partner slot (dyn_grmhd.cpp)
+  void AddDIntSource(const DvceArray5D<Real> &w0, const Real dt, DvceArray5D<Real> &u0);
 
   // dyn_grmhd_newdt.cpp
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage);

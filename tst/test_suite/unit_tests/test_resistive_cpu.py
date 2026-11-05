@@ -42,8 +42,8 @@ def _run_capture(mhd_keys, flags, tmp_path):
     (["eta_ad = 0.01"], [], "eta_ohm/eta_ad"),
     (["resistive = true", "resistive_sigma = 10"], [], "requires <time> integrator"),
     (["resistive = true"], ["time/integrator=imex2"], "resistive_sigma is required"),
-    (["resistive = true", "resistive_sigma = 10"], ["time/integrator=imex2"],
-     "not implemented yet"),
+    (["resistive = true", "resistive_sigma = 10"], ["time/integrator=rk2"],
+     "requires <time> integrator"),
     (["resistive = true", "resistive_sigma = 10", "resistive_charge_flux = bogus"],
      ["time/integrator=imex2"], "resistive_charge_flux"),
     (["resistive = true", "resistive_sigma_model = density", "resistive_sigma_in = 1e6"],
@@ -55,11 +55,12 @@ def test_resistive_guards(keys, flags, msg, tmp_path):
     assert msg in out, out
 
 
-def test_resistive_allow_incomplete_initialises(tmp_path):
-    keys = ["resistive = true", "resistive_sigma = 10", "resistive_allow_incomplete = true"]
-    rc, out = _run_capture(keys, ["time/integrator=imex2"], tmp_path)
+def test_resistive_runs_on_dyngr(tmp_path):
+    """Step 1a: the resistive dyngr path initialises and steps (flat ADM)."""
+    keys = ["resistive = true", "resistive_sigma = 10"]
+    rc, out = _run_capture(keys, ["time/integrator=imex2", "time/nlim=2"], tmp_path)
     assert rc == 0, out
-    assert "INCOMPLETE" in out, out
+    assert "INCOMPLETE" not in out, out
 
 
 def test_resistive_off_is_default(tmp_path):

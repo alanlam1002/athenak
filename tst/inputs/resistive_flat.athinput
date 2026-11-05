@@ -1,0 +1,68 @@
+# Flat-space resistive GRMHD mesh tests on the dyngr path (07_scoping_v2 step 1a).
+# Select the problem with problem/test = emwave|telegraph|cursheet|riemann|orszag_tang.
+
+<comment>
+problem   = resistive GRMHD flat-space tests
+reference = Komissarov 2007 MNRAS 382, 995; Mignone et al. 2019 MNRAS 486, 4252
+
+<job>
+basename  = Resist
+
+<mesh>
+nghost    = 2
+nx1       = 64
+x1min     = 0.0
+x1max     = 1.0
+ix1_bc    = periodic
+ox1_bc    = periodic
+
+nx2       = 1
+x2min     = 0.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 64
+nx2       = 1
+nx3       = 1
+
+<coord>
+minkowski   = true
+
+<adm>
+
+<time>
+evolution  = dynamic
+integrator = imex2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 1.0
+ndiag      = 1
+
+<mhd>
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.3333333333333333
+tfloor      = 1.0e-10
+dfloor      = 1.0e-12
+dyn_eos     = ideal
+eos         = ideal
+dyn_error   = reset_floor
+resistive   = true
+resistive_sigma = 0.0
+
+<problem>
+pgen_name  = resistive_tests
+test       = emwave
+amp1       = 1.0e-3
+amp2       = 0.0
+rho        = 1.0
+pgas       = 1.0
+dump_state = false

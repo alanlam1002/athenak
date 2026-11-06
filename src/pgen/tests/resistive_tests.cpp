@@ -34,7 +34,8 @@
 //!               v_x = v_sh tanh phi, rho = rho_h (1+tanh phi)/2 + rho_l (1-tanh phi)/2,
 //!               v_y = sign(y) a0_kh v_sh sin(2 pi x) exp(-(phi a_kh/alpha_kh)^2),
 //!               B = (sqrt(2 p mu_p), 0, sqrt(2 p mu_t)), ideal E.  user_hist adds
-//!               "dvy" = (max v^y - min v^y)/2 and "bp2" = int (B_x^2 + B_y^2) dV
+//!               "dvy" = (max v^y - min v^y)/2, "bp2" = int (B_x^2 + B_y^2) dV and
+//!               "divb" = max |div B|
 //! Passive scalars (e.g. Y_e for a tabulated EOS) are set uniformly to <problem> ye.
 //!
 //! The same pgen runs with <mhd> resistive = false (ideal dyngr) for ideal-limit
@@ -622,13 +623,15 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
 // User history: by2 = int B_y^2 dV (tearing growth), psi = 0.5 int |B_y| dx along the
 // x2 faces at y = -L_y/4 (reconnected flux of sheet 1, Sweet-Parker rate),
 // dvy = (max v^y - min v^y)/2 (KH growth, Mignone 2019 sec. 5.6),
-// bp2 = int (B_x^2 + B_y^2) dV (poloidal field amplification).
+// bp2 = int (B_x^2 + B_y^2) dV (poloidal field amplification),
+// divb = max |div B| (same as max_divb in .resist.dat; T-S2 criterion 6 over time).
 void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 4;
+  pdata->nhist = 5;
   pdata->label[0] = "by2";
   pdata->label[1] = "psi";
   pdata->label[2] = "dvy";
   pdata->label[3] = "bp2";
+  pdata->label[4] = "divb";
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -682,6 +685,8 @@ void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
   // the history writer sums hdata over ranks: dvy (already global) only on rank 0
   pdata->hdata[2] = (global_variable::my_rank == 0) ? 0.5*(vmax - vmin) : 0.0;
   pdata->hdata[3] = bp2;
+  const Real divb = resistive::MaxDivB(pmbp, pmbp->pmhd->b0);  // global max
+  pdata->hdata[4] = (global_variable::my_rank == 0) ? divb : 0.0;
 }
 
 }  // namespace

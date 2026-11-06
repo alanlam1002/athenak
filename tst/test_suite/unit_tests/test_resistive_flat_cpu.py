@@ -575,6 +575,8 @@ def test_kh_sigma_rho_histogram():
         assert cells == sum(x[5] for x in rows) and cells > 0
         assert sum(x[6] + x[7] + x[12] for x in rows) == 0     # retry, fallback, cont.
         assert len({x[0] for x in rows}) == 2                   # t = 0.5, 1.0
+        assert abs(hst[-1][6] - r["max_divb"]) <= 1e-5*r["max_divb"]  # divb (07 v2.4)
+        assert max(x[6] for x in hst) < 1e-12
         dvy.append(hst[-1][4])
     assert abs(dvy[1]/dvy[0] - 1.0) < 1e-6, dvy
 

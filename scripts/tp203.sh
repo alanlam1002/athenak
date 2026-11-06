@@ -11,12 +11,17 @@
 #   left = STOP_<arm>; any ending without "Terminating" = STOP_<arm>.
 #   The successor asks for the sum of the live arms' nodes; it is not submitted when $E/STOP exists or no arm is live.
 #   qsub -q capacity -l select=<sum> -l walltime=06:00:00 -v WT=05:50:00 -N c203 -o $E/c203.out -e $E/c203.err tp203.sh
+# Shared-ensemble members (user-approved 2026-11-06: one 16-node job for TDE + magweb + resistive): an ARMS line
+#   "name nodes ext" runs $E/members/<name>.sh NODEFILE DEADLINE_EPOCH in a clean login environment (env -i, bash -l) on
+#   the job's head node; the member launches its own mpiexec on the hosts in NODEFILE only, restarts itself, and must
+#   exit by DEADLINE_EPOCH (job start + 5 h 45 min). It ends its membership by touching $E/STOP_<name>. Logs go to
+#   $E/members/<name>.log; the owner (tlam-d8) reads every member script before it is first run.
 set -uo pipefail
 D=/lus/flare/projects/CompactBinaryMerger/tlam/athenak_run/cfc
 E=$D/c203_chain
 S=/lus/flare/projects/CompactBinaryMerger/tlam/home_builds/athenak_tde/wt_tde_scripts/scripts
 X=$E/athena_c203
-live_nodes() { local s=0 a n; while read -r a n; do [ -z "$a" ] || [ "${a:0:1}" = "#" ] || [ -e $E/STOP_$a ] || s=$((s + n)); done < $E/ARMS; echo $s; }
+live_nodes() { local s=0 a n x; while read -r a n x; do [ -z "$a" ] || [ "${a:0:1}" = "#" ] || [ -e $E/STOP_$a ] || s=$((s + n)); done < $E/ARMS; echo $s; }
 nl=$(live_nodes)
 if [ -z "${NOCHAIN:-}" ] && [ ! -e $E/STOP ] && [ $nl -gt 0 ]; then
   N=$(qsub -W depend=afterany:$PBS_JOBID -q $PBS_QUEUE -l select=$nl -l walltime=$(qstat -f $PBS_JOBID | awk '/Resource_List.walltime/{print $3}') -v WT=$WT -N $PBS_JOBNAME -o $E/$PBS_JOBNAME.out -e $E/$PBS_JOBNAME.err $E/tp203.sh) \
@@ -29,6 +34,7 @@ aurora_image_guard
 aurora_select_pe $X
 unset FI_LOG_LEVEL
 source $D/tde_mpi_env.sh
+T0=$(date +%s); DEADLINE=$(( T0 + 5*3600 + 45*60 ))
 CPU_BIND="list:1-8:9-16:17-24:25-32:33-40:41-48:53-60:61-68:69-76:77-84:85-92:93-100"
 sort -u $PBS_NODEFILE > $E/nodes.$PBS_JOBID
 PY=/opt/aurora/26.26.0/frameworks/aurora_frameworks-2025.3.1/bin/python3
@@ -71,11 +77,25 @@ arm() {  # name nodes first-node
     *) touch $E/STOP_$a; echo "$a STOPPED (no normal termination; rc=$rc)" >> $E/runs.log ;;
   esac
 }
+ext() {  # name nodes first-node: a shared-ensemble member (see the header)
+  local a=$1 nn=$2
+  sed -n "$3,$(( $3 + nn - 1 ))p" $E/nodes.$PBS_JOBID > $E/nodes.$a
+  echo "$a (ext) start $(date -u +%FT%TZ) job $PBS_JOBID nodes $nn: $(tr '\n' ' ' < $E/nodes.$a)script $(sha256sum $E/members/$a.sh | cut -c1-8) deadline $(date -u -d @$DEADLINE +%FT%TZ)" >> $E/runs.log
+  env -i HOME=$HOME USER=$USER LOGNAME=$USER TERM=dumb $(env | grep -E "^(PBS_|PALS_)[A-Za-z0-9_]*=" | grep -v " ") \
+    bash -l $E/members/$a.sh $E/nodes.$a $DEADLINE >> $E/members/$a.log 2>&1
+  local rc=$?
+  echo "$a (ext) rc=$rc end $(date -u +%FT%TZ)$([ -e $E/STOP_$a ] && echo ' (member stopped itself)')" >> $E/runs.log
+}
 nn=$(wc -l < $E/nodes.$PBS_JOBID)
 i=1
-while read -r a k; do
+while read -r a k typ; do
   [ -z "$a" ] || [ "${a:0:1}" = "#" ] || [ -e $E/STOP_$a ] && continue
   [ $(( i + k - 1 )) -le $nn ] || { echo "$(date -u +%FT%TZ) $a skipped: needs $k nodes, $((nn - i + 1)) left" >> $E/runs.log; continue; }
-  ( arm $a $k $i ) < /dev/null & i=$(( i + k ))
+  if [ "${typ:-}" = ext ]; then
+    [ -r $E/members/$a.sh ] || { echo "$(date -u +%FT%TZ) $a skipped: no members/$a.sh" >> $E/runs.log; continue; }
+    ( ext $a $k $i ) < /dev/null & i=$(( i + k ))
+  else
+    ( arm $a $k $i ) < /dev/null & i=$(( i + k ))
+  fi
 done < $E/ARMS
 wait

@@ -409,12 +409,33 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   if (web_enable) { web_norm = pin->GetOrAddString("problem", "web_norm", "bmax"); }
   if (dipole_enable) { dipole_norm = pin->GetOrAddString("problem", "dipole_norm", "bmax"); }
   if ((web_norm != "bmax" && web_norm != "rms") ||
-      (dipole_norm != "bmax" && dipole_norm != "bvarpi_rms")) {
+      (dipole_norm != "bmax" && dipole_norm != "bvarpi_rms" && dipole_norm != "bz_rms")) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "web_norm must be bmax|rms and dipole_norm bmax|bvarpi_rms (got '"
+              << "web_norm must be bmax|rms and dipole_norm bmax|bvarpi_rms|bz_rms (got '"
               << web_norm << "', '" << dipole_norm << "')" << std::endl;
     exit(EXIT_FAILURE);
   }
+  // dipole_geometry = loop (default: the confined current-loop dipole) | vertical (R-072
+  // §2 VZ: A_phi = (B_0 varpi/2) w(rho), w = 1 for rho >= vz_rho_hi, (1-u^2)^3 in
+  // u = ln(vz_rho_hi/rho)/ln(vz_rho_hi/vz_rho_lo) down to vz_rho_lo, 0 below; B = B_0 z^
+  // wherever w = 1, field lines close through the vz_rho_lo..vz_rho_hi layer)
+  std::string dipole_geometry = "loop";
+  Real vz_rho_lo = 0.0, vz_rho_hi = 0.0;
+  if (dipole_enable) {
+    dipole_geometry = pin->GetOrAddString("problem", "dipole_geometry", "loop");
+    if (dipole_geometry == "vertical") {
+      vz_rho_lo = pin->GetReal("problem", "vz_rho_lo");
+      vz_rho_hi = pin->GetReal("problem", "vz_rho_hi");
+    }
+    if ((dipole_geometry != "loop" && dipole_geometry != "vertical") ||
+        (dipole_geometry == "vertical" && !(vz_rho_hi > vz_rho_lo && vz_rho_lo > 0.0))) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "dipole_geometry must be loop|vertical; vertical needs "
+                << "0 < vz_rho_lo < vz_rho_hi (code units)" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+  const bool dipole_vertical = dipole_enable && dipole_geometry == "vertical";
   bool need_h = web_enable || (dipole_enable && (dipole_confine || dipole_norm != "bmax"));
   Real rho_lo = 0.0, rho_hi = 0.0;
   if (need_h) {
@@ -452,6 +473,8 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   if (dipole_enable) {
     dipole_target = (dipole_norm == "bvarpi_rms")
         ? pin->GetReal("problem", "dipole_bvarpi_rms_gauss")
+        : (dipole_norm == "bz_rms")
+        ? pin->GetReal("problem", "dipole_bz_rms_gauss")
         : pin->GetOrAddReal("problem", "dipole_bmax_gauss", 1.0e16);
     dipole_target *= gauss_to_code;
     dipole_r0 = pin->GetOrAddReal("problem", "dipole_r0", 5.0);
@@ -862,14 +885,15 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
 
   // rms over h >= 0.5 of the azimuthal mean Bbar_varpi (from AzimuthalSums) and of the
   // non-axisymmetric remainder B_varpi - Bbar_varpi
+  // (comp = 1: B_varpi, the default; comp = 3: B_z)
   auto BvarpiMeanRms = [&](DvceArray4D<Real> &bx, DvceArray4D<Real> &by,
                            DvceArray4D<Real> &bz, const AzHost &sums,
-                           Real *rms_mean, Real *rms_fluct) {
+                           Real *rms_mean, Real *rms_fluct, int comp = 1) {
     DvceArray2D<Real> mean("grass_az_mean", az_nw, az_nz);
     auto mean_h = Kokkos::create_mirror_view(mean);
     for (int iw = 0; iw < az_nw; ++iw) {
       for (int iz = 0; iz < az_nz; ++iz) {
-        mean_h(iw,iz) = (sums(iw,iz,0) > 0.0) ? sums(iw,iz,1)/sums(iw,iz,0) : 0.0;
+        mean_h(iw,iz) = (sums(iw,iz,0) > 0.0) ? sums(iw,iz,comp)/sums(iw,iz,0) : 0.0;
       }
     }
     Kokkos::deep_copy(mean, mean_h);
@@ -894,7 +918,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                                      bx(m,k,j,i), by(m,k,j,i), bz(m,k,j,i), x1v, x2v);
       Real dV = pb.sdetg*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
       rm += SQR(mean(iw,iz))*dV;
-      rf += SQR(pb.bvarpi - mean(iw,iz))*dV;
+      rf += SQR(((comp == 3) ? pb.bz : pb.bvarpi) - mean(iw,iz))*dV;
       rv += dV;
     }, Kokkos::Sum<Real>(s2m), Kokkos::Sum<Real>(s2f), Kokkos::Sum<Real>(sv));
 #if MPI_PARALLEL_ENABLED
@@ -950,7 +974,19 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     // I_0 > 0 gives a dipole moment along +z (lorene_bns.cpp convention); the overall
     // scale is fixed by the normalization below, which keeps that sign.
     Real I_0 = 4.0*dipole_r0*dipole_target/(23.0*M_PI);
+    // vertical geometry: A = (1/2) w(rho) (-y, x, 0), i.e. curl A = z^ where w = 1 (unit
+    // raw amplitude; the normalization below sets B_0)
+    const Real vz_lnr = dipole_vertical ? std::log(vz_rho_hi/vz_rho_lo) : 1.0;
+    auto vz_w = [&](Real x, Real y, Real z) -> Real {
+      Real rho = data.InterpolateRho(x, y, z, eos_table);
+      if (rho >= vz_rho_hi) { return 1.0; }
+      if (rho <= vz_rho_lo) { return 0.0; }
+      Real u = std::log(vz_rho_hi/rho)/vz_lnr;
+      Real w = 1.0 - u*u;
+      return w*w*w;
+    };
     std::function<Real(Real, Real, Real)> fd1 = [&](Real x, Real y, Real z) -> Real {
+      if (dipole_vertical) { return -0.5*y*vz_w(x, y, z); }
       Real a = grass::DipoleA1(x, y, z, I_0, dipole_r0);
       if (dipole_confine) {
         Real rho = data.InterpolateRho(x, y, z, eos_table);
@@ -959,6 +995,7 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
       return a;
     };
     std::function<Real(Real, Real, Real)> fd2 = [&](Real x, Real y, Real z) -> Real {
+      if (dipole_vertical) { return 0.5*x*vz_w(x, y, z); }
       Real a = grass::DipoleA2(x, y, z, I_0, dipole_r0);
       if (dipole_confine) {
         Real rho = data.InterpolateRho(x, y, z, eos_table);
@@ -985,7 +1022,12 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
     BmaxRms(dbx, dby, dbz, &dip_bmax_raw, &dip_brms_raw);
     AzimuthalSums(dbx, dby, dbz, &dip_az);
     if (need_h) { BvarpiMeanRms(dbx, dby, dbz, dip_az, &dip_bvm_raw, &dip_bvf_raw); }
-    Real dip_norm_raw = (dipole_norm == "bvarpi_rms") ? dip_bvm_raw : dip_bmax_raw;
+    Real dip_bzm_raw = 0.0, dip_bzf_raw = 0.0;
+    if (need_h && (dipole_vertical || dipole_norm == "bz_rms")) {
+      BvarpiMeanRms(dbx, dby, dbz, dip_az, &dip_bzm_raw, &dip_bzf_raw, 3);
+    }
+    Real dip_norm_raw = (dipole_norm == "bvarpi_rms") ? dip_bvm_raw
+                      : (dipole_norm == "bz_rms") ? dip_bzm_raw : dip_bmax_raw;
     dip_scale = (dip_norm_raw > 0.0) ? (dipole_target/dip_norm_raw) : 0.0;
     for (int m = 0; m < nmb; ++m) {
       for (int k = ks; k <= ke+1; ++k) {
@@ -1007,6 +1049,14 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
                 << dip_scale*dip_brms_raw/gauss_to_code << " G, max|B| = "
                 << dip_scale*dip_bmax_raw/gauss_to_code << " G; moment along "
                 << ((I_0*dip_scale > 0.0) ? "+z" : "-z") << std::endl;
+      if (dipole_vertical) {
+        std::cout << "GRASS vertical field (dipole_geometry = vertical, vz_rho_lo="
+                  << vz_rho_lo << ", vz_rho_hi=" << vz_rho_hi << " code): rms Bbar_z (h>=0.5) = "
+                  << dip_scale*dip_bzm_raw/gauss_to_code << " G, rms of its non-axisymmetric "
+                  << "part = " << dip_scale*dip_bzf_raw/gauss_to_code << " G; max|B| over "
+                  << "the grid (closure layer) = " << dip_scale*dip_bmax_raw/gauss_to_code
+                  << " G" << std::endl;
+      }
     }
   }
 
@@ -1572,6 +1622,61 @@ void BuildMagneticField(ParameterInput *pin, Mesh *pmy_mesh_,
   AzimuthalSums(tbx, tby, tbz, &tot_az);
   if (need_h) { BvarpiMeanRms(tbx, tby, tbz, tot_az, &tot_bvm, &tot_bvf); }
   Real hel_tot = Helicity(d_fa1, d_fa2, d_fa3, tbx, tby, tbz);
+
+  if (dipole_vertical) {
+    // VZ closure layer (vz_rho_lo < rho < vz_rho_hi): max|B|, max (b^2/2)/P (comoving) and
+    // the radius range it spans; max|B| on cells with rho <= vz_rho_lo (leak); total
+    // rms Bbar_z over h >= 0.5
+    Real tot_bzm = 0.0, tot_bzf = 0.0;
+    BvarpiMeanRms(tbx, tby, tbz, tot_az, &tot_bzm, &tot_bzf, 3);
+    Real cl_b = 0.0, cl_pm = 0.0, cl_rmin = 0.0, cl_rmax = 0.0, lk_b = 0.0;
+    Kokkos::parallel_reduce("GrassVZReport", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &rb, Real &rpm, Real &rnmin, Real &rmx, Real &rlk) {
+      int m = idx/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks; j += js;
+      Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      Real g0 = admd.g_dd(m,0,0,k,j,i), g1 = admd.g_dd(m,0,1,k,j,i);
+      Real g2 = admd.g_dd(m,0,2,k,j,i), g3 = admd.g_dd(m,1,1,k,j,i);
+      Real g4 = admd.g_dd(m,1,2,k,j,i), g5 = admd.g_dd(m,2,2,k,j,i);
+      GrassPhysB pb = GrassPhysicalB(g0, g1, g2, g3, g4, g5, tbx(m,k,j,i), tby(m,k,j,i),
+                                     tbz(m,k,j,i), x1v, x2v);
+      Real rho = w0d(m,IDN,k,j,i);
+      if (rho <= vz_rho_lo) { rlk = fmax(rlk, sqrt(pb.bsq)); return; }
+      if (rho >= vz_rho_hi) { return; }
+      Real r = sqrt(x1v*x1v + x2v*x2v + x3v*x3v);
+      rb = fmax(rb, sqrt(pb.bsq));
+      rnmin = fmax(rnmin, -r);
+      rmx = fmax(rmx, r);
+      if (w0d(m,IPR,k,j,i) > 0.0) {
+        Real ux = w0d(m,IVX,k,j,i), uy = w0d(m,IVY,k,j,i), uz = w0d(m,IVZ,k,j,i);
+        Real usq = g0*ux*ux + g3*uy*uy + g5*uz*uz + 2.0*(g1*ux*uy + g2*ux*uz + g4*uy*uz);
+        Real bx = tbx(m,k,j,i)/pb.sdetg, by = tby(m,k,j,i)/pb.sdetg;
+        Real bz = tbz(m,k,j,i)/pb.sdetg;
+        Real bu = (g0*bx + g1*by + g2*bz)*ux + (g1*bx + g3*by + g4*bz)*uy +
+                  (g2*bx + g4*by + g5*bz)*uz;
+        rpm = fmax(rpm, 0.5*(pb.bsq + bu*bu)/(1.0 + usq)/w0d(m,IPR,k,j,i));
+      }
+    }, Kokkos::Max<Real>(cl_b), Kokkos::Max<Real>(cl_pm), Kokkos::Max<Real>(cl_rmin),
+       Kokkos::Max<Real>(cl_rmax), Kokkos::Max<Real>(lk_b));
+#if MPI_PARALLEL_ENABLED
+    Real l5[5] = {cl_b, cl_pm, cl_rmin, cl_rmax, lk_b};
+    MPI_Allreduce(MPI_IN_PLACE, l5, 5, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    cl_b = l5[0]; cl_pm = l5[1]; cl_rmin = l5[2]; cl_rmax = l5[3]; lk_b = l5[4];
+#endif
+    if (global_variable::my_rank == 0) {
+      std::cout << "GRASS vertical field (total): rms Bbar_z (h>=0.5) = " << tot_bzm/gauss_to_code
+                << " G, rms of the non-axisymmetric B_z = " << tot_bzf/gauss_to_code
+                << " G; closure layer (vz_rho_lo<rho<vz_rho_hi, r = " << -cl_rmin << ".."
+                << cl_rmax << " M): max|B| = " << cl_b/gauss_to_code
+                << " G, max (b^2/2)/P = " << cl_pm << "; max|B| where rho<=vz_rho_lo = "
+                << lk_b/gauss_to_code << " G" << std::endl;
+    }
+  }
 
   {
     // E_mag, E_tor, E_pol (physical, proper volume); max|div B|*dx/|B|; confinement

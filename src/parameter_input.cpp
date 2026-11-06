@@ -64,7 +64,7 @@ ParameterInput::ParameterInput() : last_filename{} {
 
 // this constructor automatically loads data from input_filename in argument
 ParameterInput::ParameterInput(std::string input_filename) : last_filename{} {
-#ifdef OPENMP_PARALLEL
+#if OPENMP_PARALLEL_ENABLED
   omp_init_lock(&lock_);
 #endif
   IOWrapper infile;

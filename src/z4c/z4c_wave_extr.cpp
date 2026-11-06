@@ -18,10 +18,6 @@
 #include <algorithm>
 #include <string>
 
-#ifdef MPI_PARALLEL
-#include <mpi.h>
-#endif
-
 #include "globals.hpp"
 #include "athena.hpp"
 #include "mesh/mesh.hpp"

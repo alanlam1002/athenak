@@ -313,10 +313,6 @@ class Multigrid {
             bool on_host = false);
   virtual ~Multigrid();
 
-  // KGF: Both btype=BoundaryQuantity::mg and btypef=BoundaryQuantity::mg_faceonly (face
-  // neighbors only) are passed to comm function calls in mg_task_list.cpp Only
-  // BoundaryQuantity::mg is handled in a case in InitBoundaryData(). Passed directly
-  // (not through btype) in MGBoundaryValues() ctor
   MultigridBoundaryValues *pbval = nullptr;
   void ReallocateForAMR();
   void UpdateBlockDx();

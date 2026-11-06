@@ -16,10 +16,6 @@
 #include <string>
 #include <cstdio>
 
-#ifdef MPI_PARALLEL
-#include <mpi.h>
-#endif
-
 #include "cce.hpp"
 #include "z4c/z4c.hpp"
 #include "coordinates/adm.hpp"

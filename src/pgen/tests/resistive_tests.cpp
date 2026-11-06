@@ -624,14 +624,18 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
 // x2 faces at y = -L_y/4 (reconnected flux of sheet 1, Sweet-Parker rate),
 // dvy = (max v^y - min v^y)/2 (KH growth, Mignone 2019 sec. 5.6),
 // bp2 = int (B_x^2 + B_y^2) dV (poloidal field amplification),
-// divb = max |div B| (same as max_divb in .resist.dat; T-S2 criterion 6 over time).
+// divb = max |div B| (same as max_divb in .resist.dat; T-S2 criterion 6 over time),
+// bxk = max over the rows y < 0 (sheet 1) of the k-mode amplitude
+// (2/L_x) |int B_x exp(-i k x) dx|, k = 2 pi/L_x (tearing gate, 07 v2.4 §4.1; uniform
+// mesh only).
 void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
-  pdata->nhist = 5;
+  pdata->nhist = 6;
   pdata->label[0] = "by2";
   pdata->label[1] = "psi";
   pdata->label[2] = "dvy";
   pdata->label[3] = "bp2";
   pdata->label[4] = "divb";
+  pdata->label[5] = "bxk";
   MeshBlockPack *pmbp = pm->pmb_pack;
   auto &indcs = pm->mb_indcs;
   const int is = indcs.is, js = indcs.js, ks = indcs.ks;
@@ -687,6 +691,31 @@ void ResistiveTestsHistory(HistoryData *pdata, Mesh *pm) {
   pdata->hdata[3] = bp2;
   const Real divb = resistive::MaxDivB(pmbp, pmbp->pmhd->b0);  // global max
   pdata->hdata[4] = (global_variable::my_rank == 0) ? divb : 0.0;
+
+  const int nrow = pm->mesh_indcs.nx2;
+  const Real y0 = pm->mesh_size.x2min;
+  const Real dyr = (pm->mesh_size.x2max - y0)/nrow;
+  const Real lx = pm->mesh_size.x1max - pm->mesh_size.x1min, kx = rt.kx;
+  DvceArray2D<Real> fk("rt_bxk", 2, nrow);
+  par_for("rt_bxk", DevExeSpace(), 0, nmb-1, ks, ks+indcs.nx3-1, js, js+nx2-1, is,
+          is+nx1-1, KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const int g = fmin(fmax(floor((y - y0)/dyr), 0.0), nrow - 1.0);
+    const Real w = bcc(m, IBX, k, j, i)*size.d_view(m).dx1;
+    Kokkos::atomic_add(&fk(0, g), w*cos(kx*x));
+    Kokkos::atomic_add(&fk(1, g), -w*sin(kx*x));
+  });
+  auto hk = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), fk);
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, hk.data(), 2*nrow, MPI_ATHENA_REAL, MPI_SUM,
+                MPI_COMM_WORLD);
+#endif
+  Real bxk = 0.0;
+  for (int g = 0; g < nrow && y0 + (g + 0.5)*dyr < 0.0; ++g) {
+    bxk = fmax(bxk, 2.0/lx*sqrt(hk(0, g)*hk(0, g) + hk(1, g)*hk(1, g)));
+  }
+  pdata->hdata[5] = (global_variable::my_rank == 0) ? bxk : 0.0;
 }
 
 }  // namespace

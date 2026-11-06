@@ -455,6 +455,27 @@ def _tearing_linear(s, ka):
     return 0.5*(lo + hi)*ka**(2.0/3.0)*s**(-1.0/3.0)
 
 
+def test_harris_bxk():
+    """bxk user-hst column (tearing gate amplitude, 07 v2.4 4.1): at t = 0 the k-mode
+    amplitude of B_x of the tearing perturbation is its analytic maximum 0.5 eps b0 (to
+    the row sampling), independent of the meshblock layout."""
+    keys = _HARRIS_KEYS[:2] + ["<problem>"] + _HARRIS_KEYS[2:]
+    keys[1] = "eps = 1.0e-3"
+    lx = 2.0*math.pi/5.0
+    amp = []
+    for mb in ((16, 128), (8, 32)):
+        name = "rt_bxk%d" % mb[1]
+        _run(name, keys, ["problem/test=harris", "problem/rho=0.2", "problem/pgas=0.2",
+                          "mesh/nx1=16", "mesh/nx2=128", "meshblock/nx1=%d" % mb[0],
+                          "meshblock/nx2=%d" % mb[1], "mesh/x1min=%.17g" % (-0.5*lx),
+                          "mesh/x1max=%.17g" % (0.5*lx), "mesh/x2min=-0.8",
+                          "mesh/x2max=0.8", "mhd/resistive_sigma=1000", "time/tlim=0.01"])
+        rows = [ln.split() for ln in open(name + ".user.hst") if not ln.startswith("#")]
+        os.remove(name + ".user.hst")
+        amp.append(float(rows[0][7]))
+    assert abs(amp[0]/5.0e-4 - 1.0) < 0.02 and abs(amp[1]/amp[0] - 1.0) < 1e-5, amp
+
+
 @pytest.mark.skipif(not _HEAVY, reason="heavy (GPU): set RESIST_HEAVY=1")
 def test_tearing_scaling():
     """Resistive tearing of a force-free double Harris sheet (ka = 0.5, a/dy = 32): the

@@ -116,6 +116,8 @@ class ResistiveDynGR {
   void CheckConstantMetric() const;
   // resistive_freeze_background (test only), called from CTE
   void FreezeBackground(Real gam0, Real gam1, Real beta_dt, int mode);
+  // esrc sidecar <basename>.esrc.r<rank> (written at capture, read on restart)
+  void FreezeFile(bool write);
   // Writes and resets the K5-run histogram when t_end reaches the next output time.
   void MaybeWriteHist(Real t_end, int cycle);
 
@@ -125,6 +127,7 @@ class ResistiveDynGR {
   Real hist_dt = -1.0, hist_next = 0.0;
   bool hist_header = false;
   std::string hist_fname;
+  std::string esrc_fname;
   TaskStatus SyncSend(int r);
   TaskStatus SyncRecv(int r);
   void RestrictE();

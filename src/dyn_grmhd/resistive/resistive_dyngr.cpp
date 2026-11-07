@@ -132,6 +132,8 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     }
   }
   hist_fname = pin->GetString("job", "basename") + ".rhist.txt";
+  esrc_fname = pin->GetString("job", "basename") + ".esrc.r"
+               + std::to_string(global_variable::my_rank);
   hist_next = pp->pmesh->time + hist_dt;
 
   pbval_e = new MeshBoundaryValuesFC(pp, pin);
@@ -567,15 +569,11 @@ TaskStatus ResistiveDynGR::CTE(Driver *pdriver, int stage) {
 
   // freeze_background: record E~_pre = gam0 E~ + gam1 E~(n) before the first update
   const bool frz = params.freeze_background;
-  const bool capture = frz && !esrc_set;
-  if (capture) {
-    if (pmy_pack->pmesh->ncycle != 0 || stage != 1) {
-      std::cout << "### FATAL ERROR: <mhd> resistive_freeze_background must start at "
-                << "cycle 0 (restarts are not supported)" << std::endl;
-      std::exit(EXIT_FAILURE);
-    }
-    FreezeBackground(gam0, gam1, beta_dt, 0);
+  if (frz && !esrc_set && (pmy_pack->pmesh->ncycle != 0 || stage != 1)) {
+    FreezeFile(false);  // restart: esrc recorded by the cycle-0 run
   }
+  const bool capture = frz && !esrc_set;
+  if (capture) FreezeBackground(gam0, gam1, beta_dt, 0);
 
   auto ex1 = e0.x1f, ex1o = e1.x1f, q1 = qflx.x1f;
   par_for("CTE-e1", DevExeSpace(), 0, nmb1, ks, ke, js, je, is, ie+1,
@@ -612,7 +610,10 @@ TaskStatus ResistiveDynGR::CTE(Driver *pdriver, int stage) {
     ex3(m,k,j,i) = v - beta_dt*q3(m,k,j,i);
   });
   if (frz) {
-    if (capture) FreezeBackground(gam0, gam1, beta_dt, 1);
+    if (capture) {
+      FreezeBackground(gam0, gam1, beta_dt, 1);
+      FreezeFile(true);
+    }
     FreezeBackground(gam0, gam1, beta_dt, 2);
   }
   return TaskStatus::complete;
@@ -649,6 +650,57 @@ void ResistiveDynGR::FreezeBackground(Real gam0, Real gam1, Real beta_dt, int mo
     });
   }
   if (mode == 1) esrc_set = true;
+}
+
+//----------------------------------------------------------------------------------------
+//! esrc sidecar, one file per rank: magic, nmb, the MeshBlock gids, then x1f/x2f/x3f raw.
+//! A restart must use the same MeshBlock decomposition and rank count as the cycle-0 run
+//! that wrote it (checked).
+
+void ResistiveDynGR::FreezeFile(bool write) {
+  const int magic = 0x45535243;
+  int nmb = pmy_pack->nmb_thispack;
+  auto &gid = pmy_pack->pmb->mb_gid.h_view;
+  auto fail = [&](const char *msg) {
+    std::cout << "### FATAL ERROR: <mhd> resistive_freeze_background " << msg << " '"
+              << esrc_fname << "' (a restart needs the sidecar written by the cycle-0 "
+              << "run with the same decomposition)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  };
+  FILE *fp = std::fopen(esrc_fname.c_str(), write ? "wb" : "rb");
+  if (fp == nullptr) fail(write ? "cannot write" : "cannot read");
+  bool ok = true;
+  if (write) {
+    ok = std::fwrite(&magic, sizeof(int), 1, fp) == 1 &&
+         std::fwrite(&nmb, sizeof(int), 1, fp) == 1;
+    for (int m = 0; m < nmb && ok; ++m) {
+      int g = gid(m);
+      ok = std::fwrite(&g, sizeof(int), 1, fp) == 1;
+    }
+  } else {
+    int hdr[2] = {0, 0};
+    ok = std::fread(hdr, sizeof(int), 2, fp) == 2 && hdr[0] == magic && hdr[1] == nmb;
+    for (int m = 0; m < nmb && ok; ++m) {
+      int g = -1;
+      ok = std::fread(&g, sizeof(int), 1, fp) == 1 && g == gid(m);
+    }
+  }
+  for (int d = 0; d < 3 && ok; ++d) {
+    auto es = (d == 0) ? esrc.x1f : ((d == 1) ? esrc.x2f : esrc.x3f);
+    auto h = Kokkos::create_mirror_view(es);
+    size_t n = h.size();
+    if (write) {
+      Kokkos::deep_copy(h, es);
+      ok = std::fwrite(h.data(), sizeof(Real), n, fp) == n;
+    } else {
+      ok = std::fread(h.data(), sizeof(Real), n, fp) == n;
+      if (ok) Kokkos::deep_copy(es, h);
+    }
+  }
+  if (!write && ok && std::fgetc(fp) != EOF) ok = false;
+  std::fclose(fp);
+  if (!ok) fail(write ? "write error on" : "mismatched or truncated");
+  if (!write) esrc_set = true;
 }
 
 //----------------------------------------------------------------------------------------

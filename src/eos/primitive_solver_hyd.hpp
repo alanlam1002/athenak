@@ -239,6 +239,22 @@ class PrimitiveSolverHydro {
   // used by this mode (the flag is still computed for the diagnostics).
   bool de_cond = false;
   Real de_q1 = 3.0e-4, de_q2 = 3.0e-3, de_qdel = 0.1;
+  // <mhd> dual_energy_resync_gate = none (default) | compress | qtr (R-247 item 1; C-208/C-209:
+  // the pre-pericentre surface wind is conditioning's own logic). Gates the two-way resync of a
+  // cell that is on the tracer branch (an inverted tracer with q_tr < eta1) when the resync
+  // would raise its tracer (K_en > K_tr); such a cell keeps the tracer's pressure instead
+  // (branch code 18 = code 11 with the resync gated). Downward resyncs, cells with
+  // q_tr >= eta1 and the energy branch are unchanged.
+  //   compress: the upward resync is allowed only if div v < 0 at the cell. div v is the
+  //     shock flag's divergence (ComputeShockFlags: central differences of the previous
+  //     primitives' v^a, slice-covariant with dual_energy_div = covariant), decided by the
+  //     owner and carried to the ghosts in the flag slot as shk + 0.25 (div v < 0)
+  //     (UpdateShockFlags), so needs dual_energy_flag_exchange.
+  //   qtr: never (an upward resync waits until q_tr >= eta1, i.e. the cell has left the
+  //     tracer branch).
+  // none leaves every code path and the flag slot's values as before (bitwise).
+  int de_rgate = 0;                // 0 none, 1 compress, 2 qtr
+  DvceArray4D<int> de_comp;        // compress: 1 where div v < 0 (owner's, via the flag slot)
   // <mhd> dual_energy_variable = eint (D-int; R-223 addendum, R-225 item 2; needs dual_energy_mode =
   // conditioning): the partner is the specific internal energy, Y = eps (the scalar slot holds
   // D eps = sqrt(gamma) W rho eps = E), advected with the mass flux (dual_energy_flux = mass) and given
@@ -1620,6 +1636,35 @@ class PrimitiveSolverHydro {
                     << "dual_energy_q_delta < 1" << std::endl;
           std::exit(EXIT_FAILURE);
         }
+        // R-247 item 1: dual_energy_resync_gate (see de_rgate); read without GetOrAdd
+        if (pin->DoesParameterExist(block, "dual_energy_resync_gate")) {
+          std::string rg = pin->GetString(block, "dual_energy_resync_gate");
+          if (rg == "none") {
+            de_rgate = 0;
+          } else if (rg == "compress") {
+            de_rgate = 1;
+          } else if (rg == "qtr") {
+            de_rgate = 2;
+          } else {
+            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                      << std::endl << "<" << block << "> dual_energy_resync_gate = '" << rg
+                      << "' (use none, compress or qtr)" << std::endl;
+            std::exit(EXIT_FAILURE);
+          }
+          if (de_rgate == 1 && !de_xchg) {
+            // the owner must decide div v: without the flag exchange each block would
+            // compute it on its own ghosts from clamped neighbours (owner != ghost)
+            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                      << std::endl << "<" << block << "> dual_energy_resync_gate = compress "
+                      << "needs dual_energy_flag_exchange = true" << std::endl;
+            std::exit(EXIT_FAILURE);
+          }
+        }
+      } else if (pin->DoesParameterExist(block, "dual_energy_resync_gate")) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> dual_energy_resync_gate needs "
+                  << "dual_energy_mode = conditioning" << std::endl;
+        std::exit(EXIT_FAILURE);
       }
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
@@ -1879,6 +1924,13 @@ class PrimitiveSolverHydro {
         Kokkos::realloc(de_cls, prim.extent_int(0), e3, e2, e1);
       }
       auto &cls_ = de_cls;
+      const bool rgc_ = (de_rgate == 1);   // resync gate compress: keep div v < 0 per cell
+      if (rgc_ && (de_comp.extent_int(0) != prim.extent_int(0) ||
+                   de_comp.extent_int(1) != e3 || de_comp.extent_int(2) != e2 ||
+                   de_comp.extent_int(3) != e1)) {
+        Kokkos::realloc(de_comp, prim.extent_int(0), e3, e2, e1);
+      }
+      auto &cmp_ = de_comp;
       par_for("de_shock_flag", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
         auto vel = [&](int a, int kk, int jj, int ii) {
@@ -1939,6 +1991,7 @@ class PrimitiveSolverHydro {
         }
         shk(m, k, j, i) = (divv <= 0.0) ? (sh ? 2 : (weak ? 1 : 0)) : 0;
         if (cnt_) cls_(m, k, j, i) = ((divv <= 0.0) ? 1 : 0) | (sh ? 2 : 0) | (weak ? 4 : 0);
+        if (rgc_) cmp_(m, k, j, i) = (divv < 0.0) ? 1 : 0;
         if (ddon_) {
           Real ratio;
           if (sensor == 0) {
@@ -2068,6 +2121,18 @@ class PrimitiveSolverHydro {
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       u0(m, iflag, k, j, i) = static_cast<Real>(shk(m, k, j, i));
     });
+    if (de_rgate == 1) {
+      // resync gate compress: the owner's div v < 0 rides in the same slot as
+      // shk + 0.25 comp, so the shock flag's decode (> 0.5) is unchanged for any value the
+      // slot can take (coarse/fine restriction and prolongation average it); comp decodes as
+      // (slot - shk) > 0.125. The interior cells' div v uses unclamped neighbours (the range
+      // above is +- r >= 1)
+      auto &cmp = de_comp;
+      par_for("de_flag_store_comp", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+        u0(m, iflag, k, j, i) += 0.25*static_cast<Real>(cmp(m, k, j, i));
+      });
+    }
   }
 
   //! <mhd> dual_energy_shock_counters (R-112 item 1): count this stage's interior cells by the
@@ -2249,6 +2314,18 @@ class PrimitiveSolverHydro {
         KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
           shk(m, k, j, i) = (cons(m, iflag, k, j, i) > 0.5) ? 1 : 0;
         });
+        if (de_rgate == 1) {   // resync gate compress: the owner's div v < 0 (UpdateShockFlags)
+          if (de_comp.extent_int(0) != prim.extent_int(0) || de_comp.extent_int(1) != e3 ||
+              de_comp.extent_int(2) != e2 || de_comp.extent_int(3) != e1) {
+            Kokkos::realloc(de_comp, prim.extent_int(0), e3, e2, e1);
+          }
+          auto &cmp = de_comp;
+          par_for("de_comp_load", DevExeSpace(), 0, nmb-1, kl, ku, jl, ju, il, iu,
+          KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+            const Real v = cons(m, iflag, k, j, i);
+            cmp(m, k, j, i) = ((v - ((v > 0.5) ? 1.0 : 0.0)) > 0.125) ? 1 : 0;
+          });
+        }
         if (probe_) {
           if (de_probe0.extent_int(0) != de_shock.extent_int(0) ||
               de_probe0.extent_int(1) != e3 || de_probe0.extent_int(2) != e2 ||
@@ -2262,6 +2339,8 @@ class PrimitiveSolverHydro {
       }
     }
     auto &de_shock_ = de_shock;
+    const int rgate_ = de_cond ? de_rgate : 0;   // dual_energy_resync_gate (see de_rgate)
+    auto &de_comp_ = de_comp;                    // read only when rgate_ == 1
     const bool atm_fv_ = atm_frame_vel && !floors_only;
     const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
     const Real fv2 = pmy_pack->padm->frame_vel_u[2];
@@ -2645,7 +2724,8 @@ class PrimitiveSolverHydro {
           // branch codes (de_diag 0): 0 not dense; 11 tracer (q_tr < eta1); 12 tracer
           // (safeguard); 13 tracer (energy C2P floored/failed, or tau <= 0); 14 energy + two-way
           // resync (q_en >= eta2); 15 energy, tracer passive; 16 energy (floored), no tracer
-          // solution; 17 dense, B != 0: as not dense
+          // solution; 17 dense, B != 0: as not dense; 18 tracer (q_tr < eta1), q_en >= eta2
+          // but the upward resync gated (dual_energy_resync_gate)
           int dbr = 0;
           Real qtr = -1.0, dken = 0.0, ddk = 0.0;
           int dec = 0;   // 1 tracer pressure, 2 energy + resync, 3 energy (tracer passive)
@@ -2689,10 +2769,13 @@ class PrimitiveSolverHydro {
                 dbr = (qen >= de_q2_) ? 14 : 15;
               } else if (qtr >= de_q1_ && K_en < (1.0 - de_qdel_)*K_tr) {
                 dec = 1; dbr = 12;
-              } else if (qen >= de_q2_) {
+              } else if (qen >= de_q2_ &&
+                         !(rgate_ != 0 && qtr < de_q1_ && K_en > K_tr &&
+                           (rgate_ == 2 || de_comp_(m, k, j, i) == 0))) {
                 dec = 2; dbr = 14;
               } else if (qtr < de_q1_) {
-                dec = 1; dbr = 11;
+                // (rgate_ != 0: also a tracer-branch cell whose upward resync was gated)
+                dec = 1; dbr = (qen >= de_q2_) ? 18 : 11;
               } else {
                 dec = 3; dbr = 15;
               }

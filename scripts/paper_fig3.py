@@ -3,17 +3,18 @@
 (a) the dense drift <K/K0> - 1 (rho >= 0.01 rho_c) at t = 60 vs the elliptic convergence setting (log |drift|; open marker =
 negative), annotated with the share of psi solves that do no V-cycle ("skip"); (b) K_eff - Valencia (percentage points) vs the
 boost v at converged solves (rms 1e-8 + one V-cycle), t = 60 and 120, both bands.
-Sources: code/results/c161/c161_tol.csv (C-160 §2); code/results/c163/ana_dtscan.csv (C-163 speed scan).
-Notes: max 1e-7 (d2) reached t = 47.9 only (its last dump is used); rms 1e-10's skip share (94%) is from the logged rerun to
-t = 17 (C-160 §2); rms 1e-8 has no V-cycle log."""
+Sources: code/results/c161/c161_tol.csv (C-160 §2); code/results/c242/c242_tol.csv (R-242 item 2: the logged ISO_A reruns to
+t = 60 of e8 (rms 1e-8), d2 (max 1e-7, resumed from its t = 47.9 restart) and b10 (rms 1e-10), which replace those rows; e8's and
+b10's drifts reproduce the c161 values to 15 digits); code/results/c163/ana_dtscan.csv (C-163 speed scan)."""
 import csv, sys
 sys.path.insert(0, __file__.rsplit('/', 1)[0])
 import paper_style as ps
 R = '/home/tlam/athenak_tde_project/code/results'
 tol = {r['arm']: r for r in csv.DictReader(open(f'{R}/c161/c161_tol.csv'))}
-SET = [('e8', 'rms\n$10^{-8}$'), ('d1', 'max\n$10^{-6}$'), ('b10', 'rms\n$10^{-10}$'), ('d2', 'max\n$10^{-7}$ (t=48)'),
+tol.update({r['arm']: r for r in csv.DictReader(open(f'{R}/c242/c242_tol.csv'))})
+SET = [('e8', 'rms\n$10^{-8}$'), ('d1', 'max\n$10^{-6}$'), ('b10', 'rms\n$10^{-10}$'), ('d2', 'max\n$10^{-7}$'),
        ('a', 'rms $10^{-8}$\n+1 V-cycle'), ('c', 'rms\n$10^{-11}$')]
-SKIP = {'b10': 0.94}
+SKIP = {}
 sc = {r['arm']: r for r in csv.DictReader(open(f'{R}/c163/ana_dtscan.csv'))}
 ps.setup()
 fig, axs = ps.plt.subplots(1, 2, figsize=(ps.W2, 2.5), gridspec_kw={'width_ratios': [1.25, 1]})

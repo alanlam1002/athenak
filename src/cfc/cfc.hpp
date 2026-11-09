@@ -31,6 +31,7 @@
 #include "mg_cfc_vector_poisson.hpp"
 #include "mg_cfc_conformal_factor.hpp"
 #include "mg_cfc_lapse.hpp"
+#include <memory>
 #include <vector>
 
 class MeshBlockPack;
@@ -39,6 +40,8 @@ class Driver;
 class MeshBoundaryValuesCC;
 
 namespace cfc {
+
+struct KerrTable;  // kerr_background.hpp
 
 class CFC {
  public:
@@ -724,6 +727,13 @@ class CFC {
   void ClearXFields();
   void InitRecvTailFields();
   void ClearTailFields();
+
+  // Kerr background (Paper II, wip/kerr, K-001 W2). <cfc> kerr_background (default
+  // false; the key is only read if present, so default runs are untouched). W3/W4 (the
+  // evolution coupling) are not implemented: when on, the tables are loaded and the
+  // background filled once as a smoke test, then the run stops.
+  bool kerr_background_ = false;
+  std::shared_ptr<KerrTable> kerr_table_;
 };
 
 }  // namespace cfc

@@ -14,6 +14,8 @@
 #include <initializer_list>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -35,6 +37,7 @@
 #include "geodesic-grid/spherical_grid.hpp"
 #include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
+#include "kerr_background.hpp"
 
 namespace cfc {
 
@@ -564,6 +567,50 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Kokkos::deep_copy(a0_sq, 0.0);
     Kokkos::deep_copy(u_beta0, 0.0);
     Kokkos::deep_copy(u_grad_ap6_0, 0.0);
+  }
+
+  // Kerr background (K-001 W2): read only if the key is present, so runs without it
+  // execute nothing here and add nothing to the parameter input.
+  if (pin->DoesParameterExist("cfc", "kerr_background")) {
+    kerr_background_ = pin->GetBoolean("cfc", "kerr_background");
+  }
+  if (kerr_background_) {
+    const std::string f2 = pin->GetString("cfc", "kerr_f2");
+    const std::string ks = pin->GetString("cfc", "kerr_kstab");
+    kerr_table_ = std::make_shared<KerrTable>();
+    try {
+      LoadKerrTable(f2, ks, *kerr_table_);
+    } catch (const std::exception &e) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << e.what() << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    Real xbh[3];
+    for (int a = 0; a < 3; ++a) { xbh[a] = puncture_enabled_ ? bg_xbh_[a] : xbh0_[a]; }
+    DvceArray5D<Real> kbg("kerr_bg_smoke", nmb, kKbgN, ncells3, ncells2, ncells1);
+    FillKerrBackground(pmbp, *kerr_table_, puncture_mass_, xbh, kbg);
+    Real psimin = 0.0, psimax = 0.0;
+    auto psi = Kokkos::subview(kbg, Kokkos::ALL, kKbgPsi0, Kokkos::ALL, Kokkos::ALL,
+                               Kokkos::ALL);
+    Kokkos::parallel_reduce("kerr_bg_smoke_min", Kokkos::MDRangePolicy<DevExeSpace,
+        Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, ncells3, ncells2, ncells1}),
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mn) {
+          mn = fmin(mn, psi(m, k, j, i));
+        }, Kokkos::Min<Real>(psimin));
+    Kokkos::parallel_reduce("kerr_bg_smoke_max", Kokkos::MDRangePolicy<DevExeSpace,
+        Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, ncells3, ncells2, ncells1}),
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mx) {
+          mx = fmax(mx, psi(m, k, j, i));
+        }, Kokkos::Max<Real>(psimax));
+    std::cout << std::setprecision(10) << "[kerr] rank " << global_variable::my_rank
+              << ": a = " << kerr_table_->a << ", r_min = " << kerr_table_->rmin
+              << ", nseg = " << kerr_table_->nseg << ", M = " << puncture_mass_
+              << ", psi0 in [" << psimin << ", " << psimax << "] on " << nmb
+              << " MeshBlocks" << std::endl;
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<cfc> kerr_background = true: the background loads (above), but its "
+              << "coupling to the evolution (W3/W4) is not implemented yet" << std::endl;
+    std::exit(EXIT_FAILURE);
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.

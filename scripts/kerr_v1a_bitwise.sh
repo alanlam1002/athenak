@@ -1,0 +1,92 @@
+#!/bin/bash
+# V1a (K-001): the a = 0 / option-off bitwise gate of wip/kerr against proj/tde.
+# Runs the B.1 deck (or any deck) for 40 cycles with per-rank checksums of cycles 38-39
+# (<job> checksum_mg, as the main session's G1 gates, c203_gate/t203g.sh) under two binaries
+# and compares chksum.*.txt and the .hst files byte for byte. Rerun after every step and
+# every rebase of wip/kerr.
+#
+#   kerr_v1a_bitwise.sh DECK REF_BIN NEW_BIN OUTDIR [NODEFILE] [EXTRA_KEY=VAL ...]
+#
+# Environment: the caller sets up the MPI/GPU environment (tde_mpi_env.sh, aurora_guard.sh).
+#   NP (12), PPN (12), CPU_BIND, WRAP (gpu_tile_compact.sh), NLIM (40), TIMEOUT (2400 s).
+# With two or more hosts in NODEFILE the two binaries run concurrently, one host each.
+# Exit code 0 = bitwise identical.
+set -u
+DECK=$(readlink -f "$1"); REF=$(readlink -f "$2"); NEW=$(readlink -f "$3"); OUT=$4
+NODEFILE=${5:-${PBS_NODEFILE:-}}; shift 5 2>/dev/null || shift $#
+NP=${NP:-12}; PPN=${PPN:-12}; NLIM=${NLIM:-40}
+CPU_BIND=${CPU_BIND:-"list:1-8:9-16:17-24:25-32:33-40:41-48:53-60:61-68:69-76:77-84:85-92:93-100"}
+WRAP=${WRAP:-/soft/tools/mpi_wrapper_utils/gpu_tile_compact.sh}
+mkdir -p "$OUT"; OUT=$(readlink -f "$OUT")
+# the gate deck: checksums, nlim, and only the history output (no restarts, no slices)
+python3 - "$DECK" "$OUT/gate.par" "$NLIM" "$@" <<'EOF'
+import re, sys
+src, dst, nlim, extra = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+out, blk, skip, pend = [], None, False, None
+for line in open(src):
+    m = re.match(r'^<([^>]+)>', line)
+    if m:
+        blk = m.group(1)
+        skip = False
+        if blk.startswith('output'):
+            skip = True          # decided at file_type below
+            pend = [line]
+            continue
+        out.append(line)
+        if blk == 'job':
+            out += ['checksum_mg = 1      # V1a gate (kerr_v1a_bitwise.sh)\n',
+                    'checksum_cycles = 2\n', 'checksum_start = %d\n' % (int(nlim) - 2)]
+        continue
+    if blk and blk.startswith('output'):
+        if skip and pend is not None:
+            pend.append(line)
+            if re.match(r'^\s*file_type\s*=\s*hst\b', line):
+                out += pend; pend = None; skip = False
+            continue
+        if not skip:
+            out.append(line)
+        continue
+    if blk == 'time' and re.match(r'^\s*nlim\s*=', line):
+        line = 'nlim = %s   # V1a gate\n' % nlim
+    out.append(line)
+for kv in extra:              # block/key=value
+    b, kv2 = kv.split('/', 1); k, v = kv2.split('=', 1)
+    txt = ''.join(out)
+    pat = re.compile(r'(^<%s>\s*\n)' % re.escape(b), re.M)
+    if not pat.search(txt):
+        sys.exit('no block <%s> in the deck' % b)
+    out = [pat.sub(r'\g<1>%s = %s\n' % (k, v), txt, count=1)]
+open(dst, 'w').write(''.join(out))
+EOF
+[ $? -eq 0 ] || exit 2
+mapfile -t HOSTS < <(sort -u "$NODEFILE")
+run() {  # tag binary host
+  local tag=$1 bin=$2 host=$3
+  rm -rf "$OUT/$tag"; mkdir -p "$OUT/$tag"; cd "$OUT/$tag"
+  echo "$tag start $(date -u +%FT%TZ) host $host bin $(sha256sum "$bin" | cut -c1-8)" >> "$OUT/runs.log"
+  timeout "${TIMEOUT:-2400}" mpiexec -np "$NP" -ppn "$PPN" --hosts "$host" --cpu-bind="$CPU_BIND" \
+    "$WRAP" "$bin" -d "$OUT/$tag" -i "$OUT/gate.par" > out.log 2> err.log
+  echo "$tag rc=$? $(grep -o 'cycle=[0-9]* time=[0-9.e+-]*' out.log | tail -1) end $(date -u +%FT%TZ)" >> "$OUT/runs.log"
+}
+if [ ${#HOSTS[@]} -ge 2 ]; then
+  ( run ref "$REF" "${HOSTS[0]}" ) & ( run new "$NEW" "${HOSTS[1]}" ) & wait
+else
+  run ref "$REF" "${HOSTS[0]}"; run new "$NEW" "${HOSTS[0]}"
+fi
+# compare
+cd "$OUT"
+nref=$(ls ref/chksum.*.txt 2>/dev/null | wc -l); nnew=$(ls new/chksum.*.txt 2>/dev/null | wc -l)
+bad=0
+[ "$nref" -gt 0 ] && [ "$nref" -eq "$nnew" ] || { echo "checksum files: ref $nref new $nnew"; bad=1; }
+for f in ref/chksum.*.txt; do
+  cmp -s "$f" "new/${f#ref/}" || { echo "DIFF ${f#ref/}"; bad=1; }
+done
+for f in $(cd ref && ls *.hst 2>/dev/null); do
+  cmp -s "ref/$f" "new/$f" || { echo "DIFF $f"; bad=1; }
+done
+nh=$(cd ref && ls *.hst 2>/dev/null | wc -l)
+[ "$nh" -gt 0 ] || { echo "no .hst files"; bad=1; }
+lc=$(grep -h -o 'cycle=[0-9]*' ref/out.log | tail -1)
+echo "V1a $( [ $bad -eq 0 ] && echo PASS || echo FAIL ): $nref checksum files, $nh hst files," \
+     "ref last $lc; ref $(sha256sum "$REF" | cut -c1-8) new $(sha256sum "$NEW" | cut -c1-8)" | tee -a "$OUT/runs.log"
+exit $bad

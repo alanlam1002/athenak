@@ -523,15 +523,31 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
         ps_, pm.g, gu, sdt, cons, B, R, ug, tol, maxit, fallback, prim, E, opt);
     nstat.Record(res.iterations, res.fallback, res.failed);
     if (i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
-      const Real rho = res.failed ? w0_(m, IDN, k, j, i) : prim[PRH]*mb;
-      const int bin = resistive::SigmaMHist::Bin(resistive::Dot(pm.g, B, B), rho);
-      hist.Add(bin, resistive::kHCells);
-      if (res.converged) hist.Add(bin, resistive::kHConverged);
-      if (res.retry) hist.Add(bin, resistive::kHRetry);
-      if (res.fallback) hist.Add(bin, resistive::kHFallback);
-      if (res.prestep_inadmissible) hist.Add(bin, resistive::kHPrestep);
-      if (res.floor) hist.Add(bin, resistive::kHFloor);
-      if (res.continued) hist.Add(bin, resistive::kHContinued);
+      // b^2/(rho h) from the solved state, or from the pre-solve w0, T and E~ if failed
+      Real hp[NPRIM], eh[3];
+      for (int n = 0; n < NPRIM; ++n) hp[n] = prim[n];
+      for (int a = 0; a < 3; ++a) eh[a] = E[a];
+      if (res.failed) {
+        hp[PRH] = w0_(m, IDN, k, j, i)/mb;
+        hp[PTM] = temp_(m, 0, k, j, i);
+        for (int n = 0; n < nscal; ++n) hp[PYF + n] = w0_(m, nmhd + n, k, j, i);
+        for (int a = 0; a < 3; ++a) {
+          hp[PVX + a] = ug[a];
+          eh[a] = R[a];
+        }
+      }
+      const Real rho = hp[PRH]*mb;
+      const Real rhoh = rho*ps_.GetEOS().GetEnthalpy(hp[PRH], hp[PTM], &hp[PYF]);
+      const int bs = resistive::SigmaMHist::Bin(resistive::Dot(pm.g, B, B), rho);
+      const int bm = resistive::SigmaMHist::Bin(
+          resistive::ComovingB2(pm.g, sg, &hp[PVX], eh, B), rhoh);
+      hist.Add(bs, bm, resistive::kHCells);
+      if (res.converged) hist.Add(bs, bm, resistive::kHConverged);
+      if (res.retry) hist.Add(bs, bm, resistive::kHRetry);
+      if (res.fallback) hist.Add(bs, bm, resistive::kHFallback);
+      if (res.prestep_inadmissible) hist.Add(bs, bm, resistive::kHPrestep);
+      if (res.floor) hist.Add(bs, bm, resistive::kHFloor);
+      if (res.continued) hist.Add(bs, bm, resistive::kHContinued);
     }
     Real u[3] = {ug[0], ug[1], ug[2]};
     if (!res.failed) {
@@ -676,9 +692,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
       res.cons_adjusted = true;
     }
     if (record && i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
-      const int bin = resistive::SigmaMHist::Bin(b2, prim[PRH]*mb);
-      if (ceil_on) hist.Add(bin, resistive::kHCeiling);
-      if (resistive::Dot(pm.g, E, E) > b2) hist.Add(bin, resistive::kHEgtB);
+      const Real rho = prim[PRH]*mb;
+      const Real rhoh = rho*ps_.GetEOS().GetEnthalpy(prim[PRH], prim[PTM], &prim[PYF]);
+      const int bs = resistive::SigmaMHist::Bin(b2, rho);
+      const int bm = resistive::SigmaMHist::Bin(
+          resistive::ComovingB2(pm.g, sg, &prim[PVX], E, B), rhoh);
+      if (ceil_on) hist.Add(bs, bm, resistive::kHCeiling);
+      if (resistive::Dot(pm.g, E, E) > b2) hist.Add(bs, bm, resistive::kHEgtB);
     }
     w0_(m, IDN, k, j, i) = prim[PRH]*mb;
     w0_(m, IVX, k, j, i) = prim[PVX];

@@ -12,6 +12,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -733,31 +734,67 @@ void ResistiveDynGR::AddImexSources(Driver *pdriver, int istage) {
 }
 
 //----------------------------------------------------------------------------------------
-//! K5-run histogram output: one row per sigma_M decade with the counts accumulated since
-//! the previous row (cells of the implicit solve, converged, C-retry, lagged-v fallback,
-//! pre-step inadmissible, sigma_M-ceiling activations, floored, E^2 > B^2, converged
-//! through the sigma dt continuation).
+//! K5-run histogram output: per binning (sigM = B^2/rho, magn = b^2/(rho h)), one row
+//! per decade with the counts accumulated since the previous row (cells of the implicit
+//! solve, converged, C-retry, lagged-v fallback, pre-step inadmissible, sigma_M-ceiling
+//! activations, floored, E^2 > B^2, converged through the sigma dt continuation).
 
 void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
   if (!(hist_dt > 0.0) || t_end < hist_next*(1.0 - 1.0e-12)) return;
   while (hist_next <= t_end*(1.0 + 1.0e-12)) hist_next += hist_dt;
-  int64_t h[kHistBins][kHNCounters];
+  int64_t h[kHistBinnings][kHistBins][kHNCounters];
   hist.Read(h);
   hist.Reset();
   if (global_variable::my_rank != 0) return;
+  // a new run overwrites, a restart appends (header only if the file is new)
   FILE *fp = std::fopen(hist_fname.c_str(), hist_header ? "a" : "w");
   if (fp == nullptr) return;
-  if (!hist_header) {
-    std::fprintf(fp, "# time cycle bin log10_sigmaM_lo cells converged retry fallback "
+  std::fseek(fp, 0, SEEK_END);
+  if (std::ftell(fp) == 0) {
+    std::fprintf(fp, "# binning time cycle bin log10_lo cells converged retry fallback "
                      "prestep_inadmissible ceiling floor e_gt_b continued\n");
-    hist_header = true;
   }
-  for (int b = 0; b < kHistBins; ++b) {
-    std::fprintf(fp, "%.10e %d %d %d", t_end, cycle, b, (b == 0) ? -99 : b - 3);
-    for (int c = 0; c < kHNCounters; ++c) std::fprintf(fp, " %" PRId64, h[b][c]);
-    std::fprintf(fp, "\n");
+  hist_header = true;
+  const char *label[kHistBinnings] = {"sigM", "magn"};
+  for (int s = 0; s < kHistBinnings; ++s) {
+    for (int b = 0; b < kHistBins; ++b) {
+      std::fprintf(fp, "%s %.10e %d %d %d", label[s], t_end, cycle, b,
+                   (b == 0) ? -99 : b - 3);
+      for (int c = 0; c < kHNCounters; ++c) std::fprintf(fp, " %" PRId64, h[s][b][c]);
+      std::fprintf(fp, "\n");
+    }
   }
   std::fclose(fp);
+}
+
+//----------------------------------------------------------------------------------------
+//! Restart state: hist_dt, hist_next, Newton counters, pending histogram counts.
+
+void ResistiveDynGR::PackRestartState(char *buf) const {
+  int64_t ns[kNewtonNCounters];
+  int64_t h[kHistBinnings][kHistBins][kHNCounters];
+  newton.Read(ns);
+  hist.Read(h);
+  std::size_t o = 0;
+  std::memcpy(buf + o, &hist_dt, sizeof(Real)); o += sizeof(Real);
+  std::memcpy(buf + o, &hist_next, sizeof(Real)); o += sizeof(Real);
+  std::memcpy(buf + o, ns, sizeof(ns)); o += sizeof(ns);
+  std::memcpy(buf + o, h, sizeof(h));
+}
+
+void ResistiveDynGR::UnpackRestartState(const char *buf) {
+  int64_t ns[kNewtonNCounters];
+  int64_t h[kHistBinnings][kHistBins][kHNCounters];
+  Real dt_rst, next_rst;
+  std::size_t o = 0;
+  std::memcpy(&dt_rst, buf + o, sizeof(Real)); o += sizeof(Real);
+  std::memcpy(&next_rst, buf + o, sizeof(Real)); o += sizeof(Real);
+  std::memcpy(ns, buf + o, sizeof(ns)); o += sizeof(ns);
+  std::memcpy(h, buf + o, sizeof(h));
+  newton.Load(ns);
+  hist.Load(h);
+  if (dt_rst == hist_dt) hist_next = next_rst;
+  hist_header = true;  // continue the run's rhist file
 }
 
 }  // namespace resistive

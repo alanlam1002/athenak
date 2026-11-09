@@ -74,6 +74,23 @@ void IdealE(const Real g[NSPMETRIC], const Real sg, const Real v[3], const Real 
   E[0] = -E[0]; E[1] = -E[1]; E[2] = -E[2];
 }
 
+// Comoving b^2 (b^mu = -*F^{mu nu} u_nu) from the Eulerian E^i, B^i and u^i = W v^i:
+// b^2 = W^2 [(B - v x E)^2 - (v.B)^2], (v x E)^i = eps^ijk v_j E_k. Ideal limit:
+// B^2/W^2 + (v.B)^2.
+KOKKOS_INLINE_FUNCTION
+Real ComovingB2(const Real g[NSPMETRIC], const Real sg, const Real u[3], const Real E[3],
+                const Real B[3]) {
+  const Real W = sqrt(1.0 + Dot(g, u, u));
+  const Real v[3] = {u[0]/W, u[1]/W, u[2]/W};
+  Real vd[3], Ed[3], vxe[3];
+  Lower(g, v, vd);
+  Lower(g, E, Ed);
+  CrossUp(sg, vd, Ed, vxe);
+  const Real d[3] = {B[0] - vxe[0], B[1] - vxe[1], B[2] - vxe[2]};
+  const Real vb = vd[0]*B[0] + vd[1]*B[1] + vd[2]*B[2];
+  return W*W*(Dot(g, d, d) - vb*vb);
+}
+
 // Undensitised EM contributions: S^EM_i = eps_ijk E^j B^k, calE^EM = (E^2+B^2)/2.
 KOKKOS_INLINE_FUNCTION
 void EMParts(const Real g[NSPMETRIC], const Real sg, const Real E[3], const Real B[3],

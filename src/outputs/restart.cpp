@@ -16,6 +16,7 @@
 #include <sstream>
 #include <string>
 #include <utility> // make_pair
+#include <vector>
 
 #include "athena.hpp"
 #include "coordinates/cell_locations.hpp"
@@ -281,6 +282,12 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   }
 
   //--- STEP 3.  Root process writes internal state of objects that require it
+  // resistive counters are MPI-reduced first (collective)
+  std::vector<char> resist_state;
+  if (presist != nullptr) {
+    resist_state.resize(resistive::ResistiveDynGR::RestartStateSize());
+    presist->PackRestartState(resist_state.data());
+  }
   if (global_variable::my_rank == 0 || single_file_per_rank) {
     // store z4c information
     if (pz4c != nullptr) {
@@ -297,6 +304,10 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     // turbulence driver internal RNG
     if (pturb != nullptr) {
       resfile.Write_any_type(&(pturb->rstate), sizeof(RNG_State), "byte",
+                             single_file_per_rank);
+    }
+    if (presist != nullptr) {
+      resfile.Write_any_type(resist_state.data(), resist_state.size(), "byte",
                              single_file_per_rank);
     }
   }
@@ -345,6 +356,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   IOWrapperSizeT step3size = 3*nco*sizeof(Real);
   if (pz4c != nullptr) step3size += sizeof(Real);
   if (pturb != nullptr) step3size += sizeof(RNG_State);
+  step3size += resist_state.size();
 
   // write cell-centered variables in parallel
   IOWrapperSizeT offset_myrank = (step1size + step2size + step3size

@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "athena.hpp"
+#include "globals.hpp"
 #include "mesh/mesh.hpp"
 #include "dyn_grmhd/resistive/resistive_diagnostics.hpp"
 
@@ -157,14 +158,35 @@ void NewtonStats::Read(int64_t out[kNewtonNCounters]) const {
 }
 
 //----------------------------------------------------------------------------------------
-void SigmaMHist::Read(int64_t out[kHistBins][kHNCounters]) const {
+void NewtonStats::Load(const int64_t in[kNewtonNCounters]) const {
+  auto h = Kokkos::create_mirror_view(d);
+  for (int n = 0; n < kNewtonNCounters; ++n) {
+    h(n) = (global_variable::my_rank == 0) ? in[n] : 0;
+  }
+  Kokkos::deep_copy(d, h);
+}
+
+//----------------------------------------------------------------------------------------
+void SigmaMHist::Read(int64_t out[kHistBinnings][kHistBins][kHNCounters]) const {
   auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), d);
-  for (int b = 0; b < kHistBins; ++b)
-    for (int c = 0; c < kHNCounters; ++c) out[b][c] = h(b, c);
+  for (int s = 0; s < kHistBinnings; ++s)
+    for (int b = 0; b < kHistBins; ++b)
+      for (int c = 0; c < kHNCounters; ++c) out[s][b][c] = h(s, b, c);
 #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, &out[0][0], kHistBins*kHNCounters, MPI_INT64_T, MPI_SUM,
-                MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &out[0][0][0], kHistBinnings*kHistBins*kHNCounters,
+                MPI_INT64_T, MPI_SUM, MPI_COMM_WORLD);
 #endif
+}
+
+//----------------------------------------------------------------------------------------
+void SigmaMHist::Load(const int64_t in[kHistBinnings][kHistBins][kHNCounters]) const {
+  auto h = Kokkos::create_mirror_view(d);
+  for (int s = 0; s < kHistBinnings; ++s)
+    for (int b = 0; b < kHistBins; ++b)
+      for (int c = 0; c < kHNCounters; ++c) {
+        h(s, b, c) = (global_variable::my_rank == 0) ? in[s][b][c] : 0;
+      }
+  Kokkos::deep_copy(d, h);
 }
 
 }  // namespace resistive

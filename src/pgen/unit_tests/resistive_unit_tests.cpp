@@ -305,6 +305,37 @@ PS MakeSolver() {
   return ps;
 }
 
+// K1(d): comoving b^2 (K5-run b^2/(rho h) binning). Ideal limit E = -v x B gives
+// B^2/W^2 + (v.B)^2; with a random E the invariant b^2 - e^2 = B^2 - E^2 holds, where
+// e^2 = W^2 [(E + v x B)^2 - (v.E)^2] is the comoving electric field.
+KOKKOS_INLINE_FUNCTION
+Real K1ComovingB2Trial(const int t) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  const Real sg = SqrtDet(r.g);
+  const Real W = sqrt(1.0 + Dot(r.g, r.wv, r.wv));
+  const Real v[3] = {r.wv[0]/W, r.wv[1]/W, r.wv[2]/W};
+  const Real *B = r.Bcode;
+  Real Eid[3];
+  IdealE(r.g, sg, v, B, Eid);
+  const Real vb = Dot(r.g, v, B);
+  const Real b2id = Dot(r.g, B, B)/(W*W) + vb*vb;
+  Real err = RelErr(ComovingB2(r.g, sg, r.wv, Eid, B), b2id, b2id);
+  const Real *E = r.Ernd;
+  Real vd[3], Bd[3], vxb[3];
+  Lower(r.g, v, vd);
+  Lower(r.g, B, Bd);
+  CrossUp(sg, vd, Bd, vxb);
+  const Real ep[3] = {E[0] + vxb[0], E[1] + vxb[1], E[2] + vxb[2]};
+  const Real ve = Dot(r.g, v, E);
+  const Real e2 = W*W*(Dot(r.g, ep, ep) - ve*ve);
+  const Real inv = Dot(r.g, B, B) - Dot(r.g, E, E);
+  const Real scale = Dot(r.g, B, B) + Dot(r.g, E, E);
+  err = fmax(err, RelErr(ComovingB2(r.g, sg, r.wv, E, B) - e2, inv, scale*W*W));
+  return err;
+}
+
 template <class ExecSpace>
 void RunK1(const std::string &where, const int ntrial) {
   PS ps = MakeSolver();
@@ -312,6 +343,9 @@ void RunK1(const std::string &where, const int ntrial) {
   e = MaxOverTrials<ExecSpace>("K1a", ntrial,
       KOKKOS_LAMBDA(const int t) { return K1IdealLimitTrial(t); });
   Report("K1a ideal limit vs SingleP2C [" + where + "]", e, 1.0e-12);
+  e = MaxOverTrials<ExecSpace>("K1d", ntrial,
+      KOKKOS_LAMBDA(const int t) { return K1ComovingB2Trial(t); });
+  Report("K1d comoving b^2: ideal limit, b^2-e^2 invariant [" + where + "]", e, 1.0e-12);
   e = MaxOverTrials<ExecSpace>("K1b", ntrial,
       KOKKOS_LAMBDA(const int t) { return K1FluidVsPSTrial(ps, t); });
   Report("K1b fluid part vs PrimToCon [" + where + "]", e, 1.0e-12);

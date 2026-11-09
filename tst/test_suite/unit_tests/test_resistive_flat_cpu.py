@@ -620,12 +620,24 @@ _KH_DENSITY = ["resistive_sigma_model = density", "resistive_sigma_in = 1.0e5",
                "resistive_sigma_width = 0.5", "resistive_hist_dt = 0.5"]
 
 
-def _run_kh(name, mhd_keys, flags=()):
+def _rhist(path):
+    """rhist rows (time cycle bin log10_lo cells ... continued) keyed by binning."""
+    rows = {"sigM": [], "magn": []}
+    for ln in open(path):
+        if not ln.startswith("#"):
+            f = ln.split()
+            rows[f[0]].append(list(map(float, f[1:])))
+    return rows
+
+
+def _run_kh(name, mhd_keys, flags=(), extra=()):
     """KH layer (T-S2 setup) with extra <mhd> keys: they are spliced into the <mhd>
-    block of inputs/resistive_kh.athinput (new keys cannot be set on the command line)."""
+    block of inputs/resistive_kh.athinput (new keys cannot be set on the command line);
+    extra lines are appended. Returns .resist.dat, sigM rows, user hst, magn rows."""
     with open("inputs/resistive_kh.athinput") as f:
         text = f.read()
     text = text.replace("<mhd>\n", "<mhd>\n" + "".join(k + "\n" for k in mhd_keys))
+    text += "".join(k + "\n" for k in extra)
     inp = "resist_" + name + "_kh.athinput"
     with open(inp, "w") as f:
         f.write(text)
@@ -633,12 +645,11 @@ def _run_kh(name, mhd_keys, flags=()):
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           universal_newlines=True)
     _check(proc.stdout, proc.returncode)
-    rows = [list(map(float, ln.split())) for ln in open(name + ".rhist.txt")
-            if not ln.startswith("#")]
+    rows = _rhist(name + ".rhist.txt")
     hst = [list(map(float, ln.split())) for ln in open(name + ".user.hst")
            if not ln.startswith("#")]
     os.remove(name + ".user.hst")
-    return _dat(name), rows, hst
+    return _dat(name), rows["sigM"], hst, rows["magn"]
 
 
 def test_kh_sigma_rho_histogram():
@@ -648,26 +659,53 @@ def test_kh_sigma_rho_histogram():
     and forms g (c2p) and f (momentum) give the same KH amplitude."""
     dvy = []
     for form in ("c2p", "momentum"):
-        r, rows, hst = _run_kh("rt_kh" + form, _KH_DENSITY +
-                               ["resistive_implicit_residual = " + form])
+        r, rows, hst, magn = _run_kh("rt_kh" + form, _KH_DENSITY +
+                                     ["resistive_implicit_residual = " + form])
         assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
         assert r["max_divb"] < 1e-12 and abs(r["charge"]) < 1e-14
         cells = sum(x[4] for x in rows)
         assert cells == sum(x[5] for x in rows) and cells > 0
         assert sum(x[6] + x[7] + x[12] for x in rows) == 0     # retry, fallback, cont.
         assert len({x[0] for x in rows}) == 2                   # t = 0.5, 1.0
+        # b^2/(rho h) binning (07 v2.5): same events, different bins
+        for c in range(4, 13):
+            assert sum(x[c] for x in magn) == sum(x[c] for x in rows), c
+        assert [x[:4] for x in magn] == [x[:4] for x in rows]
+        assert sum(x[4] for x in magn if x[2] >= 1) > 0
         assert abs(hst[-1][6] - r["max_divb"]) <= 1e-5*r["max_divb"]  # divb (07 v2.4)
         assert max(x[6] for x in hst) < 1e-12
         dvy.append(hst[-1][4])
     assert abs(dvy[1]/dvy[0] - 1.0) < 1e-6, dvy
 
 
+
+def test_counters_across_restart():
+    """07 v2.5 4.1: Newton counters, pending histogram counts and the next histogram
+    time survive a restart link; the restarted run reports what an uninterrupted run
+    reports (rhist rows after the restart, cumulative Newton counters)."""
+    keys = [k for k in _KH_DENSITY if "hist_dt" not in k] + ["resistive_hist_dt = 0.4"]
+    rst = ["<output9>", "file_type = rst", "dt = 0.5"]
+    r, rows, _, magn = _run_kh("rt_khrs", keys, extra=rst)
+    os.makedirs("rt_rr", exist_ok=True)
+    proc = subprocess.run(_cmd("rt_khrs", restart=os.path.abspath("rst/rt_khrs.00001.rst")),
+                          stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          universal_newlines=True, cwd="rt_rr")
+    _check(proc.stdout, proc.returncode)
+    rr = _dat("rt_khrs", cwd="rt_rr")
+    for k in ("newton_cells", "newton_iter_sum", "newton_iter_max", "newton_fallback",
+              "newton_fail"):
+        assert rr[k] == r[k], (k, rr[k], r[k])
+    h = _rhist("rt_rr/rt_khrs.rhist.txt")
+    assert open("rt_rr/rt_khrs.rhist.txt").readline().startswith("# binning")
+    assert h["sigM"] == [x for x in rows if x[0] > 0.5] and len(h["sigM"]) == 8
+    assert h["magn"] == [x for x in magn if x[0] > 0.5]
+
 def test_sigma_max_ceiling():
     """sigma_max (07 v2.2 3.2) caps b^2/rho at 50 on the KH layer (initially ~200 in the
     light fluid): ceiling events are counted, no cell is left above 10^2, and the run
     keeps div B and charge conservation."""
-    r, rows, _ = _run_kh("rt_khcap", _KH_DENSITY + ["sigma_max = 50.0"],
-                         ["time/tlim=0.5"])
+    r, rows, _, _ = _run_kh("rt_khcap", _KH_DENSITY + ["sigma_max = 50.0"],
+                            ["time/tlim=0.5"])
     assert r["newton_fail"] == 0 and r["newton_fallback"] == 0
     assert r["max_divb"] < 1e-12 and abs(r["charge"]) < 1e-14
     assert sum(x[9] for x in rows) > 0

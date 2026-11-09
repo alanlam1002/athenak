@@ -29,6 +29,7 @@
 //! refinement only (no AMR), imex2/imex3. Unsupported configurations stop with a fatal
 //! error.
 
+#include <cstddef>
 #include <string>
 
 #include "athena.hpp"
@@ -120,6 +121,15 @@ class ResistiveDynGR {
   void FreezeFile(bool write);
   // Writes and resets the K5-run histogram when t_end reaches the next output time.
   void MaybeWriteHist(Real t_end, int cycle);
+  // Restart-file state (07 v2.5 §4.1): Newton counters, pending histogram counts and the
+  // next histogram time, MPI-reduced, so counters accumulate across restart links.
+  // Pack is collective; the restart file stores the blob after the root-process state.
+  static constexpr std::size_t RestartStateSize() {
+    return 2*sizeof(Real) + sizeof(int64_t)*(kNewtonNCounters +
+                                             kHistBinnings*kHistBins*kHNCounters);
+  }
+  void PackRestartState(char *buf) const;
+  void UnpackRestartState(const char *buf);
 
  private:
   MeshBlockPack *pmy_pack;

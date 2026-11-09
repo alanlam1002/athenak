@@ -11,6 +11,7 @@
 #include <iostream>
 #include <string>
 #include <utility>
+#include <vector>
 #include <algorithm>
 #include <cstdio>
 
@@ -247,6 +248,26 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     }
 #endif
     std::memcpy(&(pturb->rstate), &(rng_data[0]), sizeof(RNG_State));
+  }
+
+  if (presist != nullptr) {
+    // resistive counters and histogram state (written by the root process)
+    const std::size_t rsize = resistive::ResistiveDynGR::RestartStateSize();
+    std::vector<char> rdata(rsize);
+    if (global_variable::my_rank == 0 || single_file_per_rank) {
+      if (resfile.Read_bytes(rdata.data(), 1, rsize, single_file_per_rank) != rsize) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "resistive state size read from restart file is "
+                  << "incorrect, restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    if (!single_file_per_rank) {
+      MPI_Bcast(rdata.data(), rsize, MPI_CHAR, 0, MPI_COMM_WORLD);
+    }
+#endif
+    presist->UnpackRestartState(rdata.data());
   }
 
   // root process reads size of CC and FC data arrays from restart file

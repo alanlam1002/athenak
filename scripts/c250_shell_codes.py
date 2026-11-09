@@ -2,6 +2,8 @@
 """c250 (R-247 item 1 report): DE branch codes and K in the star's outer shells, per dediag_3d dump paired with the prim_3d dump
 at the same time (same mesh, checked). Centre = rho-weighted centroid of rho >= 0.01 rho_c (as c206_outflow.py); d = |x - centre|.
 Shells (gas rho > 1e3 rho_atm, as c206): S1 0.7 <= d/R* < 1.0, S2 1.0 <= d/R* < 1.5, S3 d/R* >= 1.5.
+Also a 'core' row: rho >= 0.1 rho_c (as c160_census's core_K band). Runs without dediag_3d (dual_energy off) use the prim_3d dumps
+alone, with the code columns NaN.
 Per shell: mass (M*), mass shares of branch codes 0, 11-18 (18 = resync gate held, wip/resync-gate 73389902), mass-weighted K/K0
 and the share with K/K0 > 1.05, mass-weighted radial velocity.
     c250_shell_codes.py OUT.csv RUNDIR [--tmax T]"""
@@ -19,11 +21,15 @@ pf = {}
 for f in glob.glob(f'{a.run}/bin/*.prim_3d.0*.bin'):
     pf[round(bc.read_binary(f)['time'], 6)] = f
 rows = []
-for fd in sorted(glob.glob(f'{a.run}/bin/*.dediag_3d.*.bin')):
-    Dg = bc.read_binary(fd); t = round(Dg['time'], 6)
+dd = sorted(glob.glob(f'{a.run}/bin/*.dediag_3d.*.bin'))
+for fd in (dd if dd else [pf[k] for k in sorted(pf)]):
+    Dg = bc.read_binary(fd) if dd else None
+    t = round(Dg['time'], 6) if dd else round(bc.read_binary(fd)['time'], 6)
     if t > a.tmax or t not in pf:
         continue
     P = bc.read_binary(pf[t])
+    if Dg is None:
+        Dg = P
     g = np.asarray(Dg['mb_geometry'], float); n = Dg['nx1_out_mb']
     if not np.array_equal(g, np.asarray(P['mb_geometry'], float)):
         print(f't={t}: mesh differs, skipped', flush=True); continue
@@ -35,7 +41,7 @@ for fd in sorted(glob.glob(f'{a.run}/bin/*.dediag_3d.*.bin')):
     X, Y, Z, V = map(np.concatenate, (X, Y, Z, V))
     cat = lambda S, k: np.concatenate([np.asarray(S['mb_data'][k][q]).ravel() for q in range(len(g))]).astype(float)
     rho, p = cat(P, 'dens'), cat(P, 'press'); vx, vy, vz = cat(P, 'velx'), cat(P, 'vely'), cat(P, 'velz')
-    br = cat(Dg, 'de_branch').round().astype(int)
+    br = cat(Dg, 'de_branch').round().astype(int) if dd else np.full(len(V), -1)
     m = rho*V; d0 = rho >= 0.01*RC
     cx, cy, cz = (np.average(w[d0], weights=m[d0]) for w in (X, Y, Z))
     vcx, vcy, vcz = (np.average(w[d0], weights=m[d0]) for w in (vx, vy, vz))
@@ -43,11 +49,11 @@ for fd in sorted(glob.glob(f'{a.run}/bin/*.dediag_3d.*.bin')):
     gas = rho > 1e3*1e-10*RC
     K = p/np.maximum(rho, 1e-300)**GAM/K0
     vr = ((vx-vcx)*dx+(vy-vcy)*dy+(vz-vcz)*dz)/np.maximum(d*RS, 1e-12)
-    for sh, s in (('S1', gas & (d >= 0.7) & (d < 1.0)), ('S2', gas & (d >= 1.0) & (d < 1.5)), ('S3', gas & (d >= 1.5))):
+    for sh, s in (('core', rho >= 0.1*RC), ('S1', gas & (d >= 0.7) & (d < 1.0)), ('S2', gas & (d >= 1.0) & (d < 1.5)), ('S3', gas & (d >= 1.5))):
         M = m[s].sum(); row = dict(t=t, shell=sh, M=M/MS)
         for k in CODES:
-            row[f'c{k}'] = m[s & (br == k)].sum()/M if M > 0 else np.nan
-        row['other'] = m[s & ~np.isin(br, CODES)].sum()/M if M > 0 else np.nan
+            row[f'c{k}'] = m[s & (br == k)].sum()/M if (M > 0 and dd) else np.nan
+        row['other'] = m[s & ~np.isin(br, CODES)].sum()/M if (M > 0 and dd) else np.nan
         row['K'] = np.average(K[s], weights=m[s]) if M > 0 else np.nan
         row['fK105'] = m[s & (K > 1.05)].sum()/M if M > 0 else np.nan
         row['vr'] = np.average(vr[s], weights=m[s]) if M > 0 else np.nan

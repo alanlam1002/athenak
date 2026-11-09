@@ -251,7 +251,24 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
   }
 
   if (presist != nullptr) {
-    // resistive counters and histogram state (written by the root process)
+    // resistive counters and histogram state (written by the root process): format
+    // header first, checked before the payload is read (07 v2.6 R1)
+    const std::size_t hsize = resistive::ResistiveDynGR::RestartHeaderSize();
+    std::vector<char> rhdr(hsize);
+    if (global_variable::my_rank == 0 || single_file_per_rank) {
+      if (resfile.Read_bytes(rhdr.data(), 1, hsize, single_file_per_rank) != hsize) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "resistive restart header could not be read, "
+                  << "restart file is broken." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
+#if MPI_PARALLEL_ENABLED
+    if (!single_file_per_rank) {
+      MPI_Bcast(rhdr.data(), hsize, MPI_CHAR, 0, MPI_COMM_WORLD);
+    }
+#endif
+    resistive::ResistiveDynGR::CheckRestartHeader(rhdr.data());
     const std::size_t rsize = resistive::ResistiveDynGR::RestartStateSize();
     std::vector<char> rdata(rsize);
     if (global_variable::my_rank == 0 || single_file_per_rank) {

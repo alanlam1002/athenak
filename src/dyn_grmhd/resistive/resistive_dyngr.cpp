@@ -770,11 +770,34 @@ void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
 //----------------------------------------------------------------------------------------
 //! Restart state: hist_dt, hist_next, Newton counters, pending histogram counts.
 
+void ResistiveDynGR::CheckRestartHeader(const char *hdr) {
+  uint32_t ver, size;
+  std::memcpy(&ver, hdr + 8, sizeof(uint32_t));
+  std::memcpy(&size, hdr + 8 + sizeof(uint32_t), sizeof(uint32_t));
+  if (std::memcmp(hdr, kRestartMagic, 8) != 0) {
+    Fatal(__LINE__, "resistive restart block has no format tag: the restart file was "
+          "written by a binary older than the R1 tag (07 v2.6) or without "
+          "<mhd> resistive = true; it cannot be read by this binary.");
+  }
+  if (ver != kRestartVersion || size != RestartStateSize()) {
+    Fatal(__LINE__, "resistive restart block format mismatch: file version " +
+          std::to_string(ver) + " (" + std::to_string(size) + " bytes), this binary "
+          "expects version " + std::to_string(kRestartVersion) + " (" +
+          std::to_string(RestartStateSize()) + " bytes).");
+  }
+}
+
 void ResistiveDynGR::PackRestartState(char *buf) const {
   int64_t ns[kNewtonNCounters];
   int64_t h[kHistBinnings][kHistBins][kHNCounters];
   newton.Read(ns);
   hist.Read(h);
+  const uint32_t ver = kRestartVersion;
+  const uint32_t size = static_cast<uint32_t>(RestartStateSize());
+  std::memcpy(buf, kRestartMagic, 8);
+  std::memcpy(buf + 8, &ver, sizeof(uint32_t));
+  std::memcpy(buf + 8 + sizeof(uint32_t), &size, sizeof(uint32_t));
+  buf += RestartHeaderSize();
   std::size_t o = 0;
   std::memcpy(buf + o, &hist_dt, sizeof(Real)); o += sizeof(Real);
   std::memcpy(buf + o, &hist_next, sizeof(Real)); o += sizeof(Real);

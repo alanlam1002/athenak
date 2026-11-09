@@ -297,6 +297,30 @@ def test_restart_bitwise():
     assert _state("rt_c5") == _state("rt_rr/rt_c5")
 
 
+def test_restart_format_tag():
+    """07 v2.6 R1: the resistive restart block carries a format tag; an untagged block
+    (older binary) or a different version aborts with a clear message."""
+    keys = ["<output1>", "file_type = rst", "dt = 0.125"]
+    flags = _OT + ["meshblock/nx1=32", "meshblock/nx2=32", "mhd/resistive_sigma=100"]
+    _run("rt_tag", keys, flags)
+    with open("rst/rt_tag.00001.rst", "rb") as f:
+        data = f.read()
+    assert data.count(b"ATKRESIS") == 1
+    i = data.index(b"ATKRESIS")
+    os.makedirs("rt_tag", exist_ok=True)
+    for name, blob, msg in (
+            ("untag", data[:i] + b"\0"*8 + data[i+8:], "has no format tag"),
+            ("ver", data[:i+8] + (99).to_bytes(4, "little") + data[i+12:],
+             "format mismatch: file version 99")):
+        path = os.path.abspath("rt_tag/%s.rst" % name)
+        with open(path, "wb") as f:
+            f.write(blob)
+        proc = subprocess.run(_cmd("rt_tag", restart=path), cwd="rt_tag",
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True)
+        assert proc.returncode != 0 and msg in proc.stdout, proc.stdout[-2000:]
+
+
 # GR1 (07 step 2): constant sheared/boosted flat metric, alpha = 0.8, beta = (0.3, -0.2,
 # 0.1), gamma = M^T M with M lower triangular (all off-diagonal gamma_ij nonzero)
 _GR1 = ["gr1 = true", "alpha0 = 0.8", "beta1 = 0.3", "beta2 = -0.2", "beta3 = 0.1",

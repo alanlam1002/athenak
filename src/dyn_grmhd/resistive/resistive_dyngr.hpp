@@ -30,6 +30,7 @@
 //! error.
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "athena.hpp"
@@ -124,12 +125,23 @@ class ResistiveDynGR {
   // Restart-file state (07 v2.5 §4.1): Newton counters, pending histogram counts and the
   // next histogram time, MPI-reduced, so counters accumulate across restart links.
   // Pack is collective; the restart file stores the blob after the root-process state.
+  // The blob starts with a format header (07 v2.6 R1): 8-byte magic, uint32 version,
+  // uint32 payload size. Bump kRestartVersion whenever the payload layout changes.
+  static constexpr char kRestartMagic[9] = "ATKRESIS";
+  static constexpr uint32_t kRestartVersion = 1;
+  static constexpr std::size_t RestartHeaderSize() { return 8 + 2*sizeof(uint32_t); }
   static constexpr std::size_t RestartStateSize() {
     return 2*sizeof(Real) + sizeof(int64_t)*(kNewtonNCounters +
                                              kHistBinnings*kHistBins*kHNCounters);
   }
-  void PackRestartState(char *buf) const;
-  void UnpackRestartState(const char *buf);
+  // header + payload, as written to the restart file
+  static constexpr std::size_t RestartBlockSize() {
+    return RestartHeaderSize() + RestartStateSize();
+  }
+  // Aborts with a clear message unless the header matches this binary's format.
+  static void CheckRestartHeader(const char *hdr);
+  void PackRestartState(char *buf) const;      // writes header + payload
+  void UnpackRestartState(const char *buf);    // reads the payload (header checked first)
 
  private:
   MeshBlockPack *pmy_pack;

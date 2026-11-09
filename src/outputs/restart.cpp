@@ -285,7 +285,7 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // resistive counters are MPI-reduced first (collective)
   std::vector<char> resist_state;
   if (presist != nullptr) {
-    resist_state.resize(resistive::ResistiveDynGR::RestartStateSize());
+    resist_state.resize(resistive::ResistiveDynGR::RestartBlockSize());
     presist->PackRestartState(resist_state.data());
   }
   if (global_variable::my_rank == 0 || single_file_per_rank) {

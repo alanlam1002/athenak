@@ -513,6 +513,37 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       std::exit(EXIT_FAILURE);
     }
   }
+  // S5 (cfc.hpp): the automatic phase-out; read without GetOrAdd (absent = off, unchanged)
+  if (pin->DoesParameterExist("cfc", "phaseout_time")) {
+    ph_T_ = pin->GetReal("cfc", "phaseout_time");
+    if (pin->DoesParameterExist("cfc", "phaseout_selfgrav_frac")) {
+      ph_sg_frac_ = pin->GetReal("cfc", "phaseout_selfgrav_frac");
+    }
+    if (pin->DoesParameterExist("cfc", "phaseout_guard_time")) {
+      ph_guard_T_ = pin->GetReal("cfc", "phaseout_guard_time");
+    }
+    const bool rel = pin->DoesParameterExist("cfc", "frame_track_rel") &&
+                     pin->GetReal("cfc", "frame_track_rel") > 0.0;
+    const bool lost = pin->DoesParameterExist("cfc", "frame_lost_lambda") &&
+                      pin->GetReal("cfc", "frame_lost_lambda") > 0.0;
+    if (!(ph_T_ > 0.0) || !rel || !lost || rs_on_ || ph_sg_frac_ < 0.0 ||
+        !(ph_guard_T_ >= 0.0)) {
+      std::cout << "### FATAL ERROR in CFC: <cfc> phaseout_time > 0 needs frame_track_rel > 0 "
+                << "and frame_lost_lambda > 0, excludes residual_scale*, and needs "
+                << "phaseout_selfgrav_frac >= 0, phaseout_guard_time >= 0" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pin->DoesParameterExist("cfc", "frame_ctrl_ph_fired")) {   // restored state
+      ph_fired_ = pin->GetBoolean("cfc", "frame_ctrl_ph_fired");
+      ph_guard_t0_ = pin->GetReal("cfc", "frame_ctrl_ph_guard_t0");
+      if (ph_fired_) {
+        rs_on_ = rs_ramp_ = true;
+        rs_t0_ = pin->GetReal("cfc", "frame_ctrl_ph_t0");
+        rs_t1_ = rs_t0_ + ph_T_;
+        rs_f0_ = 1.0; rs_f1_ = 0.0;
+      }
+    }
+  }
   if (rs_on_) {
     rs_log_ = pin->DoesParameterExist("cfc", "residual_scale_log_interval") ?
               pin->GetInteger("cfc", "residual_scale_log_interval") : 10;
@@ -3364,6 +3395,32 @@ void CFC::FrameControlStep(Real t_new) {
     for (int a = 0; a < 3; ++a) { fc_xd_[a] = f*fc_xdsw_[a]; fc_meas_[a] = 0.0; }
     fc_meas_[3] = 0.0; fc_meas_[4] = 0.0;
     ApplyFrameShiftUpdate(t_new);
+    // S5 (cfc.hpp): armed once the lost-star ramp is complete; the optional self-gravity
+    // guard; on firing, the residual_scale ramp f: 1 -> 0 over [t_new, t_new + T_ph]
+    if (ph_T_ > 0.0 && !ph_fired_ && t_new >= fc_tsw_ + fc_ramp_T_) {
+      bool go = true;
+      if (ph_sg_frac_ > 0.0) {
+        MeasureSelfGravShare(&ph_sg_share_);
+        if (ph_sg_share_ < ph_sg_frac_) {
+          if (ph_guard_t0_ < 0.0) ph_guard_t0_ = t_new;
+        } else {
+          ph_guard_t0_ = -1.0;
+        }
+        go = (ph_guard_t0_ >= 0.0 && t_new - ph_guard_t0_ >= ph_guard_T_);
+      }
+      if (go) {
+        ph_fired_ = true;
+        rs_on_ = rs_ramp_ = true;
+        rs_t0_ = t_new; rs_t1_ = t_new + ph_T_; rs_f0_ = 1.0; rs_f1_ = 0.0;
+        if (rs_log_ == 0) rs_log_ = 10;
+        if (global_variable::my_rank == 0) {
+          std::cout << std::setprecision(10) << "CFC phase-out (S5): fired at t = " << t_new
+                    << ": residual_scale f 1 -> 0 over [" << rs_t0_ << ", " << rs_t1_
+                    << "]; self-gravity share " << ph_sg_share_ << std::setprecision(6)
+                    << std::endl;
+        }
+      }
+    }
     return;
   }
   if (fc_mode_ == 1) {                 // bound_centroid: same law on the bound gas,
@@ -3574,6 +3631,54 @@ void CFC::SaveFrameState(ParameterInput *pin) const {
     pin->SetReal("cfc", "frame_ctrl_rlo", fc_rlo_);
     pin->SetBoolean("cfc", "frame_ctrl_armed", fc_armed_);
   }
+  if (ph_T_ > 0.0) {   // S5 state (only when on)
+    pin->SetBoolean("cfc", "frame_ctrl_ph_fired", ph_fired_);
+    pin->SetReal("cfc", "frame_ctrl_ph_t0", ph_fired_ ? rs_t0_ : -1.0);
+    pin->SetReal("cfc", "frame_ctrl_ph_guard_t0", ph_guard_t0_);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureSelfGravShare(Real *share)
+//! \brief S5 guard (cfc.hpp): over interior cells with rho > frame_track_rel_floor and
+//! r_BH >= 6, the share sum(rho dV; rho > 3 M_BH/(4 pi r_BH^3)) / sum(rho dV) (coordinate
+//! dV; MPI_Allreduce SUM then MPI_Bcast from rank 0: identical on every rank). 0 if empty.
+
+void CFC::MeasureSelfGravShare(Real *share) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &w0 = pmy_pack->pmhd->w0;
+  Real xb[3];
+  BHPosition(fc_t_, xb);
+  const Real bx = xb[0], by = xb[1], bz = xb[2];
+  const Real rfl = fc_rel_floor_, k3 = 3.0*puncture_mass_/(4.0*M_PI);
+  Real s[2] = {0.0, 0.0};
+  Kokkos::parallel_reduce("cfc_ph_selfgrav", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > rfl)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    const Real r = sqrt((x - bx)*(x - bx) + (y - by)*(y - by) + (z - bz)*(z - bz));
+    if (r < 6.0) return;
+    const Real dm = rho*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    a1 += dm;
+    if (rho > k3/(r*r*r)) a0 += dm;
+  }, Kokkos::Sum<Real>(s[0]), Kokkos::Sum<Real>(s[1]));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, s, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(s, 2, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
+  *share = (s[1] > 0.0) ? s[0]/s[1] : 0.0;
 }
 
 //----------------------------------------------------------------------------------------

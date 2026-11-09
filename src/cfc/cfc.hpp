@@ -122,6 +122,21 @@ class CFC {
   int rs_log_ = 0;           // <cfc> residual_scale_log_interval (cycles; 0 = no log)
   Real rs_f_ = 1.0;          // f of the state the current stage's CFC tasks see
   bool rs_bg_only_ = false;  // rs_f_ == 0: skip the MG solves
+  // S5 (R-255 item 1, C-217): the automatic CFC phase-out. <cfc> phaseout_time T_ph > 0
+  // (needs frame_track_rel > 0 and frame_lost_lambda > 0; exclusive with residual_scale*):
+  // armed once the lost-star switch has fired AND its ramp is complete (fc_mode_ == 2 and
+  // t >= t_sw + frame_ramp_time), so a self-bound remnant never phases out. Optional guard
+  // <cfc> phaseout_selfgrav_frac F > 0: the mass share of gas (rho > frame_track_rel_floor,
+  // r_BH >= 6) with rho > rho_tid(r_BH) = 3 M_BH/(4 pi r_BH^3) must stay below F
+  // continuously for phaseout_guard_time (default 20) -- a global reduction (MPI_Allreduce
+  // SUM + MPI_Bcast from rank 0), evaluated only while armed and not fired. On firing at
+  // t_f: the residual_scale ramp f: 1 -> 0 (C^1) over [t_f, t_f + T_ph]; f = 0 afterwards
+  // (the multigrid solves are skipped: background only). State (fired, t_f, the guard's
+  // start) is stored in restarts when the option is on.
+  Real ph_T_ = 0.0, ph_sg_frac_ = 0.0, ph_guard_T_ = 20.0, ph_guard_t0_ = -1.0;
+  bool ph_fired_ = false;
+  Real ph_sg_share_ = 0.0;   // the last guard measurement
+  void MeasureSelfGravShare(Real *share);
   Real ResidualScale(Real t) const;
   void SetResidualScale(Real t, int stage, bool last_stage);
   void AssemblePsiMetric(bool with_ghosts);

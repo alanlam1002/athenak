@@ -53,6 +53,23 @@ void TOVHistory(HistoryData *pdata, Mesh *pm);
 void TDERefineTracker(MeshBlockPack *pmbp);
 
 namespace {
+// R-255 item 6 (C-217): first-return history columns, all optional (absent = no column, the
+// hst format unchanged). About the hole x_BH (CFC BHPosition), with the BH-frame coordinate
+// velocity V^i = alpha u^i/W - (beta^i - xidot^i):
+//   <problem> hist_flux_r1, hist_flux_r2 (> 0): the inward rest-mass flux through the sphere
+//     r = R, as the shell average -(1/dR) sum(D V.n dV) over R - dR/2 <= r < R + dR/2,
+//     D = u0(IDN) (= sqrt(gamma) rho W), dR = <problem> hist_flux_dr (default 2);
+//   <problem> hist_mass_r (> 0): sum(D dV) over r < R.
+// Diagnostics only (a reduction into the history columns): the solution is unchanged.
+struct HistFluxParams {
+  Real r[2] = {0.0, 0.0};
+  Real rm = 0.0, dr = 2.0;
+  int ncol = 0;
+};
+HistFluxParams hist_flux;
+}  // namespace
+
+namespace {
 // Parameters for TDERefineTracker (<problem> amr_condition = tde_track).
 struct TDERefineParams {
   Real rad_bh;      // refinement radius around the (fixed) puncture at the origin
@@ -901,6 +918,24 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   }
 
   user_hist_func = &TOVHistory;
+  // R-255 item 6: the first-return history columns (read without GetOrAdd: absent = off)
+  for (int q = 0; q < 2; ++q) {
+    const std::string k = "hist_flux_r" + std::to_string(q + 1);
+    if (pin->DoesParameterExist("problem", k)) hist_flux.r[q] = pin->GetReal("problem", k);
+  }
+  if (pin->DoesParameterExist("problem", "hist_mass_r")) {
+    hist_flux.rm = pin->GetReal("problem", "hist_mass_r");
+  }
+  if (pin->DoesParameterExist("problem", "hist_flux_dr")) {
+    hist_flux.dr = pin->GetReal("problem", "hist_flux_dr");
+  }
+  hist_flux.ncol = (hist_flux.r[0] > 0.0) + (hist_flux.r[1] > 0.0) + (hist_flux.rm > 0.0);
+  if (hist_flux.ncol > 0 && (pmbp->pcfc == nullptr || !(hist_flux.dr > 0.0))) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<problem> hist_flux_r*/hist_mass_r need CFC (the hole's position) and "
+              << "hist_flux_dr > 0" << std::endl;
+    exit(EXIT_FAILURE);
+  }
   pgen_final_func = &FinalizeTOV;
   pmbp->padm->SetADMVariables = &SetADMVariablesToTOV;
 
@@ -1594,6 +1629,15 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     pdata->label[b+2] = "de-dE"; pdata->label[b+3] = "de-dE-total";
     pdata->nhist += 4;
   }
+  // R-255 item 6 (namespace hist_flux): after every other column
+  const int hf_b = pdata->nhist;
+  if (hist_flux.ncol > 0) {
+    int c = hf_b;
+    if (hist_flux.r[0] > 0.0) pdata->label[c++] = "mdot_in_r1";
+    if (hist_flux.r[1] > 0.0) pdata->label[c++] = "mdot_in_r2";
+    if (hist_flux.rm > 0.0) pdata->label[c++] = "mass_in_rm";
+    pdata->nhist = c;
+  }
 
   // capture class variables for kernel
   auto &w0_ = pm->pmb_pack->pmhd->w0;
@@ -1663,8 +1707,56 @@ void TOVHistory(HistoryData *pdata, Mesh *pm) {
     }
   }
   if (de_cols) {
-    int b = pdata->nhist - 4;
+    int b = hf_b - 4;
     for (int a = 0; a < 4; ++a) { pdata->hdata[b + a] = de_stats[a]; }
+  }
+  if (hist_flux.ncol > 0) {   // per-rank partial sums; the history output sums the ranks
+    auto &u0_ = pm->pmb_pack->pmhd->u0;
+    auto &size = pm->pmb_pack->pmb->mb_size;
+    Real xb[3];
+    pcfc_->BHPosition(pm->time, xb);
+    const Real *fv = pm->pmb_pack->padm->frame_vel_u;
+    const Real bx = xb[0], by = xb[1], bz = xb[2], f0 = fv[0], f1 = fv[1], f2 = fv[2];
+    const Real r1 = hist_flux.r[0], r2 = hist_flux.r[1], rm = hist_flux.rm;
+    const Real hdr = 0.5*hist_flux.dr;
+    Real q1 = 0.0, q2 = 0.0, q3 = 0.0;
+    Kokkos::parallel_reduce("TOVHistFlux", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmkji),
+    KOKKOS_LAMBDA(const int &idx, Real &a1, Real &a2, Real &a3) {
+      int m = (idx)/nkji;
+      int k = (idx - m*nkji)/nji;
+      int j = (idx - m*nkji - k*nji)/nx1;
+      int i = (idx - m*nkji - k*nji - j*nx1) + is;
+      k += ks;
+      j += js;
+      const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - bx;
+      const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - by;
+      const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - bz;
+      const Real r = sqrt(x*x + y*y + z*z);
+      const bool s1 = (r1 > 0.0 && r >= r1 - hdr && r < r1 + hdr);
+      const bool s2 = (r2 > 0.0 && r >= r2 - hdr && r < r2 + hdr);
+      const bool s3 = (rm > 0.0 && r < rm);
+      if (!(s1 || s2 || s3)) return;
+      const Real dm = u0_(m, IDN, k, j, i)*size.d_view(m).dx1*size.d_view(m).dx2*
+                      size.d_view(m).dx3;
+      if (s3) a3 += dm;
+      if (!(s1 || s2) || !(r > 0.0)) return;
+      const Real ux = w0_(m, IVX, k, j, i), uy = w0_(m, IVY, k, j, i), uz = w0_(m, IVZ, k, j, i);
+      const Real usq = adm.g_dd(m,0,0,k,j,i)*ux*ux + adm.g_dd(m,1,1,k,j,i)*uy*uy
+                     + adm.g_dd(m,2,2,k,j,i)*uz*uz
+                     + 2.0*(adm.g_dd(m,0,1,k,j,i)*ux*uy + adm.g_dd(m,0,2,k,j,i)*ux*uz
+                            + adm.g_dd(m,1,2,k,j,i)*uy*uz);
+      const Real aw = adm.alpha(m,k,j,i)/sqrt(1.0 + usq);
+      const Real vx = aw*ux - (adm.beta_u(m,0,k,j,i) - f0);
+      const Real vy = aw*uy - (adm.beta_u(m,1,k,j,i) - f1);
+      const Real vz = aw*uz - (adm.beta_u(m,2,k,j,i) - f2);
+      const Real vr = (vx*x + vy*y + vz*z)/r;
+      if (s1) a1 -= dm*vr;
+      if (s2) a2 -= dm*vr;
+    }, Kokkos::Sum<Real>(q1), Kokkos::Sum<Real>(q2), Kokkos::Sum<Real>(q3));
+    int c = hf_b;
+    if (r1 > 0.0) pdata->hdata[c++] = q1/hist_flux.dr;
+    if (r2 > 0.0) pdata->hdata[c++] = q2/hist_flux.dr;
+    if (rm > 0.0) pdata->hdata[c++] = q3;
   }
 }
 

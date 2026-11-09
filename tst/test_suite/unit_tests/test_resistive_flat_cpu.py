@@ -297,6 +297,66 @@ def test_restart_bitwise():
     assert _state("rt_c5") == _state("rt_rr/rt_c5")
 
 
+# GR1 (07 step 2): constant sheared/boosted flat metric, alpha = 0.8, beta = (0.3, -0.2,
+# 0.1), gamma = M^T M with M lower triangular (all off-diagonal gamma_ij nonzero)
+_GR1 = ["gr1 = true", "alpha0 = 0.8", "beta1 = 0.3", "beta2 = -0.2", "beta3 = 0.1",
+        "m11 = 1.2", "m21 = 0.3", "m22 = 0.9", "m31 = 0.2", "m32 = -0.25", "m33 = 1.1"]
+_GR1_CASES = {
+    "em1d": ([], lambda n: ["mesh/nx1=%d" % n, "meshblock/nx1=%d" % n]),
+    "em2d": (["amp2 = 5.0e-4"],
+             lambda n: ["mesh/nx1=%d" % n, "meshblock/nx1=%d" % (n//2),
+                        "mesh/nx2=%d" % (n//2), "meshblock/nx2=%d" % (n//4),
+                        "mesh/x2max=0.5"]),
+    "telegraph": ([], lambda n: ["mesh/nx1=%d" % n, "meshblock/nx1=%d" % n,
+                                 "problem/test=telegraph", "mhd/resistive_sigma=10"]),
+    "cpalfven": ([], lambda n: ["problem/test=cpalfven", "problem/amp1=1e-4",
+                                "mhd/resistive_sigma=100", "mesh/nx1=%d" % n,
+                                "meshblock/nx1=%d" % n]),
+}
+_ERRS = ("err_e1", "err_e2", "err_e3", "err_b1", "err_b2", "err_b3")
+
+
+@pytest.mark.parametrize("case", sorted(_GR1_CASES))
+def test_gr1_coordinate_invariance(case):
+    """GR1: the flat analytic solutions mapped to the sheared/boosted metric converge at
+    second order with errors comparable to the flat runs; div B and charge exact."""
+    keys, flags = _GR1_CASES[case]
+    fl = [_run("rt_g1f%d" % n, keys, flags(n)) for n in (64, 128)]
+    gr = [_run("rt_g1g%d" % n, keys + _GR1, flags(n)) for n in (64, 128)]
+    # components below 5% of the largest error are round-off or, for cpalfven, the
+    # O(amp^2) E^1 that the linear exact solution omits (same in the flat run)
+    for c in _ERRS:
+        if gr[1][c] > 5.0e-2*max(gr[1][x] for x in _ERRS):
+            assert _rate(gr[0][c], gr[1][c]) > 1.6, c
+    # same order as flat (densitised M^{-1} components; the pattern moves with beta)
+    assert sum(gr[1][c] for c in _ERRS) < 6.0*sum(fl[1][c] for c in _ERRS)
+    for x in gr:
+        assert x["max_divb"] < 1e-13 and abs(x["charge"] - x["charge0"]) < 1e-16
+        assert x["newton_fail"] == 0 and x["newton_fallback"] == 0
+
+
+def test_gr1_current_sheet():
+    """GR1 current sheet (beta^1 = 0 keeps the sheet in the outflow box)."""
+    flags = ["mesh/nx1=200", "meshblock/nx1=200", "mesh/x1min=-1.5", "mesh/x1max=1.5",
+             "mesh/ix1_bc=outflow", "mesh/ox1_bc=outflow", "problem/test=cursheet",
+             "problem/pgas=50", "mhd/resistive_sigma=100", "time/tlim=9"]
+    keys = [k for k in _GR1 if not k.startswith("beta1")]
+    r = _run("rt_g1cs", keys, flags)
+    assert r["err_b2"] < 2.0e-3 and r["err_e3"] < 4.0e-4
+    assert r["max_divb"] == 0.0 and r["newton_fail"] == 0
+
+
+def test_gr1_restart_bitwise():
+    """GR1 metric survives restart (pgen-set ADM function, u_adm in the restart file)."""
+    keys = ["amp2 = 5.0e-4"] + _GR1 + ["<output1>", "file_type = rst", "dt = 0.5"]
+    flags = ["mesh/nx1=64", "meshblock/nx1=32", "mesh/nx2=32", "meshblock/nx2=16",
+             "mesh/x2max=0.5", "problem/dump_state=true", "mhd/resistive_sigma=10"]
+    _run("rt_g1r", keys, flags)
+    os.makedirs("rt_rr", exist_ok=True)
+    _run("rt_g1r", restart=os.path.abspath("rst/rt_g1r.00001.rst"), cwd="rt_rr")
+    assert _state("rt_g1r") == _state("rt_rr/rt_g1r")
+
+
 _TAB = ["table = inputs/tables/SFHo_reduced.athtab", "nscalars = 1", "use_NQT = false"]
 
 

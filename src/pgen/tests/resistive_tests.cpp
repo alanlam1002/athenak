@@ -38,6 +38,17 @@
 //!               "divb" = max |div B|
 //! Passive scalars (e.g. Y_e for a tabulated EOS) are set uniformly to <problem> ye.
 //!
+//! GR1 (07 §4.1, Step 2): with <problem> gr1 = true the analytic tests (emwave,
+//! telegraph, cursheet, cpalfven; 1D or 2D) run in the constant sheared/boosted flat
+//! metric obtained from the flat coordinates (T, X) by T = alpha0 t, X = M (x + beta t),
+//! M lower triangular (<problem> m11 m21 m22 m31 m32 m33, alpha0, beta1..3):
+//! alpha = alpha0, beta^i = beta_i, gamma_ij = (M^T M)_ij, K_ij = 0.  The Eulerian
+//! observers are the flat static ones, so E, B and v are the flat vectors with
+//! components M^{-1} V_flat, evaluated at (T, X); the flat wave vector is
+//! K = M^{-T} k with k = 2 pi (1/l_x, 1/l_y, 0), so the solution stays periodic on the
+//! mesh.  Face fields are densitised (sqrt(gamma) = det M); the in-plane fields come
+//! from the covariant potential A_3 = m33 A_z(X).
+//!
 //! The same pgen runs with <mhd> resistive = false (ideal dyngr) for ideal-limit
 //! comparisons; then E is not used.  At the end of the run the pgen writes
 //! <basename>.resist.dat (errors and diagnostics, rank 0) and, with
@@ -94,6 +105,27 @@ struct RTest {
   // KH double shear layer (Mignone et al. 2019 §5.6): v_sh, a, rho_h, rho_l, A0, alpha,
   // B = (bxkh, 0, bzkh)
   Real vsh, akh, rhoh, rhol, a0kh, alkh, bxkh, bzkh;
+  // GR1 constant metric: T = al0 t, X = M (x + bet t), mm = (m11, m21, m22, m31, m32,
+  // m33), detm = det M = sqrt(gamma)
+  bool gr1;
+  Real al0, bet[3], mm[6], detm;
+
+  KOKKOS_INLINE_FUNCTION
+  void ToFlat(const Real x1, const Real x2, const Real x3, const Real t, Real X[3],
+              Real &T) const {
+    const Real y1 = x1 + bet[0]*t, y2 = x2 + bet[1]*t, y3 = x3 + bet[2]*t;
+    X[0] = mm[0]*y1;
+    X[1] = mm[1]*y1 + mm[2]*y2;
+    X[2] = mm[3]*y1 + mm[4]*y2 + mm[5]*y3;
+    T = al0*t;
+  }
+  // flat vector components -> new coordinate components: V <- M^{-1} V
+  KOKKOS_INLINE_FUNCTION
+  void FromFlat(Real v[3]) const {
+    v[0] = v[0]/mm[0];
+    v[1] = (v[1] - mm[1]*v[0])/mm[2];
+    v[2] = (v[2] - mm[3]*v[0] - mm[4]*v[1])/mm[5];
+  }
 
   KOKKOS_INLINE_FUNCTION
   void Fluid(const Real x, const Real y, Real w[5]) const {
@@ -239,8 +271,8 @@ void TelegraphAmplitudes(Real a, Real sigma, Real k, Real t, Real &e, Real &b) {
   b = ((de + sigma*ee)/k).real();
 }
 
-// Fill face B and E~ (flat: densitised == undensitised) at time t over all faces of
-// the interior plus ghosts of the pack.
+// Fill face B and E~ (flat: densitised == undensitised; GR1: see the file header) at
+// time t over all faces of the interior plus ghosts of the pack.
 void SetFaceFields(MeshBlockPack *pmbp, const RTest &r, const Real t,
                    DvceFaceFld4D<Real> bf, DvceFaceFld4D<Real> *ef) {
   auto &indcs = pmbp->pmesh->mb_indcs;
@@ -253,6 +285,71 @@ void SetFaceFields(MeshBlockPack *pmbp, const RTest &r, const Real t,
   const bool pot = r.potential && multi_d;
   const bool sete = (ef != nullptr);
   DvceFaceFld4D<Real> e = sete ? *ef : bf;
+
+  if (r.gr1) {
+    par_for("rt_face_gr1", DevExeSpace(), 0, nmb1, ks, ke+1, js, je+1, is, ie+1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const Real x1min = size.d_view(m).x1min, x1max = size.d_view(m).x1max;
+      const Real x2min = size.d_view(m).x2min, x2max = size.d_view(m).x2max;
+      const Real dx1 = size.d_view(m).dx1, dx2 = size.d_view(m).dx2;
+      const Real x1f = LeftEdgeX(i-is, nx1, x1min, x1max);
+      const Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
+      const Real x2f = LeftEdgeX(j-js, nx2, x2min, x2max);
+      const Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
+      const Real x2fp = LeftEdgeX(j+1-js, nx2, x2min, x2max);
+      const Real x1fp = LeftEdgeX(i+1-is, nx1, x1min, x1max);
+      // the flat solutions do not depend on X^3, and X^1, X^2 not on x^3
+      const Real x3 = 0.0;
+      const Real sg = r.detm, m33 = r.mm[5];
+      Real E[3], B[3], X[3], Y[3], T;
+      // x1 faces
+      if (j <= je && k <= ke) {
+        r.ToFlat(x1f, x2v, x3, t, X, T);
+        r.Fields(X[0], X[1], T, E, B);
+        r.FromFlat(E);
+        r.FromFlat(B);
+        Real bx = sg*B[0], ex = sg*E[0];
+        if (pot) {
+          r.ToFlat(x1f, x2fp, x3, t, X, T);
+          r.ToFlat(x1f, x2f, x3, t, Y, T);
+          bx = m33*(r.Az(X[0], X[1], T) - r.Az(Y[0], Y[1], T))/dx2;
+          if (r.type == kEMWave) {
+            ex = m33*(r.Psi(X[0], X[1], T) - r.Psi(Y[0], Y[1], T))/dx2;
+          }
+        }
+        bf.x1f(m, k, j, i) = bx;
+        if (sete) e.x1f(m, k, j, i) = ex;
+      }
+      // x2 faces
+      if (i <= ie && k <= ke) {
+        r.ToFlat(x1v, multi_d ? x2f : x2v, x3, t, X, T);
+        r.Fields(X[0], X[1], T, E, B);
+        r.FromFlat(E);
+        r.FromFlat(B);
+        Real by = sg*B[1], ey = sg*E[1];
+        if (pot) {
+          r.ToFlat(x1fp, x2f, x3, t, X, T);
+          r.ToFlat(x1f, x2f, x3, t, Y, T);
+          by = -m33*(r.Az(X[0], X[1], T) - r.Az(Y[0], Y[1], T))/dx1;
+          if (r.type == kEMWave) {
+            ey = -m33*(r.Psi(X[0], X[1], T) - r.Psi(Y[0], Y[1], T))/dx1;
+          }
+        }
+        bf.x2f(m, k, j, i) = by;
+        if (sete) e.x2f(m, k, j, i) = ey;
+      }
+      // x3 faces (pointwise; d/dx^3 = 0)
+      if (i <= ie && j <= je) {
+        r.ToFlat(x1v, x2v, x3, t, X, T);
+        r.Fields(X[0], X[1], T, E, B);
+        r.FromFlat(E);
+        r.FromFlat(B);
+        bf.x3f(m, k, j, i) = sg*B[2];
+        if (sete) e.x3f(m, k, j, i) = sg*E[2];
+      }
+    });
+    return;
+  }
 
   par_for("rt_face", DevExeSpace(), 0, nmb1, ks, ke+1, js, je+1, is, ie+1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -296,6 +393,48 @@ void SetFaceFields(MeshBlockPack *pmbp, const RTest &r, const Real t,
     }
   });
   (void)nx3;
+}
+
+// GR1: constant ADM data alpha = al0, beta^i = bet, gamma = M^T M, K = 0.
+void SetADMVariablesGR1(MeshBlockPack *pmbp) {
+  auto &adm = pmbp->padm->adm;
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ng = indcs.ng;
+  const int n1 = indcs.nx1 + 2*ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
+  const int nmb1 = pmbp->nmb_thispack - 1;
+  const Real *q = rt.mm;
+  // M[a][i] (row a = flat index, column i = new index)
+  const Real mat[3][3] = {{q[0], 0.0, 0.0}, {q[1], q[2], 0.0}, {q[3], q[4], q[5]}};
+  Real g[3][3];
+  for (int a = 0; a < 3; ++a) {
+    for (int b = 0; b < 3; ++b) {
+      g[a][b] = 0.0;
+      for (int c = 0; c < 3; ++c) g[a][b] += mat[c][a]*mat[c][b];
+    }
+  }
+  const Real g00 = g[0][0], g01 = g[0][1], g02 = g[0][2];
+  const Real g11 = g[1][1], g12 = g[1][2], g22 = g[2][2];
+  const Real psi4 = std::cbrt(rt.detm*rt.detm);
+  const Real al = rt.al0, b0 = rt.bet[0], b1 = rt.bet[1], b2 = rt.bet[2];
+  par_for("rt_adm_gr1", DevExeSpace(), 0, nmb1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(int m, int k, int j, int i) {
+    adm.alpha(m, k, j, i) = al;
+    adm.beta_u(m, 0, k, j, i) = b0;
+    adm.beta_u(m, 1, k, j, i) = b1;
+    adm.beta_u(m, 2, k, j, i) = b2;
+    adm.psi4(m, k, j, i) = psi4;
+    adm.g_dd(m, 0, 0, k, j, i) = g00;
+    adm.g_dd(m, 0, 1, k, j, i) = g01;
+    adm.g_dd(m, 0, 2, k, j, i) = g02;
+    adm.g_dd(m, 1, 1, k, j, i) = g11;
+    adm.g_dd(m, 1, 2, k, j, i) = g12;
+    adm.g_dd(m, 2, 2, k, j, i) = g22;
+    for (int a = 0; a < 3; ++a) {
+      for (int b = a; b < 3; ++b) adm.vK_dd(m, a, b, k, j, i) = 0.0;
+    }
+  });
 }
 
 void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm);
@@ -377,6 +516,39 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   rt.amp2 = pin->GetOrAddReal("problem", "amp2", 0.0);
   rt.kx = 2.0*M_PI/lx;
   rt.ky = pmy_mesh_->multi_d ? 2.0*M_PI/ly : 0.0;
+  rt.gr1 = pin->GetOrAddBoolean("problem", "gr1", false);
+  rt.al0 = 1.0;
+  for (int a = 0; a < 3; ++a) rt.bet[a] = 0.0;
+  for (int a = 0; a < 6; ++a) rt.mm[a] = (a == 0 || a == 2 || a == 5) ? 1.0 : 0.0;
+  rt.detm = 1.0;
+  if (rt.gr1) {
+    const bool analytic = (rt.type == kEMWave || rt.type == kTelegraph ||
+                           rt.type == kCurSheet || rt.type == kCPAlfven);
+    if (!analytic || pmy_mesh_->three_d) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<problem> gr1 = true needs an analytic test (emwave, "
+                << "telegraph, cursheet, cpalfven) in 1D or 2D" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    rt.al0 = pin->GetOrAddReal("problem", "alpha0", 1.0);
+    const char *nbt[3] = {"beta1", "beta2", "beta3"};
+    for (int a = 0; a < 3; ++a) rt.bet[a] = pin->GetOrAddReal("problem", nbt[a], 0.0);
+    const char *nmm[6] = {"m11", "m21", "m22", "m31", "m32", "m33"};
+    for (int a = 0; a < 6; ++a) rt.mm[a] = pin->GetOrAddReal("problem", nmm[a], rt.mm[a]);
+    rt.detm = rt.mm[0]*rt.mm[2]*rt.mm[5];
+    if (rt.al0 <= 0.0 || rt.mm[0] <= 0.0 || rt.mm[2] <= 0.0 || rt.mm[5] <= 0.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<problem> gr1: alpha0 and m11, m22, m33 must be > 0"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    // flat wave vector K = M^{-T} k (back substitution, k_3 = 0)
+    const Real k1 = rt.kx, k2 = rt.ky;
+    const Real kk2 = k2/rt.mm[2];
+    rt.kx = (k1 - rt.mm[1]*kk2)/rt.mm[0];
+    rt.ky = kk2;
+    pmbp->padm->SetADMVariables = &SetADMVariablesGR1;
+  }
   rt.kmag = sqrt(rt.kx*rt.kx + rt.ky*rt.ky);
   rt.b0 = pin->GetOrAddReal("problem", "b0", 1.0);
   rt.tsh = pin->GetOrAddReal("problem", "t0", 1.0);
@@ -460,13 +632,27 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
     const Real x1v = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
     const Real x2v = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
     Real w[5];
-    r.Fluid(x1v, x2v, w);
-    const Real lor = 1.0/sqrt(1.0 - (w[2]*w[2] + w[3]*w[3] + w[4]*w[4]));
-    w0(m, IDN, k, j, i) = w[0];
-    w0(m, IPR, k, j, i) = w[1];
-    w0(m, IVX, k, j, i) = lor*w[2];
-    w0(m, IVY, k, j, i) = lor*w[3];
-    w0(m, IVZ, k, j, i) = lor*w[4];
+    if (r.gr1) {
+      // flat W from the flat 3-velocity, then v^i = (M^{-1} v_flat)^i
+      Real X[3], T;
+      r.ToFlat(x1v, x2v, 0.0, 0.0, X, T);
+      r.Fluid(X[0], X[1], w);
+      const Real lor = 1.0/sqrt(1.0 - (w[2]*w[2] + w[3]*w[3] + w[4]*w[4]));
+      r.FromFlat(&w[2]);
+      w0(m, IDN, k, j, i) = w[0];
+      w0(m, IPR, k, j, i) = w[1];
+      w0(m, IVX, k, j, i) = lor*w[2];
+      w0(m, IVY, k, j, i) = lor*w[3];
+      w0(m, IVZ, k, j, i) = lor*w[4];
+    } else {
+      r.Fluid(x1v, x2v, w);
+      const Real lor = 1.0/sqrt(1.0 - (w[2]*w[2] + w[3]*w[3] + w[4]*w[4]));
+      w0(m, IDN, k, j, i) = w[0];
+      w0(m, IPR, k, j, i) = w[1];
+      w0(m, IVX, k, j, i) = lor*w[2];
+      w0(m, IVY, k, j, i) = lor*w[3];
+      w0(m, IVZ, k, j, i) = lor*w[4];
+    }
     for (int n = 0; n < nscal; ++n) w0(m, nmhd + n, k, j, i) = ye;
     bcc(m, IBX, k, j, i) = 0.5*(bf.x1f(m, k, j, i) + bf.x1f(m, k, j, i+1));
     bcc(m, IBY, k, j, i) = multi_d ? 0.5*(bf.x2f(m, k, j, i) + bf.x2f(m, k, j+1, i))
@@ -582,11 +768,12 @@ void ResistiveTestsFinal(ParameterInput *pin, Mesh *pm) {
   resistive::ResistiveDynGR *pr = pmbp->pdyngr->presist;
   RTest r = rt;
   const Real t = pm->time;
+  const Real tflat = r.gr1 ? r.al0*t : t;   // GR1: flat time T = alpha0 t
   if (r.type == kTelegraph) {
     const Real sigma = pin->GetOrAddReal("mhd", "resistive_sigma", 0.0);
-    TelegraphAmplitudes(r.amp1, sigma, r.kx, t, r.et, r.bt);
+    TelegraphAmplitudes(r.amp1, sigma, r.kx, tflat, r.et, r.bt);
   }
-  if (r.type == kCurSheet) r.tsh += t;
+  if (r.type == kCurSheet) r.tsh += tflat;
   Real err_e[3] = {0, 0, 0}, err_b[3] = {0, 0, 0};
   const bool analytic = (r.type == kEMWave || r.type == kTelegraph ||
                          r.type == kCurSheet || r.type == kCPAlfven);

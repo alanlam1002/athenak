@@ -420,11 +420,17 @@ class CFC {
   //   3 M_BH/(4 pi r^3), r = |x'_c - x_BH|. When Lambda < L (or nothing is tracked)
   //   continuously for frame_lost_time (default 20), switch to ramp mode (FrameSwitch;
   //   frame_ramp_shape/frame_ramp_time as for the other exits).
+  //   Arming (R-252 1(a): near pericentre Lambda ~ beta^-3 dips below 1 in a normal passage):
+  //   the switch is armed (latched) once t >= frame_lost_arm_time (default 0) and, with
+  //   <cfc> frame_lost_arm_rfac > 0, r >= rfac x the smallest r seen so far (past pericentre);
+  //   until then lost_t0 stays reset. Once switched, ramp mode is final (latched).
   // Every input is a global reduction made identical on all ranks (sums: MPI_Allreduce then
   // MPI_Bcast from rank 0, as MeasureTracked; maxima: MPI_Allreduce MPI_MAX, exact), so every
-  // rank takes the same decision. fc_rdyn_ and fc_lost_t0_ are stored in restarts.
+  // rank takes the same decision. fc_rdyn_, fc_lost_t0_, fc_rlo_, fc_armed_ are stored in restarts.
   Real fc_rel_ = 0.0, fc_rel_floor_ = 0.0, fc_rmin_ = 3.0, fc_rdyn_ = 0.0;
   Real fc_lost_lam_ = 0.0, fc_lost_T_ = 20.0, fc_lost_t0_ = -1.0;
+  Real fc_arm_t_ = 0.0, fc_arm_rfac_ = 0.0, fc_rlo_ = -1.0;
+  bool fc_armed_ = false;
   Real fc_rel_diag_[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // rho_max,loc, rho_bar, r_enc, r, Lambda
   int fc_rel_log_ = 10, fc_rel_n_ = 0;
   // out = MeasureTracked's 7 sums over the relative set; diag = {rho_max,loc, rho_bar, r_enc}

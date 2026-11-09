@@ -383,6 +383,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       if (pin->DoesParameterExist("cfc", "frame_lost_time")) {
         fc_lost_T_ = pin->GetReal("cfc", "frame_lost_time");
       }
+      if (pin->DoesParameterExist("cfc", "frame_lost_arm_time")) {
+        fc_arm_t_ = pin->GetReal("cfc", "frame_lost_arm_time");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_lost_arm_rfac")) {
+        fc_arm_rfac_ = pin->GetReal("cfc", "frame_lost_arm_rfac");
+      }
       if (pin->DoesParameterExist("cfc", "frame_track_rel_log")) {
         fc_rel_log_ = pin->GetInteger("cfc", "frame_track_rel_log");
       }
@@ -390,6 +396,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       if (pin->DoesParameterExist("cfc", "frame_ctrl_rdyn")) {   // restored state
         fc_rdyn_ = pin->GetReal("cfc", "frame_ctrl_rdyn");
         fc_lost_t0_ = pin->GetReal("cfc", "frame_ctrl_lost_t0");
+        fc_rlo_ = pin->GetReal("cfc", "frame_ctrl_rlo");
+        fc_armed_ = pin->GetBoolean("cfc", "frame_ctrl_armed");
       }
       if (!(fc_rel_ < 1.0) || !(fc_rel_floor_ > 0.0) || !(fc_rmin_ > 0.0) ||
           !(fc_lost_T_ >= 0.0) || fc_lost_lam_ < 0.0) {
@@ -3299,10 +3307,22 @@ void CFC::FrameControlStep(Real t_new) {
     }
     fc_rel_diag_[0] = dg[0]; fc_rel_diag_[1] = dg[1]; fc_rel_diag_[2] = dg[2];
     fc_rel_diag_[3] = r; fc_rel_diag_[4] = lam;
+    // arming (cfc.hpp): t >= frame_lost_arm_time and, with frame_lost_arm_rfac > 0, r has
+    // risen to rfac x its smallest value so far (past pericentre); armed latches
+    if (s[0] > 0.0 && (fc_rlo_ < 0.0 || r < fc_rlo_)) fc_rlo_ = r;
+    if (!fc_armed_ && t_new >= fc_arm_t_ &&
+        (!(fc_arm_rfac_ > 0.0) || (s[0] > 0.0 && fc_rlo_ > 0.0 && r >= fc_arm_rfac_*fc_rlo_))) {
+      fc_armed_ = true;
+      if (global_variable::my_rank == 0 && fc_lost_lam_ > 0.0) {
+        std::cout << std::setprecision(10) << "CFC track rel: lost-star switch armed at t = "
+                  << t_new << " (r_BH = " << r << ", smallest so far " << fc_rlo_ << ")"
+                  << std::setprecision(6) << std::endl;
+      }
+    }
     const bool low = !(s[0] > 0.0) || lam < fc_lost_lam_;
     const Real t0_prev = fc_lost_t0_;
     if (fc_lost_lam_ > 0.0) {
-      if (!low) {
+      if (!low || !fc_armed_) {
         fc_lost_t0_ = -1.0;
       } else if (fc_lost_t0_ < 0.0) {
         fc_lost_t0_ = t_new;
@@ -3551,6 +3571,8 @@ void CFC::SaveFrameState(ParameterInput *pin) const {
   if (fc_rel_ > 0.0) {   // R-252 state (only when on: default restarts are unchanged)
     pin->SetReal("cfc", "frame_ctrl_rdyn", fc_rdyn_);
     pin->SetReal("cfc", "frame_ctrl_lost_t0", fc_lost_t0_);
+    pin->SetReal("cfc", "frame_ctrl_rlo", fc_rlo_);
+    pin->SetBoolean("cfc", "frame_ctrl_armed", fc_armed_);
   }
 }
 

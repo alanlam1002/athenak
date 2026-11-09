@@ -23,7 +23,8 @@
 //! Evaluation at a point x (relative to the hole; KerrNodeCartesian):
 //!  - r_min <= r_f <= r_max: tensor-product quintic Lagrange in (ln r_f, th) of all 100 node
 //!    values, stencil as kslice/kstab/kc24_a2.cpp do_f2 (one-sided, clamped, at the edges).
-//!    The interpolation never reaches below r_min: the stencil is clamped to row 0 = r_min.
+//!    The interpolation never reaches below r_min: the stencil is clamped to row 0 = r_min
+//!    (row 0 replaced by the exact nodes at r_min at load: KerrSetRow0Exact).
 //!  - r_f < r_min: the table's own C0 cylinder fallback f(r_min, th) (r_f/r_min)^p per family
 //!    (kstab.hpp eval_polar_d). Row 0 is interpolated in th only (no radial interpolation);
 //!    its derivatives are replaced by those of the homogeneous extension (KerrFallbackComp:
@@ -108,8 +109,9 @@ void LoadKerrTable(const std::string &f2_prefix, const std::string &kstab_path,
 //! \fn void KerrSetRow0Exact(KerrTable &t)
 //! \brief Replace F2's row 0 by the spectral nodes at r_f = r_min exactly. F2's row 0 sits
 //! at exp(ln r_min), 1 ulp below r_min at a = 0 and 0.6, where the generator's KSTAB reader
-//! returns its cylinder fallback (radial derivatives p F/r instead of the table's). V0
-//! experiment only (KERR_ROW0_EXACT=1 in the unit test); not called by the CFC path.
+//! returns its cylinder fallback (radial derivatives p F/r instead of the table's). Called
+//! by the CFC path at load unless <cfc> kerr_row0_exact = false (RK-004 sec. 8.1); the unit
+//! test does the same unless KERR_ROW0_EXACT=0.
 void KerrSetRow0Exact(KerrTable &t);
 
 namespace kerr_impl {

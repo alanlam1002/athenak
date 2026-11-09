@@ -30,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <random>
 #include <sstream>
@@ -381,10 +382,10 @@ int main(int argc, char **argv) {
     KerrTable kt;
     cfc::LoadKerrTable(f2, ks, kt);
     const char *r0e = std::getenv("KERR_ROW0_EXACT");
-    const bool row0exact = (r0e != nullptr && std::atoi(r0e) != 0);
+    const bool row0exact = (r0e == nullptr || std::atoi(r0e) != 0);
     if (row0exact) cfc::KerrSetRow0Exact(kt);
-    std::printf("# F2 row 0: %s\n", row0exact ? "REPLACED by the spectral nodes at r_min "
-                "(KERR_ROW0_EXACT=1, experiment)" : "as delivered");
+    std::printf("# F2 row 0: %s\n", row0exact ? "replaced by the spectral nodes at r_min "
+                "(default, as the CFC path)" : "as delivered (KERR_ROW0_EXACT=0)");
     std::printf("# V0 (K-001): F2 %s\n#   KSTAB %s\n#   a = %.6g r_min = %.6e r_max = %.6g "
                 "nr = %d nth = %d nseg = %d kmax = %d p = (%g %g %g %g)\n", f2.c_str(),
                 ks.c_str(), kt.a, kt.rmin, kt.rmax, kt.nr, kt.nth, kt.nseg, kt.kmax,
@@ -620,27 +621,55 @@ int main(int argc, char **argv) {
         std::vector<double> pts, vref(NV);
         rand_pts(rr.first, rr.second, n, pts);
         DeviceEval(kt, pts, false, dn, dc);
-        double w = 0, psimax = 0, wf[9] = {0};
+        // Both sides form the y-derivatives as ad f / rho and ad ad f / rho^2 (kstab.hpp eval_d;
+        // KerrNodeSpectral), and ad g = J g - g J cancels the O(1) part of g = psi^4 delta: a
+        // 1-ulp host/device difference in f gives |d_y f| errors ~ eps |f| / rho. The per-point
+        // condition number kappa (from the reference values) bounds that; the gate allows
+        // 1e-12 + 64 eps kappa.
+        const double eps = std::numeric_limits<double>::epsilon();
+        double w = 0, psimax = 0, wf[9] = {0}, wk = 0, wr = 0, ws = 0, wkap = 0, wex = 0;
+        int nbad = 0, nover = 0;
+        auto S = [&](int f) {
+          double s = 0;
+          for (int q = kNodeFam[f].lo; q < kNodeFam[f].hi; ++q) s = std::max(s, std::fabs(vref[q]));
+          return std::max(s, 1e-300);
+        };
         for (int i = 0; i < n; ++i) {
           RefNode(T, pts[3*i], pts[3*i + 1], pts[3*i + 2], vref.data());
-          for (int f = 0; f < 9; ++f) {
-            const double e = FamRel(&dn[static_cast<size_t>(i)*NV], vref.data(), kNodeFam[f]);
-            wf[f] = std::max(wf[f], e);
-            w = std::max(w, e);
-          }
           const double r = std::sqrt(pts[3*i]*pts[3*i] + pts[3*i + 1]*pts[3*i + 1]
                                      + pts[3*i + 2]*pts[3*i + 2]);
+          const double rho = std::hypot(pts[3*i], pts[3*i + 1]);
+          for (int f = 0; f < 9; ++f) {
+            const double e = FamRel(&dn[static_cast<size_t>(i)*NV], vref.data(), kNodeFam[f]);
+            // base field family of each first-derivative family (dg, dK, dbeta); the scalar
+            // alpha has ad alpha = 0, so d_y alpha carries no 1/rho conditioning
+            double kap = 0;
+            if (f == 5) kap = S(0)/(rho*rho*S(5)) + S(4)/(rho*S(5));
+            else if (f == 4 || f == 6 || f == 8) kap = S(f == 4 ? 0 : f == 6 ? 1 : 3)/(rho*S(f));
+            wf[f] = std::max(wf[f], e);
+            if (e > w) { w = e; wr = r; ws = rho/r; wkap = kap; }
+            if (e > 1e-12 + 64*eps*kap) ++nbad;
+            if (e > 1e-12) {
+              ++nover;
+              if (kap > 0) wk = std::max(wk, e/(eps*kap));
+              wex = std::max(wex, e/(1e-12 + 64*eps*kap));
+            }
+          }
           psimax = std::max(psimax, std::fabs(dc[static_cast<size_t>(i)*NB] - 1.0)*r);
         }
         std::printf("  r_f in [%.0e, %.0e]: device (spectral) vs host eval_d, all families "
-                    "max famrel %.2e; max |psi0 - 1| r_f = %.4f\n   ", rr.first, rr.second, w,
-                    psimax);
+                    "max famrel %.2e (at r_f %.3e, sin th %.2e); max |psi0 - 1| r_f = %.4f\n   ",
+                    rr.first, rr.second, w, wr, ws, psimax);
         for (int f = 0; f < 9; ++f) std::printf(" %s %.1e", kNodeFam[f].name, wf[f]);
-        std::printf("\n");
+        std::printf("\n    kappa at the max: %.2e (eps kappa %.1e); (point, family) pairs over "
+                    "1e-12: %d, their max famrel/(eps kappa) (kappa > 0) %.2f; over 1e-12 + 64 eps "
+                    "kappa: %d\n", wkap, eps*wkap, nover, wk, nbad);
         // far out the inverse-radius series sums O(1e-3) coefficients to O(r^-3) values
-        // (cancellation, growing ~ r^3): host and device differ by their rounding orders; gated
-        // to 1e4 only (B.1's domain reaches r ~ 111)
-        if (rr.second <= 1e4) Check(w <= 1e-12, "(f) device spectral far field", w, 1e-12);
+        // (cancellation, growing ~ r^3; not covered by kappa): gated to 1e4 only (B.1's domain
+        // reaches r ~ 111)
+        if (rr.second <= 1e4)
+          Check(nbad == 0, "(f) device spectral far field (famrel <= 1e-12 + 64 eps kappa)",
+                wex, 1.0);
       }
     }
 

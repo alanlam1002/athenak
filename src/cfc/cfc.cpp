@@ -580,6 +580,11 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     kerr_table_ = std::make_shared<KerrTable>();
     try {
       LoadKerrTable(f2, ks, *kerr_table_);
+      // F2's row 0 lies 1 ulp below r_min (fallback derivatives); replace it by the exact
+      // spectral nodes at r_min (K-001 sec. 7; user-approved, RK-004 sec. 8.1)
+      if (pin->GetOrAddBoolean("cfc", "kerr_row0_exact", true)) {
+        KerrSetRow0Exact(*kerr_table_);
+      }
     } catch (const std::exception &e) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                 << std::endl << e.what() << std::endl;

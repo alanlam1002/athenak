@@ -9,8 +9,13 @@
 #
 # Environment: the caller sets up the MPI/GPU environment (tde_mpi_env.sh, aurora_guard.sh).
 #   NP (12), PPN (12), CPU_BIND, WRAP (gpu_tile_compact.sh), NLIM (40), TIMEOUT (2400 s).
-# With two or more hosts in NODEFILE the two binaries run concurrently, one host each.
-# Exit code 0 = bitwise identical.
+#   ARMS (both | ref | new): which arms to run; the other is reused from OUTDIR (one arm per
+#     job). REQUIRE (state | strict): the verdict needed for exit code 0.
+# With two or more hosts in NODEFILE and ARMS=both the two binaries run concurrently, one host each.
+# The rule (user-approved, RK-004 §8.2): STATE after every step and rebase; before any merge into
+# proj/tde, one STRICT pass with the arms in separate jobs:
+#   job 1: ARMS=ref kerr_v1a_bitwise.sh ...;  job 2: ARMS=new REQUIRE=strict kerr_v1a_bitwise.sh ...
+# Exit code 0 = the required verdict, 1 = not, 2 = setup error.
 set -u
 DECK=$(readlink -f "$1"); REF=$(readlink -f "$2"); NEW=$(readlink -f "$3"); OUT=$4
 NODEFILE=${5:-${PBS_NODEFILE:-}}; shift 5 2>/dev/null || shift $#
@@ -68,11 +73,21 @@ run() {  # tag binary host
     "$WRAP" "$bin" -d "$OUT/$tag" -i "$OUT/gate.par" > out.log 2> err.log
   echo "$tag rc=$? $(grep -o 'cycle=[0-9]* time=[0-9.e+-]*' out.log | tail -1) end $(date -u +%FT%TZ)" >> "$OUT/runs.log"
 }
-if [ ${#HOSTS[@]} -ge 2 ]; then
-  ( run ref "$REF" "${HOSTS[0]}" ) & ( run new "$NEW" "${HOSTS[1]}" ) & wait
-else
-  run ref "$REF" "${HOSTS[0]}"; run new "$NEW" "${HOSTS[0]}"
-fi
+ARMS=${ARMS:-both}; REQUIRE=${REQUIRE:-state}
+case "$ARMS" in
+  both) if [ ${#HOSTS[@]} -ge 2 ]; then
+          ( run ref "$REF" "${HOSTS[0]}" ) & ( run new "$NEW" "${HOSTS[1]}" ) & wait
+        else
+          run ref "$REF" "${HOSTS[0]}"; run new "$NEW" "${HOSTS[0]}"
+        fi ;;
+  ref)  run ref "$REF" "${HOSTS[0]}"
+        echo "V1a: ref arm only (ARMS=ref); run ARMS=new on the same OUTDIR to compare" | tee -a "$OUT/runs.log"
+        exit 0 ;;
+  new)  [ -d "$OUT/ref" ] || { echo "ARMS=new: no $OUT/ref (run ARMS=ref first)"; exit 2; }
+        run new "$NEW" "${HOSTS[0]}" ;;
+  *)    echo "ARMS must be both, ref or new"; exit 2 ;;
+esac
+echo "arms: $ARMS, required verdict: $REQUIRE" >> "$OUT/runs.log"
 # compare: STRICT = every checksum and .hst file byte-identical. Otherwise STATE = .hst files
 # identical, the same checksum keys (cycle stage task occurrence array) on every rank, every
 # end-of-stage row identical, and every differing row a cross-list snapshot (an MHD_* task
@@ -82,9 +97,10 @@ cd "$OUT"
 for f in $(cd ref && ls *.hst 2>/dev/null); do
   cmp -s "ref/$f" "new/$f" || echo "DIFF $f"
 done > hst.diff
-python3 - "$OUT" "$(cat hst.diff | wc -l)" "$(cd ref && ls *.hst 2>/dev/null | wc -l)" "$REF" "$NEW" <<'PYEOF' | tee -a "$OUT/runs.log"
+python3 - "$OUT" "$(cat hst.diff | wc -l)" "$(cd ref && ls *.hst 2>/dev/null | wc -l)" "$REF" "$NEW" "$REQUIRE" <<'PYEOF' | tee -a "$OUT/runs.log"
 import collections, filecmp, glob, hashlib, os, sys
-out, nhdiff, nh, ref, new = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], sys.argv[5]
+out, nhdiff, nh, ref, new, require = (sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4],
+                                      sys.argv[5], sys.argv[6])
 sha = lambda p: hashlib.sha256(open(p, 'rb').read()).hexdigest()[:8]
 hydro = {'u0', 'u1', 'w0', 'flx1', 'flx2', 'flx3', 'fofc', 'temp', 'blk_u0', 'blk_w0', 'blk_temp'}
 files = sorted(os.path.basename(f) for f in glob.glob(out + '/ref/chksum.*.txt'))
@@ -120,7 +136,9 @@ for b in bad[:20]: print('  ' + b)
 verdict = 'PASS (STRICT: all files byte-identical)' if strict else (
     f'PASS (STATE: {endrows} end-of-stage rows and {nh} hst files identical; {trans} transient '
     'task-interleaving rows, C-090)' if not bad else f'FAIL ({len(bad)} problems)')
-print(f'V1a {verdict}: {len(files)} checksum files; ref {sha(ref)} new {sha(new)}')
-sys.exit(0 if (strict or not bad) else 1)
+ok = strict if require == 'strict' else (strict or not bad)
+print(f'V1a {verdict if ok or bad else verdict.replace("PASS", "FAIL (STRICT required)")}: '
+      f'{len(files)} checksum files; ref {sha(ref)} new {sha(new)}')
+sys.exit(0 if ok else 1)
 PYEOF
 exit ${PIPESTATUS[0]}

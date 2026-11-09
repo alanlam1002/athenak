@@ -165,7 +165,7 @@ void DeviceEval(const KerrTable &kt, const std::vector<double> &pts, bool exact,
 }
 
 // ---- (d) identities of a node (host), all relative
-struct Ident { double cts, divb, momc, det, gtr; };
+struct Ident { double cts, ctst, divb, momc, det, gtr; };
 Ident Identities(const double *v) {
   KerrBgPoint b;
   cfc::KerrConformal(v, b);
@@ -184,17 +184,22 @@ Ident Identities(const double *v) {
     }
   const double divDb = Db[0][0] + Db[1][1] + Db[2][2];
   const double ip6 = std::pow(b.psi0, -6.0);
-  double dmax = 0, rmax = 0;
+  double dmax = 0, rmax = 0, tmax = 0;
   for (int i = 0; i < 3; ++i)
     for (int j = 0; j < 3; ++j) {
-      double l = -2.0/3.0*gtu[i][j]*divDb;
-      for (int k = 0; k < 3; ++k) l += gtu[i][k]*Db[k][j] + gtu[j][k]*Db[k][i];
+      double l = -2.0/3.0*gtu[i][j]*divDb, tm = std::fabs(l);
+      for (int k = 0; k < 3; ++k) {
+        l += gtu[i][k]*Db[k][j] + gtu[j][k]*Db[k][i];
+        tm += std::fabs(gtu[i][k]*Db[k][j]) + std::fabs(gtu[j][k]*Db[k][i]);
+      }
       const double r = 2.0*b.alpha0*ip6*b.ahu[ki::Sym(i, j)];
       dmax = std::max(dmax, std::fabs(l - r));
       rmax = std::max(rmax, std::fabs(r));
+      tmax = std::max(tmax, tm);
     }
   Ident id;
   id.cts = dmax/std::max(rmax, 1e-300);
+  id.ctst = dmax/std::max(tmax, 1e-300);
   double res = 0, sc = 0;
   for (int k = 0; k < 3; ++k) {
     res += b.dbeta0[k][k] + 6.0*b.beta0[k]*b.dlnpsi0[k];
@@ -375,6 +380,11 @@ int main(int argc, char **argv) {
     kstab::Table T(ks);
     KerrTable kt;
     cfc::LoadKerrTable(f2, ks, kt);
+    const char *r0e = std::getenv("KERR_ROW0_EXACT");
+    const bool row0exact = (r0e != nullptr && std::atoi(r0e) != 0);
+    if (row0exact) cfc::KerrSetRow0Exact(kt);
+    std::printf("# F2 row 0: %s\n", row0exact ? "REPLACED by the spectral nodes at r_min "
+                "(KERR_ROW0_EXACT=1, experiment)" : "as delivered");
     std::printf("# V0 (K-001): F2 %s\n#   KSTAB %s\n#   a = %.6g r_min = %.6e r_max = %.6g "
                 "nr = %d nth = %d nseg = %d kmax = %d p = (%g %g %g %g)\n", f2.c_str(),
                 ks.c_str(), kt.a, kt.rmin, kt.rmax, kt.nr, kt.nth, kt.nseg, kt.kmax,
@@ -458,15 +468,18 @@ int main(int argc, char **argv) {
     std::printf("%-21s", "band");
     for (int f = 0; f < 9; ++f) std::printf(" %9s", kNodeFam[f].name);
     for (int f : {3, 6, 7, 8, 11, 12}) std::printf(" %9s", kConfFam[f].name);
-    std::printf("\n");
+    std::printf(" %9s %9s\n", "Gt/phys", "Rt/phys");
+    std::printf("#  Gt/phys = max|dGt| / (max|dg|/max|g|), Rt/phys = max|dRt_ij| / (max|ddg|/max|g|"
+                " + (max|dg|/max|g|)^2): errors on the physical connection/curvature scale\n");
     std::vector<std::vector<double>> bandmax(edges.size() - 1);
-    std::vector<std::array<double, 5>> idp(edges.size() - 1), ide(edges.size() - 1);
+    std::vector<std::array<double, 6>> idp(edges.size() - 1), ide(edges.size() - 1);
+    std::vector<double> ctsr(edges.size() - 1, 0.0);
     for (size_t b = 0; b + 1 < edges.size(); ++b) {
       std::vector<double> pts, vref(NV), cref(NB);
       rand_pts(edges[b], edges[b + 1], nrand, pts);
       DeviceEval(kt, pts, false, dn, dc);
-      std::vector<double> mx(15, 0), mean(15, 0);
-      std::array<double, 5> ip = {0, 0, 0, 0, 0}, ie = {0, 0, 0, 0, 0};
+      std::vector<double> mx(17, 0), mean(17, 0);
+      std::array<double, 6> ip = {0, 0, 0, 0, 0, 0}, ie = {0, 0, 0, 0, 0, 0};
       for (int i = 0; i < nrand; ++i) {
         RefNode(T, pts[3*i], pts[3*i + 1], pts[3*i + 2], vref.data());
         HostConf(vref.data(), cref.data());
@@ -481,36 +494,53 @@ int main(int argc, char **argv) {
           const double e = FamRel(cd, cref.data(), kConfFam[f]);
           mx[c] = std::max(mx[c], e); mean[c] += e/nrand; ++c;
         }
+        {
+          double gs = 0, ds = 0, hs = 0, eg = 0, er = 0;
+          for (int q = 0; q < 6; ++q) gs = std::max(gs, std::fabs(vref[q]));
+          for (int q = 16; q < 34; ++q) ds = std::max(ds, std::fabs(vref[q]));
+          for (int q = 34; q < 70; ++q) hs = std::max(hs, std::fabs(vref[q]));
+          for (int q = 35; q < 53; ++q) eg = std::max(eg, std::fabs(cd[q] - cref[q]));
+          for (int q = 53; q < 59; ++q) er = std::max(er, std::fabs(cd[q] - cref[q]));
+          const double e1 = eg/(ds/gs), e2 = er/(hs/gs + (ds/gs)*(ds/gs));
+          mx[c] = std::max(mx[c], e1); mean[c] += e1/nrand; ++c;
+          mx[c] = std::max(mx[c], e2); mean[c] += e2/nrand; ++c;
+        }
         const Ident a = Identities(vd), e = Identities(vref.data());
-        const double av[5] = {a.cts, a.divb, a.momc, a.det, a.gtr};
-        const double ev[5] = {e.cts, e.divb, e.momc, e.det, e.gtr};
-        for (int k = 0; k < 5; ++k) { ip[k] = std::max(ip[k], av[k]); ie[k] = std::max(ie[k], ev[k]); }
+        const double av[6] = {a.cts, a.ctst, a.divb, a.momc, a.det, a.gtr};
+        const double ev[6] = {e.cts, e.ctst, e.divb, e.momc, e.det, e.gtr};
+        if (a.cts > ip[0])
+          ctsr[b] = std::sqrt(pts[3*i]*pts[3*i] + pts[3*i + 1]*pts[3*i + 1]
+                              + pts[3*i + 2]*pts[3*i + 2]);
+        for (int k = 0; k < 6; ++k) { ip[k] = std::max(ip[k], av[k]); ie[k] = std::max(ie[k], ev[k]); }
       }
       bandmax[b] = mx;
       idp[b] = ip; ide[b] = ie;
       char lab[64];
       std::snprintf(lab, sizeof(lab), "[%.1e,%.0e]", edges[b], edges[b + 1]);
       std::printf("%-21s", lab);
-      for (int c = 0; c < 15; ++c) std::printf(" %9.2e", mx[c]);
+      for (int c = 0; c < 17; ++c) std::printf(" %9.2e", mx[c]);
       std::printf("\n%-21s", "   mean");
-      for (int c = 0; c < 15; ++c) std::printf(" %9.2e", mean[c]);
+      for (int c = 0; c < 17; ++c) std::printf(" %9.2e", mean[c]);
       std::printf("\n");
     }
     std::printf("\n## (d) identities per band, max over the band's points: port (interp) | "
-                "exact (eval_d)\n#  cts = max|Lt beta - 2 alpha psi^-6 Ahat| / max|rhs|; divb = "
+                "exact (eval_d)\n#  cts = max|Lt beta - 2 alpha psi^-6 Ahat| / max|rhs|; ctsT = the same / "
+                "max_ij sum|terms of (Lt beta)^ij|; r@cts = r_f of the port's worst cts point;\n#  divb = "
                 "|d_k beta^k + 6 beta.dlnpsi| / sum|terms|;\n#  momc = max|Dt_j Ahat^ij| / "
                 "max|d Ahat|; det = |det gt - 1|; gtr = max|Gt^k_ki| / max|Gt|\n");
-    std::printf("%-21s %9s %9s %9s %9s %9s | %9s %9s %9s %9s %9s\n", "band", "cts", "divb",
-                "momc", "det", "gtr", "cts", "divb", "momc", "det", "gtr");
+    std::printf("%-21s %9s %9s %9s %9s %9s %9s %9s | %9s %9s %9s %9s %9s %9s\n", "band", "cts",
+                "ctsT", "r@cts", "divb", "momc", "det", "gtr", "cts", "ctsT", "divb", "momc",
+                "det", "gtr");
     for (size_t b = 0; b + 1 < edges.size(); ++b) {
       char lab[64];
       std::snprintf(lab, sizeof(lab), "[%.1e,%.0e]", edges[b], edges[b + 1]);
       std::printf("%-21s", lab);
-      for (int k = 0; k < 5; ++k) std::printf(" %9.2e", idp[b][k]);
+      std::printf(" %9.2e %9.2e %9.2e", idp[b][0], idp[b][1], ctsr[b]);
+      for (int k = 2; k < 6; ++k) std::printf(" %9.2e", idp[b][k]);
       std::printf(" |");
-      for (int k = 0; k < 5; ++k) std::printf(" %9.2e", ide[b][k]);
+      for (int k = 0; k < 6; ++k) std::printf(" %9.2e", ide[b][k]);
       std::printf("\n");
-      Check(idp[b][3] <= 1e-12, "(d) det gt - 1 (port)", idp[b][3], 1e-12);
+      Check(idp[b][4] <= 1e-12, "(d) det gt - 1 (port)", idp[b][4], 1e-12);
     }
 
     // ---------------- (e) axisymmetry
@@ -524,7 +554,7 @@ int main(int argc, char **argv) {
       }
       std::vector<double> d0n, d0c;
       DeviceEval(kt, pts0, false, d0n, d0c);
-      double w[9] = {0}, ws = 0;
+      double w[9] = {0}, ws = 0, wr = 0;
       for (int k = 1; k < nph; ++k) {
         const double ph = 2*M_PI*k/nph + 0.1, c = std::cos(ph), s = std::sin(ph);
         pts.clear();
@@ -537,10 +567,20 @@ int main(int argc, char **argv) {
           cfc::KerrRotateNode(c, -s, &dn[static_cast<size_t>(i)*NV], vb);
           for (int f = 0; f < 9; ++f)
             w[f] = std::max(w[f], FamRel(vb, &d0n[static_cast<size_t>(i)*NV], kNodeFam[f]));
-          for (int q : {cfc::kKbgPsi0, cfc::kKbgAlpha0, cfc::kKbgRs}) {
+          for (int q : {cfc::kKbgPsi0, cfc::kKbgAlpha0}) {
             const double a0 = d0c[static_cast<size_t>(i)*NB + q];
             ws = std::max(ws, std::fabs(dc[static_cast<size_t>(i)*NB + q] - a0)
                               /std::max(std::fabs(a0), 1e-300));
+          }
+          {  // Rt on the physical curvature scale (Rt = 0 at a = 0: no relative measure)
+            const double *v0 = &d0n[static_cast<size_t>(i)*NV];
+            double gs = 0, ds = 0, hs = 0;
+            for (int q = 0; q < 6; ++q) gs = std::max(gs, std::fabs(v0[q]));
+            for (int q = 16; q < 34; ++q) ds = std::max(ds, std::fabs(v0[q]));
+            for (int q = 34; q < 70; ++q) hs = std::max(hs, std::fabs(v0[q]));
+            wr = std::max(wr, std::fabs(dc[static_cast<size_t>(i)*NB + cfc::kKbgRs]
+                                        - d0c[static_cast<size_t>(i)*NB + cfc::kKbgRs])
+                              /(hs/gs + (ds/gs)*(ds/gs)));
           }
         }
       }
@@ -548,7 +588,7 @@ int main(int argc, char **argv) {
                   "f(x), famrel max\n ", n, nph - 1);
       double wm = 0;
       for (int f = 0; f < 9; ++f) { std::printf(" %s %.1e", kNodeFam[f].name, w[f]); wm = std::max(wm, w[f]); }
-      std::printf("\n  scalars psi0, alpha0, Rt: max rel %.1e\n", ws);
+      std::printf("\n  scalars psi0, alpha0: max rel %.1e; Rt: max |diff| on the Rt/phys scale %.1e\n", ws, wr);
       Check(wm <= 1e-12, "(e) axisymmetry", wm, 1e-12);
     }
 
@@ -580,19 +620,27 @@ int main(int argc, char **argv) {
         std::vector<double> pts, vref(NV);
         rand_pts(rr.first, rr.second, n, pts);
         DeviceEval(kt, pts, false, dn, dc);
-        double w = 0, psimax = 0;
+        double w = 0, psimax = 0, wf[9] = {0};
         for (int i = 0; i < n; ++i) {
           RefNode(T, pts[3*i], pts[3*i + 1], pts[3*i + 2], vref.data());
-          for (int f = 0; f < 9; ++f)
-            w = std::max(w, FamRel(&dn[static_cast<size_t>(i)*NV], vref.data(), kNodeFam[f]));
+          for (int f = 0; f < 9; ++f) {
+            const double e = FamRel(&dn[static_cast<size_t>(i)*NV], vref.data(), kNodeFam[f]);
+            wf[f] = std::max(wf[f], e);
+            w = std::max(w, e);
+          }
           const double r = std::sqrt(pts[3*i]*pts[3*i] + pts[3*i + 1]*pts[3*i + 1]
                                      + pts[3*i + 2]*pts[3*i + 2]);
           psimax = std::max(psimax, std::fabs(dc[static_cast<size_t>(i)*NB] - 1.0)*r);
         }
         std::printf("  r_f in [%.0e, %.0e]: device (spectral) vs host eval_d, all families "
-                    "max famrel %.2e; max |psi0 - 1| r_f = %.4f\n", rr.first, rr.second, w,
+                    "max famrel %.2e; max |psi0 - 1| r_f = %.4f\n   ", rr.first, rr.second, w,
                     psimax);
-        Check(w <= 1e-12, "(f) device spectral far field", w, 1e-12);
+        for (int f = 0; f < 9; ++f) std::printf(" %s %.1e", kNodeFam[f].name, wf[f]);
+        std::printf("\n");
+        // far out the inverse-radius series sums O(1e-3) coefficients to O(r^-3) values
+        // (cancellation, growing ~ r^3): host and device differ by their rounding orders; gated
+        // to 1e4 only (B.1's domain reaches r ~ 111)
+        if (rr.second <= 1e4) Check(w <= 1e-12, "(f) device spectral far field", w, 1e-12);
       }
     }
 

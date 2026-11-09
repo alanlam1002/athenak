@@ -105,6 +105,13 @@ struct KerrTable {
 void LoadKerrTable(const std::string &f2_prefix, const std::string &kstab_path,
                    KerrTable &t);
 
+//! \fn void KerrSetRow0Exact(KerrTable &t)
+//! \brief Replace F2's row 0 by the spectral nodes at r_f = r_min exactly. F2's row 0 sits
+//! at exp(ln r_min), 1 ulp below r_min at a = 0 and 0.6, where the generator's KSTAB reader
+//! returns its cylinder fallback (radial derivatives p F/r instead of the table's). V0
+//! experiment only (KERR_ROW0_EXACT=1 in the unit test); not called by the CFC path.
+void KerrSetRow0Exact(KerrTable &t);
+
 namespace kerr_impl {
 
 KOKKOS_INLINE_FUNCTION int Sym(int i, int j) {
@@ -253,13 +260,18 @@ void KerrNodeInterp(const KerrTable &t, Real u, Real th, Real *v) {
       wt[a] *= (xt - (it + b))/static_cast<Real>(a - b);
     }
   }
-  for (int q = 0; q < kKnNV; ++q) { v[q] = 0.0; }
-  for (int a = 0; a < np; ++a) {
-    for (int b = 0; b < np; ++b) {
-      const Real w = wu[a]*wt[b];
-      const size_t base = (static_cast<size_t>(iu + a)*t.nth + (it + b))*kKnNV;
-      for (int q = 0; q < kKnNV; ++q) { v[q] += w*t.f2(base + q); }
+  // one scalar accumulator per value (keeps the 100-value node out of the inner loops)
+  const size_t base = (static_cast<size_t>(iu)*t.nth + it)*kKnNV;
+  const size_t rowstride = static_cast<size_t>(t.nth)*kKnNV;
+  for (int q = 0; q < kKnNV; ++q) {
+    Real acc = 0.0;
+    for (int a = 0; a < np; ++a) {
+      const size_t ra = base + a*rowstride + q;
+      Real accb = 0.0;
+      for (int b = 0; b < np; ++b) { accb += wt[b]*t.f2(ra + b*kKnNV); }
+      acc += wu[a]*accb;
     }
+    v[q] = acc;
   }
 }
 

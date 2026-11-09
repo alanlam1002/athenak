@@ -243,4 +243,14 @@ void FillKerrBackground(MeshBlockPack *pmbp, const KerrTable &t, Real m_bh,
   });
 }
 
+void KerrSetRow0Exact(KerrTable &t) {
+  const KerrTable tt = t;
+  par_for("cfc_kerr_row0_exact", DevExeSpace(), 0, t.nth - 1, KOKKOS_LAMBDA(const int j) {
+    Real v[kKnNV];
+    KerrNodeSpectral(tt, tt.rmin, j*tt.ht, v);
+    for (int q = 0; q < kKnNV; ++q) { tt.f2(static_cast<size_t>(j)*kKnNV + q) = v[q]; }
+  });
+  Kokkos::fence();
+}
+
 }  // namespace cfc

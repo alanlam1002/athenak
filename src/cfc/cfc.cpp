@@ -589,24 +589,31 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     for (int a = 0; a < 3; ++a) { xbh[a] = puncture_enabled_ ? bg_xbh_[a] : xbh0_[a]; }
     DvceArray5D<Real> kbg("kerr_bg_smoke", nmb, kKbgN, ncells3, ncells2, ncells1);
     FillKerrBackground(pmbp, *kerr_table_, puncture_mass_, xbh, kbg);
-    Real psimin = 0.0, psimax = 0.0;
-    auto psi = Kokkos::subview(kbg, Kokkos::ALL, kKbgPsi0, Kokkos::ALL, Kokkos::ALL,
-                               Kokkos::ALL);
-    Kokkos::parallel_reduce("kerr_bg_smoke_min", Kokkos::MDRangePolicy<DevExeSpace,
-        Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, ncells3, ncells2, ncells1}),
-        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mn) {
-          mn = fmin(mn, psi(m, k, j, i));
-        }, Kokkos::Min<Real>(psimin));
-    Kokkos::parallel_reduce("kerr_bg_smoke_max", Kokkos::MDRangePolicy<DevExeSpace,
-        Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, ncells3, ncells2, ncells1}),
-        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mx) {
-          mx = fmax(mx, psi(m, k, j, i));
-        }, Kokkos::Max<Real>(psimax));
+    // the filled MeshBlocks only (nmb above is the allocation capacity)
+    const int nfill = pmbp->nmb_thispack;
+    Real psimin = 0.0, psimax = 0.0, almin = 0.0, almax = 0.0;
+    int nbad = 0;
+    auto bg = kbg;
+    Kokkos::parallel_reduce("kerr_bg_smoke_stats", Kokkos::MDRangePolicy<DevExeSpace,
+        Kokkos::Rank<4>>({0, 0, 0, 0}, {nfill, ncells3, ncells2, ncells1}),
+        KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &pmn,
+                      Real &pmx, Real &amn, Real &amx, int &nb) {
+          pmn = fmin(pmn, bg(m, kKbgPsi0, k, j, i));
+          pmx = fmax(pmx, bg(m, kKbgPsi0, k, j, i));
+          amn = fmin(amn, bg(m, kKbgAlpha0, k, j, i));
+          amx = fmax(amx, bg(m, kKbgAlpha0, k, j, i));
+          for (int n = 0; n < kKbgN; ++n) {
+            if (!Kokkos::isfinite(bg(m, n, k, j, i))) { ++nb; }
+          }
+        }, Kokkos::Min<Real>(psimin), Kokkos::Max<Real>(psimax), Kokkos::Min<Real>(almin),
+        Kokkos::Max<Real>(almax), Kokkos::Sum<int>(nbad));
     std::cout << std::setprecision(10) << "[kerr] rank " << global_variable::my_rank
               << ": a = " << kerr_table_->a << ", r_min = " << kerr_table_->rmin
               << ", nseg = " << kerr_table_->nseg << ", M = " << puncture_mass_
-              << ", psi0 in [" << psimin << ", " << psimax << "] on " << nmb
-              << " MeshBlocks" << std::endl;
+              << ", xbh = (" << xbh[0] << ", " << xbh[1] << ", " << xbh[2] << ")"
+              << ", psi0 in [" << psimin << ", " << psimax << "], alpha0 in [" << almin
+              << ", " << almax << "], non-finite " << nbad << " of " << kKbgN
+              << " x cells, on " << nfill << " MeshBlocks" << std::endl;
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<cfc> kerr_background = true: the background loads (above), but its "
               << "coupling to the evolution (W3/W4) is not implemented yet" << std::endl;

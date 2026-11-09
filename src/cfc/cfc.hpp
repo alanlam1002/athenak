@@ -405,6 +405,30 @@ class CFC {
   Real fc_exit_[2] = {0.0, 0.0};          // last MeasureExit: approach measure, inflow
   // out = {min (r - max(v_in, 0) T_ramp) over the bound gas, the shell inflow rate}
   void MeasureExit(Real out[2]);
+  // R-252 (R-250's proposal, user-approved 2026-11-09): relative tracking and an automatic
+  // roll-back to the BH frame. All default off (frame_track_rel = 0: the remnant-mode path
+  // above, bitwise; no extra reduction, no extra restart key).
+  // <cfc> frame_track_rel f_rel > 0: in remnant mode the tracked set is the interior cells
+  //   within fc_rdyn_ of x'_tgt with rho > f_rel rho_max,loc, rho_max,loc = the peak rho
+  //   within fc_rdyn_ (MPI_MAX), provided rho_max,loc > frame_track_rel_floor (code units;
+  //   else nothing is tracked and xidot is kept, as before). The radius adapts:
+  //   fc_rdyn_ = max(frame_track_radius_min (default 3), 2 r_enc), r_enc = the largest
+  //   |x' - x'_tgt| over the tracked cells (MPI_MAX), applied from the next step; it starts
+  //   at frame_track_radius. frame_track_rho is not used for the tracked set then.
+  // <cfc> frame_lost_lambda L > 0 (needs frame_track_rel > 0): Lambda = rho_bar/rho_tid,
+  //   rho_bar = sum(rho dV)/sum(dV) over the tracked set (coordinate dV), rho_tid =
+  //   3 M_BH/(4 pi r^3), r = |x'_c - x_BH|. When Lambda < L (or nothing is tracked)
+  //   continuously for frame_lost_time (default 20), switch to ramp mode (FrameSwitch;
+  //   frame_ramp_shape/frame_ramp_time as for the other exits).
+  // Every input is a global reduction made identical on all ranks (sums: MPI_Allreduce then
+  // MPI_Bcast from rank 0, as MeasureTracked; maxima: MPI_Allreduce MPI_MAX, exact), so every
+  // rank takes the same decision. fc_rdyn_ and fc_lost_t0_ are stored in restarts.
+  Real fc_rel_ = 0.0, fc_rel_floor_ = 0.0, fc_rmin_ = 3.0, fc_rdyn_ = 0.0;
+  Real fc_lost_lam_ = 0.0, fc_lost_T_ = 20.0, fc_lost_t0_ = -1.0;
+  Real fc_rel_diag_[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // rho_max,loc, rho_bar, r_enc, r, Lambda
+  int fc_rel_log_ = 10, fc_rel_n_ = 0;
+  // out = MeasureTracked's 7 sums over the relative set; diag = {rho_max,loc, rho_bar, r_enc}
+  void MeasureTrackedRel(Real out[7], Real diag[3]);
   void FrameSwitch(Real t_new, int mode, const char *why);
   void FrameControlStep(Real t_new);
 

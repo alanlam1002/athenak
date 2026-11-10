@@ -114,6 +114,11 @@ class MGKerrVectorDriver : public MultigridDriver {
   KerrOpStats OperatorTest(bool exact_edges, bool poison_corners);
   //! |V - V*| on the finest block level by class (max over components)
   void ErrorVsManufByClass(Real emax[3], Real erms[3], long ncell[3]);
+  //! V2a-e radial profile: max |u - u*| (max over components), sum (u - u*)^2 dV, volume
+  //! and cells in the shells [e[s], e[s+1]) of r = |x - c| (the last shell open), finest
+  //! block level, this rank
+  void ErrorRadial(const Real c[3], const std::vector<Real> &e, std::vector<Real> &emax,
+                   std::vector<Real> &s2, std::vector<Real> &vol, std::vector<long> &n);
   //! V at points (x, y, z) (3 per point; finest leaf cell containing it, this rank;
   //! zero where not owned) and the cell centre found (3 per point; 0 if not owned)
   void Probe(const std::vector<Real> &pts, std::vector<Real> &val, std::vector<Real> &ctr,

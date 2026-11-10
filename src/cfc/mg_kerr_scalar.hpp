@@ -141,6 +141,11 @@ class MGKerrScalarDriver : public MultigridDriver {
   void ErrorVsManuf(Real &emax, Real &erms);
   //! the same split by cell class (KerrOpStats: 0 bulk, 1 boundary edge, 2 interior edge)
   void ErrorVsManufByClass(Real emax[3], Real erms[3], long ncell[3]);
+  //! V2a-e radial profile: max |u - u*| (max over components), sum (u - u*)^2 dV, volume
+  //! and cells in the shells [e[s], e[s+1]) of r = |x - c| (the last shell open), finest
+  //! block level, this rank
+  void ErrorRadial(const Real c[3], const std::vector<Real> &e, std::vector<Real> &emax,
+                   std::vector<Real> &s2, std::vector<Real> &vol, std::vector<long> &n);
   //! total, on-boundary and interior unsafe block edges (this rank)
   void EdgeCounts(long c[3]);
   int RootMask() const { return root_mask_.h_view(0); }
@@ -156,6 +161,8 @@ class MGKerrScalarDriver : public MultigridDriver {
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb (Jacobi within colour)
   Real omega_ = 1.0;
+  //! V2a-U test: ResetSolution adds init_noise_ * xi (kmg::AddNoise) to the finest u
+  Real init_noise_ = 0.0;
   int kind_ = kmg::kKindLinear;   // block/kind = linear | psi | chi
   Real psi_floor_ = 0.05;         // block/psi_floor (kind = psi), as the flat driver
   kmg::CoefSource cs_;

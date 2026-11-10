@@ -271,6 +271,31 @@ void FillLevelMatterManuf(const DvceArray5D<Real> &coeff,
   });
 }
 
+void AddNoise(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
+              int nvar, int ngh, int nx, int ny, int nz, Real amp) {
+  auto bd = blk.d_view;
+  par_for("kmg::AddNoise", DevExeSpace(), 0, nmmb-1, 0, nvar-1, 0, nz-1, 0, ny-1, 0, nx-1,
+  KOKKOS_LAMBDA(const int m, const int n, const int k, const int j, const int i) {
+    const Real dx1 = (bd(m).x1max - bd(m).x1min)/static_cast<Real>(nx);
+    const Real dx2 = (bd(m).x2max - bd(m).x2min)/static_cast<Real>(ny);
+    const Real dx3 = (bd(m).x3max - bd(m).x3min)/static_cast<Real>(nz);
+    const Real X[3] = {bd(m).x1min + (static_cast<Real>(i) + 0.5)*dx1,
+                       bd(m).x2min + (static_cast<Real>(j) + 0.5)*dx2,
+                       bd(m).x3min + (static_cast<Real>(k) + 0.5)*dx3};
+    std::uint64_t h = 0x9e3779b97f4a7c15ULL*static_cast<std::uint64_t>(n + 1);
+    for (int d = 0; d < 3; ++d) {
+      // round to 1e-9 so that the same cell centre hashes alike on every block
+      const std::int64_t q = static_cast<std::int64_t>(Kokkos::round(X[d]*1.0e9));
+      h ^= static_cast<std::uint64_t>(q) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+      h ^= h >> 30; h *= 0xbf58476d1ce4e5b9ULL;
+      h ^= h >> 27; h *= 0x94d049bb133111ebULL;
+      h ^= h >> 31;
+    }
+    const Real xi = static_cast<Real>(h >> 11)*(1.0/9007199254740992.0);
+    u(m, n, k + ngh, j + ngh, i + ngh) += amp*(2.0*xi - 1.0);
+  });
+}
+
 void FillManufU(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
                 int ngh, int nx, int ny, int nz, const Manuf &mf) {
   auto bd = blk.d_view;

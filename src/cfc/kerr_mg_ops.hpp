@@ -108,6 +108,8 @@ struct CoefSource {
   bool exact = false;
   bool src_exact = false;
   Real eps = 0.2, kw = 1.0;
+  //! D3 blend test option (BlendNode), mesh units about xbh; off when blend_r2 <= 0
+  Real blend_r1 = 0.0, blend_r2 = 0.0;
 };
 
 //! \fn ManufCoef(cs): the coefficient source for the manufactured source and matter.
@@ -156,6 +158,157 @@ KOKKOS_INLINE_FUNCTION Real Inv3Sym(const Real g[6], Real gi[6]) {
   return det;
 }
 
+//! \fn ConformalFromPhys(g, dg, ddg, gt, gtu, dgt, ddgt)
+//! \brief gt = det(g)^(-1/3) g and its first and second derivatives from those of g
+//! (KerrConformal's formulas, kerr_background.hpp:563-583); ddg, ddgt [Sym(k, l)][ij].
+KOKKOS_INLINE_FUNCTION
+void ConformalFromPhys(const Real g[6], const Real dg[3][6], const Real ddg[6][6],
+                       Real gt[6], Real gtu[6], Real dgt[3][6], Real ddgt[6][6]) {
+  using kerr_impl::Sym;
+  Real gi[6];
+  const Real D = Inv3Sym(g, gi);
+  Real Lk[3], Lkl[3][3];
+  for (int k = 0; k < 3; ++k) {
+    Real a = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) { a += gi[Sym(i, j)]*dg[k][Sym(i, j)]; }
+    }
+    Lk[k] = a;
+  }
+  for (int k = 0; k < 3; ++k) {
+    for (int l = k; l < 3; ++l) {
+      Real a = 0.0;
+      for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+          a += gi[Sym(i, j)]*ddg[Sym(k, l)][Sym(i, j)];
+          for (int c = 0; c < 3; ++c) {
+            for (int d = 0; d < 3; ++d) {
+              a -= gi[Sym(i, c)]*gi[Sym(j, d)]*dg[l][Sym(c, d)]*dg[k][Sym(i, j)];
+            }
+          }
+        }
+      }
+      Lkl[k][l] = a;
+      Lkl[l][k] = a;
+    }
+  }
+  const Real e = Kokkos::cbrt(1.0/D);
+  for (int q = 0; q < 6; ++q) {
+    gt[q] = e*g[q];
+    gtu[q] = gi[q]/e;
+  }
+  for (int k = 0; k < 3; ++k) {
+    for (int q = 0; q < 6; ++q) { dgt[k][q] = e*(dg[k][q] - Lk[k]*g[q]/3.0); }
+  }
+  for (int k = 0; k < 3; ++k) {
+    for (int l = k; l < 3; ++l) {
+      const int p = Sym(k, l);
+      for (int q = 0; q < 6; ++q) {
+        ddgt[p][q] = e*(ddg[p][q] - Lk[l]*dg[k][q]/3.0 - Lk[k]*dg[l][q]/3.0
+                        - Lkl[k][l]*g[q]/3.0 + Lk[k]*Lk[l]*g[q]/9.0);
+      }
+    }
+  }
+}
+
+//! \fn BlendNode(x, y, z, r1, r2, v)
+//! \brief D3 test option (K-003 V2a-e; default off): blend the conformal metric of the
+//! node v (offset (x, y, z) from the hole, mesh units) toward flat, gt_b = M det(M)^(-1/3),
+//! M = delta + w (gt - delta), with w = 0 for r <= r1, the quintic smootherstep
+//! 6s^5 - 15s^4 + 10s^3 (s = (r - r1)/(r2 - r1)) between, 1 for r >= r2 (C2, analytic
+//! d w and d d w). det g, so psi0, is kept: g_b = det(g)^(1/3) gt_b, with d and d d by the
+//! product rule; K, alpha and beta are untouched. Only g, d g, d d g of v are rewritten.
+KOKKOS_INLINE_FUNCTION
+void BlendNode(Real x, Real y, Real z, Real r1, Real r2, Real *v) {
+  using kerr_impl::Sym;
+  const Real r = Kokkos::sqrt(x*x + y*y + z*z);
+  if (!(r < r2)) return;
+  Real w = 0.0, w1 = 0.0, w2 = 0.0;
+  if (r > r1) {
+    const Real L = r2 - r1, s = (r - r1)/L;
+    w = s*s*s*(10.0 + s*(-15.0 + 6.0*s));
+    w1 = 30.0*s*s*(1.0 - s)*(1.0 - s)/L;
+    w2 = 60.0*s*(1.0 - s)*(1.0 - 2.0*s)/(L*L);
+  }
+  const Real X[3] = {x, y, z};
+  Real dw[3] = {0.0, 0.0, 0.0}, ddw[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  if (r > r1 && r > 0.0) {
+    const Real ir = 1.0/r;
+    for (int k = 0; k < 3; ++k) {
+      dw[k] = w1*X[k]*ir;
+      for (int l = k; l < 3; ++l) {
+        const Real nn = X[k]*X[l]*ir*ir;
+        ddw[Sym(k, l)] = w2*nn + w1*ir*(((k == l) ? 1.0 : 0.0) - nn);
+      }
+    }
+  }
+  Real g[6], dg[3][6], ddg[6][6];
+  for (int q = 0; q < 6; ++q) {
+    g[q] = v[kKnF + q];
+    for (int k = 0; k < 3; ++k) { dg[k][q] = v[kKnDG + 6*k + q]; }
+    for (int p = 0; p < 6; ++p) { ddg[p][q] = v[kKnDDG + 6*p + q]; }
+  }
+  // L_k = d_k ln det g, L_kl = d_kl ln det g
+  Real gi[6];
+  const Real D = Inv3Sym(g, gi);
+  Real Lk[3], Lkl[3][3];
+  for (int k = 0; k < 3; ++k) {
+    Real a = 0.0;
+    for (int i = 0; i < 3; ++i) {
+      for (int j = 0; j < 3; ++j) { a += gi[Sym(i, j)]*dg[k][Sym(i, j)]; }
+    }
+    Lk[k] = a;
+  }
+  for (int k = 0; k < 3; ++k) {
+    for (int l = k; l < 3; ++l) {
+      Real a = 0.0;
+      for (int i = 0; i < 3; ++i) {
+        for (int j = 0; j < 3; ++j) {
+          a += gi[Sym(i, j)]*ddg[Sym(k, l)][Sym(i, j)];
+          for (int c = 0; c < 3; ++c) {
+            for (int d = 0; d < 3; ++d) {
+              a -= gi[Sym(i, c)]*gi[Sym(j, d)]*dg[l][Sym(c, d)]*dg[k][Sym(i, j)];
+            }
+          }
+        }
+      }
+      Lkl[k][l] = a;
+      Lkl[l][k] = a;
+    }
+  }
+  Real gt[6], gtu[6], dgt[3][6], ddgt[6][6];
+  ConformalFromPhys(g, dg, ddg, gt, gtu, dgt, ddgt);
+  Real M[6], dM[3][6], ddM[6][6];
+  for (int q = 0; q < 6; ++q) {
+    const Real h = gt[q] - ((q == 0 || q == 3 || q == 5) ? 1.0 : 0.0);
+    M[q] = ((q == 0 || q == 3 || q == 5) ? 1.0 : 0.0) + w*h;
+    for (int k = 0; k < 3; ++k) { dM[k][q] = dw[k]*h + w*dgt[k][q]; }
+    for (int k = 0; k < 3; ++k) {
+      for (int l = k; l < 3; ++l) {
+        const int p = Sym(k, l);
+        ddM[p][q] = ddw[p]*h + dw[k]*dgt[l][q] + dw[l]*dgt[k][q] + w*ddgt[p][q];
+      }
+    }
+  }
+  Real gb[6], gbu[6], dgb[3][6], ddgb[6][6];
+  ConformalFromPhys(M, dM, ddM, gb, gbu, dgb, ddgb);
+  const Real P = Kokkos::cbrt(D);
+  Real dP[3];
+  for (int k = 0; k < 3; ++k) { dP[k] = P*Lk[k]/3.0; }
+  for (int q = 0; q < 6; ++q) {
+    v[kKnF + q] = P*gb[q];
+    for (int k = 0; k < 3; ++k) { v[kKnDG + 6*k + q] = dP[k]*gb[q] + P*dgb[k][q]; }
+    for (int k = 0; k < 3; ++k) {
+      for (int l = k; l < 3; ++l) {
+        const int p = Sym(k, l);
+        const Real ddP = P*(Lkl[k][l]/3.0 + Lk[k]*Lk[l]/9.0);
+        v[kKnDDG + 6*p + q] = ddP*gb[q] + dP[k]*dgb[l][q] + dP[l]*dgb[k][q]
+                              + P*ddgb[p][q];
+      }
+    }
+  }
+}
+
 //! \fn PointMetric(cs, x, y, z, gt, gtu, dgt)
 //! \brief gt_ij, gt^ij and d_k gt_ij at the point (x, y, z) (mesh coordinates), all
 //! analytic: flat; synthetic (d_k gt = e (d_k M - M tr(M^-1 d_k M)/3), e = det M^(-1/3));
@@ -167,6 +320,9 @@ void PointMetric(const CoefSource &cs, Real x, Real y, Real z, Real gt[6], Real 
     Real v[kKnNV];
     KerrNodeCartesian(cs.tab, cs.m_bh, x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], v,
                       cs.exact);
+    if (cs.blend_r2 > 0.0) {
+      BlendNode(x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], cs.blend_r1, cs.blend_r2, v);
+    }
     KerrBgPoint b;
     KerrConformal(v, b);
     for (int q = 0; q < 6; ++q) {
@@ -322,6 +478,9 @@ void PointBg(const CoefSource &cs, Real x, Real y, Real z, BgPoint &bg) {
     Real v[kKnNV];
     KerrNodeCartesian(cs.tab, cs.m_bh, x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], v,
                       cs.exact);
+    if (cs.blend_r2 > 0.0) {
+      BlendNode(x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], cs.blend_r1, cs.blend_r2, v);
+    }
     KerrBgPoint b;
     KerrConformal(v, b);
     bg.r8 = 0.125*b.rs;
@@ -589,6 +748,11 @@ void PoisonCorners(const DvceArray5D<Real> &u, int nmmb, int nvar, int ngh, int 
 void FillLevelCoeffs(const DvceArray5D<Real> &coeff, const DualArray1D<RegionSize> &blk,
                      int nmmb, int ngh, int nx, int ny, int nz, const CoefSource &cs,
                      const Manuf &mf);
+//! V2a-U test (K-003a): u += amp * xi on the interior cells of variables 0..nvar-1, xi in
+//! [-1, 1) a hash of the cell centre's bits and the variable (independent of the block
+//! and rank layout)
+void AddNoise(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
+              int nvar, int ngh, int nx, int ny, int nz, Real amp);
 //! u* at every cell (ghosts included) of the level array u, variable v
 void FillManufU(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
                 int ngh, int nx, int ny, int nz, const Manuf &mf);

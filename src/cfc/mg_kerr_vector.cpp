@@ -739,6 +739,54 @@ KerrOpStats MGKerrVectorDriver::OperatorTest(bool exact_edges, bool poison_corne
   return st;
 }
 
+void MGKerrVectorDriver::ErrorRadial(const Real c[3], const std::vector<Real> &e,
+                          std::vector<Real> &emax, std::vector<Real> &s2,
+                          std::vector<Real> &vol, std::vector<long> &n) {
+  auto *lv = static_cast<MGKerrVector*>(mglevels_);
+  const int lev = lv->GetNumberOfLevels() - 1;
+  const int nmb = lv->NumMB();
+  const int ngh = lv->GetGhostCells();
+  const int nx = lv->LevelN(lev, 0), ny = lv->LevelN(lev, 1), nz = lv->LevelN(lev, 2);
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), lv->UAt(lev).d_view);
+  const int ns = static_cast<int>(e.size());
+  emax.assign(ns, 0.0);
+  s2.assign(ns, 0.0);
+  vol.assign(ns, 0.0);
+  n.assign(ns, 0);
+  for (int m = 0; m < nmb; ++m) {
+    const RegionSize &b = lv->Extents().h_view(m);
+    const Real dx1 = (b.x1max - b.x1min)/nx, dx2 = (b.x2max - b.x2min)/ny;
+    const Real dx3 = (b.x3max - b.x3min)/nz, dv = dx1*dx2*dx3;
+    for (int k = 0; k < nz; ++k) {
+      for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+          const Real X[3] = {b.x1min + (i + 0.5)*dx1, b.x2min + (j + 0.5)*dx2,
+                             b.x3min + (k + 0.5)*dx3};
+          const Real r = std::sqrt((X[0] - c[0])*(X[0] - c[0]) + (X[1] - c[1])*(X[1] - c[1])
+                                   + (X[2] - c[2])*(X[2] - c[2]));
+          int s = -1;
+          for (int q = 0; q < ns; ++q) {
+            if (r >= e[q]) s = q;
+          }
+          if (s < 0) continue;
+          Real ea = 0.0, e2 = 0.0;
+          for (int q = 0; q < 3; ++q) {
+            Real us, du[3], ddu[6];
+            kmg::ManufEval(vm_.c[q], X[0], X[1], X[2], us, du, ddu);
+            const Real e = h(m, q, k + ngh, j + ngh, i + ngh) - us;
+            ea = std::max(ea, std::abs(e));
+            e2 += e*e;
+          }
+          emax[s] = std::max(emax[s], ea);
+          s2[s] += e2*dv;
+          vol[s] += dv;
+          ++n[s];
+        }
+      }
+    }
+  }
+}
+
 void MGKerrVectorDriver::ErrorVsManufByClass(Real emax[3], Real erms[3], long ncell[3]) {
   auto *lv = static_cast<MGKerrVector*>(mglevels_);
   const int lev = lv->GetNumberOfLevels() - 1;

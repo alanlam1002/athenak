@@ -91,58 +91,7 @@ void SyntheticM2(const CoefSource &cs, Real x, Real y, Real z, Real M[6], Real d
   ddM[Sym(2, 2)][4] = -0.25*ek2*cyz;
 }
 
-//! \fn ConformalFromPhys(g, dg, ddg, gt, gtu, dgt, ddgt)
-//! \brief gt = det(g)^(-1/3) g and its first and second derivatives from those of g
-//! (KerrConformal's formulas, kerr_background.hpp:563-583); ddg, ddgt [Sym(k, l)][ij].
-KOKKOS_INLINE_FUNCTION
-void ConformalFromPhys(const Real g[6], const Real dg[3][6], const Real ddg[6][6],
-                       Real gt[6], Real gtu[6], Real dgt[3][6], Real ddgt[6][6]) {
-  using kerr_impl::Sym;
-  Real gi[6];
-  const Real D = Inv3Sym(g, gi);
-  Real Lk[3], Lkl[3][3];
-  for (int k = 0; k < 3; ++k) {
-    Real a = 0.0;
-    for (int i = 0; i < 3; ++i) {
-      for (int j = 0; j < 3; ++j) { a += gi[Sym(i, j)]*dg[k][Sym(i, j)]; }
-    }
-    Lk[k] = a;
-  }
-  for (int k = 0; k < 3; ++k) {
-    for (int l = k; l < 3; ++l) {
-      Real a = 0.0;
-      for (int i = 0; i < 3; ++i) {
-        for (int j = 0; j < 3; ++j) {
-          a += gi[Sym(i, j)]*ddg[Sym(k, l)][Sym(i, j)];
-          for (int c = 0; c < 3; ++c) {
-            for (int d = 0; d < 3; ++d) {
-              a -= gi[Sym(i, c)]*gi[Sym(j, d)]*dg[l][Sym(c, d)]*dg[k][Sym(i, j)];
-            }
-          }
-        }
-      }
-      Lkl[k][l] = a;
-      Lkl[l][k] = a;
-    }
-  }
-  const Real e = Kokkos::cbrt(1.0/D);
-  for (int q = 0; q < 6; ++q) {
-    gt[q] = e*g[q];
-    gtu[q] = gi[q]/e;
-  }
-  for (int k = 0; k < 3; ++k) {
-    for (int q = 0; q < 6; ++q) { dgt[k][q] = e*(dg[k][q] - Lk[k]*g[q]/3.0); }
-  }
-  for (int k = 0; k < 3; ++k) {
-    for (int l = k; l < 3; ++l) {
-      const int p = Sym(k, l);
-      for (int q = 0; q < 6; ++q) {
-        ddgt[p][q] = e*(ddg[p][q] - Lk[l]*dg[k][q]/3.0 - Lk[k]*dg[l][q]/3.0
-                        - Lkl[k][l]*g[q]/3.0 + Lk[k]*Lk[l]*g[q]/9.0);
-      }
-    }
-  }
-}
+//! ConformalFromPhys: kerr_mg_ops.hpp (shared with the D3 blend, BlendNode).
 
 //! \fn PointMetric2(cs, x, y, z, gt, gtu, dgt, ddgt)
 //! \brief PointMetric plus d_kl gt_ij (all analytic: the table's spectral ddg for Kerr,
@@ -154,6 +103,9 @@ void PointMetric2(const CoefSource &cs, Real x, Real y, Real z, Real gt[6], Real
     Real v[kKnNV];
     KerrNodeCartesian(cs.tab, cs.m_bh, x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], v,
                       cs.exact);
+    if (cs.blend_r2 > 0.0) {
+      BlendNode(x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], cs.blend_r1, cs.blend_r2, v);
+    }
     Real g[6], dg[3][6], ddg[6][6];
     for (int q = 0; q < 6; ++q) {
       g[q] = v[kKnF + q];

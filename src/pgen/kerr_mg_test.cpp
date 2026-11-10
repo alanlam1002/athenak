@@ -24,6 +24,15 @@
 //!   runs        : comma-separated smoother/fill pairs, e.g. "gs8/rule_r,rb/rule_r";
 //!                 each: u = 0, ncycles V-cycles, defect per cycle, error against u*
 //!   e1_cycles   : V-cycles of E1 inside the solver (poison every hook), R then off
+//!   kerr_blend  : D3 test option (kmg::BlendNode): blend gt to flat between
+//!                 kerr_blend_f1 (0.25) and kerr_blend_f2 (0.5) times kerr_r_ah (table
+//!                 units, max_theta r_AH) about xbh; default false
+//!   rad_shells  : comma-separated shell edges (mesh units, about xbh): the error per
+//!                 radial shell after each run (KMG ERRR / VERRR)
+//!   init_noise  : scalar runs start from u = init_noise * xi (xi in [-1, 1), a hash of
+//!                 the cell), the V2a-U zero right-hand-side test (amp = 0)
+//!   chk_near    : > 0: also the metric self-check in the cube |x - xbh| < chk_near
+//!                 (KMG VCHKN; chk_npts points)
 //! The multigrid options are also read from <problem> (MGKerrScalarDriver), among them
 //! hook_scope = operator (default; edge fill / kelvin faces only inside the kernels) |
 //! persist (hooked ghosts stay in u; with uold_edge_sync = none | free | all).
@@ -190,6 +199,53 @@ void KelvinOnBox(const cfc::MGKerrVectorDriver &drv, const RegionSize &ms, Real 
   }
 }
 
+std::vector<Real> ParseList(const std::string &str) {
+  std::vector<Real> v;
+  std::stringstream ss(str);
+  std::string x;
+  while (std::getline(ss, x, ',')) {
+    if (!x.empty()) v.push_back(std::stod(x));
+  }
+  return v;
+}
+
+//! the error per radial shell about xbh (drv.ErrorRadial), one line per run
+template <class Drv>
+void PrintRadial(const char *tag, const std::string &tok, Drv &drv,
+                 const cfc::kmg::CoefSource &cs, const std::vector<Real> &e) {
+  if (e.empty()) return;
+  std::vector<Real> em, s2, vol;
+  std::vector<long> n;
+  drv.ErrorRadial(cs.xbh, e, em, s2, vol, n);
+  if (Root()) std::printf("KMG %s %s", tag, tok.c_str());
+  for (size_t q = 0; q < e.size(); ++q) {
+    const Real m = MaxR(em[q]), a = SumR(s2[q]), w = SumR(vol[q]);
+    const long c = SumL(n[q]);
+    if (Root()) {
+      std::printf(" | r>=%.4g n %ld max %.6e l2 %.6e", e[q], c, m,
+                  (w > 0.0) ? std::sqrt(a/w) : 0.0);
+    }
+  }
+  if (Root()) {
+    std::printf("\n");
+    std::fflush(stdout);
+  }
+}
+
+//! the metric self-check (PointMetric2 against PointMetric and its FD) in a cube
+void MetricCheck(const char *tag, const cfc::kmg::CoefSource &cs, const Real lo[3],
+                 const Real len[3], int np) {
+  for (Real fd : {1.0e-3, 1.0e-4}) {
+    Real o[4];
+    cfc::kmg::MetricSelfCheck(cs, lo, len, np, fd, o);
+    if (Root()) {
+      std::printf("KMG %s npts %d fd %.1e max|dgt2-dgt| %.3e max|ddgt-FD| %.3e "
+                  "max|ddgt| %.3e max|gt2-gt| %.3e\n", tag, np, fd, o[0], o[1], o[2], o[3]);
+      std::fflush(stdout);
+    }
+  }
+}
+
 void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
                const cfc::kmg::CoefSource &cs, const cfc::kmg::Manuf &mf,
                const std::string &coef) {
@@ -233,15 +289,15 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
     const int np = pin->GetOrAddInteger(B, "chk_npts", 20000);
     const Real lo[3] = {ms.x1min, ms.x2min, ms.x3min};
     const Real len[3] = {ms.x1max - ms.x1min, ms.x2max - ms.x2min, ms.x3max - ms.x3min};
-    for (Real fd : {1.0e-3, 1.0e-4}) {
-      Real o[4];
-      cfc::kmg::MetricSelfCheck(cs, lo, len, np, fd, o);
-      if (Root()) {
-        std::printf("KMG VCHK npts %d fd %.1e max|dgt2-dgt| %.3e max|ddgt-FD| %.3e "
-                    "max|ddgt| %.3e max|gt2-gt| %.3e\n", np, fd, o[0], o[1], o[2], o[3]);
-      }
+    MetricCheck("VCHK", cs, lo, len, np);
+    const Real cn = pin->GetOrAddReal(B, "chk_near", 0.0);
+    if (cn > 0.0) {
+      const Real lon[3] = {cs.xbh[0] - cn, cs.xbh[1] - cn, cs.xbh[2] - cn};
+      const Real lenn[3] = {2.0*cn, 2.0*cn, 2.0*cn};
+      MetricCheck("VCHKN", cs, lon, lenn, np);
     }
   }
+  const std::vector<Real> shells = ParseList(pin->GetOrAddString(B, "rad_shells", ""));
 
   Kokkos::Timer timer;
   Driver dv(pin, pm, 1.0e30, &timer);
@@ -326,6 +382,7 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
       cmax[c] = MaxR(cmax[c]);
       cn[c] = SumL(cn[c]);
     }
+    PrintRadial("VERRR", tok, drv, cs, shells);
     std::vector<Real> pv, pc;
     std::vector<int> po;
     if (!probes.empty()) {
@@ -438,6 +495,19 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     cs.xbh[2] = pin->GetOrAddReal(B, "xbh3", 0.0);
     cs.exact = pin->GetOrAddBoolean(B, "exact", false);
     cs.src_exact = pin->GetOrAddBoolean(B, "src_exact", false);
+    if (pin->GetOrAddBoolean(B, "kerr_blend", false)) {
+      const Real rah = pin->GetReal(B, "kerr_r_ah");
+      cs.blend_r1 = pin->GetOrAddReal(B, "kerr_blend_f1", 0.25)*rah*cs.m_bh;
+      cs.blend_r2 = pin->GetOrAddReal(B, "kerr_blend_f2", 0.5)*rah*cs.m_bh;
+      if (!(cs.blend_r2 > cs.blend_r1) || cs.blend_r1 < 0.0) {
+        std::cout << "### FATAL ERROR: kerr_blend needs 0 <= f1 < f2" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      if (Root()) {
+        std::printf("KMG BLEND r1 %.6e r2 %.6e (mesh units about xbh)\n", cs.blend_r1,
+                    cs.blend_r2);
+      }
+    }
   } else {
     std::cout << "### FATAL ERROR: <problem>/coef must be flat, synthetic or kerr"
               << std::endl;
@@ -469,6 +539,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   drv.mm_.da2_w = pin->GetOrAddReal(B, "da2_w", 1.0);
   drv.mm_.dpsi_amp = pin->GetOrAddReal(B, "dpsi_amp", 0.0);
   drv.mm_.dpsi_w = pin->GetOrAddReal(B, "dpsi_w", 1.0);
+  drv.init_noise_ = pin->GetOrAddReal(B, "init_noise", 0.0);
+  const std::vector<Real> shells = ParseList(pin->GetOrAddString(B, "rad_shells", ""));
   drv.Prepare();
   const double tprep = t0.seconds();
   {
@@ -481,6 +553,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                   tprep);
     }
     EdgeCensus(pmbp);
+  }
+  {
+    const Real cn = pin->GetOrAddReal(B, "chk_near", 0.0);
+    if (cn > 0.0 && cs.mode != 0) {
+      const int np = pin->GetOrAddInteger(B, "chk_npts", 20000);
+      const Real lon[3] = {cs.xbh[0] - cn, cs.xbh[1] - cn, cs.xbh[2] - cn};
+      const Real lenn[3] = {2.0*cn, 2.0*cn, 2.0*cn};
+      MetricCheck("VCHKN", cs, lon, lenn, np);
+    }
   }
 
   Kokkos::Timer timer;
@@ -532,6 +613,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       cmax[c] = MaxR(cmax[c]);
       cn[c] = SumL(cn[c]);
     }
+    PrintRadial("ERRR", tok, drv, cs, shells);
     // ErrorVsManuf's rms is rank-local; with one rank it is global
     if (Root()) {
       std::printf("KMG RUN %s ncyc %d s_per_vcycle %.4e err_max %.6e err_rms_rank0 %.6e\n",

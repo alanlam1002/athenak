@@ -157,7 +157,10 @@ void MGKerrVector::SmoothPack(int color) {
   const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
   const int is = ngh_, js = ngh_, ks = ngh_;
   const int c0 = color ^ pmy_driver_->GetCoffset();
-  const Real omega = Drv()->omega_;
+  // pbj: one full damped Jacobi sweep per colour pair (the same cell updates as gs8)
+  const bool pbj = (Drv()->smoother_ == 2);
+  if (pbj && c0 != 0) return;
+  const Real omega = pbj ? Drv()->pbj_omega_ : Drv()->omega_;
   const Real fac = static_cast<Real>(1 << ll);
   auto brdx = block_rdx_.d_view;
   auto u = u_[lev].d_view;
@@ -197,7 +200,7 @@ void MGKerrVector::SmoothPack(int color) {
     const int ie = is + nx - 1, je = js + ny - 1, ke = ks + nz - 1;
     par_for("MGKerrVector::SmoothRBJ", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      if ((((i - is) + (j - js) + (k - ks)) & 1) != c0) return;
+      if (!pbj && (((i - is) + (j - js) + (k - ks)) & 1) != c0) return;
       const Real h = brdx(m)*fac;
       const Real ih2 = 1.0/(h*h);
       kmg::VViewAcc<decltype(u)> A{u, coeff, m};
@@ -214,7 +217,7 @@ void MGKerrVector::SmoothPack(int color) {
     par_for("MGKerrVector::SmoothRBJCopy", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
             is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      if ((((i - is) + (j - js) + (k - ks)) & 1) != c0) return;
+      if (!pbj && (((i - is) + (j - js) + (k - ks)) & 1) != c0) return;
       for (int a = 0; a < 3; ++a) { u(m, a, k, j, i) = scr(m, a, k, j, i); }
     });
     Hook(lev, false);
@@ -317,9 +320,12 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     smoother_ = 0;
   } else if (sm == "rb") {
     smoother_ = 1;
+  } else if (sm == "pbj") {
+    smoother_ = 2;
   } else {
-    Fatal(block + "/smoother must be 'gs8' or 'rb'.");
+    Fatal(block + "/smoother must be 'gs8', 'rb' or 'pbj'.");
   }
+  pbj_omega_ = pin->GetOrAddReal(block, "pbj_omega", 6.0/7.0);
   std::string ef = pin->GetOrAddString(block, "edge_fill", "rule_r");
   if (ef == "rule_r") {
     edge_fill_ = kmg::EdgeFill::rule_r;
@@ -604,15 +610,19 @@ void MGKerrVectorDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
       for (int a = 0; a < 3; ++a) { oct.U(a, k, j, i) = nw[a]; }
     }
   } else {
+    // rb: Jacobi within the colour; pbj: all 8 cells, damped, on colour 0 only
+    const bool pbj = (smoother_ == 2);
+    if (pbj && c != 0) return;
+    const Real om = pbj ? pbj_omega_ : omega_;
     Real nw[8][3];
     for (int sc = 0; sc < 8; ++sc) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;
-      if (((oi + oj + ok) & 1) != c) continue;
-      OctPoint(oct, ngh + ok, ngh + oj, ngh + oi, h, omega_, nw[sc]);
+      if (!pbj && ((oi + oj + ok) & 1) != c) continue;
+      OctPoint(oct, ngh + ok, ngh + oj, ngh + oi, h, om, nw[sc]);
     }
     for (int sc = 0; sc < 8; ++sc) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;
-      if (((oi + oj + ok) & 1) != c) continue;
+      if (!pbj && ((oi + oj + ok) & 1) != c) continue;
       for (int a = 0; a < 3; ++a) { oct.U(a, ngh + ok, ngh + oj, ngh + oi) = nw[sc][a]; }
     }
   }

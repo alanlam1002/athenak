@@ -33,7 +33,8 @@
 //!   for the sine mode with vnh_mix, harmonics (1,1,1), (2,1,1), (1,1,2);
 //!   vsrc        : manuf (s = -DL V*, error against V*) | blob (src = V*: a source with a
 //!                 monopole and no exact solution, for the box-doubling probes)
-//!   runs        : smoother/fill[/self|rhs] (the last: mp_source for that run)
+//!   runs        : smoother/fill[/self|rhs] (the last: mp_source for that run); smoother
+//!                 gs8 | rb | pbj (damped point-block Jacobi, damping pbj_omega)
 //!   probe_r     : > 0: V at 7 points (+-r on the axes, r(1,1,1)/sqrt3) from the mp origin
 //!   chk_npts    : the PointMetric2 self-check points (kerr/synthetic)
 //!   the driver's options: mg_outer_bc_vec (kelvin | zerofixed), mp_source, mp_outer,
@@ -306,7 +307,7 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
       while (std::getline(st, x, '/')) f.push_back(x);
     }
     if (f.size() < 2) continue;
-    drv.smoother_ = (f[0] == "rb") ? 1 : 0;
+    drv.smoother_ = (f[0] == "rb") ? 1 : ((f[0] == "pbj") ? 2 : 0);
     drv.edge_fill_ = (f[1] == "bilinear") ? cfc::kmg::EdgeFill::bilinear
                    : ((f[1] == "off") ? cfc::kmg::EdgeFill::off
                                       : cfc::kmg::EdgeFill::rule_r);

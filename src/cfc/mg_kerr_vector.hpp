@@ -129,8 +129,9 @@ class MGKerrVectorDriver : public MultigridDriver {
   bool hook_operator_ = true;   // block/hook_scope = operator (default) | persist
   bool corner_poison_ = false;
   bool count_nonfinite_ = false;
-  int smoother_ = 0;          // 0 gs8, 1 rb
+  int smoother_ = 0;          // 0 gs8, 1 rb, 2 pbj (damped point-block Jacobi, W3c)
   Real omega_ = 1.0;
+  Real pbj_omega_ = 6.0/7.0;  // block/pbj_omega: pbj's damping (one sweep per colour pair)
   bool kelvin_ = true;        // block/mg_outer_bc_vec = kelvin | zerofixed
   bool mp_self_ = true;       // block/mp_source = self | rhs
   int mp_outer_ = 3;

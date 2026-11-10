@@ -77,7 +77,9 @@ struct NewtonStats {
 // b^2/(rho h) (comoving b). Bins: <1e-2, [1e-2,1e-1), ..., [1e3,1e4), >=1e4.
 enum HistCounter {kHCells = 0, kHConverged = 1, kHRetry = 2, kHFallback = 3,
                   kHPrestep = 4, kHCeiling = 5, kHFloor = 6, kHEgtB = 7, kHContinued = 8,
-                  kHNCounters = 9};
+                  // 07 v2.8 §3.2.3(e), test-only prototype keys
+                  kHFA = 9, kHFAReject = 10, kHBlend = 11, kHIL = 12, kHILFloor = 13,
+                  kHKeep = 14, kHNCounters = 15};
 enum HistBinning {kBinSigM = 0, kBinMagn = 1, kHistBinnings = 2};
 constexpr int kHistBins = 8;
 
@@ -101,6 +103,56 @@ struct SigmaMHist {
   void Read(int64_t out[kHistBinnings][kHistBins][kHNCounters]) const;
   // Restart: rank 0 holds the MPI-reduced counts, other ranks start from zero.
   void Load(const int64_t in[kHistBinnings][kHistBins][kHNCounters]) const;
+};
+
+// 07 v2.8 §3.2.3(d,e) prototype log histograms, per b^2/(rho h) decade (kBinMagn edges):
+// eps_D4 = |avg(E_f) - E_cell|/|B| of solved cells (unflagged / flagged by FA or
+// blend/IL) and the FA energy deficit |dtau|/(tau + D). Bins: [0] < 1e-12, [1..56]
+// quarter decades from 1e-12 to 1e2, [57] >= 1e2 or NaN; plus the exact maximum per
+// (set, magn bin). Written to <basename>.rlog.txt at the rhist times; not carried
+// across restarts.
+enum LogSet {kLogEpsUnflagged = 0, kLogEpsFlagged = 1, kLogFADeficit = 2, kNLogSets = 3};
+constexpr int kLogBins = 58;
+
+struct ProtoLog {
+  DvceArray3D<int64_t> d;
+  DvceArray2D<Real> mx;
+  ProtoLog() : d("resist_proto_log", kNLogSets, kHistBins, kLogBins),
+               mx("resist_proto_max", kNLogSets, kHistBins) {}
+  void Reset() const { Kokkos::deep_copy(d, 0); Kokkos::deep_copy(mx, 0.0); }
+  KOKKOS_INLINE_FUNCTION
+  static int LogBin(const Real x) {
+    if (!(x >= 1.0e-12)) return (x == x) ? 0 : kLogBins - 1;
+    const Real f = 4.0*(log10(x) + 12.0);
+    if (!(f < static_cast<Real>(kLogBins - 2))) return kLogBins - 1;
+    return 1 + static_cast<int>(f);
+  }
+  KOKKOS_INLINE_FUNCTION
+  void Add(const int set, const int bm, const Real x) const {
+    Kokkos::atomic_add(&d(set, bm, LogBin(x)), static_cast<int64_t>(1));
+    if (x == x) Kokkos::atomic_max(&mx(set, bm), x);
+  }
+  // Host copy, summed (counts) and maximised (mx) over MPI ranks.
+  void Read(int64_t out[kNLogSets][kHistBins][kLogBins],
+            Real mxo[kNLogSets][kHistBins]) const;
+};
+
+// 07 v2.8 §3.2.3(e) failure reasons of non-converged interior cells by radius bin (dx
+// wide from the pgen's centre, else one bin), written per (cycle, stage) for the first
+// resistive_fail_reason_cycles cycles to <basename>.rfail.txt.
+constexpr int kRFailReasons = 8;   // FailReason (resistive_implicit.hpp)
+constexpr int kRFailRBins = 1024;  // the last bin collects r >= (kRFailRBins - 1) dx
+
+struct RFailCount {
+  DvceArray2D<int64_t> d;
+  RFailCount() : d("resist_rfail", kRFailReasons, kRFailRBins) {}
+  void Reset() const { Kokkos::deep_copy(d, 0); }
+  KOKKOS_INLINE_FUNCTION
+  void Add(const int reason, const int rbin) const {
+    Kokkos::atomic_add(&d(reason, rbin), static_cast<int64_t>(1));
+  }
+  // Host copy (size kRFailReasons*kRFailRBins, reason-major) summed over MPI ranks.
+  void Read(int64_t *out) const;
 };
 
 }  // namespace resistive

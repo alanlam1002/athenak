@@ -48,8 +48,10 @@ namespace resistive {
 
 // cell layout of emc
 enum {kEX = 0, kEY = 1, kEZ = 2, kBX = 3, kBY = 4, kBZ = 5, kNEMC = 6};
-// cell layout of cwork
-enum {kWU = 0, kWR = 3, kWB = 6, kWS = 9, kNWORK = 10};
+// cell layout of cwork; kWF/kWE (07 v2.8 §3.2.3(d)): flag bits of the last implicit solve
+// (consumed and cleared by ResistiveC2P) and the cell E it returned (R if it failed)
+enum {kWU = 0, kWR = 3, kWB = 6, kWS = 9, kWF = 10, kWE = 11, kNWORK = 14};
+enum {kFlagSolved = 1, kFlagFallback = 2};
 
 class ResistiveDynGR {
  public:
@@ -60,6 +62,11 @@ class ResistiveDynGR {
   Conductivity cond;
   NewtonStats newton;
   SigmaMHist hist;        // K5-run histogram, written to <basename>.rhist.txt
+  ProtoLog plog;          // 07 v2.8 prototype eps_D4/FA-deficit, <basename>.rlog.txt
+  RFailCount rfail;       // 07 v2.8 failure reasons, <basename>.rfail.txt
+  // rfail radius origin, set by the pgen (e.g. the rotor centre); else a single bin
+  bool rfail_center_set = false;
+  Real rfail_center[3] = {0.0, 0.0, 0.0};
 
   DvceFaceFld4D<Real> e0, e1, coarse_e0;
   DvceFaceFld4D<Real> qflx;
@@ -122,13 +129,18 @@ class ResistiveDynGR {
   void FreezeFile(bool write);
   // Writes and resets the K5-run histogram when t_end reaches the next output time.
   void MaybeWriteHist(Real t_end, int cycle);
+  // Appends the failure-reason counts of one implicit stage to <basename>.rfail.txt and
+  // resets them (collective).
+  void WriteRFail(int cycle, int stage);
+  // Writes and resets the prototype log histograms (called with the rhist output).
+  void MaybeWriteRLog(Real t_end, int cycle);
   // Restart-file state (07 v2.5 §4.1): Newton counters, pending histogram counts and the
   // next histogram time, MPI-reduced, so counters accumulate across restart links.
   // Pack is collective; the restart file stores the blob after the root-process state.
   // The blob starts with a format header (07 v2.6 R1): 8-byte magic, uint32 version,
   // uint32 payload size. Bump kRestartVersion whenever the payload layout changes.
   static constexpr char kRestartMagic[9] = "ATKRESIS";
-  static constexpr uint32_t kRestartVersion = 1;
+  static constexpr uint32_t kRestartVersion = 2;  // 2: rhist columns of 07 v2.8
   static constexpr std::size_t RestartHeaderSize() { return 8 + 2*sizeof(uint32_t); }
   static constexpr std::size_t RestartStateSize() {
     return 2*sizeof(Real) + sizeof(int64_t)*(kNewtonNCounters +
@@ -149,6 +161,8 @@ class ResistiveDynGR {
   Real hist_dt = -1.0, hist_next = 0.0;
   bool hist_header = false;
   std::string hist_fname;
+  std::string rlog_fname, rfail_fname;
+  bool rlog_header = false, rfail_header = false;
   std::string esrc_fname;
   TaskStatus SyncSend(int r);
   TaskStatus SyncRecv(int r);

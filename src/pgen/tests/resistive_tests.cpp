@@ -21,7 +21,9 @@
 //!               eigenmode of the linearised resistive equations (dispersion
 //!               (w^2-k^2)(w + i sigma b0^2/h) + i sigma w^2 = 0,
 //!               h = rho + gamma p/(gamma-1))
-//!   rotor       relativistic rotor (Del Zanna et al. 2003): rho_in, omega, r0, r1 taper
+//!   rotor       relativistic rotor (Del Zanna et al. 2003): rho_in, omega, r0, r1 taper;
+//!               rotor_bdir = x|z (B = b0 x, default; z: K5-cold-z, 07 v2.8 §4.1); sets
+//!               the resistive failure-reason centre to the origin
 //!   harris      force-free periodic double Harris sheet B_x = b0 [tanh((y-y1)/a) -
 //!               tanh((y-y2)/a) - 1], B_z = sqrt(b0^2 - B_x^2), y1,2 = -/+ L_y/4,
 //!               E = J/sigma (mesh centred on x = y = 0);
@@ -99,6 +101,7 @@ struct RTest {
   Real cv[2], cb[2], ce[2], omr, omi;
   // rotor
   Real rhoin, omg, r0, r1;
+  bool rotz;  // rotor_bdir = z
   // harris sheet
   Real ash, ly, eps, lam;
   bool xpoint;
@@ -202,7 +205,7 @@ struct RTest {
       if (type == kRiemann) {
         for (int a = 0; a < 3; ++a) B[a] = (x < x0) ? bl[a] : br[a];
       } else if (type == kRotor) {
-        B[0] = b0;
+        B[rotz ? 2 : 0] = b0;
       } else if (type == kKH) {
         B[0] = bxkh;
         B[2] = bzkh;
@@ -576,6 +579,20 @@ void ProblemGenerator::ResistiveTests(ParameterInput *pin, const bool restart) {
   rt.omg = pin->GetOrAddReal("problem", "omega", 9.95);
   rt.r0 = pin->GetOrAddReal("problem", "r0", 0.1);
   rt.r1 = pin->GetOrAddReal("problem", "r1", 0.115);
+  rt.rotz = false;
+  if (rt.type == kRotor) {
+    const std::string bd = pin->GetOrAddString("problem", "rotor_bdir", "x");
+    if (bd != "x" && bd != "z") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<problem> rotor_bdir = '" << bd << "'; use x|z"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    rt.rotz = (bd == "z");
+    if (pmbp->pdyngr->presist != nullptr) {
+      pmbp->pdyngr->presist->rfail_center_set = true;  // rotor centre at the origin
+    }
+  }
   rt.ash = pin->GetOrAddReal("problem", "a_sheet", 0.1);
   rt.ly = ly;
   rt.eps = pin->GetOrAddReal("problem", "eps", 1.0e-3);

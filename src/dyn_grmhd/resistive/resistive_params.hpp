@@ -16,7 +16,15 @@
 //!   resistive_sigma_width  (density model, see conductivity.hpp)
 //!   resistive_rsolver      = mhllc|lf     (tetrad MHLLC, default; or light-speed LF)
 //!   resistive_charge_flux  = upwind|rusanov
-//!   resistive_newton_fallback = lagged_v|fail
+//!   resistive_newton_fallback = lagged_v|fail|blend (blend: 07 v2.8 §3.2.3(c)
+//!                            ideal-limit blend; test-only prototype, like the four
+//!                            keys below)
+//!   resistive_floor_accept = false      (07 v2.8 §3.2.3(b) floored-root acceptance)
+//!   resistive_floor_accept_tol = 1e-3   (FA condition 2, discarded energy/(tau + D))
+//!   resistive_d4           = average|keep (keep: no hydro c2p in flagged cells,
+//!                            §3.2.3(d))
+//!   resistive_fail_reason_cycles = 0    (log failure reasons for cycles < N to
+//!                            <base>.rfail.txt)
 //!   resistive_newton_tol   = 1e-11
 //!   resistive_newton_maxit = 30
 //!   resistive_allow_incomplete = false  (developer switch while steps are unfinished)
@@ -38,7 +46,8 @@ namespace resistive {
 enum class ChargeFlux {upwind, rusanov};
 enum class RSolver {mhllc, lf};
 enum class SigmaModel {uniform, density};
-enum class NewtonFallback {lagged_v, fail};
+enum class NewtonFallback {lagged_v, fail, blend};
+enum class D4Mode {average, keep};
 enum class ImplicitResidual {c2p, momentum};
 
 struct ResistiveParams {
@@ -56,6 +65,15 @@ struct ResistiveParams {
   ImplicitResidual implicit_residual = ImplicitResidual::c2p;
   Real sigma_max = 0.0;   // <mhd> sigma_max: fluid density floor rho >= B^2/sigma_max
   Real hist_dt = -1.0;    // K5-run histogram output interval
+  // 07 v2.8 §3.2.3 test-only prototype keys
+  bool floor_accept = false;
+  Real floor_accept_tol = 1.0e-3;
+  D4Mode d4 = D4Mode::average;
+  int fail_reason_cycles = 0;
+  // any prototype key on: ResistiveC2P consumes the per-cell flags (D4 diagnostics/keep)
+  bool Prototype() const {
+    return newton_fallback == NewtonFallback::blend || floor_accept || d4 == D4Mode::keep;
+  }
 };
 
 // True only if <block>/resistive exists and is true. Never adds keys to pin.

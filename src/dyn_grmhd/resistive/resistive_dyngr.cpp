@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
@@ -133,6 +134,8 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     }
   }
   hist_fname = pin->GetString("job", "basename") + ".rhist.txt";
+  rlog_fname = pin->GetString("job", "basename") + ".rlog.txt";
+  rfail_fname = pin->GetString("job", "basename") + ".rfail.txt";
   esrc_fname = pin->GetString("job", "basename") + ".esrc.r"
                + std::to_string(global_variable::my_rank);
   hist_next = pp->pmesh->time + hist_dt;
@@ -737,7 +740,9 @@ void ResistiveDynGR::AddImexSources(Driver *pdriver, int istage) {
 //! K5-run histogram output: per binning (sigM = B^2/rho, magn = b^2/(rho h)), one row
 //! per decade with the counts accumulated since the previous row (cells of the implicit
 //! solve, converged, C-retry, lagged-v fallback, pre-step inadmissible, sigma_M-ceiling
-//! activations, floored, E^2 > B^2, converged through the sigma dt continuation).
+//! activations, floored, E^2 > B^2, converged through the sigma dt continuation; 07 v2.8
+//! §3.2.3(e): FA accepted/rejected, blend, pure IL, IL floored, keep). With a 07 v2.8
+//! prototype key on, also the <basename>.rlog.txt histograms (ProtoLog).
 
 void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
   if (!(hist_dt > 0.0) || t_end < hist_next*(1.0 - 1.0e-12)) return;
@@ -745,6 +750,7 @@ void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
   int64_t h[kHistBinnings][kHistBins][kHNCounters];
   hist.Read(h);
   hist.Reset();
+  if (params.Prototype()) MaybeWriteRLog(t_end, cycle);
   if (global_variable::my_rank != 0) return;
   // a new run overwrites, a restart appends (header only if the file is new)
   FILE *fp = std::fopen(hist_fname.c_str(), hist_header ? "a" : "w");
@@ -752,7 +758,8 @@ void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
   std::fseek(fp, 0, SEEK_END);
   if (std::ftell(fp) == 0) {
     std::fprintf(fp, "# binning time cycle bin log10_lo cells converged retry fallback "
-                     "prestep_inadmissible ceiling floor e_gt_b continued\n");
+                     "prestep_inadmissible ceiling floor e_gt_b continued fa fa_reject "
+                     "blend il il_floor keep\n");
   }
   hist_header = true;
   const char *label[kHistBinnings] = {"sigM", "magn"};
@@ -762,6 +769,64 @@ void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
                    (b == 0) ? -99 : b - 3);
       for (int c = 0; c < kHNCounters; ++c) std::fprintf(fp, " %" PRId64, h[s][b][c]);
       std::fprintf(fp, "\n");
+    }
+  }
+  std::fclose(fp);
+}
+
+//! rlog rows: "set time cycle magn_bin max", then the kLogBins counts (bin 0: < 1e-12,
+//! bin 1 + q: [1e-12 10^(q/4), 1e-12 10^((q+1)/4)), last: >= 1e2 or NaN); max is the
+//! exact maximum of the set over all magn bins in the interval.
+void ResistiveDynGR::MaybeWriteRLog(const Real t_end, const int cycle) {
+  int64_t h[kNLogSets][kHistBins][kLogBins];
+  Real mx[kNLogSets][kHistBins];
+  plog.Read(h, mx);
+  plog.Reset();
+  if (global_variable::my_rank != 0) return;
+  FILE *fp = std::fopen(rlog_fname.c_str(), rlog_header ? "a" : "w");
+  if (fp == nullptr) return;
+  std::fseek(fp, 0, SEEK_END);
+  if (std::ftell(fp) == 0) {
+    std::fprintf(fp, "# set time cycle magn_bin max counts[%d] (bin 0 < 1e-12, bin 1+q "
+                     "from 1e-12*10^(q/4), bin %d >= 1e2 or NaN)\n", kLogBins,
+                 kLogBins - 1);
+  }
+  rlog_header = true;
+  const char *label[kNLogSets] = {"eps_d4", "eps_d4_flagged", "fa_deficit"};
+  for (int s = 0; s < kNLogSets; ++s) {
+    for (int b = 0; b < kHistBins; ++b) {
+      std::fprintf(fp, "%s %.10e %d %d %.6e", label[s], t_end, cycle, b, mx[s][b]);
+      for (int c = 0; c < kLogBins; ++c) std::fprintf(fp, " %" PRId64, h[s][b][c]);
+      std::fprintf(fp, "\n");
+    }
+  }
+  std::fclose(fp);
+}
+
+//----------------------------------------------------------------------------------------
+//! rfail rows: "cycle stage reason rbin count" (nonzero counts only; cycle 1-based, stage
+//! = ImEx istage, reason = FailReason, rbin = floor(r/dx) from rfail_center or 0).
+
+void ResistiveDynGR::WriteRFail(const int cycle, const int stage) {
+  std::vector<int64_t> c(kRFailReasons*kRFailRBins);
+  rfail.Read(c.data());
+  rfail.Reset();
+  if (global_variable::my_rank != 0) return;
+  FILE *fp = std::fopen(rfail_fname.c_str(), rfail_header ? "a" : "w");
+  if (fp == nullptr) return;
+  std::fseek(fp, 0, SEEK_END);
+  if (std::ftell(fp) == 0) {
+    std::fprintf(fp, "# cycle stage reason rbin count (reason: 1 prestep_inadmissible "
+                     "2 all_floored 3 c2p_error 4 no_descent 5 singular_jacobian 6 maxit "
+                     "7 continuation_stalled; rbin: r/dx from (%g, %g, %g)%s)\n",
+                 rfail_center[0], rfail_center[1], rfail_center[2],
+                 rfail_center_set ? "" : ", no centre: single bin 0");
+  }
+  rfail_header = true;
+  for (int r = 0; r < kRFailReasons; ++r) {
+    for (int b = 0; b < kRFailRBins; ++b) {
+      const int64_t n = c[r*kRFailRBins + b];
+      if (n > 0) std::fprintf(fp, "%d %d %d %d %" PRId64 "\n", cycle, stage, r, b, n);
     }
   }
   std::fclose(fp);
@@ -817,7 +882,9 @@ void ResistiveDynGR::UnpackRestartState(const char *buf) {
   newton.Load(ns);
   hist.Load(h);
   if (dt_rst == hist_dt) hist_next = next_rst;
-  hist_header = true;  // continue the run's rhist file
+  hist_header = true;  // continue the run's rhist file (and rlog/rfail, if present)
+  rlog_header = true;
+  rfail_header = true;
 }
 
 }  // namespace resistive

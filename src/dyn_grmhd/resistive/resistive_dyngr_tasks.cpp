@@ -20,6 +20,7 @@
 #include "mesh/mesh.hpp"
 #include "driver/driver.hpp"
 #include "coordinates/adm.hpp"
+#include "coordinates/cell_locations.hpp"
 #include "mhd/mhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
@@ -490,6 +491,21 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
   resistive::CellSolveOptions opt;
   opt.form = (presist->params.implicit_residual == resistive::ImplicitResidual::momentum)
              ? resistive::kResidualMomentum : resistive::kResidualC2P;
+  // 07 v2.8 §3.2.3 test-only prototype keys
+  opt.blend = (presist->params.newton_fallback == resistive::NewtonFallback::blend);
+  opt.floor_accept = presist->params.floor_accept;
+  opt.floor_accept_tol = presist->params.floor_accept_tol;
+  const bool proto = presist->params.Prototype();
+  const resistive::ProtoLog plog = presist->plog;
+  const int ncyc = pmy_pack->pmesh->ncycle;
+  const bool dorfail = (ncyc < presist->params.fail_reason_cycles);
+  const resistive::RFailCount rfail = presist->rfail;
+  const bool rcen = presist->rfail_center_set;
+  const Real rc0 = presist->rfail_center[0], rc1 = presist->rfail_center[1];
+  const Real rc2 = presist->rfail_center[2];
+  auto &mbsize = pmy_pack->pmb->mb_size;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  static_assert(resistive::kRFailReasons == resistive::kNReasons, "rfail reasons");
   const resistive::SigmaMHist hist = presist->hist;
   const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
   const int je = (indcs.nx2 > 1) ? indcs.je : js;
@@ -548,6 +564,28 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
       if (res.prestep_inadmissible) hist.Add(bs, bm, resistive::kHPrestep);
       if (res.floor) hist.Add(bs, bm, resistive::kHFloor);
       if (res.continued) hist.Add(bs, bm, resistive::kHContinued);
+      if (res.fa) hist.Add(bs, bm, resistive::kHFA);
+      if (res.fa_reject) hist.Add(bs, bm, resistive::kHFAReject);
+      if (res.blend) hist.Add(bs, bm, resistive::kHBlend);
+      if (res.il) hist.Add(bs, bm, resistive::kHIL);
+      if (res.il_floor) hist.Add(bs, bm, resistive::kHILFloor);
+      if (res.keep) hist.Add(bs, bm, resistive::kHKeep);
+      if (res.fa_deficit >= 0.0) plog.Add(resistive::kLogFADeficit, bm, res.fa_deficit);
+      if (dorfail && res.reason != resistive::kReasonNone) {
+        int rb = 0;
+        if (rcen) {
+          const Real x = CellCenterX(i - is, nx1, mbsize.d_view(m).x1min,
+                                     mbsize.d_view(m).x1max) - rc0;
+          const Real y = (nx2 > 1) ? CellCenterX(j - js, nx2, mbsize.d_view(m).x2min,
+                                                  mbsize.d_view(m).x2max) - rc1 : 0.0;
+          const Real z = (nx3 > 1) ? CellCenterX(k - ks, nx3, mbsize.d_view(m).x3min,
+                                                  mbsize.d_view(m).x3max) - rc2 : 0.0;
+          const Real rr = sqrt(x*x + y*y + z*z)/mbsize.d_view(m).dx1;
+          rb = (rr < static_cast<Real>(resistive::kRFailRBins - 1))
+               ? static_cast<int>(rr) : resistive::kRFailRBins - 1;
+        }
+        rfail.Add(res.reason, rb);
+      }
     }
     Real u[3] = {ug[0], ug[1], ug[2]};
     if (!res.failed) {
@@ -566,7 +604,17 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
       cw(m, resistive::kWB + a, k, j, i) = B[a];
     }
     cw(m, resistive::kWS, k, j, i) = sdt;
+    if (proto) {
+      // flag + cell E for ResistiveC2P (07 v2.8 §3.2.3(d)): FA and blend/IL cells
+      const bool flg = res.fa || res.blend || res.il;
+      cw(m, resistive::kWF, k, j, i) = static_cast<Real>(
+          resistive::kFlagSolved + (flg ? resistive::kFlagFallback : 0));
+      for (int a = 0; a < 3; ++a) {
+        cw(m, resistive::kWE + a, k, j, i) = res.failed ? R[a] : E[a];
+      }
+    }
   });
+  if (dorfail) presist->WriteRFail(ncyc + 1, istage);
 
   auto rs = pdriver->impl_src_e;
   const int s = istage - 1;
@@ -636,6 +684,12 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
   DvceFaceFld4D<Real> ef = presist->e0;
   const int nkji = n3*n2*n1, nji = n2*n1;
   const resistive::SigmaMHist hist = presist->hist;
+  // 07 v2.8 §3.2.3(d) prototype: flagged cells (and every solved cell under
+  // resistive_d4 = keep) keep their implicit-step fluid state; eps_D4 is logged
+  const bool proto = presist->params.Prototype();
+  const bool d4keep = (presist->params.d4 == resistive::D4Mode::keep);
+  const resistive::ProtoLog plog = presist->plog;
+  auto cw = presist->cwork;
   const Real sigmax = presist->params.sigma_max;
   const bool ceiling = (sigmax < 0.1*std::numeric_limits<float>::max());
   const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
@@ -677,7 +731,30 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
     Real bz[NMAG] = {0.0, 0.0, 0.0};
     Real g[NSPMETRIC];
     for (int n = 0; n < NSPMETRIC; ++n) g[n] = pm.g[n];
-    Primitive::SolverResult res = ps_.ConToPrim(prim, cons, bz, g, gu);
+    int flag = 0;
+    if (proto) {
+      flag = static_cast<int>(cw(m, resistive::kWF, k, j, i));
+      cw(m, resistive::kWF, k, j, i) = 0.0;
+    }
+    const bool solved = (flag & resistive::kFlagSolved) != 0;
+    const bool flagged = (flag & resistive::kFlagFallback) != 0;
+    const bool keepst = solved && (flagged || d4keep);
+    Primitive::SolverResult res;
+    if (keepst) {
+      // the implicit step's state: w0/temperature as the solve left them
+      res.error = Primitive::Error::SUCCESS;
+      res.iterations = 0;
+      res.cons_floor = res.prim_floor = res.cons_adjusted = false;
+      prim[PRH] = w0_(m, IDN, k, j, i)/mb;
+      prim[PVX] = w0_(m, IVX, k, j, i);
+      prim[PVY] = w0_(m, IVY, k, j, i);
+      prim[PVZ] = w0_(m, IVZ, k, j, i);
+      prim[PPR] = w0_(m, IPR, k, j, i);
+      prim[PTM] = temp_(m, 0, k, j, i);
+      for (int n = 0; n < nscal; ++n) prim[PYF + n] = w0_(m, nmhd + n, k, j, i);
+    } else {
+      res = ps_.ConToPrim(prim, cons, bz, g, gu);
+    }
     if (res.error != Primitive::Error::SUCCESS) sumerr++;
     // sigma_M ceiling (decision 10 A): add fluid mass at fixed u, T, Y; E~, B~ untouched
     const Real b2 = resistive::Dot(pm.g, B, B);
@@ -699,6 +776,13 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
           resistive::ComovingB2(pm.g, sg, &prim[PVX], E, B), rhoh);
       if (ceil_on) hist.Add(bs, bm, resistive::kHCeiling);
       if (resistive::Dot(pm.g, E, E) > b2) hist.Add(bs, bm, resistive::kHEgtB);
+      if (solved) {
+        Real de[3];
+        for (int a = 0; a < 3; ++a) de[a] = E[a] - cw(m, resistive::kWE + a, k, j, i);
+        const Real eps = sqrt(fmax(resistive::Dot(pm.g, de, de), 0.0))/sqrt(b2);
+        plog.Add(flagged ? resistive::kLogEpsFlagged : resistive::kLogEpsUnflagged, bm,
+                 eps);
+      }
     }
     w0_(m, IDN, k, j, i) = prim[PRH]*mb;
     w0_(m, IVX, k, j, i) = prim[PVX];

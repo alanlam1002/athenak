@@ -27,6 +27,8 @@
 //!      continuation root with no fallback for sigma_M <= 10.
 //!  K6  Conductivity functor values, limits, monotonicity and smoothness.
 //!  K7  edge 2D solver: Mignone 2019 Eqs. 46-47 and 1D HLL reduction with GR speeds.
+//!  K8  07 v2.8 §3.2.3(f) prototype (host only): ideal-limit blend vs the converged root
+//!      (report-only); floored-root acceptance on cells whose root is T-floored.
 //!  C3  SMR prolongation of E~: fine q~ equals the coarse q~ (Toth-Roe), 2D and 3D.
 //!  D   Diagnostics on synthetic mesh fields: Q == boundary flux, q~ for linear E,
 //!      div B of a CT-built field, E_c mismatch, Newton counters.
@@ -36,6 +38,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -1364,13 +1367,161 @@ void RunK7(const std::string &where, const int ntrial) {
 }  // namespace
 
 //----------------------------------------------------------------------------------------
+// K8 (07 v2.8 §3.2.3(f)): test-only fallback prototype, host only.
+
+// Pre-step cell (E = R = -v x B + a non-ideal part) with W0 in [1, wmax], B^2/rho in
+// 10^[lsig_lo, lsig_hi], sigma dt in 10^[lsdt_lo, lsdt_hi]; flat metric for even t.
+struct K8Cell {
+  Real g[NSPMETRIC], gi[NSPMETRIC], sg, sdt, sigm, w0, rho, p;
+  Real u[3], B[3], R[3], cons[NCONS];
+  Real idn, im[3], ien;
+};
+
+void K8MakeCell(const int t, const Real lsig_lo, const Real lsig_hi, const Real lsdt_lo,
+                const Real lsdt_hi, const Real wmax, const Real nuideal, const Real pfac,
+                K8Cell &c) {
+  using namespace resistive;  // NOLINT
+  RandomState r;
+  MakeRandomState(t, r);
+  uint64_t s = 0x8B1E0000ULL + static_cast<uint64_t>(t)*104729ULL;
+  for (int n = 0; n < NSPMETRIC; ++n) c.g[n] = r.g[n];
+  if (t % 2 == 0) {
+    for (int n = 0; n < NSPMETRIC; ++n) c.g[n] = 0.0;
+    c.g[S11] = c.g[S22] = c.g[S33] = 1.0;
+  }
+  Inverse3(c.g, c.gi);
+  c.sg = SqrtDet(c.g);
+  c.sdt = pow(10.0, Uniform(s, lsdt_lo, lsdt_hi));
+  c.sigm = pow(10.0, Uniform(s, lsig_lo, lsig_hi));
+  c.rho = r.rho;
+  c.p = (pfac > 0.0) ? pfac*r.rho : r.p;
+  const Real h = 1.0 + kGam/(kGam - 1.0)*c.p/c.rho;
+  const Real umag = Uniform(s, 0.0, sqrt(wmax*wmax - 1.0));
+  const Real un = sqrt(Dot(c.g, r.wv, r.wv));
+  for (int a = 0; a < 3; ++a) c.u[a] = r.wv[a]*umag/fmax(un, 1.0e-12);
+  c.w0 = sqrt(1.0 + Dot(c.g, c.u, c.u));
+  const Real bn = sqrt(Dot(c.g, r.Bcode, r.Bcode));
+  for (int a = 0; a < 3; ++a) c.B[a] = r.Bcode[a]*sqrt(c.sigm*c.rho)/bn;
+  Real v[3] = {c.u[0]/c.w0, c.u[1]/c.w0, c.u[2]/c.w0}, Es[3];
+  IdealE(c.g, c.sg, v, c.B, Es);
+  const Real nu = nuideal*Uniform(s, 0.0, 1.0)*sqrt(c.sigm*c.rho);
+  for (int a = 0; a < 3; ++a) c.R[a] = Es[a] + nu*r.Ernd[a];
+  PrimToConsDyn(c.g, c.rho, c.p, h, c.u, c.R, c.B, c.idn, c.im, c.ien);
+  for (int n = 0; n < NCONS; ++n) c.cons[n] = 0.0;
+  c.cons[CDN] = c.idn/c.sg;
+  for (int a = 0; a < 3; ++a) c.cons[CSX+a] = c.im[a]/c.sg;
+  c.cons[CTA] = c.ien/c.sg;
+}
+
+void ReportOnly(const std::string &name, const std::string &msg) {
+  if (global_variable::my_rank == 0) {
+    std::cout << "  " << std::left << std::setw(46) << name << " " << msg << "  REPORT"
+              << std::endl;
+  }
+}
+
+void RunK8(const int ntrial) {
+  using namespace resistive;  // NOLINT
+  const PS ps = MakeSolver();
+  // K8a: blend vs the converged Newton root u*. Reported per sigma dt decade: the
+  // maximum of q = |u_B - u*|/|u0 - u_IL| and of q/|u0 - u_IL| (O(1) if the blend error
+  // is second order in the IL distance, the §3.2.3(c) claim).
+  constexpr int nd = 6;
+  Real qmax[nd], q2max[nd];
+  int nconv[nd], ntot[nd], nfail = 0;
+  for (int d = 0; d < nd; ++d) { qmax[d] = q2max[d] = 0.0; nconv[d] = ntot[d] = 0; }
+  for (int t = 0; t < ntrial; ++t) {
+    K8Cell c;
+    K8MakeCell(t, 0.0, 4.0, -3.0, 3.0, 10.0, 0.3, -1.0, c);
+    const int d = std::min(nd - 1,
+                           std::max(0, static_cast<int>(floor(log10(c.sdt))) + 3));
+    ++ntot[d];
+    Real prim[NPRIM], E[3];
+    CellSolveOptions opt;
+    const CellSolveResult res = ResistiveCellSolve(ps, c.g, c.gi, c.sdt, c.cons, c.B,
+                                                   c.R, c.u, 1.0e-11, 30, false, prim, E,
+                                                   opt);
+    if (!res.converged || res.prestep_inadmissible) continue;
+    const Real us[3] = {prim[PVX], prim[PVY], prim[PVZ]};
+    Real pil[NPRIM], eil[3], uil[3], pb[NPRIM], eb[3], ub[3];
+    CellSolveResult r1, r2;
+    const bool ok1 = detail::IdealLimitBlend(ps, c.g, c.gi, c.sg, c.sdt, c.cons, c.B,
+                                             c.R, false, c.u, c.w0, pil, eil, uil, r1);
+    const bool ok2 = detail::IdealLimitBlend(ps, c.g, c.gi, c.sg, c.sdt, c.cons, c.B,
+                                             c.R, true, c.u, c.w0, pb, eb, ub, r2);
+    if (!ok1 || !ok2 || !r2.blend) { ++nfail; continue; }
+    Real dil[3], dbs[3];
+    for (int a = 0; a < 3; ++a) { dil[a] = c.u[a] - uil[a]; dbs[a] = ub[a] - us[a]; }
+    const Real nil = sqrt(Dot(c.g, dil, dil)), nbs = sqrt(Dot(c.g, dbs, dbs));
+    ++nconv[d];
+    if (nil > 1.0e-12) {
+      qmax[d] = fmax(qmax[d], nbs/nil);
+      q2max[d] = fmax(q2max[d], nbs/(nil*nil));
+    }
+  }
+  for (int d = 0; d < nd; ++d) {
+    char buf[200];
+    std::snprintf(buf, sizeof(buf), "n = %d/%d  max q = %.3e  max q/|u0-uIL| = %.3e",
+                  nconv[d], ntot[d], qmax[d], q2max[d]);
+    ReportOnly("K8a blend vs root, sdt 1e" + std::to_string(d - 3), buf);
+  }
+  Report("K8a blend: ideal c2p failures on solved cells", static_cast<Real>(nfail), 0.0);
+
+  // K8b: floored-root acceptance. Cold cells (p = 1e-9 rho), B^2/rho in 1e2..1e4, W0 <=
+  // 3, sigma dt in 1..1e3, with tau lowered by f (tau + D), f in 1e-7..1e-4, so that no
+  // unfloored root exists. Checks that accepted FA states reproduce D and S_i (the
+  // conserved totals the T floor must not touch) and meet condition 2.
+  int nfl = 0, nfa = 0, nrej = 0, nconv_b = 0, nblend = 0, nkeep = 0;
+  Real cmax = 0.0, defmax = 0.0;
+  for (int t = 0; t < ntrial; ++t) {
+    K8Cell c;
+    K8MakeCell(t, 2.0, 4.0, 0.0, 3.0, 3.0, 0.1, 1.0e-9, c);
+    uint64_t s = 0xFA000000ULL + static_cast<uint64_t>(t)*7907ULL;
+    const Real f = pow(10.0, Uniform(s, -7.0, -4.0));
+    c.cons[CTA] -= f*(c.cons[CTA] + c.cons[CDN]);
+    Real prim[NPRIM], E[3];
+    CellSolveOptions opt;
+    opt.floor_accept = true;
+    opt.blend = true;
+    const CellSolveResult res = ResistiveCellSolve(ps, c.g, c.gi, c.sdt, c.cons, c.B,
+                                                   c.R, c.u, 1.0e-11, 30, false, prim, E,
+                                                   opt);
+    if (res.converged) ++nconv_b;
+    if (res.reason == kReasonAllFloored) ++nfl;
+    if (res.fa_reject) ++nrej;
+    if (res.blend || res.il) ++nblend;
+    if (res.keep) ++nkeep;
+    if (!res.fa) continue;
+    ++nfa;
+    defmax = fmax(defmax, res.fa_deficit);
+    const Real mb = ps.GetEOS().GetBaryonMass();
+    Real u2[3] = {prim[PVX], prim[PVY], prim[PVZ]};
+    Real idn2, im2[3], ien2;
+    PrimToConsDyn(c.g, prim[PRH]*mb, prim[PPR], SolvedEnthalpy(ps, prim), u2, E, c.B,
+                  idn2, im2, ien2);
+    Real cm = fabs(idn2 - c.idn)/fabs(c.idn);
+    const Real ms = fabs(c.im[0]) + fabs(c.im[1]) + fabs(c.im[2]) + fabs(c.idn);
+    for (int a = 0; a < 3; ++a) cm = fmax(cm, fabs(im2[a] - c.im[a])/ms);
+    cmax = fmax(cmax, cm);
+  }
+  char buf[240];
+  std::snprintf(buf, sizeof(buf), "trials %d: converged %d all_floored %d fa %d "
+                "fa_reject %d blend/il %d keep %d", ntrial, nconv_b, nfl, nfa, nrej,
+                nblend, nkeep);
+  ReportOnly("K8b floored-root cells", buf);
+  Report("K8b FA accepted (>= 1 of the trials)", (nfa > 0) ? 0.0 : 1.0, 0.0);
+  Report("K8b FA: D, S_i reproduced", cmax, 1.0e-9);
+  Report("K8b FA: condition 2 (deficit <= 1e-3)", defmax, 1.0e-3);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn ProblemGenerator::ResistiveUnitTests()
 
 void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restart) {
   if (restart) return;
   const int ntrial = pin->GetOrAddInteger("problem", "ntrial", 4096);
   if (global_variable::my_rank == 0) {
-    std::cout << "Resistive GRMHD unit tests (K1-K7, diagnostics), ntrial = "
+    std::cout << "Resistive GRMHD unit tests (K1-K8, diagnostics), ntrial = "
               << ntrial << std::endl;
   }
   RunK1<DevExeSpace>("device", ntrial);
@@ -1402,6 +1553,7 @@ void ProblemGenerator::ResistiveUnitTests(ParameterInput *pin, const bool restar
   }
   RunK7<DevExeSpace>("device", ntrial);
   RunK7<Kokkos::DefaultHostExecutionSpace>("host", ntrial);
+  RunK8(pin->GetOrAddInteger("problem", "ntrial_k8", 2048));
   {
     PSH eosh("resistive_ut_eos", pmy_mesh_->pmb_pack, pin);
     eosh.ps.GetEOSMutable().SetGamma(kGam);

@@ -33,7 +33,9 @@ const std::vector<std::string> &ResistiveKeys() {
     "resistive_sigma_out", "resistive_rho_transition", "resistive_sigma_width",
     "resistive_rsolver", "resistive_charge_flux", "resistive_newton_fallback",
     "resistive_newton_tol", "resistive_newton_maxit", "resistive_allow_incomplete",
-    "resistive_freeze_background", "resistive_implicit_residual", "resistive_hist_dt"};
+    "resistive_freeze_background", "resistive_implicit_residual", "resistive_hist_dt",
+    "resistive_floor_accept", "resistive_floor_accept_tol", "resistive_d4",
+    "resistive_fail_reason_cycles"};
   return keys;
 }
 
@@ -117,9 +119,11 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
     rp.newton_fallback = NewtonFallback::lagged_v;
   } else if (fb == "fail") {
     rp.newton_fallback = NewtonFallback::fail;
+  } else if (fb == "blend") {
+    rp.newton_fallback = NewtonFallback::blend;
   } else {
     Fatal(__LINE__, "<" + block + "> resistive_newton_fallback = '" + fb +
-          "' not recognised; use lagged_v|fail");
+          "' not recognised; use lagged_v|fail|blend");
   }
 
   rp.newton_tol = pin->GetOrAddReal(block, "resistive_newton_tol", 1.0e-11);
@@ -148,6 +152,25 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   }
   // K5-run histogram output interval (<= 0: the dt of the first hst output, if any)
   rp.hist_dt = pin->GetOrAddReal(block, "resistive_hist_dt", -1.0);
+  // 07 v2.8 §3.2.3 test-only prototype keys
+  rp.floor_accept = pin->GetOrAddBoolean(block, "resistive_floor_accept", false);
+  rp.floor_accept_tol = pin->GetOrAddReal(block, "resistive_floor_accept_tol", 1.0e-3);
+  if (!(rp.floor_accept_tol > 0.0)) {
+    Fatal(__LINE__, "<" + block + "> resistive_floor_accept_tol must be > 0");
+  }
+  std::string d4 = pin->GetOrAddString(block, "resistive_d4", "average");
+  if (d4 == "average") {
+    rp.d4 = D4Mode::average;
+  } else if (d4 == "keep") {
+    rp.d4 = D4Mode::keep;
+  } else {
+    Fatal(__LINE__, "<" + block + "> resistive_d4 = '" + d4 +
+          "' not recognised; use average|keep");
+  }
+  rp.fail_reason_cycles = pin->GetOrAddInteger(block, "resistive_fail_reason_cycles", 0);
+  if (rp.fail_reason_cycles < 0) {
+    Fatal(__LINE__, "<" + block + "> resistive_fail_reason_cycles must be >= 0");
+  }
   return rp;
 }
 

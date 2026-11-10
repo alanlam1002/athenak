@@ -189,4 +189,34 @@ void SigmaMHist::Load(const int64_t in[kHistBinnings][kHistBins][kHNCounters]) c
   Kokkos::deep_copy(d, h);
 }
 
+//----------------------------------------------------------------------------------------
+void ProtoLog::Read(int64_t out[kNLogSets][kHistBins][kLogBins],
+                    Real mxo[kNLogSets][kHistBins]) const {
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), d);
+  auto hm = Kokkos::create_mirror_view_and_copy(HostMemSpace(), mx);
+  for (int s = 0; s < kNLogSets; ++s) {
+    for (int b = 0; b < kHistBins; ++b) {
+      mxo[s][b] = hm(s, b);
+      for (int c = 0; c < kLogBins; ++c) out[s][b][c] = h(s, b, c);
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &out[0][0][0], kNLogSets*kHistBins*kLogBins, MPI_INT64_T,
+                MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &mxo[0][0], kNLogSets*kHistBins, MPI_ATHENA_REAL, MPI_MAX,
+                MPI_COMM_WORLD);
+#endif
+}
+
+//----------------------------------------------------------------------------------------
+void RFailCount::Read(int64_t *out) const {
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), d);
+  for (int r = 0; r < kRFailReasons; ++r)
+    for (int b = 0; b < kRFailRBins; ++b) out[r*kRFailRBins + b] = h(r, b);
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, out, kRFailReasons*kRFailRBins, MPI_INT64_T, MPI_SUM,
+                MPI_COMM_WORLD);
+#endif
+}
+
 }  // namespace resistive

@@ -173,8 +173,8 @@ void MGKerrScalar::SmoothPack(int color) {
         VAcc<decltype(u)> A{u, coeff, m, 0};
         Real dg;
         const Real r = kmg::PointResidual(kind, A, k, j, i, ih2, dg) + src(m, 0, k, j, i);
-        u(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg,
-                                         coeff(m, kChPsi0, k, j, i), pfl);
+        const Real p0 = (kind == kmg::kKindPsi) ? coeff(m, kChPsi0, k, j, i) : 0.0;
+        u(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg, p0, pfl);
       });
       kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, fill, false);
     }
@@ -189,8 +189,8 @@ void MGKerrScalar::SmoothPack(int color) {
       VAcc<decltype(u)> A{u, coeff, m, 0};
       Real dg;
       const Real r = kmg::PointResidual(kind, A, k, j, i, ih2, dg) + src(m, 0, k, j, i);
-      scr(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg,
-                                         coeff(m, kChPsi0, k, j, i), pfl);
+      const Real p0 = (kind == kmg::kKindPsi) ? coeff(m, kChPsi0, k, j, i) : 0.0;
+      scr(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg, p0, pfl);
     });
     par_for("MGKerrScalar::SmoothRBJCopy", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
             is, ie,
@@ -533,8 +533,9 @@ void MGKerrScalarDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
       const int k = ngh + ok, j = ngh + oj, i = ngh + oi;
       Real dg;
       const Real r = kmg::PointResidual(kind_, A, k, j, i, ih2, dg) + oct.Src(0, k, j, i);
-      oct.U(0, k, j, i) = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg,
-                                        oct.Coeff(kChPsi0, k, j, i), psi_floor_);
+      const Real p0 = (kind_ == kmg::kKindPsi) ? oct.Coeff(kChPsi0, k, j, i) : 0.0;
+      oct.U(0, k, j, i) = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg, p0,
+                                        psi_floor_);
     }
   } else {
     Real nw[8];
@@ -544,8 +545,8 @@ void MGKerrScalarDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
       const int k = ngh + ok, j = ngh + oj, i = ngh + oi;
       Real dg;
       const Real r = kmg::PointResidual(kind_, A, k, j, i, ih2, dg) + oct.Src(0, k, j, i);
-      nw[sc] = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg,
-                             oct.Coeff(kChPsi0, k, j, i), psi_floor_);
+      const Real p0 = (kind_ == kmg::kKindPsi) ? oct.Coeff(kChPsi0, k, j, i) : 0.0;
+      nw[sc] = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg, p0, psi_floor_);
     }
     for (int sc = 0; sc < 8; ++sc) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;

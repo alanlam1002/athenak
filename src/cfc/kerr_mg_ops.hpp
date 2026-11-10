@@ -215,7 +215,8 @@ void PointDgtu(const Real gtu[6], const Real dgt[3][6], Real dgtu[3][6]) {
 //! \brief A manufactured solution u* for the linear test equation
 //!   A u = -Dt^2 u + c u = s,  Dt^2 u = d_i(gt^ij d_j u)  (det gt = 1),
 //! with s evaluated analytically (the flux form, d_i gt^ij from the analytic d gt):
-//!   mode 0: amp sin(pi X) sin(pi Y) sin(pi Z), X = (x - xmin)/L (zero on the box faces);
+//!   mode 0: amp sin(n1 pi X) sin(n2 pi Y) sin(n3 pi Z), X = (x - xmin)/L, integer
+//!           harmonics nh (default 1; zero on the box faces);
 //!   mode 1: amp/sqrt(|x - x0|^2 + w^2) (a 1/r tail, for the Robin outer boundary);
 //!   mode 2: amp exp(-|x - x0|^2/w^2).
 struct Manuf {
@@ -223,6 +224,7 @@ struct Manuf {
   Real amp = 1.0, w = 1.0, c = 0.0;
   Real x0[3] = {0.0, 0.0, 0.0};
   Real xmin[3] = {0.0, 0.0, 0.0}, len[3] = {1.0, 1.0, 1.0};
+  Real nh[3] = {1.0, 1.0, 1.0};
 };
 
 //! u*, d_i u*, d_ij u* (packed)
@@ -234,7 +236,7 @@ void ManufEval(const Manuf &mf, Real x, Real y, Real z, Real &u, Real du[3], Rea
     const Real pi = 3.14159265358979323846;
     Real s[3], c[3], k[3];
     for (int d = 0; d < 3; ++d) {
-      k[d] = pi/mf.len[d];
+      k[d] = mf.nh[d]*pi/mf.len[d];
       s[d] = Kokkos::sin(k[d]*(X[d] - mf.xmin[d]));
       c[d] = Kokkos::cos(k[d]*(X[d] - mf.xmin[d]));
     }
@@ -514,6 +516,8 @@ Real PointResidual(int kind, const Acc &A, int k, int j, int i, Real ih2, Real &
 
 //! \fn FloorPsi(kind, u, psi0, floor)
 //! \brief the flat driver's psi floor (mg_cfc_conformal_factor.cpp:251), psi equation only
+//! (callers read psi0 = coeff(kChPsi0) only for kind psi: kind linear has kNCoeffScalar
+//! channels, so kChPsi0 is out of range there)
 KOKKOS_INLINE_FUNCTION
 Real FloorPsi(int kind, Real u, Real psi0, Real floor) {
   return (kind == kKindPsi && u + psi0 < floor) ? floor - psi0 : u;

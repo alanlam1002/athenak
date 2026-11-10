@@ -11,7 +11,9 @@
 //! <problem> (test options)
 //!   edges_only  : true -> only the unsafe-edge census of the mesh (no multigrid)
 //!   coef        : flat | synthetic | kerr   (synthetic: eps, kw; kerr: kerr_f2,
-//!                 kerr_kstab, kerr_row0_exact, m_bh, xbh1..3, exact)
+//!                 kerr_kstab, kerr_row0_exact, m_bh, xbh1..3, exact, src_exact: the
+//!                 manufactured source/matter from the spectral background, the operator
+//!                 from F2, V2a-e)
 //!   manuf       : 0 sine (zero on the box faces) | 1 amp/sqrt(r^2+w^2) | 2 gaussian;
 //!                 amp, w, c, x01..3
 //!   kind        : linear (c, s) | psi (eq:cpsi) | chi (eq:cchi) -- the driver's option;
@@ -434,6 +436,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     cs.xbh[1] = pin->GetOrAddReal(B, "xbh2", 0.0);
     cs.xbh[2] = pin->GetOrAddReal(B, "xbh3", 0.0);
     cs.exact = pin->GetOrAddBoolean(B, "exact", false);
+    cs.src_exact = pin->GetOrAddBoolean(B, "src_exact", false);
   } else {
     std::cout << "### FATAL ERROR: <problem>/coef must be flat, synthetic or kerr"
               << std::endl;

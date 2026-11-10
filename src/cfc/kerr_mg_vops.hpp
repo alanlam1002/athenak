@@ -212,7 +212,7 @@ void ManufVecSource(const CoefSource &cs, const VManuf &vm, Real x, Real y, Real
   using kerr_impl::IdxI;
   using kerr_impl::IdxJ;
   Real gt[6], gtu[6], dgt[3][6], ddgt[6][6], dgtu[3][6], ddgtu[6][6], gam[3][6];
-  PointMetric2(cs, x, y, z, gt, gtu, dgt, ddgt);
+  PointMetric2(ManufCoef(cs), x, y, z, gt, gtu, dgt, ddgt);
   PointDgtu(gtu, dgt, dgtu);
   ChristoffelT(gtu, dgt, gam);
   for (int m = 0; m < 3; ++m) {

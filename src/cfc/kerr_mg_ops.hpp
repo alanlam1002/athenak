@@ -98,14 +98,24 @@ KOKKOS_INLINE_FUNCTION bool NonFinite(Real x) {
 //! \brief Where the conformal metric comes from: 0 flat, 1 synthetic det = 1 metric
 //! (gt = M det(M)^(-1/3), M = 1 + eps S(x), off-diagonals O(eps); E2), 2 the Kerr table
 //! (W1, about the hole at xbh, mass m_bh; exact = the spectral evaluation instead of F2).
+//! src_exact (tests only, V2a-e): the manufactured source and matter use the spectral
+//! evaluation while the operator keeps F2, so the F2 interpolation floor is visible.
 struct CoefSource {
   int mode = 0;
   KerrTable tab;
   Real m_bh = 1.0;
   Real xbh[3] = {0.0, 0.0, 0.0};
   bool exact = false;
+  bool src_exact = false;
   Real eps = 0.2, kw = 1.0;
 };
+
+//! \fn ManufCoef(cs): the coefficient source for the manufactured source and matter.
+KOKKOS_INLINE_FUNCTION CoefSource ManufCoef(const CoefSource &cs) {
+  CoefSource c = cs;
+  c.exact = cs.exact || cs.src_exact;
+  return c;
+}
 
 //! \fn SyntheticM(cs, x, y, z, M, dM)
 //! \brief M_ab = delta_ab + eps S_ab(x) and d_k M_ab (packed xx xy xz yy yz zz).
@@ -281,7 +291,7 @@ KOKKOS_INLINE_FUNCTION
 Real ManufSource(const CoefSource &cs, const Manuf &mf, Real x, Real y, Real z) {
   using kerr_impl::Sym;
   Real gt[6], gtu[6], dgt[3][6], dgtu[3][6];
-  PointMetric(cs, x, y, z, gt, gtu, dgt);
+  PointMetric(ManufCoef(cs), x, y, z, gt, gtu, dgt);
   PointDgtu(gtu, dgt, dgtu);
   Real u, du[3], ddu[6];
   ManufEval(mf, x, y, z, u, du, ddu);
@@ -424,7 +434,7 @@ void ManufMatter(int kind, const CoefSource &cs, const Manuf &mf, const MatterMa
   Real us, du[3], ddu[6];
   ManufEval(mf, x, y, z, us, du, ddu);
   BgPoint bg;
-  PointBg(cs, x, y, z, bg);
+  PointBg(ManufCoef(cs), x, y, z, bg);
   const Real r2 = (x - mf.x0[0])*(x - mf.x0[0]) + (y - mf.x0[1])*(y - mf.x0[1])
                 + (z - mf.x0[2])*(z - mf.x0[2]);
   da2 = mm.da2_amp*Kokkos::exp(-r2/(mm.da2_w*mm.da2_w));

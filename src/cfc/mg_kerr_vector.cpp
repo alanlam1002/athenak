@@ -471,10 +471,18 @@ void MGKerrVectorDriver::ComputeMoments() {
   auto *lv = static_cast<MGKerrVector*>(mglevels_);
   const int lev = lv->GetNumberOfLevels() - 1;
   Real m[kmg::kNMom];
+  // self: (S - S_flat) on the cells next to the box and to unsafe edges reads the hooked
+  // ghosts (kelvin faces, edge fill), as the operator kernels do (hook_scope = operator
+  // leaves framework values there between kernels)
+  if (mp_self_) {
+    lv->SaveGhosts(lev);
+    lv->Hook(lev, false);
+  }
   kmg::LocalMoments(lv->UAt(lev).d_view, lv->SrcAt(lev).d_view,
                     lv->CoeffAtLevel(lev).d_view, lv->Extents(), lv->NumMB(),
                     lv->GetGhostCells(), lv->LevelN(lev, 0), lv->LevelN(lev, 1),
                     lv->LevelN(lev, 2), mp_self_, mpo_, m);
+  if (mp_self_) { lv->RestoreGhosts(lev); }
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, m, kmg::kNMom, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif

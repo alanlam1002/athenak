@@ -23,8 +23,20 @@
 //!                 each: u = 0, ncycles V-cycles, defect per cycle, error against u*
 //!   e1_cycles   : V-cycles of E1 inside the solver (poison every hook), R then off
 //! The multigrid options are also read from <problem> (MGKerrScalarDriver).
+//!
+//! W3c (driver = vector, MGKerrVectorDriver: -DL V = s on gt, mg_kerr_vector.hpp):
+//!   V*'s component c is the scalar manuf with amp*vamp<c+1>, centre x0 + vofs e_c and,
+//!   for the sine mode with vnh_mix, harmonics (1,1,1), (2,1,1), (1,1,2);
+//!   vsrc        : manuf (s = -DL V*, error against V*) | blob (src = V*: a source with a
+//!                 monopole and no exact solution, for the box-doubling probes)
+//!   runs        : smoother/fill[/self|rhs] (the last: mp_source for that run)
+//!   probe_r     : > 0: V at 7 points (+-r on the axes, r(1,1,1)/sqrt3) from the mp origin
+//!   chk_npts    : the PointMetric2 self-check points (kerr/synthetic)
+//!   the driver's options: mg_outer_bc_vec (kelvin | zerofixed), mp_source, mp_outer,
+//!   mp_x01..3, smoother, edge_fill, mg_* as for the scalar driver.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -43,6 +55,8 @@
 #include "cfc/kerr_background.hpp"
 #include "cfc/kerr_mg_ops.hpp"
 #include "cfc/mg_kerr_scalar.hpp"
+#include "cfc/kerr_mg_vops.hpp"
+#include "cfc/mg_kerr_vector.hpp"
 
 namespace {
 
@@ -131,6 +145,243 @@ void EdgeCensus(MeshBlockPack *pmbp) {
   }
 }
 
+void PrintDefs(const char *tag, const std::string &tok, const std::vector<Real> &d) {
+  std::printf("KMG %s %s", tag, tok.c_str());
+  for (size_t n = 0; n < d.size(); ++n) std::printf(" %.6e", d[n]);
+  std::printf("\nKMG %sRHO %s", tag, tok.c_str());
+  for (size_t n = 1; n < d.size(); ++n) {
+    std::printf(" %.4f", (d[n-1] > 0.0) ? d[n]/d[n-1] : 0.0);
+  }
+  std::printf("\n");
+}
+
+//! max |V_K| over the 6 face centres and 8 corners of the mesh, and max |V*| there
+void KelvinOnBox(const cfc::MGKerrVectorDriver &drv, const RegionSize &ms, Real &vk,
+                 Real &vs) {
+  vk = vs = 0.0;
+  const Real lo[3] = {ms.x1min, ms.x2min, ms.x3min}, hi[3] = {ms.x1max, ms.x2max, ms.x3max};
+  std::vector<std::array<Real, 3>> P;
+  for (int d = 0; d < 3; ++d) {
+    for (int sd = 0; sd < 2; ++sd) {
+      std::array<Real, 3> x;
+      for (int e = 0; e < 3; ++e) x[e] = 0.5*(lo[e] + hi[e]);
+      x[d] = sd ? hi[d] : lo[d];
+      P.push_back(x);
+    }
+  }
+  for (int c = 0; c < 8; ++c) {
+    P.push_back({(c & 1) ? hi[0] : lo[0], (c & 2) ? hi[1] : lo[1], (c & 4) ? hi[2] : lo[2]});
+  }
+  for (const auto &x : P) {
+    Real V[3];
+    cfc::kmg::KelvinV(drv.mom_, x[0] - drv.mpo_[0], x[1] - drv.mpo_[1], x[2] - drv.mpo_[2],
+                      V);
+    for (int c = 0; c < 3; ++c) {
+      Real us, du[3], ddu[6];
+      cfc::kmg::ManufEval(drv.vm_.c[c], x[0], x[1], x[2], us, du, ddu);
+      vk = std::max(vk, std::abs(V[c]));
+      vs = std::max(vs, std::abs(us));
+    }
+  }
+}
+
+void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
+               const cfc::kmg::CoefSource &cs, const cfc::kmg::Manuf &mf,
+               const std::string &coef) {
+  const std::string B = "problem";
+  cfc::kmg::VManuf vm;
+  const Real vamp[3] = {pin->GetOrAddReal(B, "vamp1", 1.0), pin->GetOrAddReal(B, "vamp2", 0.7),
+                        pin->GetOrAddReal(B, "vamp3", -0.5)};
+  const Real vofs = pin->GetOrAddReal(B, "vofs", 0.0);
+  const bool nhmix = pin->GetOrAddBoolean(B, "vnh_mix", true);
+  for (int c = 0; c < 3; ++c) {
+    vm.c[c] = mf;
+    vm.c[c].amp = mf.amp*vamp[c];
+    vm.c[c].x0[c] += vofs;
+  }
+  if (nhmix) {
+    vm.c[1].nh[0] = 2.0;
+    vm.c[2].nh[2] = 2.0;
+  }
+  const std::string vsrc = pin->GetOrAddString(B, "vsrc", "manuf");
+
+  Kokkos::Timer t0;
+  cfc::MGKerrVectorDriver drv(pmbp, pin, B, cs, vm);
+  drv.src_blob_ = (vsrc == "blob");
+  drv.Prepare();
+  const double tprep = t0.seconds();
+  const RegionSize &ms = pm->mesh_size;
+  {
+    long bd[3] = {SumL(drv.bad_dinv_[0]), SumL(drv.bad_dinv_[1]), SumL(drv.bad_dinv_[2])};
+    const long nmb = SumL(pmbp->nmb_thispack);
+    if (Root()) {
+      std::printf("KMG VSETUP coef %s manuf %d vsrc %s nmb %ld root_mask 0x%03x outer %s "
+                  "mp_source %s mp_origin %.4f %.4f %.4f bad_dinv %ld %ld %ld "
+                  "boundary_octets %ld prepare_s %.3f\n", coef.c_str(), mf.mode,
+                  vsrc.c_str(), nmb, drv.RootMask(), drv.kelvin_ ? "kelvin" : "zerofixed",
+                  drv.mp_self_ ? "self" : "rhs", drv.mpo_[0], drv.mpo_[1], drv.mpo_[2],
+                  bd[0], bd[1], bd[2], drv.boundary_octets_, tprep);
+    }
+    EdgeCensus(pmbp);
+  }
+  if (cs.mode != 0) {
+    const int np = pin->GetOrAddInteger(B, "chk_npts", 20000);
+    const Real lo[3] = {ms.x1min, ms.x2min, ms.x3min};
+    const Real len[3] = {ms.x1max - ms.x1min, ms.x2max - ms.x2min, ms.x3max - ms.x3min};
+    for (Real fd : {1.0e-3, 1.0e-4}) {
+      Real o[4];
+      cfc::kmg::MetricSelfCheck(cs, lo, len, np, fd, o);
+      if (Root()) {
+        std::printf("KMG VCHK npts %d fd %.1e max|dgt2-dgt| %.3e max|ddgt-FD| %.3e "
+                    "max|ddgt| %.3e max|gt2-gt| %.3e\n", np, fd, o[0], o[1], o[2], o[3]);
+      }
+    }
+  }
+
+  Kokkos::Timer timer;
+  Driver dv(pin, pm, 1.0e30, &timer);
+
+  // ---- operator checks (manufactured source only)
+  if (vsrc == "manuf" && pin->GetOrAddBoolean(B, "op_tests", true)) {
+    const auto fill0 = drv.edge_fill_;
+    using EF = cfc::kmg::EdgeFill;
+    PrintOp("v_exact", drv.OperatorTest(true, false));
+    drv.edge_fill_ = EF::rule_r;   PrintOp("v_rule_r", drv.OperatorTest(false, false));
+    drv.edge_fill_ = EF::bilinear; PrintOp("v_bilinear", drv.OperatorTest(false, false));
+    drv.edge_fill_ = EF::off;      PrintOp("v_off_stale", drv.OperatorTest(false, false));
+    drv.edge_poison_ = true;
+    drv.edge_fill_ = EF::rule_r;   PrintOp("v_E1_rule_r", drv.OperatorTest(false, false));
+    drv.edge_fill_ = EF::off;      PrintOp("v_E1_off", drv.OperatorTest(false, false));
+    drv.edge_poison_ = false;
+    drv.edge_fill_ = EF::rule_r;   PrintOp("v_corner_r", drv.OperatorTest(false, true));
+    drv.edge_fill_ = fill0;
+    // the kelvin field of q from u = V*: self (q = -DL_f V*, its far field is V* ~ 0
+    // outside a compact V*) against rhs (q = s)
+    const bool self0 = drv.mp_self_;
+    for (int sm = 0; sm < 2; ++sm) {
+      drv.ResetSolution();
+      drv.OperatorTest(true, false);   // finest u = V* (ghosts exact)
+      drv.mp_self_ = (sm == 0);
+      drv.ComputeMoments();
+      Real vk, vs;
+      KelvinOnBox(drv, ms, vk, vs);
+      Real qn = 0.0, dn = 0.0, qq = 0.0;
+      for (int q = 0; q < 3; ++q) qn = std::max(qn, std::abs(drv.mom_.v[q]));
+      for (int q = 3; q < 12; ++q) dn = std::max(dn, std::abs(drv.mom_.v[q]));
+      for (int q = 12; q < 39; ++q) qq = std::max(qq, std::abs(drv.mom_.v[q]));
+      if (Root()) {
+        std::printf("KMG MOM ustar %s max|Q| %.3e max|D| %.3e max|Qab| %.3e "
+                    "box max|V_K| %.3e max|V*| %.3e\n", sm == 0 ? "self" : "rhs", qn, dn,
+                    qq, vk, vs);
+      }
+    }
+    drv.mp_self_ = self0;
+  }
+
+  // ---- V-cycle runs
+  const int ncyc = pin->GetOrAddInteger(B, "ncycles", 10);
+  std::vector<Real> probes;
+  const Real pr = pin->GetOrAddReal(B, "probe_r", 0.0);
+  if (pr > 0.0) {
+    const Real q3 = pr/std::sqrt(3.0);
+    const Real D[7][3] = {{pr, 0, 0}, {0, pr, 0}, {0, 0, pr}, {-pr, 0, 0}, {0, -pr, 0},
+                          {0, 0, -pr}, {q3, q3, q3}};
+    for (int p = 0; p < 7; ++p) {
+      for (int d = 0; d < 3; ++d) probes.push_back(drv.mpo_[d] + D[p][d]);
+    }
+  }
+  std::string runs = pin->GetOrAddString(B, "runs", "gs8/rule_r");
+  std::stringstream ss(runs);
+  std::string tok;
+  const bool self0 = drv.mp_self_;
+  while (std::getline(ss, tok, ',')) {
+    std::vector<std::string> f;
+    {
+      std::stringstream st(tok);
+      std::string x;
+      while (std::getline(st, x, '/')) f.push_back(x);
+    }
+    if (f.size() < 2) continue;
+    drv.smoother_ = (f[0] == "rb") ? 1 : 0;
+    drv.edge_fill_ = (f[1] == "bilinear") ? cfc::kmg::EdgeFill::bilinear
+                   : ((f[1] == "off") ? cfc::kmg::EdgeFill::off
+                                      : cfc::kmg::EdgeFill::rule_r);
+    drv.mp_self_ = (f.size() > 2) ? (f[2] != "rhs") : self0;
+    drv.edge_poison_ = false;
+    drv.count_nonfinite_ = false;
+    drv.ResetSolution();
+    Kokkos::fence();
+    Kokkos::Timer tv;
+    std::vector<Real> d = drv.RunCycles(&dv, ncyc);
+    const double tsec = tv.seconds();
+    Real cmax[3], crms[3];
+    long cn[3];
+    drv.ErrorVsManufByClass(cmax, crms, cn);
+    for (int c = 0; c < 3; ++c) {
+      cmax[c] = MaxR(cmax[c]);
+      cn[c] = SumL(cn[c]);
+    }
+    std::vector<Real> pv, pc;
+    std::vector<int> po;
+    if (!probes.empty()) {
+      drv.Probe(probes, pv, pc, po);
+      for (auto &x : pv) x = SumR(x);
+      for (auto &x : pc) x = SumR(x);
+      for (auto &x : po) x = static_cast<int>(SumL(x));
+    }
+    if (Root()) {
+      std::printf("KMG VRUN %s ncyc %d s_per_vcycle %.4e err_max %.6e\n", tok.c_str(), ncyc,
+                  tsec/std::max(ncyc, 1), std::max(cmax[0], std::max(cmax[1], cmax[2])));
+      std::printf("KMG VERRC %s bulk %.6e %.6e %ld bedge %.6e %.6e %ld iedge %.6e %.6e "
+                  "%ld\n", tok.c_str(), cmax[0], crms[0], cn[0], cmax[1], crms[1], cn[1],
+                  cmax[2], crms[2], cn[2]);
+      PrintDefs("VDEF", tok, d);
+      Real qn = 0.0;
+      for (int q = 0; q < 3; ++q) qn = std::max(qn, std::abs(drv.mom_.v[q]));
+      std::printf("KMG VMOMQ %s max|Q| %.6e Q %.6e %.6e %.6e\n", tok.c_str(), qn,
+                  drv.mom_.v[0], drv.mom_.v[1], drv.mom_.v[2]);
+      for (size_t p = 0; p < po.size(); ++p) {
+        std::printf("KMG VPROBE %s p %zu own %d x %.6f %.6f %.6f V %.10e %.10e %.10e\n",
+                    tok.c_str(), p, po[p], (po[p] ? pc[3*p]/po[p] : 0.0),
+                    (po[p] ? pc[3*p + 1]/po[p] : 0.0), (po[p] ? pc[3*p + 2]/po[p] : 0.0),
+                    pv[3*p], pv[3*p + 1], pv[3*p + 2]);
+      }
+      std::fflush(stdout);
+    }
+  }
+  drv.mp_self_ = self0;
+
+  // ---- E1 inside the solver
+  const int ne1 = pin->GetOrAddInteger(B, "e1_cycles", 3);
+  if (ne1 > 0) {
+    const cfc::kmg::EdgeFill fills[2] = {cfc::kmg::EdgeFill::rule_r,
+                                         cfc::kmg::EdgeFill::off};
+    const char *names[2] = {"rule_r", "off"};
+    for (int f = 0; f < 2; ++f) {
+      drv.smoother_ = 0;
+      drv.edge_fill_ = fills[f];
+      drv.edge_poison_ = true;
+      drv.count_nonfinite_ = true;
+      drv.ResetSolution();
+      std::vector<Real> d = drv.RunCycles(&dv, ne1);
+      long c[3];
+      drv.NonFiniteCounts(c);
+      const long cb = SumL(c[0]), cr = SumL(c[1]), co = SumL(c[2]);
+      if (Root()) {
+        std::printf("KMG VE1 %s nonfinite_defects blocks %ld root %ld octets %ld | def",
+                    names[f], cb, cr, co);
+        for (size_t n = 0; n < d.size(); ++n) std::printf(" %.6e", d[n]);
+        std::printf("\n");
+        std::fflush(stdout);
+      }
+    }
+  }
+  if (Root()) {
+    std::printf("KMG DONE\n");
+    std::fflush(stdout);
+  }
+}
+
 }  // namespace
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
@@ -200,6 +451,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   mf.xmin[0] = ms.x1min; mf.len[0] = ms.x1max - ms.x1min;
   mf.xmin[1] = ms.x2min; mf.len[1] = ms.x2max - ms.x2min;
   mf.xmin[2] = ms.x3min; mf.len[2] = ms.x3max - ms.x3min;
+
+  if (pin->GetOrAddString(B, "driver", "scalar") == "vector") {
+    RunVector(pin, pmbp, pmy_mesh_, cs, mf, coef);
+    return;
+  }
 
   Kokkos::Timer t0;
   cfc::MGKerrScalarDriver drv(pmbp, pin, B, cs, mf);

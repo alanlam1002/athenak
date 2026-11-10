@@ -70,6 +70,7 @@ class MGKerrVector : public Multigrid {
   const DualArray1D<RegionSize> &Extents() const { return blk_; }
   const DualArray1D<int> &Mask() const { return mask_; }
   const DualArray1D<int> &Phys() const { return phys_; }
+  void SetSyncMask(const DualArray1D<int> &sync) { sync_ = sync; }
   //! the hook on level lev (see the file comment); poison_ok: E1 poison allowed
   void Hook(int lev, bool poison_ok);
   Real LevelDx(int lev, int m) const;
@@ -78,6 +79,7 @@ class MGKerrVector : public Multigrid {
 
  private:
   MGKerrVectorDriver *Drv() const;
+  DualArray1D<int> sync_;     // uold edge sync mask (kmg::BuildSyncMask)
   DualArray1D<int> mask_, phys_, kfaces_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
@@ -119,6 +121,7 @@ class MGKerrVectorDriver : public MultigridDriver {
   // settings (public for the test harness)
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
   bool edge_poison_ = false;
+  int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
   bool corner_poison_ = false;
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb
@@ -142,6 +145,7 @@ class MGKerrVectorDriver : public MultigridDriver {
 
  private:
   void FillOctetCoeffs();
+  DualArray1D<int> blk_sync_, root_sync_;
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_, blk_kf_, root_kf_;
 };
 

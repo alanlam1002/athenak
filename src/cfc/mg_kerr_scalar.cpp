@@ -243,6 +243,12 @@ void MGKerrScalar::CalculateFASRHSPack() {
   auto coeff = coeff_[lev].d_view;
   const int kind = Drv()->kind_;
   EdgeHook(lev, true);
+  // uold = u was stored just before (multigrid_driver.cpp:762-763, :1206-1207,
+  // multigrid_tasks.cpp:96-97), ahead of the hook: give uold the hooked edges too
+  if (Drv()->uold_edge_sync_ != kmg::kSyncNone) {
+    kmg::CopyMaskedEdges(uold_[lev].d_view, u, sync_.d_view, nmmb_, nvar_, ngh_, nx, ny,
+                         nz);
+  }
   par_for("MGKerrScalar::FASRHS", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const Real dx = brdx(m)*fac;
@@ -312,6 +318,16 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/edge_fill must be 'rule_r', 'bilinear' or 'off'.");
   }
   edge_poison_ = pin->GetOrAddBoolean(block, "edge_poison", false);
+  std::string us = pin->GetOrAddString(block, "uold_edge_sync", "free");
+  if (us == "none") {
+    uold_edge_sync_ = kmg::kSyncNone;
+  } else if (us == "free") {
+    uold_edge_sync_ = kmg::kSyncFree;
+  } else if (us == "all") {
+    uold_edge_sync_ = kmg::kSyncAll;
+  } else {
+    Fatal(block + "/uold_edge_sync must be 'none', 'free' or 'all'.");
+  }
   count_nonfinite_ = pin->GetOrAddBoolean(block, "count_nonfinite", false);
 
   robin_order_ = pin->GetOrAddInteger(block, "mg_robin_order", 1);
@@ -361,6 +377,11 @@ void MGKerrScalarDriver::Prepare() {
   kmg::ComputeRootEdgeMask(mg_mesh_bcs_, root_mask_, root_phys_);
   lv->SetEdgeMasks(blk_mask_, blk_phys_);
   rt->SetEdgeMasks(root_mask_, root_phys_);
+  kmg::BuildSyncMask(blk_mask_, blk_phys_, pmy_pack_->nmb_thispack, uold_edge_sync_, false,
+                     blk_sync_);
+  kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
+  lv->SetSyncMask(blk_sync_);
+  rt->SetSyncMask(root_sync_);
   if (kind_ == kmg::kKindLinear) {
     lv->FillAllLevels(cs_, mf_);
     rt->FillAllLevels(cs_, mf_);

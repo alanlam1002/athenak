@@ -243,6 +243,13 @@ void MGKerrVector::CalculateFASRHSPack() {
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
   Hook(lev, true);
+  // uold = u was stored just before, ahead of the hook (see kmg::CopyMaskedEdges): give
+  // uold the hooked edges too (kelvin faces stay framework zerofixed in uold, as in u at
+  // prolongation, so the correction sees homogeneous Dirichlet there)
+  if (Drv()->uold_edge_sync_ != kmg::kSyncNone) {
+    kmg::CopyMaskedEdges(uold_[lev].d_view, u, sync_.d_view, nmmb_, nvar_, ngh_, nx, ny,
+                         nz);
+  }
   par_for("MGKerrVector::FASRHS", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const Real h = brdx(m)*fac;
@@ -302,6 +309,16 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/edge_fill must be 'rule_r', 'bilinear' or 'off'.");
   }
   edge_poison_ = pin->GetOrAddBoolean(block, "edge_poison", false);
+  std::string us = pin->GetOrAddString(block, "uold_edge_sync", "free");
+  if (us == "none") {
+    uold_edge_sync_ = kmg::kSyncNone;
+  } else if (us == "free") {
+    uold_edge_sync_ = kmg::kSyncFree;
+  } else if (us == "all") {
+    uold_edge_sync_ = kmg::kSyncAll;
+  } else {
+    Fatal(block + "/uold_edge_sync must be 'none', 'free' or 'all'.");
+  }
   count_nonfinite_ = pin->GetOrAddBoolean(block, "count_nonfinite", false);
 
   std::string ob = pin->GetOrAddString(block, "mg_outer_bc_vec", "kelvin");
@@ -408,6 +425,10 @@ void MGKerrVectorDriver::Prepare() {
   root_kf_.template sync<DevExeSpace>();
   lv->SetMasks(blk_mask_, blk_phys_, blk_kf_);
   rt->SetMasks(root_mask_, root_phys_, root_kf_);
+  kmg::BuildSyncMask(blk_mask_, blk_phys_, nmb, uold_edge_sync_, false, blk_sync_);
+  kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
+  lv->SetSyncMask(blk_sync_);
+  rt->SetSyncMask(root_sync_);
   bad_dinv_[0] = lv->FillAllLevels(cs_);
   bad_dinv_[1] = rt->FillAllLevels(cs_);
   FillOctetCoeffs();

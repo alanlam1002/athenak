@@ -544,6 +544,21 @@ void CountEdges(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int 
 //! level array u (nmmb x nvar x (nz+2ngh) x (ny+2ngh) x (nx+2ngh)); device.
 void ApplyEdgeFill(const DvceArray5D<Real> &u, const DvceArray1D<int> &mask, int nmmb,
                    int nvar, int ngh, int nx, int ny, int nz, EdgeFill mode, bool poison);
+//! uold edge sync (block/uold_edge_sync): the framework stores uold = u (StoreOldData)
+//! BEFORE CalculateFASRHSPack runs the edge hook, and ComputeCorrection forms u - uold on
+//! the ghosts too, which trilinear prolongation reads (multigrid.cpp:1040-1068, :1197).
+//! On edges the framework never refills (root robin/multipole/kelvin edges; see the sync
+//! mask) uold would keep the previous cycle's fill: a period-2 coupling between cycles
+//! (job 9057334). none: no sync; free: the edges the framework does not refill (root:
+//! mask; blocks: mask & ~phys); all: every masked edge.
+constexpr int kSyncNone = 0, kSyncFree = 1, kSyncAll = 2;
+//! sync(m) from (mask, phys) for mode (root: the root level's arrays)
+void BuildSyncMask(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int nmb,
+                   int mode, bool root, DualArray1D<int> &sync);
+//! dst = src on the first-layer ghosts of every edge in mask (the cells ApplyEdgeFill writes)
+void CopyMaskedEdges(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src,
+                     const DvceArray1D<int> &mask, int nmmb, int nvar, int ngh, int nx,
+                     int ny, int nz);
 //! NaN at the 8 corner ghosts (first layer) of every block: the 19-point stencil must
 //! never read them.
 void PoisonCorners(const DvceArray5D<Real> &u, int nmmb, int nvar, int ngh, int nx, int ny,

@@ -85,6 +85,7 @@ class MGKerrScalar : public Multigrid {
   const DualArray1D<RegionSize> &Extents() const { return blk_; }
   const DualArray1D<int> &Mask() const { return mask_; }
   const DualArray1D<int> &Phys() const { return phys_; }
+  void SetSyncMask(const DualArray1D<int> &sync) { sync_ = sync; }
   //! the edge hook on level lev (see the file comment)
   void EdgeHook(int lev, bool poison_ok);
   //! level width of block m's cells
@@ -94,6 +95,7 @@ class MGKerrScalar : public Multigrid {
 
  private:
   MGKerrScalarDriver *Drv() const;
+  DualArray1D<int> sync_;     // uold edge sync mask (kmg::BuildSyncMask)
   DualArray1D<int> mask_, phys_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
@@ -143,6 +145,7 @@ class MGKerrScalarDriver : public MultigridDriver {
   // settings (public for the test harness)
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
   bool edge_poison_ = false;
+  int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
   bool corner_poison_ = false;
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb (Jacobi within colour)
@@ -167,6 +170,7 @@ class MGKerrScalarDriver : public MultigridDriver {
   //! (a copy of MGCFCConformalFactorDriver::TransferCoeffToRoot,
   //! mg_cfc_conformal_factor.cpp:708-777)
   void TransferCoeffToRoot();
+  DualArray1D<int> blk_sync_, root_sync_;
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_;
 };
 

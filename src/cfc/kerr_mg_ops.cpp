@@ -135,6 +135,41 @@ void ApplyEdgeFill(const DvceArray5D<Real> &u, const DvceArray1D<int> &mask, int
   });
 }
 
+void BuildSyncMask(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int nmb,
+                   int mode, bool root, DualArray1D<int> &sync) {
+  Kokkos::realloc(sync, nmb);
+  for (int m = 0; m < nmb; ++m) {
+    int bits = 0;
+    if (mode == kSyncAll || (mode == kSyncFree && root)) {
+      bits = mask.h_view(m);
+    } else if (mode == kSyncFree) {
+      bits = mask.h_view(m) & ~phys.h_view(m);
+    }
+    sync.h_view(m) = bits;
+  }
+  sync.template modify<HostExeSpace>();
+  sync.template sync<DevExeSpace>();
+}
+
+void CopyMaskedEdges(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src,
+                     const DvceArray1D<int> &mask, int nmmb, int nvar, int ngh, int nx,
+                     int ny, int nz) {
+  const int nmax = (nx > ny) ? ((nx > nz) ? nx : nz) : ((ny > nz) ? ny : nz);
+  par_for("kmg::CopyMaskedEdges", DevExeSpace(), 0, nmmb-1, 0, nvar-1, 0, 11, 0, nmax-1,
+  KOKKOS_LAMBDA(const int m, const int v, const int q, const int t) {
+    if (!((mask(m) >> q) & 1)) return;
+    int e, a, b, sa, sb;
+    EdgeAxes(q, e, a, b, sa, sb);
+    const int n[3] = {nx, ny, nz};
+    if (t >= n[e]) return;
+    int I[3];
+    I[e] = ngh + t;
+    I[a] = (sa > 0) ? ngh + n[a] : ngh - 1;
+    I[b] = (sb > 0) ? ngh + n[b] : ngh - 1;
+    dst(m, v, I[2], I[1], I[0]) = src(m, v, I[2], I[1], I[0]);
+  });
+}
+
 void PoisonCorners(const DvceArray5D<Real> &u, int nmmb, int nvar, int ngh, int nx, int ny,
                    int nz) {
   const Real nan = std::numeric_limits<Real>::quiet_NaN();

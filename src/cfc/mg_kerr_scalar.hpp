@@ -88,6 +88,10 @@ class MGKerrScalar : public Multigrid {
   void SetSyncMask(const DualArray1D<int> &sync) { sync_ = sync; }
   //! the edge hook on level lev (see the file comment)
   void EdgeHook(int lev, bool poison_ok);
+  //! hook_scope = operator: save u's ghosts before the hook / restore them after the
+  //! kernels, so the hooked values never reach the framework's transfer (no-ops if persist)
+  void SaveGhosts(int lev);
+  void RestoreGhosts(int lev);
   //! level width of block m's cells
   Real LevelDx(int lev, int m) const;
 
@@ -99,6 +103,7 @@ class MGKerrScalar : public Multigrid {
   DualArray1D<int> mask_, phys_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
+  DvceArray5D<Real> gsave_;   // hook_scope = operator: u's ghosts (finest-level shape)
 };
 
 //! \struct KerrOpStats
@@ -146,6 +151,7 @@ class MGKerrScalarDriver : public MultigridDriver {
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
   bool edge_poison_ = false;
   int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
+  bool hook_operator_ = true;   // block/hook_scope = operator (default) | persist
   bool corner_poison_ = false;
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb (Jacobi within colour)

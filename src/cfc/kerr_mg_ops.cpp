@@ -170,6 +170,17 @@ void CopyMaskedEdges(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src,
   });
 }
 
+void CopyGhostShell(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src, int nmmb,
+                    int nvar, int ngh, int nx, int ny, int nz) {
+  const int ie = ngh + nx - 1, je = ngh + ny - 1, ke = ngh + nz - 1;
+  par_for("kmg::CopyGhostShell", DevExeSpace(), 0, nmmb-1, 0, nvar-1, 0, nz+2*ngh-1,
+          0, ny+2*ngh-1, 0, nx+2*ngh-1,
+  KOKKOS_LAMBDA(const int m, const int v, const int k, const int j, const int i) {
+    if (i >= ngh && i <= ie && j >= ngh && j <= je && k >= ngh && k <= ke) return;
+    dst(m, v, k, j, i) = src(m, v, k, j, i);
+  });
+}
+
 void PoisonCorners(const DvceArray5D<Real> &u, int nmmb, int nvar, int ngh, int nx, int ny,
                    int nz) {
   const Real nan = std::numeric_limits<Real>::quiet_NaN();

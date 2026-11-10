@@ -142,6 +142,22 @@ void MGKerrScalar::EdgeHook(int lev, bool poison_ok) {
                      d->edge_fill_, d->edge_poison_ && poison_ok);
 }
 
+void MGKerrScalar::SaveGhosts(int lev) {
+  if (!Drv()->hook_operator_) return;
+  if (static_cast<int>(gsave_.extent(0)) != nmmb_) {
+    Kokkos::realloc(gsave_, nmmb_, nvar_, indcs_.nx3+2*ngh_, indcs_.nx2+2*ngh_,
+                    indcs_.nx1+2*ngh_);
+  }
+  kmg::CopyGhostShell(gsave_, u_[lev].d_view, nmmb_, nvar_, ngh_, LevelN(lev, 0),
+                      LevelN(lev, 1), LevelN(lev, 2));
+}
+
+void MGKerrScalar::RestoreGhosts(int lev) {
+  if (!Drv()->hook_operator_) return;
+  kmg::CopyGhostShell(u_[lev].d_view, gsave_, nmmb_, nvar_, ngh_, LevelN(lev, 0),
+                      LevelN(lev, 1), LevelN(lev, 2));
+}
+
 void MGKerrScalar::SmoothPack(int color) {
   const int lev = current_level_;
   const int ll = nlevel_-1-lev;
@@ -157,6 +173,7 @@ void MGKerrScalar::SmoothPack(int color) {
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
   const kmg::EdgeFill fill = Drv()->edge_fill_;
+  SaveGhosts(lev);
   EdgeHook(lev, true);
   if (Drv()->smoother_ == 0) {
     for (int sc = 0; sc < 8; ++sc) {
@@ -200,6 +217,7 @@ void MGKerrScalar::SmoothPack(int color) {
     });
     kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, fill, false);
   }
+  RestoreGhosts(lev);
 }
 
 void MGKerrScalar::CalculateDefectPack() {
@@ -215,6 +233,7 @@ void MGKerrScalar::CalculateDefectPack() {
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
   const int kind = Drv()->kind_;
+  SaveGhosts(lev);
   EdgeHook(lev, true);
   par_for("MGKerrScalar::Defect", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -225,6 +244,7 @@ void MGKerrScalar::CalculateDefectPack() {
     def(m, 0, k, j, i) = kmg::PointResidual(kind, A, k, j, i, ih2, dg)
                        + src(m, 0, k, j, i);
   });
+  RestoreGhosts(lev);
   if (Drv()->count_nonfinite_) {
     nonfinite_def_ += kmg::CountNonFinite(def, nmmb_, nvar_, ngh_, nx, ny, nz);
   }
@@ -242,10 +262,12 @@ void MGKerrScalar::CalculateFASRHSPack() {
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
   const int kind = Drv()->kind_;
+  SaveGhosts(lev);
   EdgeHook(lev, true);
-  // uold = u was stored just before (multigrid_driver.cpp:762-763, :1206-1207,
-  // multigrid_tasks.cpp:96-97), ahead of the hook: give uold the hooked edges too
-  if (Drv()->uold_edge_sync_ != kmg::kSyncNone) {
+  // persist only: uold = u was stored just before (multigrid_driver.cpp:762-763,
+  // :1206-1207, multigrid_tasks.cpp:96-97), ahead of the hook: give uold the hooked edges
+  // too. With hook_scope = operator u's ghosts stay framework-filled, as uold's.
+  if (!Drv()->hook_operator_ && Drv()->uold_edge_sync_ != kmg::kSyncNone) {
     kmg::CopyMaskedEdges(uold_[lev].d_view, u, sync_.d_view, nmmb_, nvar_, ngh_, nx, ny,
                          nz);
   }
@@ -257,6 +279,7 @@ void MGKerrScalar::CalculateFASRHSPack() {
     Real dg;
     src(m, 0, k, j, i) -= kmg::PointResidual(kind, A, k, j, i, ih2, dg);
   });
+  RestoreGhosts(lev);
 }
 
 //----------------------------------------------------------------------------------------
@@ -327,6 +350,14 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     uold_edge_sync_ = kmg::kSyncAll;
   } else {
     Fatal(block + "/uold_edge_sync must be 'none', 'free' or 'all'.");
+  }
+  std::string hs = pin->GetOrAddString(block, "hook_scope", "operator");
+  if (hs == "operator") {
+    hook_operator_ = true;
+  } else if (hs == "persist") {
+    hook_operator_ = false;
+  } else {
+    Fatal(block + "/hook_scope must be 'operator' or 'persist'.");
   }
   count_nonfinite_ = pin->GetOrAddBoolean(block, "count_nonfinite", false);
 

@@ -550,7 +550,12 @@ void ApplyEdgeFill(const DvceArray5D<Real> &u, const DvceArray1D<int> &mask, int
 //! On edges the framework never refills (root robin/multipole/kelvin edges; see the sync
 //! mask) uold would keep the previous cycle's fill: a period-2 coupling between cycles
 //! (job 9057334). none: no sync; free: the edges the framework does not refill (root:
-//! mask; blocks: mask & ~phys); all: every masked edge.
+//! mask; blocks: mask & ~phys); all: every masked edge. Used only with hook_scope =
+//! persist: the sync removes the period-2 coupling, but the framework refills u's ghosts
+//! (not uold's) just before prolongation (multigrid_tasks.cpp:512-521,
+//! multigrid_driver.cpp:696-700), so u - uold stays O(u) on hooked ghosts at convergence
+//! and the cycle stalls (job 9057915). hook_scope = operator (the default) avoids both:
+//! the hook's values live only for the kernels (SaveGhosts/RestoreGhosts).
 constexpr int kSyncNone = 0, kSyncFree = 1, kSyncAll = 2;
 //! sync(m) from (mask, phys) for mode (root: the root level's arrays)
 void BuildSyncMask(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int nmb,
@@ -559,6 +564,10 @@ void BuildSyncMask(const DualArray1D<int> &mask, const DualArray1D<int> &phys, i
 void CopyMaskedEdges(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src,
                      const DvceArray1D<int> &mask, int nmmb, int nvar, int ngh, int nx,
                      int ny, int nz);
+//! dst = src on every ghost cell (all layers) of a level of interior size nx*ny*nz; the
+//! hook_scope = operator save/restore (dst and src may be larger, finest-level, arrays)
+void CopyGhostShell(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src, int nmmb,
+                    int nvar, int ngh, int nx, int ny, int nz);
 //! NaN at the 8 corner ghosts (first layer) of every block: the 19-point stencil must
 //! never read them.
 void PoisonCorners(const DvceArray5D<Real> &u, int nmmb, int nvar, int ngh, int nx, int ny,

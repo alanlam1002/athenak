@@ -73,6 +73,9 @@ class MGKerrVector : public Multigrid {
   void SetSyncMask(const DualArray1D<int> &sync) { sync_ = sync; }
   //! the hook on level lev (see the file comment); poison_ok: E1 poison allowed
   void Hook(int lev, bool poison_ok);
+  //! hook_scope = operator: see MGKerrScalar::SaveGhosts (the kelvin faces too)
+  void SaveGhosts(int lev);
+  void RestoreGhosts(int lev);
   Real LevelDx(int lev, int m) const;
 
   long nonfinite_def_ = 0;
@@ -83,6 +86,7 @@ class MGKerrVector : public Multigrid {
   DualArray1D<int> mask_, phys_, kfaces_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
+  DvceArray5D<Real> gsave_;   // hook_scope = operator: u's ghosts (finest-level shape)
 };
 
 class MGKerrVectorDriver : public MultigridDriver {
@@ -122,6 +126,7 @@ class MGKerrVectorDriver : public MultigridDriver {
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
   bool edge_poison_ = false;
   int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
+  bool hook_operator_ = true;   // block/hook_scope = operator (default) | persist
   bool corner_poison_ = false;
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb

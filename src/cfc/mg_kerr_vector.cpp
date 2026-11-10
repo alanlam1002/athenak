@@ -135,6 +135,22 @@ void MGKerrVector::Hook(int lev, bool poison_ok) {
                      d->edge_poison_ && poison_ok);
 }
 
+void MGKerrVector::SaveGhosts(int lev) {
+  if (!Drv()->hook_operator_) return;
+  if (static_cast<int>(gsave_.extent(0)) != nmmb_) {
+    Kokkos::realloc(gsave_, nmmb_, nvar_, indcs_.nx3+2*ngh_, indcs_.nx2+2*ngh_,
+                    indcs_.nx1+2*ngh_);
+  }
+  kmg::CopyGhostShell(gsave_, u_[lev].d_view, nmmb_, nvar_, ngh_, LevelN(lev, 0),
+                      LevelN(lev, 1), LevelN(lev, 2));
+}
+
+void MGKerrVector::RestoreGhosts(int lev) {
+  if (!Drv()->hook_operator_) return;
+  kmg::CopyGhostShell(u_[lev].d_view, gsave_, nmmb_, nvar_, ngh_, LevelN(lev, 0),
+                      LevelN(lev, 1), LevelN(lev, 2));
+}
+
 void MGKerrVector::SmoothPack(int color) {
   const int lev = current_level_;
   const int ll = nlevel_-1-lev;
@@ -148,6 +164,7 @@ void MGKerrVector::SmoothPack(int color) {
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
   using kmg::kVDinv;
+  SaveGhosts(lev);
   Hook(lev, true);
   if (Drv()->smoother_ == 0) {
     for (int sc = 0; sc < 8; ++sc) {
@@ -202,6 +219,7 @@ void MGKerrVector::SmoothPack(int color) {
     });
     Hook(lev, false);
   }
+  RestoreGhosts(lev);
 }
 
 void MGKerrVector::CalculateDefectPack() {
@@ -216,6 +234,7 @@ void MGKerrVector::CalculateDefectPack() {
   auto def = def_[lev].d_view;
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  SaveGhosts(lev);
   Hook(lev, true);
   par_for("MGKerrVector::Defect", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
@@ -226,6 +245,7 @@ void MGKerrVector::CalculateDefectPack() {
     kmg::VecS(A, k, j, i, h, S);
     for (int a = 0; a < 3; ++a) { def(m, a, k, j, i) = src(m, a, k, j, i) + S[a]*ih2; }
   });
+  RestoreGhosts(lev);
   if (Drv()->count_nonfinite_) {
     nonfinite_def_ += kmg::CountNonFinite(def, nmmb_, nvar_, ngh_, nx, ny, nz);
   }
@@ -242,11 +262,12 @@ void MGKerrVector::CalculateFASRHSPack() {
   auto u = u_[lev].d_view;
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  SaveGhosts(lev);
   Hook(lev, true);
-  // uold = u was stored just before, ahead of the hook (see kmg::CopyMaskedEdges): give
-  // uold the hooked edges too (kelvin faces stay framework zerofixed in uold, as in u at
-  // prolongation, so the correction sees homogeneous Dirichlet there)
-  if (Drv()->uold_edge_sync_ != kmg::kSyncNone) {
+  // persist only: uold = u was stored just before, ahead of the hook (see
+  // kmg::CopyMaskedEdges): give uold the hooked edges too. With hook_scope = operator u's
+  // ghosts (edges and kelvin faces) stay framework-filled, as uold's.
+  if (!Drv()->hook_operator_ && Drv()->uold_edge_sync_ != kmg::kSyncNone) {
     kmg::CopyMaskedEdges(uold_[lev].d_view, u, sync_.d_view, nmmb_, nvar_, ngh_, nx, ny,
                          nz);
   }
@@ -259,6 +280,7 @@ void MGKerrVector::CalculateFASRHSPack() {
     kmg::VecS(A, k, j, i, h, S);
     for (int a = 0; a < 3; ++a) { src(m, a, k, j, i) -= S[a]*ih2; }
   });
+  RestoreGhosts(lev);
 }
 
 //----------------------------------------------------------------------------------------
@@ -309,6 +331,14 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/edge_fill must be 'rule_r', 'bilinear' or 'off'.");
   }
   edge_poison_ = pin->GetOrAddBoolean(block, "edge_poison", false);
+  std::string hs = pin->GetOrAddString(block, "hook_scope", "operator");
+  if (hs == "operator") {
+    hook_operator_ = true;
+  } else if (hs == "persist") {
+    hook_operator_ = false;
+  } else {
+    Fatal(block + "/hook_scope must be 'operator' or 'persist'.");
+  }
   std::string us = pin->GetOrAddString(block, "uold_edge_sync", "free");
   if (us == "none") {
     uold_edge_sync_ = kmg::kSyncNone;

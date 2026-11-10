@@ -22,7 +22,9 @@
 //!   runs        : comma-separated smoother/fill pairs, e.g. "gs8/rule_r,rb/rule_r";
 //!                 each: u = 0, ncycles V-cycles, defect per cycle, error against u*
 //!   e1_cycles   : V-cycles of E1 inside the solver (poison every hook), R then off
-//! The multigrid options are also read from <problem> (MGKerrScalarDriver).
+//! The multigrid options are also read from <problem> (MGKerrScalarDriver), among them
+//! hook_scope = operator (default; edge fill / kelvin faces only inside the kernels) |
+//! persist (hooked ghosts stay in u; with uold_edge_sync = none | free | all).
 //!
 //! W3c (driver = vector, MGKerrVectorDriver: -DL V = s on gt, mg_kerr_vector.hpp):
 //!   V*'s component c is the scalar manuf with amp*vamp<c+1>, centre x0 + vofs e_c and,

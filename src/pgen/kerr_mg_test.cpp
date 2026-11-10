@@ -8,18 +8,21 @@
 //! (src/cfc/mg_kerr_scalar.hpp): no evolution (<time> evolution = static). Everything
 //! happens in the problem generator; output lines start with "KMG" for parsing.
 //!
-//! <kerr_mg_test>
+//! <problem> (test options)
 //!   edges_only  : true -> only the unsafe-edge census of the mesh (no multigrid)
 //!   coef        : flat | synthetic | kerr   (synthetic: eps, kw; kerr: kerr_f2,
 //!                 kerr_kstab, kerr_row0_exact, m_bh, xbh1..3, exact)
 //!   manuf       : 0 sine (zero on the box faces) | 1 amp/sqrt(r^2+w^2) | 2 gaussian;
 //!                 amp, w, c, x01..3
+//!   kind        : linear (c, s) | psi (eq:cpsi) | chi (eq:cchi) -- the driver's option;
+//!                 psi/chi: the matter is manufactured (kmg::ManufMatter) from
+//!                 da2_amp, da2_w (Ahat^2 - Ahat0^2) and dpsi_amp, dpsi_w (delta psi, chi)
 //!   op_tests    : the operator checks on the finest block level (exact edges, R, B, off,
 //!                 E1 poison with R and with off, corner poison)
 //!   runs        : comma-separated smoother/fill pairs, e.g. "gs8/rule_r,rb/rule_r";
 //!                 each: u = 0, ncycles V-cycles, defect per cycle, error against u*
 //!   e1_cycles   : V-cycles of E1 inside the solver (poison every hook), R then off
-//! The multigrid options are read from <kerr_mg> (MGKerrScalarDriver).
+//! The multigrid options are also read from <problem> (MGKerrScalarDriver).
 
 #include <algorithm>
 #include <cmath>
@@ -133,7 +136,9 @@ void EdgeCensus(MeshBlockPack *pmbp) {
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (restart) return;
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
-  const std::string B = "kerr_mg_test";
+  // AthenaK accepts only whitelisted block names (parameter_input.cpp:124), so the test
+  // and driver options share <problem>.
+  const std::string B = "problem";
 
   // a valid (uniform) fluid so that the static driver's initialisation has a state
   if (pmbp->phydro != nullptr) {
@@ -177,7 +182,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     cs.xbh[2] = pin->GetOrAddReal(B, "xbh3", 0.0);
     cs.exact = pin->GetOrAddBoolean(B, "exact", false);
   } else {
-    std::cout << "### FATAL ERROR: <kerr_mg_test>/coef must be flat, synthetic or kerr"
+    std::cout << "### FATAL ERROR: <problem>/coef must be flat, synthetic or kerr"
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
@@ -197,7 +202,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   mf.xmin[2] = ms.x3min; mf.len[2] = ms.x3max - ms.x3min;
 
   Kokkos::Timer t0;
-  cfc::MGKerrScalarDriver drv(pmbp, pin, "kerr_mg", cs, mf);
+  cfc::MGKerrScalarDriver drv(pmbp, pin, B, cs, mf);
+  drv.mm_.da2_amp = pin->GetOrAddReal(B, "da2_amp", 0.0);
+  drv.mm_.da2_w = pin->GetOrAddReal(B, "da2_w", 1.0);
+  drv.mm_.dpsi_amp = pin->GetOrAddReal(B, "dpsi_amp", 0.0);
+  drv.mm_.dpsi_w = pin->GetOrAddReal(B, "dpsi_w", 1.0);
   drv.Prepare();
   const double tprep = t0.seconds();
   {
@@ -205,8 +214,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     drv.EdgeCounts(c);
     const long nmb = SumL(pmbp->nmb_thispack);
     if (Root()) {
-      std::printf("KMG SETUP coef %s manuf %d nmb %ld root_mask 0x%03x prepare_s %.3f\n",
-                  coef.c_str(), mf.mode, nmb, drv.RootMask(), tprep);
+      std::printf("KMG SETUP coef %s manuf %d kind %d nmb %ld root_mask 0x%03x "
+                  "prepare_s %.3f\n", coef.c_str(), mf.mode, drv.kind_, nmb, drv.RootMask(),
+                  tprep);
     }
     EdgeCensus(pmbp);
   }
@@ -253,10 +263,20 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     Real emax, erms;
     drv.ErrorVsManuf(emax, erms);
     emax = MaxR(emax);
+    Real cmax[3], crms[3];
+    long cn[3];
+    drv.ErrorVsManufByClass(cmax, crms, cn);
+    for (int c = 0; c < 3; ++c) {
+      cmax[c] = MaxR(cmax[c]);
+      cn[c] = SumL(cn[c]);
+    }
     // ErrorVsManuf's rms is rank-local; with one rank it is global
     if (Root()) {
       std::printf("KMG RUN %s ncyc %d s_per_vcycle %.4e err_max %.6e err_rms_rank0 %.6e\n",
                   tok.c_str(), ncyc, tsec/std::max(ncyc, 1), emax, erms);
+      std::printf("KMG ERRC %s bulk %.6e %.6e %ld bedge %.6e %.6e %ld iedge %.6e %.6e %ld\n",
+                  tok.c_str(), cmax[0], crms[0], cn[0], cmax[1], crms[1], cn[1], cmax[2],
+                  crms[2], cn[2]);
       std::printf("KMG DEF %s", tok.c_str());
       for (size_t n = 0; n < d.size(); ++n) std::printf(" %.6e", d[n]);
       std::printf("\nKMG RHO %s", tok.c_str());

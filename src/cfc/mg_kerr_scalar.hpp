@@ -14,6 +14,13 @@
 //!
 //! Coefficient channels (kerr_mg_ops.hpp): 0-17 gt^ij at the lower faces, 18 c, 19 s; all
 //! analytic at every level (blocks, root, octets), never restricted.
+//! W3b (kind = psi | chi; eq:cpsi, eq:cchi): 25 channels. The background ones (faces,
+//! Rt/8, psi0, Ahat0^2, chi0) are analytic at every level, root and octet; the matter ones
+//! (E* or E* + 2S*, Ahat^2 - Ahat0^2, delta psi) are formed on the finest level and
+//! restricted through the block levels, the root (TransferCoeffToRoot) and the octets
+//! (kerr_methods.tex sec. 4.2). The pointwise terms c, s(u), ds/du come from
+//! kmg::PointTerm; smooth: u += omega def/(c - ds/du - SDiag/h^2), with the flat driver's
+//! psi floor for kind = psi.
 //! Discrete form (h the level's cell width, S = h^2 Dt^2 u from ScalarS):
 //!     def = s + src + S/h^2 - c u,  FAS: src += (c u - S/h^2) - s,
 //!     smooth: u += omega def/(c - SDiag/h^2).
@@ -45,7 +52,8 @@ class MGKerrScalarDriver;
 
 class MGKerrScalar : public Multigrid {
  public:
-  MGKerrScalar(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost, bool on_host = false);
+  MGKerrScalar(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost, int ncoeff,
+               bool on_host = false);
   ~MGKerrScalar() = default;
 
   void SmoothPack(int color) final;
@@ -59,6 +67,11 @@ class MGKerrScalar : public Multigrid {
   }
   //! all levels' coefficients from (cs, mf)
   void FillAllLevels(const kmg::CoefSource &cs, const kmg::Manuf &mf);
+  //! W3b: the background channels on all levels (see kmg::FillLevelBg)
+  void FillAllLevelsBg(const kmg::CoefSource &cs);
+  //! W3b test: the manufactured matter channels on the finest level
+  void FillFinestMatterManuf(int kind, const kmg::CoefSource &cs, const kmg::Manuf &mf,
+                             const kmg::MatterManuf &mm);
   //! the extent of each "m" (blocks: mb_size; root: the mesh)
   void BuildExtents();
   int NumMB() const { return nmmb_; }
@@ -119,6 +132,8 @@ class MGKerrScalarDriver : public MultigridDriver {
   KerrOpStats OperatorTest(bool exact_edges, bool poison_corners);
   //! max and volume-weighted rms of u - u* on the finest block level
   void ErrorVsManuf(Real &emax, Real &erms);
+  //! the same split by cell class (KerrOpStats: 0 bulk, 1 boundary edge, 2 interior edge)
+  void ErrorVsManufByClass(Real emax[3], Real erms[3], long ncell[3]);
   //! total, on-boundary and interior unsafe block edges (this rank)
   void EdgeCounts(long c[3]);
   int RootMask() const { return root_mask_.h_view(0); }
@@ -132,8 +147,11 @@ class MGKerrScalarDriver : public MultigridDriver {
   bool count_nonfinite_ = false;
   int smoother_ = 0;          // 0 gs8, 1 rb (Jacobi within colour)
   Real omega_ = 1.0;
+  int kind_ = kmg::kKindLinear;   // block/kind = linear | psi | chi
+  Real psi_floor_ = 0.05;         // block/psi_floor (kind = psi), as the flat driver
   kmg::CoefSource cs_;
   kmg::Manuf mf_;
+  kmg::MatterManuf mm_;           // kinds psi/chi: the manufactured matter
 
   // octets (host): physics-dependent operations
   void SmoothOctet(MGOctet &oct, int rlev, int color) override;
@@ -143,7 +161,12 @@ class MGKerrScalarDriver : public MultigridDriver {
   long nonfinite_oct_ = 0;
 
  private:
-  void FillOctetCoeffs();
+  //! all channels (linear) or the background channels only (psi/chi)
+  void FillOctetCoeffs(bool bg_only);
+  //! W3b: every channel of the coarsest block cell into the root grid or its parent octet
+  //! (a copy of MGCFCConformalFactorDriver::TransferCoeffToRoot,
+  //! mg_cfc_conformal_factor.cpp:708-777)
+  void TransferCoeffToRoot();
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_;
 };
 

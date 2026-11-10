@@ -173,6 +173,58 @@ void FillLevelCoeffs(const DvceArray5D<Real> &coeff, const DualArray1D<RegionSiz
   });
 }
 
+void FillLevelBg(const DvceArray5D<Real> &coeff, const DualArray1D<RegionSize> &blk,
+                 int nmmb, int ngh, int nx, int ny, int nz, const CoefSource &cs) {
+  auto bd = blk.d_view;
+  const int ncx = nx + 2*ngh, ncy = ny + 2*ngh, ncz = nz + 2*ngh;
+  par_for("kmg::FillLevelBg", DevExeSpace(), 0, nmmb-1, 0, ncz-1, 0, ncy-1, 0, ncx-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real dx[3] = {(bd(m).x1max - bd(m).x1min)/static_cast<Real>(nx),
+                        (bd(m).x2max - bd(m).x2min)/static_cast<Real>(ny),
+                        (bd(m).x3max - bd(m).x3min)/static_cast<Real>(nz)};
+    const Real lo[3] = {bd(m).x1min + static_cast<Real>(i - ngh)*dx[0],
+                        bd(m).x2min + static_cast<Real>(j - ngh)*dx[1],
+                        bd(m).x3min + static_cast<Real>(k - ngh)*dx[2]};
+    const Real xc[3] = {lo[0] + 0.5*dx[0], lo[1] + 0.5*dx[1], lo[2] + 0.5*dx[2]};
+    for (int d = 0; d < 3; ++d) {
+      Real p[3] = {xc[0], xc[1], xc[2]};
+      p[d] = lo[d];
+      Real gt[6], gtu[6], dgt[3][6];
+      PointMetric(cs, p[0], p[1], p[2], gt, gtu, dgt);
+      for (int s = 0; s < 6; ++s) { coeff(m, kFace + 6*d + s, k, j, i) = gtu[s]; }
+    }
+    BgPoint bg;
+    PointBg(cs, xc[0], xc[1], xc[2], bg);
+    coeff(m, kChR8, k, j, i) = bg.r8;
+    coeff(m, kChPsi0, k, j, i) = bg.psi0;
+    coeff(m, kChA02, k, j, i) = bg.a02;
+    coeff(m, kChChi0, k, j, i) = bg.chi0;
+  });
+}
+
+void FillLevelMatterManuf(const DvceArray5D<Real> &coeff,
+                          const DualArray1D<RegionSize> &blk, int nmmb, int ngh, int nx,
+                          int ny, int nz, int kind, const CoefSource &cs, const Manuf &mf,
+                          const MatterManuf &mm) {
+  auto bd = blk.d_view;
+  const int ncx = nx + 2*ngh, ncy = ny + 2*ngh, ncz = nz + 2*ngh;
+  par_for("kmg::FillLevelMatterManuf", DevExeSpace(), 0, nmmb-1, 0, ncz-1, 0, ncy-1, 0,
+          ncx-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real dx1 = (bd(m).x1max - bd(m).x1min)/static_cast<Real>(nx);
+    const Real dx2 = (bd(m).x2max - bd(m).x2min)/static_cast<Real>(ny);
+    const Real dx3 = (bd(m).x3max - bd(m).x3min)/static_cast<Real>(nz);
+    const Real x = bd(m).x1min + (static_cast<Real>(i - ngh) + 0.5)*dx1;
+    const Real y = bd(m).x2min + (static_cast<Real>(j - ngh) + 0.5)*dx2;
+    const Real z = bd(m).x3min + (static_cast<Real>(k - ngh) + 0.5)*dx3;
+    Real mt, da2, dpsi;
+    ManufMatter(kind, cs, mf, mm, x, y, z, mt, da2, dpsi);
+    coeff(m, kChM, k, j, i) = mt;
+    coeff(m, kChDA2, k, j, i) = da2;
+    coeff(m, kChDPsi, k, j, i) = dpsi;
+  });
+}
+
 void FillManufU(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
                 int ngh, int nx, int ny, int nz, const Manuf &mf) {
   auto bd = blk.d_view;

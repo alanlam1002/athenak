@@ -23,8 +23,7 @@
 
 namespace cfc {
 
-using kmg::kChC;
-using kmg::kChS;
+using kmg::kChPsi0;
 
 namespace {
 
@@ -42,15 +41,29 @@ struct OctAcc {
   std::exit(EXIT_FAILURE);
 }
 
+//! the class of interior cell I of a block with n cells (KerrOpStats): 0 bulk, 1 next to
+//! an unsafe edge on the domain boundary, 2 next to an unsafe interior edge
+int CellClass(int msk, int phy, const int I[3], const int n[3]) {
+  int cls = 0;
+  for (int q = 0; q < 12; ++q) {
+    if (!((msk >> q) & 1)) continue;
+    int e, a, b, sa, sb;
+    kmg::EdgeAxes(q, e, a, b, sa, sb);
+    const int ca = (sa > 0) ? n[a] - 1 : 0, cb = (sb > 0) ? n[b] - 1 : 0;
+    if (I[a] == ca && I[b] == cb) { cls = std::max(cls, ((phy >> q) & 1) ? 1 : 2); }
+  }
+  return cls;
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
 // MGKerrScalar
 
 MGKerrScalar::MGKerrScalar(MultigridDriver *pmd, MeshBlockPack *pmbp, int nghost,
-                           bool on_host)
+                           int ncoeff, bool on_host)
     : Multigrid(pmd, pmbp, nghost, on_host) {
-  ncoeff_ = kmg::kNCoeffScalar;
+  ncoeff_ = ncoeff;
   for (int l = 0; l < nlevel_; l++) {
     int ll = nlevel_-1-l;
     Kokkos::realloc(coeff_[l], nmmb_, ncoeff_, (indcs_.nx3>>ll)+2*ngh_,
@@ -96,6 +109,29 @@ void MGKerrScalar::FillAllLevels(const kmg::CoefSource &cs, const kmg::Manuf &mf
   }
 }
 
+void MGKerrScalar::FillAllLevelsBg(const kmg::CoefSource &cs) {
+  BuildExtents();
+  if (static_cast<int>(scratch_.extent(0)) != nmmb_) {
+    Kokkos::realloc(scratch_, nmmb_, 1, indcs_.nx3+2*ngh_, indcs_.nx2+2*ngh_,
+                    indcs_.nx1+2*ngh_);
+  }
+  for (int lev = 0; lev < nlevel_; ++lev) {
+    const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
+    if (static_cast<int>(coeff_[lev].d_view.extent(0)) != nmmb_) {
+      Kokkos::realloc(coeff_[lev], nmmb_, ncoeff_, nz+2*ngh_, ny+2*ngh_, nx+2*ngh_);
+    }
+    kmg::FillLevelBg(coeff_[lev].d_view, blk_, nmmb_, ngh_, nx, ny, nz, cs);
+  }
+}
+
+void MGKerrScalar::FillFinestMatterManuf(int kind, const kmg::CoefSource &cs,
+                                         const kmg::Manuf &mf,
+                                         const kmg::MatterManuf &mm) {
+  const int lev = nlevel_ - 1;
+  kmg::FillLevelMatterManuf(coeff_[lev].d_view, blk_, nmmb_, ngh_, LevelN(lev, 0),
+                            LevelN(lev, 1), LevelN(lev, 2), kind, cs, mf, mm);
+}
+
 void MGKerrScalar::EdgeHook(int lev, bool poison_ok) {
   const MGKerrScalarDriver *d = Drv();
   const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
@@ -113,6 +149,8 @@ void MGKerrScalar::SmoothPack(int color) {
   const int is = ngh_, js = ngh_, ks = ngh_;
   const int c0 = color ^ pmy_driver_->GetCoffset();
   const Real omega = Drv()->omega_;
+  const int kind = Drv()->kind_;
+  const Real pfl = Drv()->psi_floor_;
   const Real fac = static_cast<Real>(1 << ll);
   auto brdx = block_rdx_.d_view;
   auto u = u_[lev].d_view;
@@ -133,12 +171,10 @@ void MGKerrScalar::SmoothPack(int color) {
         const Real dx = brdx(m)*fac;
         const Real ih2 = 1.0/(dx*dx);
         VAcc<decltype(u)> A{u, coeff, m, 0};
-        const Real S = kmg::ScalarS(A, k, j, i);
-        const Real D = kmg::ScalarSDiag(A, k, j, i);
-        const Real cc = coeff(m, kChC, k, j, i);
-        const Real r = coeff(m, kChS, k, j, i) + src(m, 0, k, j, i) + S*ih2
-                     - cc*u(m, 0, k, j, i);
-        u(m, 0, k, j, i) += omega*r/(cc - D*ih2);
+        Real dg;
+        const Real r = kmg::PointResidual(kind, A, k, j, i, ih2, dg) + src(m, 0, k, j, i);
+        u(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg,
+                                         coeff(m, kChPsi0, k, j, i), pfl);
       });
       kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, fill, false);
     }
@@ -151,12 +187,10 @@ void MGKerrScalar::SmoothPack(int color) {
       const Real dx = brdx(m)*fac;
       const Real ih2 = 1.0/(dx*dx);
       VAcc<decltype(u)> A{u, coeff, m, 0};
-      const Real S = kmg::ScalarS(A, k, j, i);
-      const Real D = kmg::ScalarSDiag(A, k, j, i);
-      const Real cc = coeff(m, kChC, k, j, i);
-      const Real r = coeff(m, kChS, k, j, i) + src(m, 0, k, j, i) + S*ih2
-                   - cc*u(m, 0, k, j, i);
-      scr(m, 0, k, j, i) = u(m, 0, k, j, i) + omega*r/(cc - D*ih2);
+      Real dg;
+      const Real r = kmg::PointResidual(kind, A, k, j, i, ih2, dg) + src(m, 0, k, j, i);
+      scr(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg,
+                                         coeff(m, kChPsi0, k, j, i), pfl);
     });
     par_for("MGKerrScalar::SmoothRBJCopy", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je,
             is, ie,
@@ -180,15 +214,16 @@ void MGKerrScalar::CalculateDefectPack() {
   auto def = def_[lev].d_view;
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  const int kind = Drv()->kind_;
   EdgeHook(lev, true);
   par_for("MGKerrScalar::Defect", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const Real dx = brdx(m)*fac;
     const Real ih2 = 1.0/(dx*dx);
     VAcc<decltype(u)> A{u, coeff, m, 0};
-    def(m, 0, k, j, i) = coeff(m, kChS, k, j, i) + src(m, 0, k, j, i)
-                       + kmg::ScalarS(A, k, j, i)*ih2
-                       - coeff(m, kChC, k, j, i)*u(m, 0, k, j, i);
+    Real dg;
+    def(m, 0, k, j, i) = kmg::PointResidual(kind, A, k, j, i, ih2, dg)
+                       + src(m, 0, k, j, i);
   });
   if (Drv()->count_nonfinite_) {
     nonfinite_def_ += kmg::CountNonFinite(def, nmmb_, nvar_, ngh_, nx, ny, nz);
@@ -206,14 +241,15 @@ void MGKerrScalar::CalculateFASRHSPack() {
   auto u = u_[lev].d_view;
   auto src = src_[lev].d_view;
   auto coeff = coeff_[lev].d_view;
+  const int kind = Drv()->kind_;
   EdgeHook(lev, true);
   par_for("MGKerrScalar::FASRHS", DevExeSpace(), 0, nmmb_-1, ks, ke, js, je, is, ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     const Real dx = brdx(m)*fac;
     const Real ih2 = 1.0/(dx*dx);
     VAcc<decltype(u)> A{u, coeff, m, 0};
-    src(m, 0, k, j, i) += coeff(m, kChC, k, j, i)*u(m, 0, k, j, i)
-                        - kmg::ScalarS(A, k, j, i)*ih2 - coeff(m, kChS, k, j, i);
+    Real dg;
+    src(m, 0, k, j, i) -= kmg::PointResidual(kind, A, k, j, i, ih2, dg);
   });
 }
 
@@ -224,7 +260,18 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
                                        const std::string &block,
                                        const kmg::CoefSource &cs, const kmg::Manuf &mf)
     : MultigridDriver(pmbp, 1), cs_(cs), mf_(mf) {
-  ncoeff_ = kmg::kNCoeffScalar;
+  std::string kd = pin->GetOrAddString(block, "kind", "linear");
+  if (kd == "linear") {
+    kind_ = kmg::kKindLinear;
+  } else if (kd == "psi") {
+    kind_ = kmg::kKindPsi;
+  } else if (kd == "chi") {
+    kind_ = kmg::kKindChi;
+  } else {
+    Fatal(block + "/kind must be 'linear', 'psi' or 'chi'.");
+  }
+  psi_floor_ = pin->GetOrAddReal(block, "psi_floor", 0.05);
+  ncoeff_ = (kind_ == kmg::kKindLinear) ? kmg::kNCoeffScalar : kmg::kNCoeffKerr;
   eps_ = pin->GetOrAddReal(block, "mg_threshold", 1.0e-10);
   std::string norm_str = pin->GetOrAddString(block, "mg_norm", "rms");
   if (norm_str == "legacy") {
@@ -293,8 +340,8 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   if (pin->GetOrAddBoolean(block, "root_on_host", false)) {
     Fatal(block + "/root_on_host = true is not supported (device-only coefficient fills).");
   }
-  mgroot_ = new MGKerrScalar(this, nullptr, nghost, false);
-  mglevels_ = new MGKerrScalar(this, pmbp, nghost);
+  mgroot_ = new MGKerrScalar(this, nullptr, nghost, ncoeff_, false);
+  mglevels_ = new MGKerrScalar(this, pmbp, nghost, ncoeff_);
   mglevels_->pbval = new MultigridBoundaryValues(pmbp, pin, false, mglevels_);
   mglevels_->pbval->InitializeBuffers(nvar_);
   mglevels_->pbval->RemapIndicesForMG();
@@ -314,9 +361,25 @@ void MGKerrScalarDriver::Prepare() {
   kmg::ComputeRootEdgeMask(mg_mesh_bcs_, root_mask_, root_phys_);
   lv->SetEdgeMasks(blk_mask_, blk_phys_);
   rt->SetEdgeMasks(root_mask_, root_phys_);
-  lv->FillAllLevels(cs_, mf_);
-  rt->FillAllLevels(cs_, mf_);
-  FillOctetCoeffs();
+  if (kind_ == kmg::kKindLinear) {
+    lv->FillAllLevels(cs_, mf_);
+    rt->FillAllLevels(cs_, mf_);
+    FillOctetCoeffs(false);
+  } else {
+    // matter: finest level -> block levels -> root/octets -> root levels (the order of
+    // MGCFCConformalFactorDriver::Solve, mg_cfc_conformal_factor.cpp:547-560); then the
+    // background, restricted along with it, is overwritten analytically everywhere
+    lv->FillAllLevelsBg(cs_);
+    rt->FillAllLevelsBg(cs_);
+    lv->FillFinestMatterManuf(kind_, cs_, mf_, mm_);
+    lv->RestrictCoefficients();
+    TransferCoeffToRoot();
+    RestrictCoeffOctets();
+    rt->RestrictCoefficients();
+    lv->FillAllLevelsBg(cs_);
+    rt->FillAllLevelsBg(cs_);
+    FillOctetCoeffs(true);
+  }
   SetupMultigrid(0.0, false);
   Kokkos::fence();
 }
@@ -352,7 +415,7 @@ std::vector<Real> MGKerrScalarDriver::RunCycles(Driver *pdriver, int ncyc) {
   return d;
 }
 
-void MGKerrScalarDriver::FillOctetCoeffs() {
+void MGKerrScalarDriver::FillOctetCoeffs(bool bg_only) {
   if (nreflevel_ == 0) return;
   const int ngh = mgroot_->GetGhostCells();
   const int nc = 2 + 2*ngh;
@@ -379,11 +442,16 @@ void MGKerrScalarDriver::FillOctetCoeffs() {
     blk.template modify<HostExeSpace>();
     blk.template sync<DevExeSpace>();
     DvceArray5D<Real> tmp("kmg_octcoeff", noct, ncoeff_, nc, nc, nc);
-    kmg::FillLevelCoeffs(tmp, blk, noct, ngh, 2, 2, 2, cs_, mf_);
+    if (bg_only) {
+      kmg::FillLevelBg(tmp, blk, noct, ngh, 2, 2, 2, cs_);
+    } else {
+      kmg::FillLevelCoeffs(tmp, blk, noct, ngh, 2, 2, 2, cs_, mf_);
+    }
     auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), tmp);
     for (int o = 0; o < noct; ++o) {
       MGOctet &oct = octets_[l][o];
       for (int c = 0; c < ncoeff_; ++c) {
+        if (bg_only && !kmg::IsBgChannel(c)) continue;
         for (int k = 0; k < nc; ++k) {
           for (int j = 0; j < nc; ++j) {
             for (int i = 0; i < nc; ++i) { oct.Coeff(c, k, j, i) = h(o, c, k, j, i); }
@@ -392,6 +460,64 @@ void MGKerrScalarDriver::FillOctetCoeffs() {
       }
     }
   }
+}
+
+void MGKerrScalarDriver::TransferCoeffToRoot() {
+  const int nc = ncoeff_;
+  auto *lv = static_cast<MGKerrScalar*>(mglevels_);
+  auto *rt = static_cast<MGKerrScalar*>(mgroot_);
+  auto &coeff_lvl = lv->CoeffAtLevel(0);
+  const int ngh_mb = lv->GetGhostCells();
+  const int nmmb = pmy_pack_->nmb_thispack - 1;
+  const int padding = nslist_[global_variable::my_rank];
+  DualArray2D<Real> coeffbuf;
+  Kokkos::realloc(coeffbuf, nc, nbtotal_);
+  auto cb = coeffbuf.d_view;
+  auto cl = coeff_lvl.d_view;
+  par_for("MGKerrScalarDriver::SaveCoeffToRoot", DevExeSpace(), 0, nmmb,
+  KOKKOS_LAMBDA(const int m) {
+    for (int v = 0; v < nc; ++v) {
+      cb(v, m + padding) = cl(m, v, ngh_mb, ngh_mb, ngh_mb);
+    }
+  });
+  coeffbuf.template modify<DevExeSpace>();
+  coeffbuf.template sync<HostExeSpace>();
+#if MPI_PARALLEL_ENABLED
+  for (int v = 0; v < nc; ++v) {
+    MPI_Allgatherv(MPI_IN_PLACE, nblist_[global_variable::my_rank], MPI_ATHENA_REAL,
+                   &coeffbuf.h_view(v, 0), nblist_, nslist_, MPI_ATHENA_REAL,
+                   MPI_COMM_WORLD);
+  }
+#endif
+  const auto loc = pmy_mesh_->lloc_eachmb;
+  const int ngh = rt->GetGhostCells();
+  auto &coeff_root = rt->CoeffAtLevel(rt->GetNumberOfLevels() - 1);
+  // the root array may have been written on the device only (FillAllLevelsBg)
+  Kokkos::deep_copy(coeff_root.h_view, coeff_root.d_view);
+  auto rh = coeff_root.h_view;
+  for (int n = 0; n < nbtotal_; ++n) {
+    const int i = static_cast<int>(loc[n].lx1);
+    const int j = static_cast<int>(loc[n].lx2);
+    const int k = static_cast<int>(loc[n].lx3);
+    if (loc[n].level == locrootlevel_) {
+      for (int v = 0; v < nc; ++v) {
+        rh(0, v, k + ngh, j + ngh, i + ngh) = coeffbuf.h_view(v, n);
+      }
+    } else {
+      LogicalLocation oloc;
+      oloc.lx1 = (loc[n].lx1 >> 1);
+      oloc.lx2 = (loc[n].lx2 >> 1);
+      oloc.lx3 = (loc[n].lx3 >> 1);
+      oloc.level = loc[n].level - 1;
+      const int olev = oloc.level - locrootlevel_;
+      const int oid = octetmap_[olev][oloc];
+      MGOctet &oct = octets_[olev][oid];
+      for (int v = 0; v < nc; ++v) {
+        oct.Coeff(v, (k & 1) + ngh, (j & 1) + ngh, (i & 1) + ngh) = coeffbuf.h_view(v, n);
+      }
+    }
+  }
+  Kokkos::deep_copy(coeff_root.d_view, coeff_root.h_view);
 }
 
 void MGKerrScalarDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
@@ -405,11 +531,10 @@ void MGKerrScalarDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;
       if (((oi + oj + ok) & 1) != c) continue;
       const int k = ngh + ok, j = ngh + oj, i = ngh + oi;
-      const Real S = kmg::ScalarS(A, k, j, i), D = kmg::ScalarSDiag(A, k, j, i);
-      const Real cc = oct.Coeff(kChC, k, j, i);
-      const Real r = oct.Coeff(kChS, k, j, i) + oct.Src(0, k, j, i) + S*ih2
-                   - cc*oct.U(0, k, j, i);
-      oct.U(0, k, j, i) += omega_*r/(cc - D*ih2);
+      Real dg;
+      const Real r = kmg::PointResidual(kind_, A, k, j, i, ih2, dg) + oct.Src(0, k, j, i);
+      oct.U(0, k, j, i) = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg,
+                                        oct.Coeff(kChPsi0, k, j, i), psi_floor_);
     }
   } else {
     Real nw[8];
@@ -417,11 +542,10 @@ void MGKerrScalarDriver::SmoothOctet(MGOctet &oct, int rlev, int color) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;
       if (((oi + oj + ok) & 1) != c) continue;
       const int k = ngh + ok, j = ngh + oj, i = ngh + oi;
-      const Real S = kmg::ScalarS(A, k, j, i), D = kmg::ScalarSDiag(A, k, j, i);
-      const Real cc = oct.Coeff(kChC, k, j, i);
-      const Real r = oct.Coeff(kChS, k, j, i) + oct.Src(0, k, j, i) + S*ih2
-                   - cc*oct.U(0, k, j, i);
-      nw[sc] = oct.U(0, k, j, i) + omega_*r/(cc - D*ih2);
+      Real dg;
+      const Real r = kmg::PointResidual(kind_, A, k, j, i, ih2, dg) + oct.Src(0, k, j, i);
+      nw[sc] = kmg::FloorPsi(kind_, oct.U(0, k, j, i) + omega_*r/dg,
+                             oct.Coeff(kChPsi0, k, j, i), psi_floor_);
     }
     for (int sc = 0; sc < 8; ++sc) {
       const int oi = sc & 1, oj = (sc >> 1) & 1, ok = (sc >> 2) & 1;
@@ -439,9 +563,9 @@ void MGKerrScalarDriver::CalculateDefectOctet(MGOctet &oct, int rlev) {
   for (int k = ngh; k <= ngh+1; ++k) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
-        const Real d = oct.Coeff(kChS, k, j, i) + oct.Src(0, k, j, i)
-                     + kmg::ScalarS(A, k, j, i)*ih2
-                     - oct.Coeff(kChC, k, j, i)*oct.U(0, k, j, i);
+        Real dg;
+        const Real d = kmg::PointResidual(kind_, A, k, j, i, ih2, dg)
+                     + oct.Src(0, k, j, i);
         oct.Def(0, k, j, i) = d;
         if (count_nonfinite_ && kmg::NonFinite(d)) { ++nonfinite_oct_; }
       }
@@ -457,8 +581,8 @@ void MGKerrScalarDriver::CalculateFASRHSOctet(MGOctet &oct, int rlev) {
   for (int k = ngh; k <= ngh+1; ++k) {
     for (int j = ngh; j <= ngh+1; ++j) {
       for (int i = ngh; i <= ngh+1; ++i) {
-        oct.Src(0, k, j, i) += oct.Coeff(kChC, k, j, i)*oct.U(0, k, j, i)
-                             - kmg::ScalarS(A, k, j, i)*ih2 - oct.Coeff(kChS, k, j, i);
+        Real dg;
+        oct.Src(0, k, j, i) -= kmg::PointResidual(kind_, A, k, j, i, ih2, dg);
       }
     }
   }
@@ -488,6 +612,7 @@ KerrOpStats MGKerrScalarDriver::OperatorTest(bool exact_edges, bool poison_corne
     for (int m = 0; m < nmb; ++m) { h(m) = lv->LevelDx(lev, m); }
     Kokkos::deep_copy(rdx, h);
   }
+  const int kind = kind_;
   par_for("kmg::OperatorTest", DevExeSpace(), 0, nmb-1, 0, nz-1, 0, ny-1, 0, nx-1,
   KOKKOS_LAMBDA(const int m, const int kk, const int jj, const int ii) {
     const int k = kk + ngh, j = jj + ngh, i = ii + ngh;
@@ -497,8 +622,8 @@ KerrOpStats MGKerrScalarDriver::OperatorTest(bool exact_edges, bool poison_corne
     const Real S7 = u(m, 0, k, j, i+1) + u(m, 0, k, j, i-1) + u(m, 0, k, j+1, i)
                   + u(m, 0, k, j-1, i) + u(m, 0, k+1, j, i) + u(m, 0, k-1, j, i)
                   - 6.0*u(m, 0, k, j, i);
-    out(m, 0, kk, jj, ii) = coeff(m, kmg::kChS, k, j, i) + S*ih2
-                          - coeff(m, kmg::kChC, k, j, i)*u(m, 0, k, j, i);
+    Real dg;
+    out(m, 0, kk, jj, ii) = kmg::PointResidual(kind, A, k, j, i, ih2, dg);
     out(m, 1, kk, jj, ii) = S - S7;
   });
   auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), out);
@@ -511,16 +636,7 @@ KerrOpStats MGKerrScalarDriver::OperatorTest(bool exact_edges, bool poison_corne
       for (int jj = 0; jj < ny; ++jj) {
         for (int ii = 0; ii < nx; ++ii) {
           const int I[3] = {ii, jj, kk};
-          int cls = 0;
-          for (int q = 0; q < 12; ++q) {
-            if (!((msk >> q) & 1)) continue;
-            int e, a, b, sa, sb;
-            kmg::EdgeAxes(q, e, a, b, sa, sb);
-            const int ca = (sa > 0) ? n[a] - 1 : 0, cb = (sb > 0) ? n[b] - 1 : 0;
-            if (I[a] == ca && I[b] == cb) {
-              cls = std::max(cls, ((phy >> q) & 1) ? 1 : 2);
-            }
-          }
+          const int cls = CellClass(msk, phy, I, n);
           const Real d = h(m, 0, kk, jj, ii);
           if (kmg::NonFinite(d)) {
             ++st.nonfinite;
@@ -566,6 +682,46 @@ void MGKerrScalarDriver::ErrorVsManuf(Real &emax, Real &erms) {
     }
   }
   erms = (vol > 0.0) ? std::sqrt(s2/vol) : 0.0;
+}
+
+void MGKerrScalarDriver::ErrorVsManufByClass(Real emax[3], Real erms[3], long ncell[3]) {
+  auto *lv = static_cast<MGKerrScalar*>(mglevels_);
+  const int lev = lv->GetNumberOfLevels() - 1;
+  const int nmb = lv->NumMB();
+  const int ngh = lv->GetGhostCells();
+  const int nx = lv->LevelN(lev, 0), ny = lv->LevelN(lev, 1), nz = lv->LevelN(lev, 2);
+  const int n[3] = {nx, ny, nz};
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), lv->UAt(lev).d_view);
+  Real s2[3] = {0, 0, 0}, vol[3] = {0, 0, 0};
+  for (int c = 0; c < 3; ++c) {
+    emax[c] = 0.0;
+    ncell[c] = 0;
+  }
+  for (int m = 0; m < nmb; ++m) {
+    const RegionSize &b = lv->Extents().h_view(m);
+    const int msk = lv->Mask().h_view(m), phy = lv->Phys().h_view(m);
+    const Real dx1 = (b.x1max - b.x1min)/nx, dx2 = (b.x2max - b.x2min)/ny;
+    const Real dx3 = (b.x3max - b.x3min)/nz, dv = dx1*dx2*dx3;
+    for (int k = 0; k < nz; ++k) {
+      for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+          const int I[3] = {i, j, k};
+          const int cls = CellClass(msk, phy, I, n);
+          Real us, du[3], ddu[6];
+          kmg::ManufEval(mf_, b.x1min + (i + 0.5)*dx1, b.x2min + (j + 0.5)*dx2,
+                         b.x3min + (k + 0.5)*dx3, us, du, ddu);
+          const Real e = h(m, 0, k + ngh, j + ngh, i + ngh) - us;
+          emax[cls] = std::max(emax[cls], std::abs(e));
+          s2[cls] += e*e*dv;
+          vol[cls] += dv;
+          ++ncell[cls];
+        }
+      }
+    }
+  }
+  for (int c = 0; c < 3; ++c) {
+    erms[c] = (vol[c] > 0.0) ? std::sqrt(s2[c]/vol[c]) : 0.0;
+  }
 }
 
 void MGKerrScalarDriver::NonFiniteCounts(long c[3]) const {

@@ -50,6 +50,29 @@ inline constexpr int kChC = 18;      // the linear test equation's c (cell centr
 inline constexpr int kChS = 19;      // its right-hand side s (cell centre)
 inline constexpr int kNCoeffScalar = 20;
 
+// W3b (eq:cpsi, eq:cchi): the channel layout of the psi and chi correction equations.
+// Background channels (B) are evaluated pointwise on every level, root and octet, never
+// restricted; matter channels (M) are formed on the finest level and restricted
+// (kerr_methods.tex sec. 4.2, FAS consistency).
+inline constexpr int kChR8   = 18;   // B  Rt/8
+inline constexpr int kChM    = 19;   // M  psi: E*; chi: E* + 2S*
+inline constexpr int kChDA2  = 20;   // M  Ahat^2 - Ahat0^2
+inline constexpr int kChPsi0 = 21;   // B  psi0
+inline constexpr int kChA02  = 22;   // B  Ahat0^2 = Ahat0^ij Ahat0_ij
+inline constexpr int kChDPsi = 23;   // M  delta psi (chi only; psi is solved first)
+inline constexpr int kChChi0 = 24;   // B  chi0 = alpha0 psi0
+inline constexpr int kNCoeffKerr = 25;
+
+//! The equation solved by a driver: 0 the linear test equation (c, s); 1 the psi
+//! correction (eq:cpsi); 2 the lapse correction (eq:cchi).
+inline constexpr int kKindLinear = 0;
+inline constexpr int kKindPsi = 1;
+inline constexpr int kKindChi = 2;
+
+KOKKOS_INLINE_FUNCTION bool IsBgChannel(int q) {
+  return q < kNFace || q == kChR8 || q == kChPsi0 || q == kChA02 || q == kChChi0;
+}
+
 enum class EdgeFill : int { rule_r = 0, bilinear = 1, off = 2 };
 
 KOKKOS_INLINE_FUNCTION void EdgeAxes(int q, int &e, int &a, int &b, int &sa, int &sb) {
@@ -270,6 +293,157 @@ Real ManufSource(const CoefSource &cs, const Manuf &mf, Real x, Real y, Real z) 
 }
 
 //----------------------------------------------------------------------------------------
+// W3b: the psi and chi correction equations, written as -Dt^2 u + c u = s(u).
+
+//! \struct BgPoint
+//! \brief The background scalars a correction equation needs at a cell centre.
+struct BgPoint {
+  Real r8, psi0, a02, chi0;
+};
+
+//! \fn PointBg(cs, x, y, z, bg)
+//! \brief Kerr: Rt/8, psi0, Ahat0^ij Ahat0_ij and alpha0 psi0 from W1 (KerrConformal);
+//! flat and synthetic: the flat-space values (0, 1, 0, 1).
+KOKKOS_INLINE_FUNCTION
+void PointBg(const CoefSource &cs, Real x, Real y, Real z, BgPoint &bg) {
+  if (cs.mode == 2) {
+    Real v[kKnNV];
+    KerrNodeCartesian(cs.tab, cs.m_bh, x - cs.xbh[0], y - cs.xbh[1], z - cs.xbh[2], v,
+                      cs.exact);
+    KerrBgPoint b;
+    KerrConformal(v, b);
+    bg.r8 = 0.125*b.rs;
+    bg.psi0 = b.psi0;
+    bg.a02 = b.ahu[0]*b.ahd[0] + b.ahu[3]*b.ahd[3] + b.ahu[5]*b.ahd[5]
+           + 2.0*(b.ahu[1]*b.ahd[1] + b.ahu[2]*b.ahd[2] + b.ahu[4]*b.ahd[4]);
+    bg.chi0 = b.alpha0*b.psi0;
+    return;
+  }
+  bg.r8 = 0.0;
+  bg.psi0 = 1.0;
+  bg.a02 = 0.0;
+  bg.chi0 = 1.0;
+}
+
+//! \fn KerrPsiRHS(u, e_star, da2, psi0, a02, rhs, drhs)
+//! \brief A Kerr-only copy of ConformalFactorRHS<false> (mg_cfc_conformal_factor.cpp:
+//! 122-166, the cancellation-free factoring psi^-7 - psi0^-7 = -psi0^-7 x P7(x)/(1+x)^7,
+//! x = u/psi0): rhs = 2 pi E* psi^-1 + Ahat^2 delta / 8 psi^-7 - Ahat0^2/8 reg(x), so that
+//! eq:cpsi reads -Dt^2 u + (Rt/8) u = rhs(u); drhs = d rhs/du.
+KOKKOS_INLINE_FUNCTION
+void KerrPsiRHS(Real u, Real e_star, Real da2, Real psi0, Real a02, Real &rhs,
+                Real &drhs) {
+  const Real psi = u + psi0;
+  const Real psi_inv = 1.0/psi;
+  const Real psi_inv2 = psi_inv*psi_inv;
+  const Real psi_inv7 = psi_inv2*psi_inv2*psi_inv2*psi_inv;
+  const Real psi_inv8 = psi_inv7*psi_inv;
+  const Real psi0_inv = 1.0/psi0;
+  const Real x = u*psi0_inv;
+  const Real opx = psi0*psi_inv;
+  const Real opx2 = opx*opx;
+  const Real opx7 = opx2*opx2*opx2*opx;
+  const Real p02 = psi0_inv*psi0_inv;
+  const Real p07 = p02*p02*p02*psi0_inv;
+  const Real p7 = 7.0 + x*(21.0 + x*(35.0 + x*(35.0 + x*(21.0 + x*(7.0 + x)))));
+  const Real reg = p07*x*p7*opx7;
+  rhs = 2.0*M_PI*e_star*psi_inv + 0.125*da2*psi_inv7 - 0.125*a02*reg;
+  drhs = -2.0*M_PI*e_star*psi_inv2 - 0.875*(da2 + a02)*psi_inv8;
+}
+
+//! \fn KerrChiRHS(u2s, dpsi, da2, psi0, a02, chi0, kx, sl)
+//! \brief A Kerr-only copy of LapseReactionRHS (mg_cfc_lapse.cpp:121-142):
+//! kx = 2 pi (E* + 2S*) psi^-2 + 7/8 Ahat^2 psi^-8 and
+//! sl = chi0 [2 pi (E* + 2S*) psi^-2 + 7/8 dA2 psi^-8 - 7/8 Ahat0^2 reg8(x)]
+//!    = chi0 (Q - Q0) (Rt cancels), so that eq:cchi reads -Dt^2 u + (Rt/8 + kx) u = -sl.
+KOKKOS_INLINE_FUNCTION
+void KerrChiRHS(Real u2s, Real dpsi, Real da2, Real psi0, Real a02, Real chi0, Real &kx,
+                Real &sl) {
+  const Real psi = dpsi + psi0;
+  const Real psi_inv2 = 1.0/(psi*psi);
+  const Real psi_inv8 = psi_inv2*psi_inv2*psi_inv2*psi_inv2;
+  kx = 2.0*M_PI*u2s*psi_inv2 + 0.875*(da2 + a02)*psi_inv8;
+  const Real psi0_inv = 1.0/psi0;
+  const Real x = dpsi*psi0_inv;
+  const Real opx = psi0*(1.0/psi);
+  const Real opx2 = opx*opx;
+  const Real opx8 = opx2*opx2*opx2*opx2;
+  const Real p02 = psi0_inv*psi0_inv;
+  const Real p08 = p02*p02*p02*p02;
+  const Real p8 = 8.0 + x*(28.0 + x*(56.0 + x*(70.0 + x*(56.0 + x*(28.0 +
+                  x*(8.0 + x))))));
+  const Real reg8 = p08*x*p8*opx8;
+  sl = chi0*(2.0*M_PI*u2s*psi_inv2 + 0.875*da2*psi_inv8 - 0.875*a02*reg8);
+}
+
+//! \fn PointTerm(kind, A, k, j, i, u, c, s, dsdu)
+//! \brief The pointwise part of -Dt^2 u + c u = s(u) at cell (k, j, i): the linear test
+//! equation (c, s from channels 18, 19), eq:cpsi (c = Rt/8, s = rhs(u)) or eq:cchi
+//! (c = Rt/8 + kx, s = -sl). The smoother's Newton diagonal is c - dsdu - SDiag/h^2.
+template <class Acc>
+KOKKOS_INLINE_FUNCTION
+void PointTerm(int kind, const Acc &A, int k, int j, int i, Real u, Real &c, Real &s,
+               Real &dsdu) {
+  if (kind == kKindPsi) {
+    c = A.C(kChR8, k, j, i);
+    KerrPsiRHS(u, A.C(kChM, k, j, i), A.C(kChDA2, k, j, i), A.C(kChPsi0, k, j, i),
+               A.C(kChA02, k, j, i), s, dsdu);
+  } else if (kind == kKindChi) {
+    Real kx, sl;
+    KerrChiRHS(A.C(kChM, k, j, i), A.C(kChDPsi, k, j, i), A.C(kChDA2, k, j, i),
+               A.C(kChPsi0, k, j, i), A.C(kChA02, k, j, i), A.C(kChChi0, k, j, i), kx,
+               sl);
+    c = A.C(kChR8, k, j, i) + kx;
+    s = -sl;
+    dsdu = 0.0;
+  } else {
+    c = A.C(kChC, k, j, i);
+    s = A.C(kChS, k, j, i);
+    dsdu = 0.0;
+  }
+}
+
+//! \struct MatterManuf
+//! \brief Manufactured matter for the psi/chi tests: dA2 = da2_amp exp(-r^2/da2_w^2) and
+//! (chi) delta psi = dpsi_amp exp(-r^2/dpsi_w^2), r = |x - mf.x0|; E* (psi) or E* + 2S*
+//! (chi) is then solved for so that u* (Manuf) satisfies the continuum equation exactly.
+struct MatterManuf {
+  Real da2_amp = 0.0, da2_w = 1.0;
+  Real dpsi_amp = 0.0, dpsi_w = 1.0;
+};
+
+//! \fn ManufMatter(kind, cs, mf, mm, x, y, z, m, da2, dpsi)
+KOKKOS_INLINE_FUNCTION
+void ManufMatter(int kind, const CoefSource &cs, const Manuf &mf, const MatterManuf &mm,
+                 Real x, Real y, Real z, Real &m, Real &da2, Real &dpsi) {
+  Manuf m0 = mf;
+  m0.c = 0.0;
+  const Real L = ManufSource(cs, m0, x, y, z);   // -Dt^2 u*
+  Real us, du[3], ddu[6];
+  ManufEval(mf, x, y, z, us, du, ddu);
+  BgPoint bg;
+  PointBg(cs, x, y, z, bg);
+  const Real r2 = (x - mf.x0[0])*(x - mf.x0[0]) + (y - mf.x0[1])*(y - mf.x0[1])
+                + (z - mf.x0[2])*(z - mf.x0[2]);
+  da2 = mm.da2_amp*Kokkos::exp(-r2/(mm.da2_w*mm.da2_w));
+  if (kind == kKindPsi) {
+    dpsi = 0.0;
+    // L + r8 u* = 2 pi E*/psi + [dA2 psi^-7 - Ahat0^2 reg]/8: rhs with E* = 0, then E*
+    Real rhs0, d0;
+    KerrPsiRHS(us, 0.0, da2, bg.psi0, bg.a02, rhs0, d0);
+    m = (L + bg.r8*us - rhs0)*(us + bg.psi0)/(2.0*M_PI);
+  } else {
+    dpsi = mm.dpsi_amp*Kokkos::exp(-r2/(mm.dpsi_w*mm.dpsi_w));
+    // L + (r8 + kx) u* = sl, both affine in u2s: kx = kx0 + 2 pi u2s/psi^2, likewise sl
+    Real kx0, sl0;
+    KerrChiRHS(0.0, dpsi, da2, bg.psi0, bg.a02, bg.chi0, kx0, sl0);
+    const Real psi = dpsi + bg.psi0;
+    const Real g = 2.0*M_PI/(psi*psi);
+    m = -(L + (bg.r8 + kx0)*us + sl0)/(g*(us + bg.chi0));
+  }
+}
+
+//----------------------------------------------------------------------------------------
 // The scalar flux operator, written once over an accessor (device views or a host octet).
 // A.U(k, j, i) is the unknown, A.C(c, k, j, i) a coefficient channel.
 
@@ -324,6 +498,27 @@ struct ViewAcc {
   }
 };
 
+//! \fn PointResidual(kind, A, k, j, i, ih2, diag)
+//! \brief s(u) + S/h^2 - c u at (k, j, i) (the defect without the FAS source), and the
+//! Newton-Gauss-Seidel diagonal diag = c - ds/du - SDiag/h^2 (> 0 for SDiag < 0 and h
+//! small enough even where Rt/8 < 0).
+template <class Acc>
+KOKKOS_INLINE_FUNCTION
+Real PointResidual(int kind, const Acc &A, int k, int j, int i, Real ih2, Real &diag) {
+  const Real u = A.U(k, j, i);
+  Real c, s, ds;
+  PointTerm(kind, A, k, j, i, u, c, s, ds);
+  diag = c - ds - ScalarSDiag(A, k, j, i)*ih2;
+  return s + ScalarS(A, k, j, i)*ih2 - c*u;
+}
+
+//! \fn FloorPsi(kind, u, psi0, floor)
+//! \brief the flat driver's psi floor (mg_cfc_conformal_factor.cpp:251), psi equation only
+KOKKOS_INLINE_FUNCTION
+Real FloorPsi(int kind, Real u, Real psi0, Real floor) {
+  return (kind == kKindPsi && u + psi0 < floor) ? floor - psi0 : u;
+}
+
 //----------------------------------------------------------------------------------------
 // Host-side helpers (kerr_mg_ops.cpp)
 
@@ -359,6 +554,15 @@ void FillLevelCoeffs(const DvceArray5D<Real> &coeff, const DualArray1D<RegionSiz
 //! u* at every cell (ghosts included) of the level array u, variable v
 void FillManufU(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk, int nmmb,
                 int ngh, int nx, int ny, int nz, const Manuf &mf);
+//! W3b: the background channels only (faces 0-17, Rt/8, psi0, Ahat0^2, chi0), every cell
+//! including the ghosts; the matter channels are left untouched.
+void FillLevelBg(const DvceArray5D<Real> &coeff, const DualArray1D<RegionSize> &blk,
+                 int nmmb, int ngh, int nx, int ny, int nz, const CoefSource &cs);
+//! W3b test: the manufactured matter channels (ManufMatter), every cell.
+void FillLevelMatterManuf(const DvceArray5D<Real> &coeff,
+                          const DualArray1D<RegionSize> &blk, int nmmb, int ngh, int nx,
+                          int ny, int nz, int kind, const CoefSource &cs, const Manuf &mf,
+                          const MatterManuf &mm);
 //! Non-finite entries of a(m, v, interior) (a bit test, immune to fast-math)
 long CountNonFinite(const DvceArray5D<Real> &a, int nmmb, int nvar, int ngh, int nx,
                     int ny, int nz);

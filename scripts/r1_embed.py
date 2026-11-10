@@ -103,7 +103,10 @@ def edit_par(text, old, new_box, deck=False, src=None):
             elif block.startswith('refined_region') and key == 'level':
                 nv = str(int(val) + 1)
             elif block == 'problem' and key in LEVEL_KEYS:
-                nv = str(int(val) + 1)
+                if int(val) >= 0:             # a negative level key means off (e.g. amr_pin_level = -1,
+                    nv = str(int(val) + 1)    # dyngr_tov.cpp:183): keep it off
+                else:
+                    seen.add((block, key))
             elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box', 'restart_embed_done', 'restart_embed_src'):
                 continue                      # an earlier embedding's keys (replaced above); restart_embed_done
                                               # (set at the earlier fill, restart_state.cpp:347) would make the

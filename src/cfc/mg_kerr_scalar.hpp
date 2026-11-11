@@ -67,8 +67,9 @@ class MGKerrScalar : public Multigrid {
   }
   //! all levels' coefficients from (cs, mf)
   void FillAllLevels(const kmg::CoefSource &cs, const kmg::Manuf &mf);
-  //! W3b: the background channels on all levels (see kmg::FillLevelBg)
-  void FillAllLevelsBg(const kmg::CoefSource &cs);
+  //! W3b: the background channels on levels lev_lo..lev_hi (all by default; see
+  //! kmg::FillLevelBg); every level's array is (re)allocated as needed
+  void FillAllLevelsBg(const kmg::CoefSource &cs, int lev_lo = 0, int lev_hi = -1);
   //! W3b test: the manufactured matter channels on the finest level
   //! W4 production: the matter channels on the finest level from mesh arrays (channel 0,
   //! ghost depth ngh): M, DA2 and (has_dpsi) DPsi, interior cells only
@@ -196,7 +197,23 @@ class MGKerrScalarDriver : public MultigridDriver {
 
   long nonfinite_oct_ = 0;
 
+  //! K-005 B1 (kinds psi/chi): the block levels' background channels are copied from
+  //! bg_donor_ (cfc_kerr.cpp: chi takes psi's, filled earlier in the same stage) when its
+  //! kmg::CoeffKey still matches; KERR_MG_NOCACHE=1 fills every solve (the A/B check)
+  MGKerrScalarDriver *bg_donor_ = nullptr;
+  bool coeff_cache_ = true;
+  long bg_fills_ = 0, bg_copies_ = 0;
+  //! KERR_MG_CACHECHECK: checks done and entries that differed from a refill (must be 0)
+  bool cache_check_ = false;
+  long check_n_ = 0, check_diff_ = 0;
+  //! this driver's block-level background channels still hold what key_ describes, for cs
+  bool BgIntactFor(const kmg::CoefSource &cs) const;
+
  private:
+  //! block levels lo..hi's background channels from bg_donor_ (false: nothing copied)
+  bool CopyBgFromDonor(int lo, int hi);
+  kmg::CoeffKey key_;
+  std::vector<const Real*> key_ptr_;
   //! all channels (linear) or the background channels only (psi/chi)
   void FillOctetCoeffs(bool bg_only);
   //! W3b: every channel of the coarsest block cell into the root grid or its parent octet

@@ -7,6 +7,7 @@
 //! \brief W3a host drivers and device kernels for the Kerr multigrid building blocks
 //! (see kerr_mg_ops.hpp).
 
+#include <cstdlib>
 #include <limits>
 #include <vector>
 
@@ -328,6 +329,94 @@ long CountNonFinite(const DvceArray5D<Real> &a, int nmmb, int nvar, int ngh, int
     const int v = static_cast<int>(r % nvar); r /= nvar;
     const int m = static_cast<int>(r);
     if (NonFinite(a(m, v, k + ngh, j + ngh, i + ngh))) { c += 1; }
+  }, cnt);
+  return cnt;
+}
+
+bool SameCoefSource(const CoefSource &a, const CoefSource &b) {
+  return a.mode == b.mode && a.tab.f2.data() == b.tab.f2.data() && a.tab.a == b.tab.a &&
+         a.m_bh == b.m_bh && a.xbh[0] == b.xbh[0] && a.xbh[1] == b.xbh[1] &&
+         a.xbh[2] == b.xbh[2] && a.exact == b.exact && a.src_exact == b.src_exact &&
+         a.eps == b.eps && a.kw == b.kw && a.blend_r1 == b.blend_r1 &&
+         a.blend_r2 == b.blend_r2;
+}
+
+void CaptureKey(CoeffKey &k, const CoefSource &cs, Mesh *pm, MeshBlockPack *pmbp,
+                int nref, const int *noct) {
+  k.cs = cs;
+  k.seq = pm->GetAMRLoadBalanceUpdateSeq();
+  k.nmb = pmbp->nmb_thispack;
+  k.nref = nref;
+  k.noct.assign(noct, noct + nref);
+  auto &mbs = pmbp->pmb->mb_size;
+  k.ext.resize(k.nmb);
+  for (int m = 0; m < k.nmb; ++m) { k.ext[m] = mbs.h_view(m); }
+  k.ok = true;
+}
+
+bool KeyMatches(const CoeffKey &k, const CoefSource &cs, Mesh *pm, MeshBlockPack *pmbp,
+                int nref, const int *noct) {
+  if (!k.ok || pm->IsMeshUpdated()) return false;
+  if (k.seq != pm->GetAMRLoadBalanceUpdateSeq() || k.nmb != pmbp->nmb_thispack ||
+      k.nref != nref || !SameCoefSource(k.cs, cs)) {
+    return false;
+  }
+  for (int l = 0; l < nref; ++l) {
+    if (k.noct[l] != noct[l]) return false;
+  }
+  auto &mbs = pmbp->pmb->mb_size;
+  for (int m = 0; m < k.nmb; ++m) {
+    const RegionSize &a = mbs.h_view(m), &b = k.ext[m];
+    if (a.x1min != b.x1min || a.x2min != b.x2min || a.x3min != b.x3min ||
+        a.x1max != b.x1max || a.x2max != b.x2max || a.x3max != b.x3max) {
+      return false;
+    }
+  }
+  return true;
+}
+
+bool CopyBgChannels(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src) {
+  for (int r = 0; r < 5; ++r) {
+    if (dst.extent(r) != src.extent(r)) return false;
+  }
+  const int nmb = dst.extent_int(0), nc = dst.extent_int(1);
+  const int nz = dst.extent_int(2), ny = dst.extent_int(3), nx = dst.extent_int(4);
+  par_for("kmg::CopyBgChannels", DevExeSpace(), 0, nmb-1, 0, nc-1, 0, nz-1, 0, ny-1, 0,
+          nx-1,
+  KOKKOS_LAMBDA(const int m, const int q, const int k, const int j, const int i) {
+    if (IsBgChannel(q)) { dst(m, q, k, j, i) = src(m, q, k, j, i); }
+  });
+  return true;
+}
+
+bool CoeffCacheEnabled() {
+  const char *e = std::getenv("KERR_MG_NOCACHE");
+  return !(e != nullptr && std::atoi(e) != 0);
+}
+
+bool CoeffCacheCheck() {
+  const char *e = std::getenv("KERR_MG_CACHECHECK");
+  return e != nullptr && std::atoi(e) != 0;
+}
+
+DvceArray5D<Real> CloneView(const DvceArray5D<Real> &a) {
+  DvceArray5D<Real> b("kmg::clone", a.extent(0), a.extent(1), a.extent(2), a.extent(3),
+                      a.extent(4));
+  Kokkos::deep_copy(b, a);
+  return b;
+}
+
+long CountDiff(const DvceArray5D<Real> &a, const DvceArray5D<Real> &b) {
+  for (int r = 0; r < 5; ++r) {
+    if (a.extent(r) != b.extent(r)) return -1;
+  }
+  const long n = static_cast<long>(a.size());
+  const Real *pa = a.data(), *pb = b.data();
+  long cnt = 0;
+  Kokkos::parallel_reduce("kmg::CountDiff", Kokkos::RangePolicy<DevExeSpace>(0, n),
+  KOKKOS_LAMBDA(const long idx, long &c) {
+    const Real x = pa[idx], y = pb[idx];
+    if (x != y && !(x != x && y != y)) { c += 1; }
   }, cnt);
   return cnt;
 }

@@ -628,6 +628,38 @@ void FillLevelMatterManuf(const DvceArray5D<Real> &coeff,
 long CountNonFinite(const DvceArray5D<Real> &a, int nmmb, int nvar, int ngh, int nx,
                     int ny, int nz);
 
+//! \struct CoeffKey
+//! \brief K-005 B1: what a driver's background coefficients were filled for (host): the
+//! CoefSource, the mesh's AMR/load-balance sequence, this rank's block extents and the
+//! octet counts per refinement level. Two drivers on the same mesh whose keys match hold
+//! bitwise-identical background coefficients (the fills are pointwise and deterministic).
+struct CoeffKey {
+  bool ok = false;
+  CoefSource cs;
+  int seq = -1, nmb = -1, nref = -1;
+  std::vector<int> noct;
+  std::vector<RegionSize> ext;
+};
+bool SameCoefSource(const CoefSource &a, const CoefSource &b);
+//! the key for the current state (pmbp: the block pack; noct[0..nref-1])
+void CaptureKey(CoeffKey &k, const CoefSource &cs, Mesh *pm, MeshBlockPack *pmbp,
+                int nref, const int *noct);
+//! k still describes the current state (false while the mesh is marked updated)
+bool KeyMatches(const CoeffKey &k, const CoefSource &cs, Mesh *pm, MeshBlockPack *pmbp,
+                int nref, const int *noct);
+//! dst(:, q) = src(:, q) for the channels q with IsBgChannel(q) (scalar drivers); false
+//! (nothing copied) if the shapes differ
+bool CopyBgChannels(const DvceArray5D<Real> &dst, const DvceArray5D<Real> &src);
+//! env KERR_MG_NOCACHE = nonzero: no reuse or sharing (refill every solve; the A/B check)
+bool CoeffCacheEnabled();
+//! env KERR_MG_CACHECHECK = nonzero: after each reuse/copy, refill and count the entries
+//! that differ (the cache's bitwise self-check; costs a fill per solve)
+bool CoeffCacheCheck();
+//! a device copy of a (contiguous)
+DvceArray5D<Real> CloneView(const DvceArray5D<Real> &a);
+//! number of entries of a and b that differ (NaN = NaN; -1 if the shapes differ)
+long CountDiff(const DvceArray5D<Real> &a, const DvceArray5D<Real> &b);
+
 }  // namespace kmg
 }  // namespace cfc
 

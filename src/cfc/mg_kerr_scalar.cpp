@@ -109,17 +109,19 @@ void MGKerrScalar::FillAllLevels(const kmg::CoefSource &cs, const kmg::Manuf &mf
   }
 }
 
-void MGKerrScalar::FillAllLevelsBg(const kmg::CoefSource &cs) {
+void MGKerrScalar::FillAllLevelsBg(const kmg::CoefSource &cs, int lev_lo, int lev_hi) {
   BuildExtents();
   if (static_cast<int>(scratch_.extent(0)) != nmmb_) {
     Kokkos::realloc(scratch_, nmmb_, 1, indcs_.nx3+2*ngh_, indcs_.nx2+2*ngh_,
                     indcs_.nx1+2*ngh_);
   }
+  if (lev_hi < 0) { lev_hi = nlevel_ - 1; }
   for (int lev = 0; lev < nlevel_; ++lev) {
     const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
     if (static_cast<int>(coeff_[lev].d_view.extent(0)) != nmmb_) {
       Kokkos::realloc(coeff_[lev], nmmb_, ncoeff_, nz+2*ngh_, ny+2*ngh_, nx+2*ngh_);
     }
+    if (lev < lev_lo || lev > lev_hi) { continue; }
     kmg::FillLevelBg(coeff_[lev].d_view, blk_, nmmb_, ngh_, nx, ny, nz, cs);
   }
 }
@@ -318,6 +320,8 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/kind must be 'linear', 'psi' or 'chi'.");
   }
   psi_floor_ = pin->GetOrAddReal(block, "psi_floor", 0.05);
+  coeff_cache_ = kmg::CoeffCacheEnabled();
+  cache_check_ = coeff_cache_ && kmg::CoeffCacheCheck();
   ncoeff_ = (kind_ == kmg::kKindLinear) ? kmg::kNCoeffScalar : kmg::kNCoeffKerr;
   eps_ = pin->GetOrAddReal(block, "mg_threshold", 1.0e-10);
   std::string norm_str = pin->GetOrAddString(block, "mg_norm", "rms");
@@ -441,8 +445,16 @@ void MGKerrScalarDriver::Prepare() {
   } else {
     // matter: finest level -> block levels -> root/octets -> root levels (the order of
     // MGCFCConformalFactorDriver::Solve, mg_cfc_conformal_factor.cpp:547-560); then the
-    // background, restricted along with it, is overwritten analytically everywhere
-    lv->FillAllLevelsBg(cs_);
+    // background, restricted along with it, is overwritten analytically everywhere.
+    // The block levels' finest background is filled once: the matter fill and the
+    // restrictions leave its channels alone (Multigrid::RestrictCoefficients writes levels
+    // < finest only; TransferCoeffToRoot reads level-0 interiors, which it has written),
+    // so only the coarser block levels need the second fill (bitwise as before, K-005 B1)
+    const int lfin = lv->GetNumberOfLevels() - 1;
+    key_.ok = false;
+    lv->FillAllLevelsBg(cs_, 1, 0);   // extents and storage only
+    const bool shared = CopyBgFromDonor(lfin, lfin);
+    if (!shared) { lv->FillAllLevelsBg(cs_, lfin, lfin); }
     rt->FillAllLevelsBg(cs_);
     if (matter_ext_) {
       lv->FillFinestMatterExt(ext_m_, ext_da2_, ext_dpsi_, kind_ == kmg::kKindChi, ext_ngh_);
@@ -453,12 +465,65 @@ void MGKerrScalarDriver::Prepare() {
     TransferCoeffToRoot();
     RestrictCoeffOctets();
     rt->RestrictCoefficients();
-    lv->FillAllLevelsBg(cs_);
+    if (lfin > 0 && !(shared && CopyBgFromDonor(0, lfin - 1))) {
+      lv->FillAllLevelsBg(cs_, 0, lfin - 1);
+    }
     rt->FillAllLevelsBg(cs_);
     FillOctetCoeffs(true);
+    if (shared) { ++bg_copies_; } else { ++bg_fills_; }
+    if (shared && cache_check_) {
+      // KERR_MG_CACHECHECK: refill the copied background and count what differs
+      std::vector<DvceArray5D<Real>> save;
+      for (int lev = 0; lev <= lfin; ++lev) {
+        save.push_back(kmg::CloneView(lv->CoeffAtLevel(lev).d_view));
+      }
+      lv->FillAllLevelsBg(cs_, 0, lfin);
+      for (int lev = 0; lev <= lfin; ++lev) {
+        const long c = kmg::CountDiff(save[lev], lv->CoeffAtLevel(lev).d_view);
+        check_diff_ += (c < 0) ? 1 : c;
+      }
+      ++check_n_;
+    }
+    kmg::CaptureKey(key_, cs_, pmy_mesh_, pmy_pack_, nreflevel_, noctets_);
+    key_ptr_.clear();
+    for (int lev = 0; lev <= lfin; ++lev) {
+      key_ptr_.push_back(lv->CoeffAtLevel(lev).d_view.data());
+    }
   }
   SetupMultigrid(0.0, false);
   Kokkos::fence();
+}
+
+bool MGKerrScalarDriver::BgIntactFor(const kmg::CoefSource &cs) const {
+  if (kind_ == kmg::kKindLinear) return false;
+  if (!kmg::KeyMatches(key_, cs, pmy_mesh_, pmy_pack_, nreflevel_, noctets_)) return false;
+  auto *lv = static_cast<MGKerrScalar*>(mglevels_);
+  if (static_cast<int>(key_ptr_.size()) != lv->GetNumberOfLevels()) return false;
+  for (int lev = 0; lev < lv->GetNumberOfLevels(); ++lev) {
+    if (lv->CoeffAtLevel(lev).d_view.data() != key_ptr_[lev]) return false;
+  }
+  return true;
+}
+
+bool MGKerrScalarDriver::CopyBgFromDonor(int lo, int hi) {
+  MGKerrScalarDriver *d = bg_donor_;
+  if (!coeff_cache_ || d == nullptr || d == this || kind_ == kmg::kKindLinear ||
+      d->ncoeff_ != ncoeff_ || !d->BgIntactFor(cs_)) {
+    return false;
+  }
+  auto *lv = static_cast<MGKerrScalar*>(mglevels_);
+  auto *dl = static_cast<MGKerrScalar*>(d->mglevels_);
+  if (dl->GetNumberOfLevels() != lv->GetNumberOfLevels()) return false;
+  for (int lev = lo; lev <= hi; ++lev) {
+    const auto &a = lv->CoeffAtLevel(lev).d_view, &b = dl->CoeffAtLevel(lev).d_view;
+    for (int r = 0; r < 5; ++r) {
+      if (a.extent(r) != b.extent(r)) return false;
+    }
+  }
+  for (int lev = lo; lev <= hi; ++lev) {
+    kmg::CopyBgChannels(lv->CoeffAtLevel(lev).d_view, dl->CoeffAtLevel(lev).d_view);
+  }
+  return true;
 }
 
 void MGKerrScalarDriver::Solve(Driver *pdriver, int stage, Real dt) {

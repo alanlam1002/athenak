@@ -77,6 +77,16 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
         } else if (emethod.compare("lapse") == 0) {
           coord_data.excision_scheme = ExcisionScheme::lapse;
           coord_data.excise_lapse = pin->GetOrAddReal("coord","excise_lapse", 0.25);
+          // Kerr D4 (K-005): CFC::KerrSetup writes these into pin, since every regrid
+          // rebuilds Coordinates from pin (mesh_refinement.cpp, AddCoordinates); absent
+          // otherwise (the defaults keep the lapse scheme unchanged, pin untouched)
+          if (pin->DoesParameterExist("coord", "kerr_excision_lapse_off")) {
+            coord_data.excision_lapse_off =
+                pin->GetBoolean("coord", "kerr_excision_lapse_off");
+          }
+          if (pin->DoesParameterExist("coord", "kerr_excision_rfloor")) {
+            coord_data.excision_rfloor = pin->GetReal("coord", "kerr_excision_rfloor");
+          }
         } else if (emethod.compare("horizon") == 0) {
           if (pin->DoesBlockExist("fastflow")) {
             coord_data.excision_scheme = ExcisionScheme::horizon;

@@ -377,6 +377,8 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/mp_source must be 'self' or 'rhs'.");
   }
   mp_outer_ = pin->GetOrAddInteger(block, "mp_outer", 3);
+  coeff_cache_ = kmg::CoeffCacheEnabled();
+  cache_check_ = coeff_cache_ && kmg::CoeffCacheCheck();
   const RegionSize &msz = pmbp->pmesh->mesh_size;
   mpo_[0] = pin->GetOrAddReal(block, "mp_x01", 0.5*(msz.x1min + msz.x1max));
   mpo_[1] = pin->GetOrAddReal(block, "mp_x02", 0.5*(msz.x2min + msz.x2max));
@@ -468,11 +470,128 @@ void MGKerrVectorDriver::Prepare() {
   kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
   lv->SetSyncMask(blk_sync_);
   rt->SetSyncMask(root_sync_);
+  if (coeff_cache_ && CoeffsIntact()) {
+    ++coeff_reuses_;
+    if (cache_check_) { CheckAgainstRefill(); }
+  } else if (coeff_cache_ && CopyCoeffsFrom(coeff_donor_)) {
+    ++coeff_copies_;
+    if (cache_check_) { CheckAgainstRefill(); }
+    StoreKey();
+  } else {
+    key_.ok = false;
+    bad_dinv_[0] = lv->FillAllLevels(cs_);
+    bad_dinv_[1] = rt->FillAllLevels(cs_);
+    FillOctetCoeffs();
+    ++coeff_fills_;
+    StoreKey();
+  }
+  SetupMultigrid(0.0, false);
+  Kokkos::fence();
+}
+
+namespace {
+void CoeffPtrs(Multigrid *lv, Multigrid *rt, std::vector<const Real*> &p) {
+  p.clear();
+  for (Multigrid *g : {lv, rt}) {
+    for (int lev = 0; lev < g->GetNumberOfLevels(); ++lev) {
+      p.push_back(g->CoeffAtLevel(lev).d_view.data());
+    }
+  }
+}
+}  // namespace
+
+// called after PrepareForAMR (which reallocates the storage and rebuilds the octets,
+// zeroing their coefficients, when the mesh has changed)
+bool MGKerrVectorDriver::CoeffsIntact() const {
+  if (!kmg::KeyMatches(key_, cs_, pmy_mesh_, pmy_pack_, nreflevel_, noctets_)) return false;
+  std::vector<const Real*> p;
+  CoeffPtrs(mglevels_, mgroot_, p);
+  return p == key_ptr_;
+}
+
+void MGKerrVectorDriver::StoreKey() {
+  kmg::CaptureKey(key_, cs_, pmy_mesh_, pmy_pack_, nreflevel_, noctets_);
+  CoeffPtrs(mglevels_, mgroot_, key_ptr_);
+}
+
+// KERR_MG_CACHECHECK: refill (as an uncached Prepare would) and count what differs from the
+// reused/copied coefficients; the refilled values are kept
+void MGKerrVectorDriver::CheckAgainstRefill() {
+  auto *lv = static_cast<MGKerrVector*>(mglevels_);
+  auto *rt = static_cast<MGKerrVector*>(mgroot_);
+  Multigrid *g2[2] = {mglevels_, mgroot_};
+  std::vector<DvceArray5D<Real>> save;
+  for (Multigrid *g : g2) {
+    for (int lev = 0; lev < g->GetNumberOfLevels(); ++lev) {
+      save.push_back(kmg::CloneView(g->CoeffAtLevel(lev).d_view));
+    }
+  }
+  std::vector<std::vector<Real>> osave(nreflevel_);
+  for (int l = 0; l < nreflevel_; ++l) { osave[l] = oct_coeff_buf_[l]; }
+  const long bsave[3] = {bad_dinv_[0], bad_dinv_[1], bad_dinv_[2]};
+  const long bosave = boundary_octets_;
   bad_dinv_[0] = lv->FillAllLevels(cs_);
   bad_dinv_[1] = rt->FillAllLevels(cs_);
   FillOctetCoeffs();
-  SetupMultigrid(0.0, false);
-  Kokkos::fence();
+  long diff = 0;
+  size_t n = 0;
+  for (Multigrid *g : g2) {
+    for (int lev = 0; lev < g->GetNumberOfLevels(); ++lev, ++n) {
+      const long c = kmg::CountDiff(save[n], g->CoeffAtLevel(lev).d_view);
+      diff += (c < 0) ? 1 : c;
+    }
+  }
+  for (int l = 0; l < nreflevel_; ++l) {
+    if (osave[l].size() != oct_coeff_buf_[l].size()) { ++diff; continue; }
+    for (size_t q = 0; q < osave[l].size(); ++q) {
+      const Real x = osave[l][q], y = oct_coeff_buf_[l][q];
+      if (x != y && !(x != x && y != y)) { ++diff; }
+    }
+  }
+  for (int q = 0; q < 3; ++q) { if (bsave[q] != bad_dinv_[q]) { ++diff; } }
+  if (bosave != boundary_octets_) { ++diff; }
+  ++check_n_;
+  check_diff_ += diff;
+}
+
+bool MGKerrVectorDriver::CopyCoeffsFrom(MGKerrVectorDriver *d) {
+  if (d == nullptr || d == this || !d->CoeffsIntact()) return false;
+  // d's key matches the current state; so must this driver's layout
+  if (d->ncoeff_ != ncoeff_ || d->nreflevel_ != nreflevel_) return false;
+  for (int l = 0; l < nreflevel_; ++l) {
+    if (d->noctets_[l] != noctets_[l] ||
+        d->oct_coeff_buf_[l].size() != oct_coeff_buf_[l].size()) {
+      return false;
+    }
+  }
+  Multigrid *mine[2] = {mglevels_, mgroot_}, *theirs[2] = {d->mglevels_, d->mgroot_};
+  for (int g = 0; g < 2; ++g) {
+    if (mine[g]->GetNumberOfLevels() != theirs[g]->GetNumberOfLevels()) return false;
+    for (int lev = 0; lev < mine[g]->GetNumberOfLevels(); ++lev) {
+      const auto &a = mine[g]->CoeffAtLevel(lev).d_view;
+      const auto &b = theirs[g]->CoeffAtLevel(lev).d_view;
+      for (int r = 0; r < 5; ++r) {
+        if (a.extent(r) != b.extent(r)) return false;
+      }
+    }
+  }
+  auto *lv = static_cast<MGKerrVector*>(mglevels_);
+  auto *rt = static_cast<MGKerrVector*>(mgroot_);
+  lv->BuildExtents();
+  rt->BuildExtents();
+  for (int g = 0; g < 2; ++g) {
+    for (int lev = 0; lev < mine[g]->GetNumberOfLevels(); ++lev) {
+      Kokkos::deep_copy(mine[g]->CoeffAtLevel(lev).d_view,
+                        theirs[g]->CoeffAtLevel(lev).d_view);
+    }
+  }
+  for (int l = 0; l < nreflevel_; ++l) {
+    std::copy(d->oct_coeff_buf_[l].begin(), d->oct_coeff_buf_[l].end(),
+              oct_coeff_buf_[l].begin());
+  }
+  for (int q = 0; q < 3; ++q) { bad_dinv_[q] = d->bad_dinv_[q]; }
+  boundary_octets_ = d->boundary_octets_;
+  return true;
 }
 
 void MGKerrVectorDriver::ComputeMoments() {

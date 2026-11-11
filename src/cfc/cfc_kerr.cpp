@@ -194,10 +194,21 @@ void CFC::KerrSetup(ParameterInput *pin) {
     }
     cd.excision_rfloor = 0.75*kerr_r_ah_min_;
     cd.excision_lapse_off = true;
+    // also into pin: a regrid rebuilds Coordinates from pin (coordinates.cpp reads these),
+    // which otherwise reverted the mask to the lapse test after the first regrid (K-005)
+    pin->SetBoolean("coord", "kerr_excision_lapse_off", true);
+    pin->SetReal("coord", "kerr_excision_rfloor", cd.excision_rfloor);
     if (global_variable::my_rank == 0) {
       std::cout << "[kerr] D4 excision: r < max(" << cd.excision_rfloor
                 << ", r_f) about the hole, lapse mask off" << std::endl;
     }
+  } else if (pin->DoesParameterExist("coord", "kerr_excision_lapse_off")) {
+    // a = 0 restarted from an a > 0 restart file: drop its D4 keys
+    auto &cd = pmy_pack->pcoord->coord_data;
+    cd.excision_rfloor = 0.0;
+    cd.excision_lapse_off = false;
+    pin->SetBoolean("coord", "kerr_excision_lapse_off", false);
+    pin->SetReal("coord", "kerr_excision_rfloor", 0.0);
   }
   // M_BH is fixed on this path (the tables are per a, in units of M): accretion is a
   // tally only, as freeze_puncture_mass (R-155)
@@ -241,6 +252,9 @@ void CFC::KerrSetup(ParameterInput *pin) {
   pkbeta_ = new MGKerrVectorDriver(pmy_pack, pin, "cfc_kerr_beta", cs, vm);
   pkpsi_ = new MGKerrScalarDriver(pmy_pack, pin, "cfc_kerr_psi", cs, mf);
   pkchi_ = new MGKerrScalarDriver(pmy_pack, pin, "cfc_kerr_chi", cs, mf);
+  // K-005 B1: same background each stage (KerrRefill before the X solve) -> share it
+  pkbeta_->coeff_donor_ = pkx_;
+  pkchi_->bg_donor_ = pkpsi_;
   if (pkpsi_->kind_ != kmg::kKindPsi || pkchi_->kind_ != kmg::kKindChi) {
     KerrFatal("<cfc_kerr_psi> kind must be psi and <cfc_kerr_chi> kind chi.");
   }
@@ -418,9 +432,21 @@ void CFC::KerrSolveX(Driver *pdriver, int stage) {
   pkx_->RetrieveSolution(u_p_x);
   if (kerr_log_ > 0 && global_variable::my_rank == 0 && stage <= 1 &&
       pmy_pack->pmesh->ncycle % kerr_log_ == 0) {
-    std::printf("KERR FILL cycle= %d n= %ld total_s= %.4e per_fill_ms= %.4f\n",
+    std::printf("KERR FILL cycle= %d n= %ld total_s= %.4e per_fill_ms= %.4f "
+                "vcoef fill/reuse/copy X= %ld/%ld/%ld beta= %ld/%ld/%ld sbg fill/copy psi= %ld/%ld "
+                "chi= %ld/%ld\n",
                 pmy_pack->pmesh->ncycle, kerr_fill_n_, kerr_fill_sec_,
-                1.0e3*kerr_fill_sec_/static_cast<double>(std::max(kerr_fill_n_, 1L)));
+                1.0e3*kerr_fill_sec_/static_cast<double>(std::max(kerr_fill_n_, 1L)),
+                pkx_->coeff_fills_, pkx_->coeff_reuses_, pkx_->coeff_copies_,
+                pkbeta_->coeff_fills_, pkbeta_->coeff_reuses_, pkbeta_->coeff_copies_,
+                pkpsi_->bg_fills_, pkpsi_->bg_copies_, pkchi_->bg_fills_,
+                pkchi_->bg_copies_);
+    if (pkx_->cache_check_ || pkchi_->cache_check_) {
+      std::printf("KERR CACHECHECK cycle= %d X= %ld/%ld beta= %ld/%ld chi= %ld/%ld "
+                  "(checks/diffs, rank 0)\n", pmy_pack->pmesh->ncycle, pkx_->check_n_,
+                  pkx_->check_diff_, pkbeta_->check_n_, pkbeta_->check_diff_,
+                  pkchi_->check_n_, pkchi_->check_diff_);
+    }
   }
 }
 

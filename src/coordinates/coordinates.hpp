@@ -51,7 +51,9 @@ struct CoordData {
   bool excision_dynamic = false;
   Real excision_rf = 0.0;
   Real exc_cx = 0.0, exc_cy = 0.0, exc_cz = 0.0;
-  // <cfc> kerr_background with a > 0 (K-004 B4, SPIN_DESIGN_SPEC D4; set by CFC::KerrSetup):
+  // <cfc> kerr_background with a > 0 (K-004 B4, SPIN_DESIGN_SPEC D4; set by CFC::KerrSetup,
+  // which also writes them to pin as <coord> kerr_excision_{lapse_off,rfloor} so that the
+  // regrid's rebuild of Coordinates keeps them):
   // the sphere is r < max(excision_rfloor, r_f) and the lapse test is off. Defaults keep
   // the lapse scheme as above.
   Real excision_rfloor = 0.0;

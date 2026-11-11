@@ -161,8 +161,26 @@ class MGKerrVectorDriver : public MultigridDriver {
 
   long nonfinite_oct_ = 0;
 
+  //! K-005 B1: the coefficients (block levels, root, octets) depend on the background
+  //! only, so they are reused while CoeffKey still matches, or copied from coeff_donor_
+  //! (cfc_kerr.cpp: kbeta takes kX's, filled earlier in the same stage) when its key
+  //! matches; KERR_MG_NOCACHE=1 refills every solve (the A/B check)
+  MGKerrVectorDriver *coeff_donor_ = nullptr;
+  bool coeff_cache_ = true;
+  long coeff_fills_ = 0, coeff_reuses_ = 0, coeff_copies_ = 0;
+  //! KERR_MG_CACHECHECK: checks done and entries that differed from a refill (must be 0)
+  bool cache_check_ = false;
+  long check_n_ = 0, check_diff_ = 0;
+
  private:
   void FillOctetCoeffs();
+  //! this driver's coefficients still hold what key_ describes
+  bool CoeffsIntact() const;
+  bool CopyCoeffsFrom(MGKerrVectorDriver *d);
+  void StoreKey();
+  void CheckAgainstRefill();
+  kmg::CoeffKey key_;
+  std::vector<const Real*> key_ptr_;
   DualArray1D<int> blk_sync_, root_sync_;
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_, blk_kf_, root_kf_;
 };

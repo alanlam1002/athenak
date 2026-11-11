@@ -157,9 +157,12 @@ void LocalMoments(const DvceArray5D<Real> &u, const DvceArray5D<Real> &src,
                   Real mom[kNMom]) {
   auto bd = blk.d_view;
   const Real ox = x0[0], oy = x0[1], oz = x0[2];
+  // K-005 B1: one thread per (m, k, j) row, then the rows of each (m, k) plane summed in
+  // j order (the plane sums used to be one thread each: nmmb*nz threads only)
+  DvceArray2D<Real> prow("kmg_mom_row", nmmb*nz*ny, kNMom);
   DvceArray2D<Real> part("kmg_mom_part", nmmb*nz, kNMom);
-  par_for("kmg::LocalMoments", DevExeSpace(), 0, nmmb-1, 0, nz-1,
-  KOKKOS_LAMBDA(const int m, const int kk) {
+  par_for("kmg::LocalMoments", DevExeSpace(), 0, nmmb-1, 0, nz-1, 0, ny-1,
+  KOKKOS_LAMBDA(const int m, const int kk, const int jj) {
     const RegionSize &r = bd(m);
     const Real dx1 = (r.x1max - r.x1min)/static_cast<Real>(nx);
     const Real dx2 = (r.x2max - r.x2min)/static_cast<Real>(ny);
@@ -171,32 +174,37 @@ void LocalMoments(const DvceArray5D<Real> &u, const DvceArray5D<Real> &src,
     const Real y2 = r.x3min + (static_cast<Real>(kk) + 0.5)*dx3 - oz;
     VViewAcc<DvceArray5D<Real>> A{u, coeff, m};
     FlatVAcc<VViewAcc<DvceArray5D<Real>>> F{A};
-    for (int jj = 0; jj < ny; ++jj) {
-      const int j = jj + ngh;
-      const Real y1 = r.x2min + (static_cast<Real>(jj) + 0.5)*dx2 - oy;
-      for (int ii = 0; ii < nx; ++ii) {
-        const int i = ii + ngh;
-        const Real y0 = r.x1min + (static_cast<Real>(ii) + 0.5)*dx1 - ox;
-        const Real Y[3] = {y0, y1, y2};
-        Real q[3];
-        for (int c = 0; c < 3; ++c) { q[c] = src(m, c, k, j, i); }
-        if (self) {
-          Real S[3], Sf[3];
-          VecS(A, k, j, i, h, S);
-          VecS(F, k, j, i, h, Sf);
-          for (int c = 0; c < 3; ++c) { q[c] += (S[c] - Sf[c])*ih2; }
-        }
-        for (int c = 0; c < 3; ++c) {
-          const Real w = q[c]*dv;
-          acc[c] += w;
-          for (int a = 0; a < 3; ++a) {
-            acc[3 + 3*c + a] += w*Y[a];
-            for (int b = 0; b < 3; ++b) { acc[12 + 9*c + 3*a + b] += w*Y[a]*Y[b]; }
-          }
+    const int j = jj + ngh;
+    const Real y1 = r.x2min + (static_cast<Real>(jj) + 0.5)*dx2 - oy;
+    for (int ii = 0; ii < nx; ++ii) {
+      const int i = ii + ngh;
+      const Real y0 = r.x1min + (static_cast<Real>(ii) + 0.5)*dx1 - ox;
+      const Real Y[3] = {y0, y1, y2};
+      Real q[3];
+      for (int c = 0; c < 3; ++c) { q[c] = src(m, c, k, j, i); }
+      if (self) {
+        Real S[3], Sf[3];
+        VecS(A, k, j, i, h, S);
+        VecS(F, k, j, i, h, Sf);
+        for (int c = 0; c < 3; ++c) { q[c] += (S[c] - Sf[c])*ih2; }
+      }
+      for (int c = 0; c < 3; ++c) {
+        const Real w = q[c]*dv;
+        acc[c] += w;
+        for (int a = 0; a < 3; ++a) {
+          acc[3 + 3*c + a] += w*Y[a];
+          for (int b = 0; b < 3; ++b) { acc[12 + 9*c + 3*a + b] += w*Y[a]*Y[b]; }
         }
       }
     }
-    for (int q = 0; q < kNMom; ++q) { part(m*nz + kk, q) = acc[q]; }
+    const int row = (m*nz + kk)*ny + jj;
+    for (int q = 0; q < kNMom; ++q) { prow(row, q) = acc[q]; }
+  });
+  par_for("kmg::LocalMomentsPlane", DevExeSpace(), 0, nmmb*nz-1, 0, kNMom-1,
+  KOKKOS_LAMBDA(const int p, const int q) {
+    Real s = 0.0;
+    for (int jj = 0; jj < ny; ++jj) { s += prow(p*ny + jj, q); }
+    part(p, q) = s;
   });
   auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), part);
   for (int q = 0; q < kNMom; ++q) { mom[q] = 0.0; }

@@ -114,7 +114,7 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
           "' not recognised; use upwind|rusanov");
   }
 
-  std::string fb = pin->GetOrAddString(block, "resistive_newton_fallback", "lagged_v");
+  std::string fb = pin->GetOrAddString(block, "resistive_newton_fallback", "blend");
   if (fb == "lagged_v") {
     rp.newton_fallback = NewtonFallback::lagged_v;
   } else if (fb == "fail") {
@@ -152,8 +152,8 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   }
   // K5-run histogram output interval (<= 0: the dt of the first hst output, if any)
   rp.hist_dt = pin->GetOrAddReal(block, "resistive_hist_dt", -1.0);
-  // 07 v2.8 §3.2.3 test-only prototype keys
-  rp.floor_accept = pin->GetOrAddBoolean(block, "resistive_floor_accept", false);
+  // 07 v2.8 §3.2.3 fallback keys (FA + blend default since v2.9, DECISIONS 23)
+  rp.floor_accept = pin->GetOrAddBoolean(block, "resistive_floor_accept", true);
   rp.floor_accept_tol = pin->GetOrAddReal(block, "resistive_floor_accept_tol", 1.0e-3);
   if (!(rp.floor_accept_tol > 0.0)) {
     Fatal(__LINE__, "<" + block + "> resistive_floor_accept_tol must be > 0");

@@ -16,15 +16,14 @@
 //!   resistive_sigma_width  (density model, see conductivity.hpp)
 //!   resistive_rsolver      = mhllc|lf     (tetrad MHLLC, default; or light-speed LF)
 //!   resistive_charge_flux  = upwind|rusanov
-//!   resistive_newton_fallback = lagged_v|fail|blend (blend: 07 v2.8 §3.2.3(c)
-//!                            ideal-limit blend; test-only prototype, like the four
-//!                            keys below)
-//!   resistive_floor_accept = false      (07 v2.8 §3.2.3(b) floored-root acceptance)
+//!   resistive_newton_fallback = blend|lagged_v|fail (default blend: 07 v2.8 §3.2.3(c)
+//!                            ideal-limit blend; default since 07 v2.9, DECISIONS 23)
+//!   resistive_floor_accept = true       (07 v2.8 §3.2.3(b) floored-root acceptance)
 //!   resistive_floor_accept_tol = 1e-3   (FA condition 2, discarded energy/(tau + D))
-//!   resistive_d4           = average|keep (keep: no hydro c2p in flagged cells,
-//!                            §3.2.3(d))
-//!   resistive_fail_reason_cycles = 0    (log failure reasons for cycles < N to
-//!                            <base>.rfail.txt)
+//!   resistive_d4           = average|keep (test-only; keep: no hydro c2p in any solved
+//!                            cell, §3.2.3(d))
+//!   resistive_fail_reason_cycles = 0    (test-only; log failure reasons for
+//!                            cycles < N to <base>.rfail.txt)
 //!   resistive_newton_tol   = 1e-11
 //!   resistive_newton_maxit = 30
 //!   resistive_allow_incomplete = false  (developer switch while steps are unfinished)
@@ -58,19 +57,19 @@ struct ResistiveParams {
   Real sigma_in = 0.0, sigma_out = 0.0, rho_transition = 0.0, sigma_width = 0.0;
   RSolver rsolver = RSolver::mhllc;
   ChargeFlux charge_flux = ChargeFlux::upwind;
-  NewtonFallback newton_fallback = NewtonFallback::lagged_v;
+  NewtonFallback newton_fallback = NewtonFallback::blend;
   Real newton_tol = 1.0e-11;
   int newton_maxit = 30;
   bool freeze_background = false;
   ImplicitResidual implicit_residual = ImplicitResidual::c2p;
   Real sigma_max = 0.0;   // <mhd> sigma_max: fluid density floor rho >= B^2/sigma_max
   Real hist_dt = -1.0;    // K5-run histogram output interval
-  // 07 v2.8 §3.2.3 test-only prototype keys
-  bool floor_accept = false;
+  // 07 v2.8 §3.2.3 fallback keys (FA + blend default, 07 v2.9); d4 is test-only
+  bool floor_accept = true;
   Real floor_accept_tol = 1.0e-3;
   D4Mode d4 = D4Mode::average;
   int fail_reason_cycles = 0;
-  // any prototype key on: ResistiveC2P consumes the per-cell flags (D4 diagnostics/keep)
+  // FA/blend or d4 keep on: ResistiveC2P consumes the per-cell flags (D4 keep/eps_D4)
   bool Prototype() const {
     return newton_fallback == NewtonFallback::blend || floor_accept || d4 == D4Mode::keep;
   }

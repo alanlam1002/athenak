@@ -97,17 +97,17 @@ struct CellSolveOptions {
   bool retry = true;        // option C energy-safe retry
   Real wmax = 10.0;         // Lorentz factor cap of the drift start state
   bool continuation = true; // option A: sigma dt continuation before the fallback
-  // 07 v2.8 §3.2.3, test-only prototype (both false: the decision-10 solve unchanged)
-  bool floor_accept = false;    // (b) floored-root acceptance after the continuation
+  // 07 v2.8 §3.2.3, default since 07 v2.9 (both false: the lagged-v fallback)
+  bool floor_accept = true;     // (b) floored-root acceptance after the continuation
   Real floor_accept_tol = 1.0e-3;  // (b) condition 2 on the discarded energy
-  bool blend = false;           // (c) ideal-limit blend replaces the lagged-v fallback
+  bool blend = true;            // (c) ideal-limit blend replaces the lagged-v fallback
 };
 
 struct CellSolveResult {
   int iterations = 0;        // Newton iterations taken (0 = guess already converged)
   int c2p_calls = 0;         // hydro c2p (form g) or EOS inversions (form f)
   bool converged = false;    // Newton converged to tol
-  bool fallback = false;     // lagged-v result returned instead
+  bool fallback = false;     // non-Newton exit: fa, blend, il, keep or lagged-v
   bool failed = false;       // no usable state (hydro c2p failed at the guess)
   bool floor = false;        // hydro c2p applied a floor in the accepted evaluation
   bool retry = false;        // option C moved the Newton start
@@ -638,7 +638,7 @@ CellSolveResult ResistiveCellSolve(const PSolver &ps, const Real g3d_in[NSPMETRI
   if (out.prestep_inadmissible) why = kReasonPrestep;
   out.reason = why;
 
-  // 07 v2.8 §3.2.3 test-only prototype: FA, then the ideal-limit blend, then keep
+  // 07 v2.8 §3.2.3 (default since v2.9): FA, then the ideal-limit blend, then keep
   if (opt.floor_accept || opt.blend) {
     // anchor: the pre-step state (E = R, one hydro c2p); none if inadmissible or if
     // only a density floor / EOS clamp gives a state
@@ -707,6 +707,7 @@ CellSolveResult ResistiveCellSolve(const PSolver &ps, const Real g3d_in[NSPMETRI
         for (int n = 0; n < NPRIM; ++n) prim[n] = pf[n];
         for (int a = 0; a < 3; ++a) E[a] = ef[a];
         out.fa = true;
+        out.fallback = true;
         out.floor = ff;
         return out;
       }

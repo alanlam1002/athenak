@@ -615,7 +615,8 @@ struct CellTrialOut {
   int pre;     // the E = R state was flagged inadmissible by the solver
   int iters;
   int calls;
-  int status;  // 0 converged, 1 fallback, 2 failed
+  int status;  // 0 converged, 1 fallback, 2 failed (incl. keep)
+  int fbk;     // fallback kind: 0 none/lagged-v, 1 fa, 2 blend, 3 il, 4 keep (07 v2.9)
   int retry;   // option C moved the Newton start
   int folded;  // pre-step mode: the dt-continuation could not be completed
 };
@@ -792,7 +793,8 @@ CellTrialOut CellSolveTrial(const PSolver &ps, const int t, const Real lsig_lo,
   out.cont = 0.0;
   out.iters = res.iterations;
   out.calls = res.c2p_calls;
-  out.status = res.converged ? 0 : (res.fallback ? 1 : 2);
+  out.status = res.converged ? 0 : (res.failed ? 2 : (res.fallback ? 1 : 2));
+  out.fbk = res.fa ? 1 : (res.blend ? 2 : (res.il ? 3 : (res.keep ? 4 : 0)));
   out.err = 0.0;
   out.cmis = 0.0;
   out.sigm = sigm;
@@ -913,11 +915,13 @@ void RunK5(const PSolver &ps, const std::string &eosname, const int ntrial,
       int tworst = 0;
       int nsig[nd] = {0}, nfbd[nd] = {0}, nrtd[nd] = {0}, nncd[nd] = {0}, nfod[nd] = {0};
       int nmsd[nd] = {0};  // pre-step fallbacks although a continuation root exists
+      int nkind[5] = {0};  // lagged-v/none, fa, blend, il, keep (07 v2.9)
       for (int t = 0; t < ntrial; ++t) {
         const int d = std::min(nd - 1, std::max(0,
                                static_cast<int>(floor(log10(h(t).sigm))) + 2));
         ++nsig[d];
         nrtd[d] += h(t).retry;
+        if (h(t).status != 0) ++nkind[h(t).fbk];
         if (h(t).status == 0) {
           ++nconv;
           itsum += h(t).iters;
@@ -947,6 +951,9 @@ void RunK5(const PSolver &ps, const std::string &eosname, const int ntrial,
                   << itmax << ", mean c2p calls " << callsum/std::max(nconv, 1)
                   << ((rn.mode == 0) ? ", other root " : ", non-continuation root ")
                   << nother << std::endl
+                  << "     non-Newton exits fa/blend/il/keep/lagged-v: " << nkind[1]
+                  << "/" << nkind[2] << "/" << nkind[3] << "/" << nkind[4] << "/" << nkind[0]
+                  << std::endl
                   << "     per sigma_M decade [1e-2..1e4] "
                   << "trials/fallback/retry/non-cont/folded/missed:";
         for (int d = 0; d < nd; ++d) {

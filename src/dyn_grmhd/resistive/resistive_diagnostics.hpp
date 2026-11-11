@@ -77,7 +77,7 @@ struct NewtonStats {
 // b^2/(rho h) (comoving b). Bins: <1e-2, [1e-2,1e-1), ..., [1e3,1e4), >=1e4.
 enum HistCounter {kHCells = 0, kHConverged = 1, kHRetry = 2, kHFallback = 3,
                   kHPrestep = 4, kHCeiling = 5, kHFloor = 6, kHEgtB = 7, kHContinued = 8,
-                  // 07 v2.8 §3.2.3(e), test-only prototype keys
+                  // 07 v2.8 §3.2.3(e) fallback breakdown (fallback = any non-Newton exit)
                   kHFA = 9, kHFAReject = 10, kHBlend = 11, kHIL = 12, kHILFloor = 13,
                   kHKeep = 14, kHNCounters = 15};
 enum HistBinning {kBinSigM = 0, kBinMagn = 1, kHistBinnings = 2};

@@ -739,10 +739,11 @@ void ResistiveDynGR::AddImexSources(Driver *pdriver, int istage) {
 //----------------------------------------------------------------------------------------
 //! K5-run histogram output: per binning (sigM = B^2/rho, magn = b^2/(rho h)), one row
 //! per decade with the counts accumulated since the previous row (cells of the implicit
-//! solve, converged, C-retry, lagged-v fallback, pre-step inadmissible, sigma_M-ceiling
-//! activations, floored, E^2 > B^2, converged through the sigma dt continuation; 07 v2.8
-//! §3.2.3(e): FA accepted/rejected, blend, pure IL, IL floored, keep). With a 07 v2.8
-//! prototype key on, also the <basename>.rlog.txt histograms (ProtoLog).
+//! solve, converged, C-retry, fallback (any non-Newton exit), pre-step inadmissible,
+//! sigma_M-ceiling activations, floored, E^2 > B^2, converged through the sigma dt
+//! continuation; 07 v2.8 §3.2.3(e): FA accepted/rejected, blend, pure IL, IL floored,
+//! keep). With FA/blend or d4 keep on (FA + blend is the default since 07 v2.9), also
+//! the <basename>.rlog.txt histograms (ProtoLog).
 
 void ResistiveDynGR::MaybeWriteHist(const Real t_end, const int cycle) {
   if (!(hist_dt > 0.0) || t_end < hist_next*(1.0 - 1.0e-12)) return;

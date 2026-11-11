@@ -491,7 +491,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
   resistive::CellSolveOptions opt;
   opt.form = (presist->params.implicit_residual == resistive::ImplicitResidual::momentum)
              ? resistive::kResidualMomentum : resistive::kResidualC2P;
-  // 07 v2.8 §3.2.3 test-only prototype keys
+  // 07 v2.8 §3.2.3 FA + blend (default since 07 v2.9)
   opt.blend = (presist->params.newton_fallback == resistive::NewtonFallback::blend);
   opt.floor_accept = presist->params.floor_accept;
   opt.floor_accept_tol = presist->params.floor_accept_tol;

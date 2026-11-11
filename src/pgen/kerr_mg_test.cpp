@@ -33,6 +33,12 @@
 //!                 the cell), the V2a-U zero right-hand-side test (amp = 0)
 //!   chk_near    : > 0: also the metric self-check in the cube |x - xbh| < chk_near
 //!                 (KMG VCHKN; chk_npts points)
+//!   amp2, w2, x2_1..3 : manuf 2 only: a second Gaussian amp2 exp(-|x - x2|^2/w2^2) (K-004 A5)
+//!   ssrc        : kind psi/chi: manuf (default) | blob (no u*: the matter channel is the
+//!                 manuf field itself, dA2 = delta psi = 0; K-004 A5 blend sensitivity)
+//!   dump_u      : non-empty: after each run, the finest block level's u to the binary file
+//!                 <dump_u>_<run>.r<rank> (int32 nmb nx ny nz nvar; per block 6 doubles
+//!                 x1min x1max x2min x2max x3min x3max then u[v][k][j][i] interior, double)
 //! The multigrid options are also read from <problem> (MGKerrScalarDriver), among them
 //! hook_scope = operator (default; edge fill / kelvin faces only inside the kernels) |
 //! persist (hooked ghosts stay in u; with uold_edge_sync = none | free | all).
@@ -103,6 +109,39 @@ Real MaxR(Real x) {
 }
 
 bool Root() { return global_variable::my_rank == 0; }
+
+template <class LV>
+void DumpFinest(LV *lv, int nvar, const std::string &stem, const std::string &tok) {
+  if (stem.empty()) return;
+  std::string run = tok;
+  std::replace(run.begin(), run.end(), '/', '-');
+  const std::string path = stem + "_" + run + ".r" + std::to_string(global_variable::my_rank);
+  const int lev = lv->GetNumberOfLevels() - 1;
+  const int ngh = lv->GetGhostCells();
+  const int hdr[5] = {lv->NumMB(), lv->LevelN(lev, 0), lv->LevelN(lev, 1),
+                      lv->LevelN(lev, 2), nvar};
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), lv->UAt(lev).d_view);
+  std::FILE *f = std::fopen(path.c_str(), "wb");
+  if (f == nullptr) {
+    std::printf("KMG DUMP failed to open %s\n", path.c_str());
+    return;
+  }
+  std::fwrite(hdr, sizeof(int), 5, f);
+  std::vector<double> buf(static_cast<size_t>(hdr[1])*hdr[2]*hdr[3]*nvar);
+  for (int m = 0; m < hdr[0]; ++m) {
+    const RegionSize &b = lv->Extents().h_view(m);
+    const double e[6] = {b.x1min, b.x1max, b.x2min, b.x2max, b.x3min, b.x3max};
+    std::fwrite(e, sizeof(double), 6, f);
+    size_t q = 0;
+    for (int v = 0; v < nvar; ++v)
+      for (int k = 0; k < hdr[3]; ++k)
+        for (int j = 0; j < hdr[2]; ++j)
+          for (int i = 0; i < hdr[1]; ++i) buf[q++] = h(m, v, k + ngh, j + ngh, i + ngh);
+    std::fwrite(buf.data(), sizeof(double), buf.size(), f);
+  }
+  std::fclose(f);
+  if (Root()) std::printf("KMG DUMP %s nmb %d\n", path.c_str(), hdr[0]);
+}
 
 void PrintOp(const char *tag, const cfc::KerrOpStats &s0) {
   cfc::KerrOpStats s;
@@ -258,6 +297,7 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
   for (int c = 0; c < 3; ++c) {
     vm.c[c] = mf;
     vm.c[c].amp = mf.amp*vamp[c];
+    vm.c[c].amp2 = mf.amp2*vamp[c];
     vm.c[c].x0[c] += vofs;
   }
   if (nhmix) {
@@ -383,6 +423,7 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
       cn[c] = SumL(cn[c]);
     }
     PrintRadial("VERRR", tok, drv, cs, shells);
+    DumpFinest(drv.Levels(), 3, pin->GetOrAddString(B, "dump_u", ""), tok);
     std::vector<Real> pv, pc;
     std::vector<int> po;
     if (!probes.empty()) {
@@ -523,6 +564,11 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   mf.x0[0] = pin->GetOrAddReal(B, "x01", 0.0);
   mf.x0[1] = pin->GetOrAddReal(B, "x02", 0.0);
   mf.x0[2] = pin->GetOrAddReal(B, "x03", 0.0);
+  mf.amp2 = pin->GetOrAddReal(B, "amp2", 0.0);
+  mf.w2 = pin->GetOrAddReal(B, "w2", 1.0);
+  mf.x2[0] = pin->GetOrAddReal(B, "x2_1", 0.0);
+  mf.x2[1] = pin->GetOrAddReal(B, "x2_2", 0.0);
+  mf.x2[2] = pin->GetOrAddReal(B, "x2_3", 0.0);
   const RegionSize &ms = pmy_mesh_->mesh_size;
   mf.xmin[0] = ms.x1min; mf.len[0] = ms.x1max - ms.x1min;
   mf.xmin[1] = ms.x2min; mf.len[1] = ms.x2max - ms.x2min;
@@ -539,6 +585,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   drv.mm_.da2_w = pin->GetOrAddReal(B, "da2_w", 1.0);
   drv.mm_.dpsi_amp = pin->GetOrAddReal(B, "dpsi_amp", 0.0);
   drv.mm_.dpsi_w = pin->GetOrAddReal(B, "dpsi_w", 1.0);
+  drv.mm_.blob = (pin->GetOrAddString(B, "ssrc", "manuf") == "blob");
   drv.init_noise_ = pin->GetOrAddReal(B, "init_noise", 0.0);
   const std::vector<Real> shells = ParseList(pin->GetOrAddString(B, "rad_shells", ""));
   drv.Prepare();
@@ -614,6 +661,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       cn[c] = SumL(cn[c]);
     }
     PrintRadial("ERRR", tok, drv, cs, shells);
+    DumpFinest(drv.Levels(), 1, pin->GetOrAddString(B, "dump_u", ""), tok);
     // ErrorVsManuf's rms is rank-local; with one rank it is global
     if (Root()) {
       std::printf("KMG RUN %s ncyc %d s_per_vcycle %.4e err_max %.6e err_rms_rank0 %.6e\n",

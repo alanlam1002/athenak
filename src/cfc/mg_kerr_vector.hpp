@@ -125,6 +125,8 @@ class MGKerrVectorDriver : public MultigridDriver {
              std::vector<int> &own);
   void EdgeCounts(long c[3]);
   int RootMask() const { return root_mask_.h_view(0); }
+  //! the block levels (test harness: the K-004 A5 solution dump)
+  MGKerrVector *Levels() { return static_cast<MGKerrVector*>(mglevels_); }
   void NonFiniteCounts(long c[3]) const;
 
   // settings (public for the test harness)

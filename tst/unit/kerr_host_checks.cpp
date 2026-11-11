@@ -14,6 +14,7 @@
 //   kerr_host_checks f4  KSTAB_a0.60 F4_FILE
 //   kerr_host_checks run KSTAB A [NR NTH]
 //   kerr_host_checks blend KSTAB A RAHMAX F1 F2 [NRT NTH]   (K-004 A2: D3-blended gt)
+//   kerr_host_checks dt KSTAB RCUT ACUT RMAX RBOX [XI1 XI2 XI3 NR NTH NPH]   (K-004 A6)
 //========================================================================================
 #include <omp.h>
 
@@ -533,16 +534,84 @@ int RunBlend(const char *tab, double a, double rahmax, double f1, double f2, int
 }
 }  // namespace
 
+// K-004 A6: light-cone speed bound per direction, lambda_i = |beta^i + xi^i| + alpha sqrt(g^ii)
+// (the bound RK-013 asks newdt to use), on evolved cells: r >= RCUT and alpha >= ACUT.
+// The D3 blend acts only at r < r2 < 0.75 r_AH,min, inside the D4 excision, so the physical
+// metric of every evolved cell is the table's own (no blend needed here).
+// Reports lambda_max over RCUT <= r <= RMAX, its location, and max over shells of a log grid.
+int RunDt(const char *tab, double rcut, double acut, double rmax, double rbox,
+          const double xi[3], int nr, int nth, int nph) {
+  kstab::Table t(tab);
+  std::vector<double> shell(nr, 0.0), shr(nr);
+  struct Best { double lam = 0, r = 0, th = 0, ph = 0, al = 0, b = 0; int dir = -1; };
+  std::vector<Best> best(nr);
+  for (int ir = 0; ir < nr; ++ir)
+    shr[ir] = rcut*std::pow(rmax/rcut, nr > 1 ? double(ir)/(nr - 1) : 0.0);
+#pragma omp parallel for schedule(dynamic)
+  for (int ir = 0; ir < nr; ++ir) {
+    const double r = shr[ir];
+    Best bb;
+    for (int it = 0; it < nth; ++it) {
+      const double th = M_PI*it/(nth - 1);
+      for (int ip = 0; ip < nph; ++ip) {
+        const double ph = 2*M_PI*ip/nph;
+        double f[16];
+        t.eval(r*std::sin(th)*std::cos(ph), r*std::sin(th)*std::sin(ph), r*std::cos(th), f);
+        if (f[12] < acut) continue;
+        double g[3][3];
+        for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) g[i][j] = f[S(i, j)];
+        const double D = g[0][0]*(g[1][1]*g[2][2] - g[1][2]*g[2][1])
+                       - g[0][1]*(g[1][0]*g[2][2] - g[1][2]*g[2][0])
+                       + g[0][2]*(g[1][0]*g[2][1] - g[1][1]*g[2][0]);
+        const double gii[3] = {(g[1][1]*g[2][2] - g[1][2]*g[2][1])/D,
+                               (g[0][0]*g[2][2] - g[0][2]*g[2][0])/D,
+                               (g[0][0]*g[1][1] - g[0][1]*g[1][0])/D};
+        for (int i = 0; i < 3; ++i) {
+          const double lam = std::fabs(f[13 + i] + xi[i]) + f[12]*std::sqrt(gii[i]);
+          if (lam > bb.lam) {
+            bb.lam = lam; bb.r = r; bb.th = th; bb.ph = ph; bb.dir = i;
+            bb.al = f[12]*std::sqrt(gii[i]); bb.b = std::fabs(f[13 + i] + xi[i]);
+          }
+        }
+      }
+    }
+    best[ir] = bb;
+    shell[ir] = bb.lam;
+  }
+  Best all, out;
+  for (int ir = 0; ir < nr; ++ir) {
+    if (best[ir].lam > all.lam) all = best[ir];
+    if (shr[ir] >= rbox && best[ir].lam > out.lam) out = best[ir];
+  }
+  std::printf("DT tab=%s rcut=%.6f acut=%.3f rmax=%.3f xi=(%.3f,%.3f,%.3f)\n", tab, rcut, acut,
+              rmax, xi[0], xi[1], xi[2]);
+  std::printf("DT lam_max=%.6f at r=%.6f th=%.4f ph=%.4f dir=%d (|b+xi|=%.4f a*sqrt(g^ii)=%.4f)\n",
+              all.lam, all.r, all.th, all.ph, all.dir, all.b, all.al);
+  std::printf("DT lam_max(r>=rbox=%.4f)=%.6f at r=%.6f th=%.4f dir=%d\n", rbox, out.lam, out.r,
+              out.th, out.dir);
+  const int step = std::getenv("DT_ALL") ? 1 : (nr > 24 ? nr/24 : 1);
+  for (int ir = 0; ir < nr; ir += step)
+    std::printf("DTPROF r=%.6f lam_shell=%.6f\n", shr[ir], shell[ir]);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc >= 7 && std::string(argv[1]) == "blend")
     return RunBlend(argv[2], std::atof(argv[3]), std::atof(argv[4]), std::atof(argv[5]),
                     std::atof(argv[6]), argc > 7 ? std::atoi(argv[7]) : 200,
                     argc > 8 ? std::atoi(argv[8]) : 257);
+  if (argc >= 7 && std::string(argv[1]) == "dt") {
+    const double xi[3] = {argc > 7 ? std::atof(argv[7]) : 0.0, argc > 8 ? std::atof(argv[8]) : 0.0,
+                          argc > 9 ? std::atof(argv[9]) : 0.0};
+    return RunDt(argv[2], std::atof(argv[3]), std::atof(argv[4]), std::atof(argv[5]),
+                 std::atof(argv[6]), xi, argc > 10 ? std::atoi(argv[10]) : 240,
+                 argc > 11 ? std::atoi(argv[11]) : 65, argc > 12 ? std::atoi(argv[12]) : 64);
+  }
   if (argc >= 4 && std::string(argv[1]) == "f4") return F4Check(argv[2], argv[3]);
   if (argc >= 4 && std::string(argv[1]) == "run")
     return Run(argv[2], std::atof(argv[3]), argc > 4 ? std::atoi(argv[4]) : 1024,
                argc > 5 ? std::atoi(argv[5]) : 257);
   std::fprintf(stderr, "usage: %s f4 KSTAB F4 | run KSTAB A [NR NTH] | blend KSTAB A RAHMAX "
-               "F1 F2 [NRT NTH]\n", argv[0]);
+               "F1 F2 [NRT NTH] | dt KSTAB RCUT ACUT RMAX RBOX [XI1 XI2 XI3 NR NTH NPH]\n", argv[0]);
   return 2;
 }

@@ -149,6 +149,8 @@ class MGKerrScalarDriver : public MultigridDriver {
   //! total, on-boundary and interior unsafe block edges (this rank)
   void EdgeCounts(long c[3]);
   int RootMask() const { return root_mask_.h_view(0); }
+  //! the block levels (test harness: the K-004 A5 solution dump)
+  MGKerrScalar *Levels() { return static_cast<MGKerrScalar*>(mglevels_); }
   //! non-finite defects counted since ResetSolution: [0] block levels, [1] root, [2] octets
   void NonFiniteCounts(long c[3]) const;
 

@@ -219,11 +219,13 @@ void PointDgtu(const Real gtu[6], const Real dgt[3][6], Real dgtu[3][6]) {
 //!   mode 0: amp sin(n1 pi X) sin(n2 pi Y) sin(n3 pi Z), X = (x - xmin)/L, integer
 //!           harmonics nh (default 1; zero on the box faces);
 //!   mode 1: amp/sqrt(|x - x0|^2 + w^2) (a 1/r tail, for the Robin outer boundary);
-//!   mode 2: amp exp(-|x - x0|^2/w^2).
+//!   mode 2: amp exp(-|x - x0|^2/w^2) [+ amp2 exp(-|x - x2|^2/w2^2), K-004 A5].
 struct Manuf {
   int mode = 0;
   Real amp = 1.0, w = 1.0, c = 0.0;
   Real x0[3] = {0.0, 0.0, 0.0};
+  Real amp2 = 0.0, w2 = 1.0;
+  Real x2[3] = {0.0, 0.0, 0.0};
   Real xmin[3] = {0.0, 0.0, 0.0}, len[3] = {1.0, 1.0, 1.0};
   Real nh[3] = {1.0, 1.0, 1.0};
 };
@@ -273,6 +275,18 @@ void ManufEval(const Manuf &mf, Real x, Real y, Real z, Real &u, Real du[3], Rea
   for (int i = 0; i < 3; ++i) {
     for (int j = i; j < 3; ++j) {
       ddu[Sym(i, j)] = (4.0*r[i]*r[j]*iw2*iw2 - ((i == j) ? 2.0*iw2 : 0.0))*u;
+    }
+  }
+  if (mf.amp2 != 0.0) {
+    const Real q[3] = {x - mf.x2[0], y - mf.x2[1], z - mf.x2[2]};
+    const Real iv2 = 1.0/(mf.w2*mf.w2);
+    const Real u2 = mf.amp2*Kokkos::exp(-(q[0]*q[0] + q[1]*q[1] + q[2]*q[2])*iv2);
+    u += u2;
+    for (int i = 0; i < 3; ++i) { du[i] += -2.0*q[i]*iv2*u2; }
+    for (int i = 0; i < 3; ++i) {
+      for (int j = i; j < 3; ++j) {
+        ddu[Sym(i, j)] += (4.0*q[i]*q[j]*iv2*iv2 - ((i == j) ? 2.0*iv2 : 0.0))*u2;
+      }
     }
   }
 }
@@ -413,15 +427,25 @@ void PointTerm(int kind, const Acc &A, int k, int j, int i, Real u, Real &c, Rea
 //! \brief Manufactured matter for the psi/chi tests: dA2 = da2_amp exp(-r^2/da2_w^2) and
 //! (chi) delta psi = dpsi_amp exp(-r^2/dpsi_w^2), r = |x - mf.x0|; E* (psi) or E* + 2S*
 //! (chi) is then solved for so that u* (Manuf) satisfies the continuum equation exactly.
+//! blob (K-004 A5): no manufactured solution; the matter channel is u*(x) itself (kind psi:
+//! E* = u*, mode 2 gives one or two Gaussian blobs), dA2 = delta psi = 0.
 struct MatterManuf {
   Real da2_amp = 0.0, da2_w = 1.0;
   Real dpsi_amp = 0.0, dpsi_w = 1.0;
+  bool blob = false;
 };
 
 //! \fn ManufMatter(kind, cs, mf, mm, x, y, z, m, da2, dpsi)
 KOKKOS_INLINE_FUNCTION
 void ManufMatter(int kind, const CoefSource &cs, const Manuf &mf, const MatterManuf &mm,
                  Real x, Real y, Real z, Real &m, Real &da2, Real &dpsi) {
+  if (mm.blob) {
+    Real du[3], ddu[6];
+    ManufEval(mf, x, y, z, m, du, ddu);
+    da2 = 0.0;
+    dpsi = 0.0;
+    return;
+  }
   Manuf m0 = mf;
   m0.c = 0.0;
   const Real L = ManufSource(cs, m0, x, y, z);   // -Dt^2 u*

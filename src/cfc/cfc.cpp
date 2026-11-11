@@ -38,6 +38,8 @@
 #include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
 #include "kerr_background.hpp"
+#include "mg_kerr_scalar.hpp"
+#include "mg_kerr_vector.hpp"
 
 namespace cfc {
 
@@ -640,10 +642,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
               << ", psi0 in [" << psimin << ", " << psimax << "], alpha0 in [" << almin
               << ", " << almax << "], non-finite " << nbad << " of " << kKbgN
               << " x cells, on " << nfill << " MeshBlocks" << std::endl;
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<cfc> kerr_background = true: the background loads (above), but its "
-              << "coupling to the evolution (W3/W4) is not implemented yet" << std::endl;
-    std::exit(EXIT_FAILURE);
+    // the coupling (W4) is set up at the end of the constructor (KerrSetup), once the
+    // frame and init keys it reads are parsed
   }
 
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
@@ -757,6 +757,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // Elliptic source/output NaN scan; see cfc.hpp. Default 0 = off.
   src_nan_check_ = pin->GetOrAddInteger("cfc", "src_nan_check", 0);
   indcs_ng_ = pmy_pack->pmesh->mb_indcs.ng;
+
+  // W4: the Kerr path (cfc_kerr.cpp); replaces the trumpet background filled above
+  if (kerr_background_) { KerrSetup(pin); }
 }
 
 //----------------------------------------------------------------------------------------
@@ -966,6 +969,10 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
 //! \fn CFC::~CFC()
 
 CFC::~CFC() {
+  delete pkx_;
+  delete pkbeta_;
+  delete pkpsi_;
+  delete pkchi_;
   delete pmgd_pietax;
   delete pmgd_pietabeta;
   delete pmgd_psi;
@@ -1396,10 +1403,14 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   if (puncture_enabled_) {
     Real xbh[3];
     BHPosition(pmy_pack->pmesh->time, xbh);
+    if (kerr_background_) {
+      KerrRefill(xbh);
+    } else {
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
     for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
     pmgd_psi->SetPunctureCenter(xbh); pmgd_alpha->SetPunctureCenter(xbh);
+    }
   }
 
   psi_seeded_ = false;
@@ -1447,6 +1458,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   // Cold-start them from zero.
   pmgd_pietax->ZeroFinestSolution();
   pmgd_pietabeta->ZeroFinestSolution();
+  if (kerr_background_) { pkx_->ZeroFinestSolution(); pkbeta_->ZeroFinestSolution(); }
   numrel::ChecksumAfterTask(pmy_pack, "regrid_enter", -1);   // debug (checksum_cycles)
   numrel::ChecksumPerBlock(pmy_pack, "regrid_enter");
 
@@ -2521,6 +2533,10 @@ void CFC::AssembleVectorSource(bool for_shift) {
   // own index space first. eta's source is channel 3 of u_p_src_.
   int mg_nghost = mg_nghost_;
 
+  if (kerr_background_ && !for_shift) {   // W4: eq:cX's 8 pi gt^ij S*_j (cfc_kerr.cpp)
+    KerrVectorSourceX();
+    return;
+  }
   if (!for_shift) {
     // Step 1 (Gmunu eq. 72): U/S_i built directly from the evolved conserved state
     // (pmy_pack->pmhd->u0), mirroring dyn_grmhd.cpp's DynGRMHD::SetTmunu -- no
@@ -2570,7 +2586,11 @@ void CFC::AssembleVectorSource(bool for_shift) {
   } else {
     // Step 6 (Gmunu eq. 75): pointwise part (16*pi*alpha*psi^-6*S-tilde_i) first,
     // using this stage's newly-solved psi/alpha_psi and the s_tilde_d step 1 already
-    // built.
+    // built. W4 (Kerr): 16 pi alpha psi^-6 gt^ij S*_j (cfc_kerr.cpp); the cross terms
+    // below are eq:cbeta's with a_dd/a0_dd = Ahat^ij/Ahat0^ij (upper) on that path.
+    if (kerr_background_) {
+      KerrShiftPointSource();
+    } else {
     auto &delta_psi_ = delta_psi;
     auto &delta_alpha_psi_ = delta_alpha_psi;
     auto &u_psi0_ = u_psi0;
@@ -2587,6 +2607,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
         p_src_(m,a,mk,mj,mi) = 16.0*M_PI*ap6*s_tilde_d_(m,a,k,j,i);
       }
     });
+    }
     // Derivative part (Sec 3.9's regularized cross-terms), added onto p_src in place.
     BuildShiftSource(pmy_pack, delta_psi, delta_alpha_psi, u_psi0, u_alpha0_psi0, a_dd,
                      a0_dd, grad_ap6_0, p_src, mg_nghost, u_alpha_psi6);
@@ -2627,6 +2648,7 @@ void CFC::AssembleVectorSource(bool for_shift) {
 
 void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
   if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
+  if (kerr_background_) { KerrSolveX(pdriver, stage); return; }
   // r_com_X_ (Sec 3.10 items 2-3/Sec 5 Phase A item 8b-8c) only needs u0/psi, both
   // already available -- must run before AssembleVectorSource(false), whose
   // eta-source loop reads r_com_X_.
@@ -2646,6 +2668,7 @@ void CFC::SolveVectorPotential(Driver *pdriver, int stage) {
 }
 
 void CFC::ComputeADual() {
+  if (kerr_background_) { KerrComputeAhat(); return; }
   cfc::ComputeADualFromPotentials(pmy_pack, p_x, u_p_x, a0_dd, a_dd, 3, r_com_X_);
 
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -2783,6 +2806,7 @@ void CFC::SolveConformalFactor(Driver *pdriver, int stage, bool use_psi5_source)
     AssemblePsiMetric(false);
     return;
   }
+  if (kerr_background_) { KerrSolvePsi(pdriver, stage); return; }   // W4 (E* source)
 
   // On the very first call ever, seed the V-cycle's initial guess from the problem
   // generator's own ADM data (padm->adm.psi4) instead of a cold Kokkos-zero start.
@@ -2899,6 +2923,7 @@ void CFC::RescaleMatterSources(Driver *pdriver, int stage) {
 
 void CFC::SolveLapse(Driver *pdriver, int stage) {
   if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
+  if (kerr_background_) { KerrSolveLapse(pdriver, stage); return; }
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   int nmb = pmy_pack->nmb_thispack;
   int ncells1 = u_tilde.extent_int(4);
@@ -2958,6 +2983,7 @@ void CFC::SolveLapse(Driver *pdriver, int stage) {
 
 void CFC::SolveShift(Driver *pdriver, int stage) {
   if (rs_bg_only_) { return; }   // residual_scale f = 0: no solve
+  if (kerr_background_) { KerrSolveShift(pdriver, stage); return; }
   // AssembleVectorSource(true) fills r_com_beta_ internally (right after
   // BuildShiftSource() completes, Sec 3.10 item 2/Sec 5 Phase A item 8b) -- by the
   // time it returns, r_com_beta_ is ready for SetMultipoleOrigin() below.
@@ -2992,6 +3018,7 @@ void CFC::LogVcycles(int stage) {
 }
 
 void CFC::ReconstructShift() {
+  if (kerr_background_) { KerrReconstructShift(); return; }
   cfc::ReconstructVectorFromPotentials(pmy_pack, p_beta, u_p_beta, beta_u, 3, r_com_beta_);
   return;
 }
@@ -3001,6 +3028,7 @@ void CFC::RefillMovingPuncture(Real t) {
   Real xbh[3];
   BHPosition(t, xbh);
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->bc_center[a] = xbh[a]; }
+  if (kerr_background_) { KerrRefill(xbh); return; }
   FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                          a0_dd, a0_sq, grad_ap6_0);
   for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }
@@ -3041,6 +3069,7 @@ void CFC::SetResidualScale(Real t, int stage, bool last_stage) {
 }
 
 void CFC::AssemblePsiMetric(bool with_ghosts) {
+  if (kerr_background_) { KerrAssemblePsiMetric(with_ghosts); return; }
   if (rs_on_ && rs_f_ != 1.0) {
     cfc::AssembleConformalMetricScaled(pmy_pack, delta_psi, u_psi0, with_ghosts, rs_f_);
   } else {
@@ -3049,6 +3078,7 @@ void CFC::AssemblePsiMetric(bool with_ghosts) {
 }
 
 void CFC::AssembleADM(Real time) {
+  if (kerr_background_) { KerrAssembleADM(time); return; }
   Real xd[3] = {0.0, 0.0, 0.0};
   if (frame_enabled_) { FrameVel(time, xd); }
   if (rs_on_ && rs_f_ != 1.0) {
@@ -3070,6 +3100,7 @@ void CFC::AssembleADM(Real time) {
 //! \brief see cfc.hpp
 
 void CFC::FillEmbedADM(const DvceArray1D<int> &newmb, Real time) {
+  if (kerr_background_) { KerrFillEmbedADM(newmb, time); return; }
   Real xd[3] = {0.0, 0.0, 0.0};
   if (frame_enabled_) { FrameVel(time, xd); }
   const Real xd0 = xd[0], xd1 = xd[1], xd2 = xd[2];

@@ -2159,7 +2159,10 @@ class PrimitiveSolverHydro {
     auto &texcise_ = pmy_pack->pcoord->coord_data.texcise;
     const bool exdyn_ = excise && pmy_pack->pcoord->coord_data.excision_dynamic &&
                         pmy_pack->pcoord->coord_data.excision_scheme == ExcisionScheme::lapse;
-    const Real exlap_ = exdyn_ ? pmy_pack->pcoord->coord_data.excise_lapse : 0.0;
+    // Kerr lapse_off (K-004 B4): every excised cell lies in the sphere max(r_D4, r_f)
+    const Real exlap_ = (!exdyn_) ? 0.0 :
+        (pmy_pack->pcoord->coord_data.excision_lapse_off ?
+         std::numeric_limits<Real>::lowest() : pmy_pack->pcoord->coord_data.excise_lapse);
 
     auto &adm  = pmy_pack->padm->adm;
     auto &eos_ = ps.GetEOS();

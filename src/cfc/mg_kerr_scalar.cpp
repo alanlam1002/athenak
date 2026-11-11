@@ -132,6 +132,24 @@ void MGKerrScalar::FillFinestMatterManuf(int kind, const kmg::CoefSource &cs,
                             LevelN(lev, 1), LevelN(lev, 2), kind, cs, mf, mm);
 }
 
+void MGKerrScalar::FillFinestMatterExt(const DvceArray5D<Real> &mt,
+                                       const DvceArray5D<Real> &da2,
+                                       const DvceArray5D<Real> &dpsi, bool has_dpsi,
+                                       int ngh) {
+  const int lev = nlevel_ - 1;
+  auto cm = coeff_[lev].d_view;
+  const int lngh = ngh_, off = ngh - ngh_;
+  const int ie = lngh + indcs_.nx1 - 1, je = lngh + indcs_.nx2 - 1;
+  const int ke = lngh + indcs_.nx3 - 1;
+  par_for("MGKerrScalar::FillFinestMatterExt", DevExeSpace(), 0, nmmb_-1, lngh, ke, lngh,
+          je, lngh, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    cm(m, kmg::kChM, k, j, i) = mt(m, 0, k+off, j+off, i+off);
+    cm(m, kmg::kChDA2, k, j, i) = da2(m, 0, k+off, j+off, i+off);
+    cm(m, kmg::kChDPsi, k, j, i) = has_dpsi ? dpsi(m, 0, k+off, j+off, i+off) : 0.0;
+  });
+}
+
 void MGKerrScalar::EdgeHook(int lev, bool poison_ok) {
   const MGKerrScalarDriver *d = Drv();
   const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
@@ -423,7 +441,11 @@ void MGKerrScalarDriver::Prepare() {
     // background, restricted along with it, is overwritten analytically everywhere
     lv->FillAllLevelsBg(cs_);
     rt->FillAllLevelsBg(cs_);
-    lv->FillFinestMatterManuf(kind_, cs_, mf_, mm_);
+    if (matter_ext_) {
+      lv->FillFinestMatterExt(ext_m_, ext_da2_, ext_dpsi_, kind_ == kmg::kKindChi, ext_ngh_);
+    } else {
+      lv->FillFinestMatterManuf(kind_, cs_, mf_, mm_);
+    }
     lv->RestrictCoefficients();
     TransferCoeffToRoot();
     RestrictCoeffOctets();
@@ -440,6 +462,25 @@ void MGKerrScalarDriver::Solve(Driver *pdriver, int stage, Real dt) {
   Prepare();
   SolveMG(pdriver);
   Kokkos::fence();
+}
+
+void MGKerrScalarDriver::SetMatter(const DvceArray5D<Real> &mt,
+                                   const DvceArray5D<Real> &da2,
+                                   const DvceArray5D<Real> &dpsi, int ngh) {
+  matter_ext_ = true;
+  ext_m_ = mt;
+  ext_da2_ = da2;
+  ext_dpsi_ = dpsi;
+  ext_ngh_ = ngh;
+}
+
+void MGKerrScalarDriver::SeedInitialGuess(const DvceArray5D<Real> &u, int ngh) {
+  mglevels_->ReallocateForAMR();
+  mglevels_->LoadFinestData(u, 0, ngh);
+}
+
+void MGKerrScalarDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
+  mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
 }
 
 void MGKerrScalarDriver::ResetSolution() {

@@ -70,6 +70,10 @@ class MGKerrScalar : public Multigrid {
   //! W3b: the background channels on all levels (see kmg::FillLevelBg)
   void FillAllLevelsBg(const kmg::CoefSource &cs);
   //! W3b test: the manufactured matter channels on the finest level
+  //! W4 production: the matter channels on the finest level from mesh arrays (channel 0,
+  //! ghost depth ngh): M, DA2 and (has_dpsi) DPsi, interior cells only
+  void FillFinestMatterExt(const DvceArray5D<Real> &mt, const DvceArray5D<Real> &da2,
+                           const DvceArray5D<Real> &dpsi, bool has_dpsi, int ngh);
   void FillFinestMatterManuf(int kind, const kmg::CoefSource &cs, const kmg::Manuf &mf,
                              const kmg::MatterManuf &mm);
   //! the extent of each "m" (blocks: mb_size; root: the mesh)
@@ -170,6 +174,20 @@ class MGKerrScalarDriver : public MultigridDriver {
   kmg::CoefSource cs_;
   kmg::Manuf mf_;
   kmg::MatterManuf mm_;           // kinds psi/chi: the manufactured matter
+
+  //! W4 production (cfc_kerr.cpp): Prepare() takes the finest-level matter from these mesh
+  //! arrays (mesh ghost depth ngh, channel 0) instead of mm_: M (E* for psi, E* + 2S* for
+  //! chi), DA2 = Ahat^2 - Ahat0^2 and, for chi, DPsi = delta psi. The views are kept, so
+  //! they are read at every Solve.
+  void SetMatter(const DvceArray5D<Real> &mt, const DvceArray5D<Real> &da2,
+                 const DvceArray5D<Real> &dpsi, int ngh);
+  //! the finest u (interior) from a mesh array of ghost depth ngh (cold start / regrid)
+  void SeedInitialGuess(const DvceArray5D<Real> &u, int ngh);
+  //! the finest u into a mesh array (mesh ghost depth; the inner min(ngh_, ng) ring too)
+  void RetrieveSolution(DvceArray5D<Real> &dst);
+  bool matter_ext_ = false;
+  DvceArray5D<Real> ext_m_, ext_da2_, ext_dpsi_;
+  int ext_ngh_ = 0;
 
   // octets (host): physics-dependent operations
   void SmoothOctet(MGOctet &oct, int rlev, int color) override;

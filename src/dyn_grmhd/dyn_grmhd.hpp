@@ -296,6 +296,9 @@ class DynGRMHD {
   // Dx<NGHOST> of the full metric in the source), the "KF_CFC-ta" reference.
   bool kf_bgw = false;
   void KillingBgResidual();   // kill_res 0-3 and kbg_ell on every cell (ghosts included)
+  // <cfc> kerr_background (K-004 B3, dyn_grmhd_kerr.cpp): the same residuals about the Kerr
+  // background (CFC::KerrBgForSources), kbg_ell = ln(det gamma)/12 - ln psi0
+  void KerrBgResidual();
   DvceArray5D<Real> kf_prev;
   Real kf_tprev = 0.0, kf_tstage = 0.0;
   Real kf_m1u1 = 0.0;   // KCLOSE weights item: [M_s - M_1](u1), telescoped (KillingFullStage)
@@ -509,6 +512,11 @@ class DynGRMHDPS : public DynGRMHD {
   template<int NGHOST>
   void AddCoordTermsEOS(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
                         const Real dt, DvceArray5D<Real> &u0);
+  // <cfc> kerr_background (K-004 B3, dyn_grmhd_kerr.cpp): AddCoordTermsEOS's sources with
+  // the background's derivatives analytic (W1) and Dx<NGHOST> on the residuals only
+  template<int NGHOST>
+  void AddCoordTermsKerr(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,
+                         const Real dt, DvceArray5D<Real> &u0);
   // metric_terms = analytic_bg | wellbalanced (dyn_grmhd_metric.cpp)
   template<int NGHOST>
   void AddCoordTermsFM(const DvceArray5D<Real> &w0, const DvceArray5D<Real> &bcc0,

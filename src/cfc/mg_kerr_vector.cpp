@@ -505,6 +505,15 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   Kokkos::fence();
 }
 
+void MGKerrVectorDriver::LoadSource(const DvceArray5D<Real> &src, int ngh, Real fac) {
+  mglevels_->ReallocateForAMR();
+  mglevels_->LoadSource(src, 0, ngh, fac);
+}
+
+void MGKerrVectorDriver::RetrieveSolution(DvceArray5D<Real> &dst) {
+  mglevels_->RetrieveResult(dst, 0, pmy_pack_->pmesh->mb_indcs.ng);
+}
+
 void MGKerrVectorDriver::ResetSolution() {
   ZeroHierarchy();
   auto *lv = static_cast<MGKerrVector*>(mglevels_);

@@ -42,6 +42,8 @@ class MeshBoundaryValuesCC;
 namespace cfc {
 
 struct KerrTable;  // kerr_background.hpp
+class MGKerrScalarDriver;  // mg_kerr_scalar.hpp
+class MGKerrVectorDriver;  // mg_kerr_vector.hpp
 
 class CFC {
  public:
@@ -696,6 +698,11 @@ class CFC {
   }
   // refill the analytic background at x_BH(t) and point the ADM outer-BC falloff there
   void RefillMovingPuncture(Real t);
+  // W4 (cfc_kerr.cpp): <cfc> kerr_background is on, and the W1 background (kKbg* channels,
+  // ghosts included) about the hole position the current metric was assembled with --
+  // filled on first use (e.g. a restart's first sources) or after a regrid
+  bool KerrOn() const { return kerr_background_; }
+  const DvceArray5D<Real> &KerrBgForSources();
 
  private:
 
@@ -729,9 +736,8 @@ class CFC {
   void ClearTailFields();
 
   // Kerr background (Paper II, wip/kerr, K-001 W2). <cfc> kerr_background (default
-  // false; the key is only read if present, so default runs are untouched). W3/W4 (the
-  // evolution coupling) are not implemented: when on, the tables are loaded and the
-  // background filled once as a smoke test, then the run stops.
+  // false; the key is only read if present, so default runs are untouched). When on, the
+  // CFC step runs the Kerr path (W4, below).
   bool kerr_background_ = false;
   std::shared_ptr<KerrTable> kerr_table_;
   // D3 (K-004 A1): gt blended to flat between kerr_blend_r1_ and kerr_blend_r2_ (mesh
@@ -739,6 +745,38 @@ class CFC {
   // kerr_r_ah_{min,max}_: min/max over theta of the horizon r_f (F1), times M.
   Real kerr_blend_r1_ = 0.0, kerr_blend_r2_ = 0.0;
   Real kerr_r_ah_min_ = 0.0, kerr_r_ah_max_ = 0.0;
+
+  // W4 (K-004 Part B; cfc_kerr.cpp, kerr_methods sec. 8): the Kerr path of the CFC step.
+  // Every flat-path solver function branches here at its top when kerr_background_; the
+  // task graph and its ghost exchanges are unchanged. Storage on the Kerr path:
+  //   a_dd, a0_dd: Ahat^ij, Ahat0^ij (upper; the flat path's Adual = Ahat_ij);
+  //   a_sq, a0_sq: gt_ik gt_jl Ahat^ij Ahat^kl;   u_p_x, u_p_beta ch. 0-2: X^i, beta_res^i;
+  //   beta0_u, u_psi0, u_alpha0_psi0, grad_ap6_0: from kbg_ (grad_ap6_0 analytic).
+  DvceArray5D<Real> kbg_;            // W1 background, kKbgN channels, ghosts included
+  Real kbg_xbh_[3] = {0.0, 0.0, 0.0};   // the hole position kbg_ is filled about
+  bool kbg_valid_ = false;
+  MGKerrVectorDriver *pkx_ = nullptr, *pkbeta_ = nullptr;   // <cfc_kerr_x>, <cfc_kerr_beta>
+  MGKerrScalarDriver *pkpsi_ = nullptr, *pkchi_ = nullptr;  // <cfc_kerr_psi>, <cfc_kerr_chi>
+  double kerr_fill_sec_ = 0.0;       // B1: wall time in KerrRefill (kbg_ + derived), summed
+  long kerr_fill_n_ = 0;
+  int kerr_log_ = 0;                 // <cfc> kerr_log: every n-th cycle, the fill timing
+  DvceArray5D<Real> kerr_da2_;       // Ahat^2 - Ahat0^2 (cancellation-free), the psi/chi DA2
+  // the Kerr scalar drivers hold their own finest u (warm start); false: load it from
+  // delta_psi / delta_alpha_psi before the next solve (first call, regrid, restart)
+  bool kerr_psi_warm_ = false, kerr_chi_warm_ = false;
+  void KerrSetup(ParameterInput *pin);
+  void KerrRefill(const Real xbh[3]);
+  void KerrVectorSourceX();
+  void KerrShiftPointSource();
+  void KerrSolveX(Driver *pdriver, int stage);
+  void KerrComputeAhat();
+  void KerrSolvePsi(Driver *pdriver, int stage);
+  void KerrSolveLapse(Driver *pdriver, int stage);
+  void KerrSolveShift(Driver *pdriver, int stage);
+  void KerrReconstructShift();
+  void KerrAssemblePsiMetric(bool with_ghosts);
+  void KerrAssembleADM(Real time);
+  void KerrFillEmbedADM(const DvceArray1D<int> &newmb, Real time);
 };
 
 }  // namespace cfc

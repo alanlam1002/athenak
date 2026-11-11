@@ -36,6 +36,7 @@ add_executable(
         cfc/mg_kerr_scalar.cpp
         cfc/kerr_mg_vops.cpp
         cfc/mg_kerr_vector.cpp
+        cfc/cfc_kerr.cpp
         cfc/cfc_reconstruct.cpp
         cfc/mg_cfc_conformal_factor.cpp
         cfc/mg_cfc_lapse.cpp
@@ -58,6 +59,7 @@ add_executable(
         dyn_grmhd/dyn_grmhd_newdt.cpp
         dyn_grmhd/dyn_grmhd_metric.cpp
         dyn_grmhd/dyn_grmhd_killing.cpp
+        dyn_grmhd/dyn_grmhd_kerr.cpp
         dyn_grmhd/dyn_grmhd_taubudget.cpp
         dyn_grmhd/dyn_grmhd_riemann_frame.cpp
 
@@ -240,7 +242,7 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "IntelLLVM|Intel")
   set_source_files_properties(
       cfc/cfc_puncture.cpp cfc/cfc.cpp cfc/mg_cfc_conformal_factor.cpp cfc/mg_cfc_lapse.cpp
       cfc/kerr_background.cpp cfc/kerr_mg_ops.cpp cfc/mg_kerr_scalar.cpp
-      cfc/kerr_mg_vops.cpp cfc/mg_kerr_vector.cpp
+      cfc/kerr_mg_vops.cpp cfc/mg_kerr_vector.cpp cfc/cfc_kerr.cpp
       PROPERTIES COMPILE_OPTIONS "-fp-model=precise")
   # MCLOSE also needs no FMA contraction: precise still allows icpx to fuse u0*dv - d0*dv,
   # which makes unchanged cells' differences nonzero and the masses' and the cells'

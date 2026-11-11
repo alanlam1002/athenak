@@ -285,7 +285,9 @@ void MassClosure::YStage(int stage, const DvceArray4D<Real> &cls,
   auto &cd = pp->pcoord->coord_data;
   const bool exdyn = cd.bh_excise && cd.excision_dynamic &&
                      cd.excision_scheme == ExcisionScheme::lapse;
-  const Real exlap = cd.excise_lapse;
+  // Kerr lapse_off (K-004 B4): every excised cell lies in the sphere max(r_D4, r_f)
+  const Real exlap = cd.excision_lapse_off ? std::numeric_limits<Real>::lowest()
+                                           : cd.excise_lapse;
   const Real irc = 1.0/y_rhoc;
   // |V.n|_coord bin edges (kYV = 7 bins)
   const Real e0 = 0.003, e1 = 0.01, e2 = 0.03, e3 = 0.1, e4 = 0.2, e5 = 0.3;
@@ -496,7 +498,9 @@ void MassClosure::StagePost(int stage, int ns, const Real *gam0, const Real *gam
   auto &cd = pp->pcoord->coord_data;
   const bool exdyn = cd.bh_excise && cd.excision_dynamic &&
                      cd.excision_scheme == ExcisionScheme::lapse;
-  const Real exlap = cd.excise_lapse;
+  // Kerr lapse_off (K-004 B4): every excised cell lies in the sphere max(r_D4, r_f)
+  const Real exlap = cd.excision_lapse_off ? std::numeric_limits<Real>::lowest()
+                                           : cd.excise_lapse;
   const Real cx = pp->padm->bc_center[0], cy = pp->padm->bc_center[1];
   const Real cz = pp->padm->bc_center[2];
   // the C2P's change by item (the ledger's per-cell class, mass_ledger_hpp classes: 0/1

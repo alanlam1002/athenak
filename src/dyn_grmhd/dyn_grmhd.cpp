@@ -1726,6 +1726,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddCoordTermsEOS(const DvceArray5D<Real
   if (fixed_evolution) {
     return;
   }
+  if (pmy_pack->pcfc != nullptr && pmy_pack->pcfc->KerrOn()) {   // K-004 B3
+    AddCoordTermsKerr<NGHOST>(prim, bcc, dt, rhs);
+    return;
+  }
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   auto &size  = pmy_pack->pmb->mb_size;
   int &is = indcs.is; int &ie = indcs.ie;

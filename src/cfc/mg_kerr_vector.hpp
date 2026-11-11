@@ -145,6 +145,11 @@ class MGKerrVectorDriver : public MultigridDriver {
   bool src_blob_ = false;
   Real mpo_[3] = {0.0, 0.0, 0.0};   // the multipole origin (block/mp_x01..3)
   kmg::VMoments mom_;
+  //! W4 production (cfc_kerr.cpp): finest src = fac * src(channels 0-2), mesh array of
+  //! ghost depth ngh (interior used); call before Solve
+  void LoadSource(const DvceArray5D<Real> &src, int ngh, Real fac);
+  //! the finest V into channels 0-2 of a mesh array (mesh ghost depth)
+  void RetrieveSolution(DvceArray5D<Real> &dst);
   kmg::CoefSource cs_;
   kmg::VManuf vm_;
   long bad_dinv_[3] = {0, 0, 0};    // blocks, root, octets

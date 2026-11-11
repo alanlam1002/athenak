@@ -181,8 +181,13 @@ void Coordinates::UpdateExcisionMasks() {
     // time-dependent excision: (r < r_f) OR (alpha < excise_lapse), r about the moving hole.
     // A pure function of the cell's position, the hole position and the cycle's global r_f
     // (and its lapse), so a ghost decides as its owner does.
-    const bool dyn = coord_data.excision_dynamic && coord_data.excision_rf > 0.0;
-    const Real rf2 = coord_data.excision_rf*coord_data.excision_rf;
+    // Kerr (K-004 B4, D4): r < max(r_D4, r_f) and no lapse test; r_D4 = excision_rfloor
+    // (0 otherwise, which leaves dyn and rf2 as before)
+    const bool lapse_off = coord_data.excision_lapse_off;
+    const Real rsph = fmax(coord_data.excision_dynamic ? coord_data.excision_rf : 0.0,
+                           coord_data.excision_rfloor);
+    const bool dyn = rsph > 0.0;
+    const Real rf2 = rsph*rsph;
     const Real cx = coord_data.exc_cx, cy = coord_data.exc_cy, cz = coord_data.exc_cz;
     auto &size = pmy_pack->pmb->mb_size;
     int is = indcs.is; int js = indcs.js; int ks = indcs.ks;
@@ -190,7 +195,7 @@ void Coordinates::UpdateExcisionMasks() {
 
     par_for("set_excision", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      bool excise = (adm.alpha(m,k,j,i) < excise_lapse);
+      bool excise = !lapse_off && (adm.alpha(m,k,j,i) < excise_lapse);
       if (dyn && !excise) {
         const Real x = CellCenterX(i-is, nx1, size.d_view(m).x1min, size.d_view(m).x1max) - cx;
         const Real y = CellCenterX(j-js, nx2, size.d_view(m).x2min, size.d_view(m).x2max) - cy;

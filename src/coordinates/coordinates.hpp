@@ -51,6 +51,11 @@ struct CoordData {
   bool excision_dynamic = false;
   Real excision_rf = 0.0;
   Real exc_cx = 0.0, exc_cy = 0.0, exc_cz = 0.0;
+  // <cfc> kerr_background with a > 0 (K-004 B4, SPIN_DESIGN_SPEC D4; set by CFC::KerrSetup):
+  // the sphere is r < max(excision_rfloor, r_f) and the lapse test is off. Defaults keep
+  // the lapse scheme as above.
+  Real excision_rfloor = 0.0;
+  bool excision_lapse_off = false;
   bool smooth_excision = false;    // flag to specify smooth excision (fastflow)
   Real horizon_factor;             // factor to muliply the horizon factor by (fastflow)
   Real tdamp;                      // damping time (needed for smooth excision)

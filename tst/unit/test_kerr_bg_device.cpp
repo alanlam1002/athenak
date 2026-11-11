@@ -716,6 +716,42 @@ int main(int argc, char **argv) {
         std::printf("  [%.0e,%.0e]  psi0 %.2e  alpha0 %.2e  beta0 %.2e\n", edges[b],
                     edges[b + 1], ep, ea, eb);
       }
+      // K-005 A3(a): alpha0 and d_r alpha0 = n.d alpha0 as W1 evaluates them (device interp,
+      // r_min fallback below r_min) against the analytic trumpet, on NA log-spaced radii in
+      // [1e-4, 1] along the x axis, the z axis and the (1,1,1) diagonal
+      const char *ae = std::getenv("KERR_ALPHA_TAB");
+      const int na = (ae != nullptr) ? std::atoi(ae) : 0;
+      if (na > 1) {
+        const double dir[3][3] = {{1, 0, 0}, {0, 0, 1}, {1/std::sqrt(3.0), 1/std::sqrt(3.0),
+                                                         1/std::sqrt(3.0)}};
+        std::printf("\n## (s2) a = 0 alpha0 table (K-005 A3a): r dir alpha0_W1 alpha0_an "
+                    "rel dra0_W1 dra0_an rel\n");
+        for (int d = 0; d < 3; ++d) {
+          pts.clear();
+          for (int i = 0; i < na; ++i) {
+            const double r = std::exp(std::log(1e-4) + std::log(1e4)*i/(na - 1));
+            for (int a = 0; a < 3; ++a) pts.push_back(r*dir[d][a]);
+          }
+          DeviceEval(kt, pts, false, dn, dc);
+          double ea = 0, ed = 0;
+          for (int i = 0; i < na; ++i) {
+            const double x = pts[3*i], y = pts[3*i + 1], z = pts[3*i + 2];
+            const double r = std::sqrt(x*x + y*y + z*z);
+            double psi, alp, beta[3], A[6], a2, dps, dal;
+            cfc::TrumpetBackground(1.0, x, y, z, cfc::TrumpetIsoToAreal(r), &psi, &alp,
+                                   beta, A, &a2, &dps, &dal);
+            const double *c = &dc[static_cast<size_t>(i)*NB];
+            double drw = 0;
+            for (int a = 0; a < 3; ++a) drw += dir[d][a]*c[cfc::kKbgDAlpha0 + a];
+            const double r1 = std::fabs(c[cfc::kKbgAlpha0] - alp)/std::fabs(alp);
+            const double r2 = std::fabs(drw - dal)/std::max(std::fabs(dal), 1e-300);
+            ea = std::max(ea, r1); ed = std::max(ed, r2);
+            std::printf("A3A %.6e %d %.12e %.12e %.3e %.12e %.12e %.3e\n", r, d,
+                        c[cfc::kKbgAlpha0], alp, r1, drw, dal, r2);
+          }
+          std::printf("A3A_MAX dir %d max rel alpha0 %.3e d_r alpha0 %.3e\n", d, ea, ed);
+        }
+      }
     }
 
     // ---------------- (g) cost per cell

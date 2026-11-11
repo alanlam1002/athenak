@@ -295,6 +295,8 @@ class CFC {
   // clears them at the end of a step that accreted, so the next step's first solves
   // re-seed from adm); read in the constructor, applied by LoadRestartState
   bool rst_psi_seeded_ = true, rst_alpha_psi_seeded_ = true;
+  // K-005 B2: the restart carries the Kerr drivers' finest u (restart_kerr_mg)
+  bool rst_kerr_mg_ = false;
 
   // InitializeMetric()'s X^i/psi fixed-point-iteration controls.
   int cfc_init_iter_max_;
@@ -685,6 +687,7 @@ class CFC {
   void SaveRestartState(DvceArray5D<Real> &dst, int ns);
   void LoadRestartState(const DvceArray5D<Real> &src, int ns);
   void SaveRestartScalars(ParameterInput *pin) const;   // the seed flags
+  std::string KerrRestartLayout() const;
   // after InitializeMetric (fresh start): xidot(0) from the tracked gas, target, and
   // the comoving initial atmosphere
   void InitFrameControl(Driver *pdriver);

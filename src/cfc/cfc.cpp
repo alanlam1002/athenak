@@ -328,6 +328,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     rst_psi_seeded_ = pin->GetBoolean("cfc", "restart_psi_seeded");
     rst_alpha_psi_seeded_ = pin->GetBoolean("cfc", "restart_alpha_psi_seeded");
   }
+  if (pin->DoesParameterExist("cfc", "restart_kerr_mg")) {
+    rst_kerr_mg_ = pin->GetBoolean("cfc", "restart_kerr_mg");
+  }
   if (frame_ctrl_) {
     fc_rho_thr_ = pin->GetReal("cfc", "frame_track_rho");        // required (code units)
     fc_rtrk_ = pin->GetReal("cfc", "frame_track_radius");        // required
@@ -3402,18 +3405,34 @@ void CFC::InitFrameControl(Driver *pdriver) {
 //----------------------------------------------------------------------------------------
 //! \fn CFC::RestartStateVars / SaveRestartState / LoadRestartState
 //! \brief see cfc.hpp. Order: delta_psi, delta_alpha_psi, then the MG finest u of
-//! pmgd_psi, pmgd_alpha, pmgd_pietax, pmgd_pietabeta (padded to the mesh's ng).
+//! pmgd_psi, pmgd_alpha, pmgd_pietax, pmgd_pietabeta (padded to the mesh's ng); on the
+//! Kerr path then pkpsi_, pkchi_, pkx_, pkbeta_ (K-005 B2).
 
 int CFC::RestartStateVars() const {
-  return 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
-           + pmgd_pietabeta->NumVars();
+  int n = 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
+            + pmgd_pietabeta->NumVars();
+  if (kerr_background_) {
+    n += pkpsi_->NumVars() + pkchi_->NumVars() + pkx_->NumVars() + pkbeta_->NumVars();
+  }
+  return n;
 }
 
 std::string CFC::RestartStateLayout() const {
   return "cfc.dpsi:1,cfc.dap:1,cfc.mg_psi:" + std::to_string(pmgd_psi->NumVars())
          + ",cfc.mg_alpha:" + std::to_string(pmgd_alpha->NumVars())
          + ",cfc.mg_pietax:" + std::to_string(pmgd_pietax->NumVars())
-         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars());
+         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars())
+         + (kerr_background_ ? KerrRestartLayout() : std::string());
+}
+
+// K-005 B2: the Kerr drivers' finest u (the warm starts of eq:cpsi, eq:cchi, X^i and
+// beta_res), after the flat groups; not core, so an older Kerr restart maps (zero) and
+// re-seeds as before (restart_kerr_mg absent)
+std::string CFC::KerrRestartLayout() const {
+  return ",cfc.kmg_psi:" + std::to_string(pkpsi_->NumVars())
+         + ",cfc.kmg_chi:" + std::to_string(pkchi_->NumVars())
+         + ",cfc.kmg_x:" + std::to_string(pkx_->NumVars())
+         + ",cfc.kmg_beta:" + std::to_string(pkbeta_->NumVars());
 }
 
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
@@ -3435,6 +3454,17 @@ void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
     d->SaveFinestState(dst, n, ng);
     n += d->NumVars();
   }
+  if (kerr_background_) {
+    for (MultigridDriver *d : {static_cast<MultigridDriver*>(pkpsi_),
+                               static_cast<MultigridDriver*>(pkchi_),
+                               static_cast<MultigridDriver*>(pkx_),
+                               static_cast<MultigridDriver*>(pkbeta_)}) {
+      // sized for this mesh already when the regrid re-solved; idempotent otherwise
+      d->PrepareForAMR();
+      d->SaveFinestState(dst, n, ng);
+      n += d->NumVars();
+    }
+  }
 }
 
 void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
@@ -3453,6 +3483,18 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
     d->LoadFinestState(src, n, ng);
     n += d->NumVars();
   }
+  if (kerr_background_) {
+    for (MultigridDriver *d : {static_cast<MultigridDriver*>(pkpsi_),
+                               static_cast<MultigridDriver*>(pkchi_),
+                               static_cast<MultigridDriver*>(pkx_),
+                               static_cast<MultigridDriver*>(pkbeta_)}) {
+      d->LoadFinestState(src, n, ng);
+      n += d->NumVars();
+    }
+    // the drivers hold the restarted run's solutions: no re-seed from delta_psi /
+    // delta_alpha_psi (a step that cleared psi_seeded_ still re-seeds, as continuous)
+    kerr_psi_warm_ = kerr_chi_warm_ = rst_kerr_mg_;
+  }
   // as the restarted run left them: false after a step that accreted, so the next solves
   // re-seed from adm exactly as the continuous run does (C-100, c100_rst7)
   psi_seeded_ = rst_psi_seeded_;
@@ -3463,6 +3505,7 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
 void CFC::SaveRestartScalars(ParameterInput *pin) const {
   pin->SetBoolean("cfc", "restart_psi_seeded", psi_seeded_);
   pin->SetBoolean("cfc", "restart_alpha_psi_seeded", alpha_psi_seeded_);
+  if (kerr_background_) pin->SetBoolean("cfc", "restart_kerr_mg", true);
 }
 
 //----------------------------------------------------------------------------------------

@@ -296,6 +296,9 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   ncoeff_ = kmg::kNCoeffVec;
   eps_ = pin->GetOrAddReal(block, "mg_threshold", 1.0e-10);
   std::string norm_str = pin->GetOrAddString(block, "mg_norm", "rms");
+  // K-005 B1(b): as <cfc>/mg_norm_ref_volume (mg_cfc_conformal_factor.cpp:430); <= 0 =
+  // the root-grid volume (multigrid_driver.cpp CalculateDefectNorm)
+  norm_ref_vol_ = pin->GetOrAddReal(block, "mg_norm_ref_volume", 0.0);
   if (norm_str == "legacy") {
     norm_mode_ = MGNormScaling::legacy;
   } else if (norm_str == "rms") {

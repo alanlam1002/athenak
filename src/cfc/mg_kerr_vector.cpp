@@ -384,6 +384,12 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   mpo_[1] = pin->GetOrAddReal(block, "mp_x02", 0.5*(msz.x2min + msz.x2max));
   mpo_[2] = pin->GetOrAddReal(block, "mp_x03", 0.5*(msz.x3min + msz.x3max));
   for (int q = 0; q < kmg::kNMom; ++q) { mom_.v[q] = 0.0; }
+  pin_block_ = block;
+  zero_coarse_ = pin->GetOrAddBoolean(block, "zero_coarse", true);
+  for (int q = 0; q < kmg::kNMom; ++q) {
+    const std::string key = "restart_mom" + std::to_string(q);
+    if (pin->DoesParameterExist(block, key)) { mom_.v[q] = pin->GetReal(block, key); }
+  }
 
   // the framework's physical boundary: zerofixed on the outer faces (the kelvin values
   // are written over it by the hook), zerograd on reflecting faces
@@ -622,9 +628,16 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   const int nout = (kelvin_ && mp_self_) ? std::max(mp_outer_, 1) : 1;
   for (int n = 0; n < nout; ++n) {
     ComputeMoments();
+    if (zero_coarse_) ZeroHierarchy();
     SolveMG(pdriver);
   }
   Kokkos::fence();
+}
+
+void MGKerrVectorDriver::SaveMomentsToPin(ParameterInput *pin) const {
+  for (int q = 0; q < kmg::kNMom; ++q) {
+    pin->SetReal(pin_block_, "restart_mom" + std::to_string(q), mom_.v[q]);
+  }
 }
 
 void MGKerrVectorDriver::LoadSource(const DvceArray5D<Real> &src, int ngh, Real fac) {

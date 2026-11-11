@@ -322,6 +322,7 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   psi_floor_ = pin->GetOrAddReal(block, "psi_floor", 0.05);
   coeff_cache_ = kmg::CoeffCacheEnabled();
   cache_check_ = coeff_cache_ && kmg::CoeffCacheCheck();
+  zero_coarse_ = pin->GetOrAddBoolean(block, "zero_coarse", true);
   ncoeff_ = (kind_ == kmg::kKindLinear) ? kmg::kNCoeffScalar : kmg::kNCoeffKerr;
   eps_ = pin->GetOrAddReal(block, "mg_threshold", 1.0e-10);
   std::string norm_str = pin->GetOrAddString(block, "mg_norm", "rms");
@@ -528,6 +529,7 @@ bool MGKerrScalarDriver::CopyBgFromDonor(int lo, int hi) {
 
 void MGKerrScalarDriver::Solve(Driver *pdriver, int stage, Real dt) {
   Prepare();
+  if (zero_coarse_) ZeroHierarchy();
   SolveMG(pdriver);
   Kokkos::fence();
 }

@@ -205,6 +205,10 @@ class MGKerrScalarDriver : public MultigridDriver {
   long bg_fills_ = 0, bg_copies_ = 0;
   //! KERR_MG_CACHECHECK: checks done and entries that differed from a refill (must be 0)
   bool cache_check_ = false;
+  //! K-005 B2 (bitwise restart): ZeroHierarchy before SolveMG, so a solve does not start
+  //! from the previous solve's coarse state, which a restart does not carry
+  //! (<block> zero_coarse, default true)
+  bool zero_coarse_ = true;
   long check_n_ = 0, check_diff_ = 0;
   //! this driver's block-level background channels still hold what key_ describes, for cs
   bool BgIntactFor(const kmg::CoefSource &cs) const;

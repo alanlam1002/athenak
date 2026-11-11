@@ -3505,7 +3505,11 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
 void CFC::SaveRestartScalars(ParameterInput *pin) const {
   pin->SetBoolean("cfc", "restart_psi_seeded", psi_seeded_);
   pin->SetBoolean("cfc", "restart_alpha_psi_seeded", alpha_psi_seeded_);
-  if (kerr_background_) pin->SetBoolean("cfc", "restart_kerr_mg", true);
+  if (kerr_background_) {
+    pin->SetBoolean("cfc", "restart_kerr_mg", true);
+    pkx_->SaveMomentsToPin(pin);
+    pkbeta_->SaveMomentsToPin(pin);
+  }
 }
 
 //----------------------------------------------------------------------------------------

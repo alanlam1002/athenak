@@ -171,6 +171,14 @@ class MGKerrVectorDriver : public MultigridDriver {
   //! KERR_MG_CACHECHECK: checks done and entries that differed from a refill (must be 0)
   bool cache_check_ = false;
   long check_n_ = 0, check_diff_ = 0;
+  //! K-005 B2 (bitwise restart): ZeroHierarchy before every SolveMG, so a solve does not
+  //! start from the previous solve's coarse levels/root/octets, which a restart does not
+  //! carry (<block> zero_coarse, default true)
+  bool zero_coarse_ = true;
+  //! K-005 B2: mom_ (read by the kelvin hook in the first ComputeMoments of the next
+  //! solve) through the restart file's parameter copy, <block> restart_mom<q>
+  void SaveMomentsToPin(ParameterInput *pin) const;
+  std::string pin_block_;
 
  private:
   void FillOctetCoeffs();

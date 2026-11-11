@@ -618,7 +618,20 @@ void MGKerrVectorDriver::ComputeMoments() {
                     lv->LevelN(lev, 2), mp_self_, mpo_, m);
   if (mp_self_) { lv->RestoreGhosts(lev); }
 #if MPI_PARALLEL_ENABLED
-  MPI_Allreduce(MPI_IN_PLACE, m, kmg::kNMom, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  // rank-ordered sum, not MPI_SUM: the moments enter u through the kelvin faces, and the
+  // MPI library is free to change its reduction order between runs (K-005)
+  {
+    int nrank = 1;
+    MPI_Comm_size(MPI_COMM_WORLD, &nrank);
+    std::vector<Real> all(static_cast<size_t>(nrank)*kmg::kNMom);
+    MPI_Allgather(m, kmg::kNMom, MPI_ATHENA_REAL, all.data(), kmg::kNMom, MPI_ATHENA_REAL,
+                  MPI_COMM_WORLD);
+    for (int q = 0; q < kmg::kNMom; ++q) {
+      Real s = 0.0;
+      for (int r = 0; r < nrank; ++r) { s += all[static_cast<size_t>(r)*kmg::kNMom + q]; }
+      m[q] = s;
+    }
+  }
 #endif
   for (int q = 0; q < kmg::kNMom; ++q) { mom_.v[q] = m[q]; }
 }

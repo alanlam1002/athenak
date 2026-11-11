@@ -449,6 +449,9 @@ void CFC::KerrSolvePsi(Driver *pdriver, int stage) {
     auto &adm = pmy_pack->padm->adm;
     auto dps = delta_psi;
     auto psi0 = u_psi0;
+    // fresh start: the pgen's psi_* - 1 on top of psi0 (differencing against psi0 seeds
+    // delta psi ~ 1 - psi0 ~ -4 at the hole, which the psi^-7 FAS cannot recover, k004d)
+    const bool pg = kerr_pgen_psi_;
     par_for("cfc_kerr_seed_psi", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, ks, ke, js, je,
             is, ie, KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const Real detg = adm::SpatialDet(adm.g_dd(m, 0, 0, k, j, i),
@@ -457,8 +460,10 @@ void CFC::KerrSolvePsi(Driver *pdriver, int stage) {
                                         adm.g_dd(m, 1, 1, k, j, i),
                                         adm.g_dd(m, 1, 2, k, j, i),
                                         adm.g_dd(m, 2, 2, k, j, i));
-      dps(m, 0, k, j, i) = Kokkos::pow(detg, 1.0/12.0) - psi0(m, 0, k, j, i);
+      dps(m, 0, k, j, i) = Kokkos::pow(detg, 1.0/12.0)
+                           - (pg ? 1.0 : psi0(m, 0, k, j, i));
     });
+    kerr_pgen_psi_ = false;
   }
   if (!kerr_psi_warm_) {
     pkpsi_->SeedInitialGuess(delta_psi, indcs.ng);
@@ -496,11 +501,15 @@ void CFC::KerrSolveLapse(Driver *pdriver, int stage) {
     auto dap = delta_alpha_psi;
     auto psi0 = u_psi0;
     auto ap0 = u_alpha0_psi0;
+    // fresh start: alpha = alpha0 x the pgen's alpha_* (adm.alpha ~ 1 at the hole)
+    const bool pg = kerr_pgen_chi_;
     par_for("cfc_kerr_seed_chi", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      dap(m, 0, k, j, i) = adm.alpha(m, k, j, i)*(dps(m, 0, k, j, i) + psi0(m, 0, k, j, i))
-                           - ap0(m, 0, k, j, i);
+      const Real p0 = psi0(m, 0, k, j, i);
+      const Real al = pg ? adm.alpha(m, k, j, i)*ap0(m, 0, k, j, i)/p0 : adm.alpha(m, k, j, i);
+      dap(m, 0, k, j, i) = al*(dps(m, 0, k, j, i) + p0) - ap0(m, 0, k, j, i);
     });
+    kerr_pgen_chi_ = false;
   }
   if (!kerr_chi_warm_) {
     pkchi_->SeedInitialGuess(delta_alpha_psi, indcs.ng);
@@ -612,6 +621,42 @@ void CFC::KerrAssembleADM(Real time) {
   });
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
   frame_assembled_ = true;
+  KerrLogCorrections();
+}
+
+//! <cfc> kerr_log = n: once per n-th cycle, max over interior cells of the corrections
+//! |delta psi/psi0|, |delta chi/chi0| and |beta_res| (V2: zero to round-off without a star)
+void CFC::KerrLogCorrections() {
+  const int nc = pmy_pack->pmesh->ncycle;
+  if (kerr_log_ <= 0 || nc % kerr_log_ != 0 || nc == kerr_corr_cycle_) return;
+  kerr_corr_cycle_ = nc;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto dps = delta_psi;
+  auto dap = delta_alpha_psi;
+  auto psi0 = u_psi0;
+  auto ap0 = u_alpha0_psi0;
+  auto bu = beta_u;
+  Real mx[3] = {0.0, 0.0, 0.0};
+  Kokkos::parallel_reduce("cfc_kerr_corr",
+    Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                       {nmb, indcs.ke + 1, indcs.je + 1, indcs.ie + 1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &a, Real &b,
+                  Real &c) {
+      a = Kokkos::fmax(a, Kokkos::fabs(dps(m, 0, k, j, i)/psi0(m, 0, k, j, i)));
+      b = Kokkos::fmax(b, Kokkos::fabs(dap(m, 0, k, j, i)/ap0(m, 0, k, j, i)));
+      const Real b2 = bu(m, 0, k, j, i)*bu(m, 0, k, j, i) + bu(m, 1, k, j, i)*bu(m, 1, k, j, i)
+                    + bu(m, 2, k, j, i)*bu(m, 2, k, j, i);
+      c = Kokkos::fmax(c, Kokkos::sqrt(b2));
+    }, Kokkos::Max<Real>(mx[0]), Kokkos::Max<Real>(mx[1]), Kokkos::Max<Real>(mx[2]));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, mx, 3, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    std::printf("KERR CORR cycle= %d time= %.10e max|dpsi/psi0|= %.6e max|dchi/chi0|= %.6e "
+                "max|beta_res|= %.6e\n", nc, pmy_pack->pmesh->time, mx[0], mx[1], mx[2]);
+  }
 }
 
 //! FillEmbedADM's Kerr form: psi = psi0, g = psi0^4 gt, alpha = alpha0, beta = beta0 +

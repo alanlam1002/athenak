@@ -764,6 +764,11 @@ class CFC {
   // the Kerr scalar drivers hold their own finest u (warm start); false: load it from
   // delta_psi / delta_alpha_psi before the next solve (first call, regrid, restart)
   bool kerr_psi_warm_ = false, kerr_chi_warm_ = false;
+  // true until the first Kerr psi / chi solve of a fresh start: adm then still holds the
+  // pgen's star on flat space (no hole), so the seeds superpose it on the Kerr background
+  // instead of differencing against psi0 / alpha0 (false on restart; regrids see the
+  // assembled Kerr metric)
+  bool kerr_pgen_psi_ = true, kerr_pgen_chi_ = true;
   void KerrSetup(ParameterInput *pin);
   void KerrRefill(const Real xbh[3]);
   void KerrVectorSourceX();
@@ -776,6 +781,8 @@ class CFC {
   void KerrReconstructShift();
   void KerrAssemblePsiMetric(bool with_ghosts);
   void KerrAssembleADM(Real time);
+  void KerrLogCorrections();
+  int kerr_corr_cycle_ = -1;         // last cycle KerrLogCorrections printed
   void KerrFillEmbedADM(const DvceArray1D<int> &newmb, Real time);
 };
 

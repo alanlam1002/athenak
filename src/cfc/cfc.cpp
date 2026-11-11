@@ -3429,6 +3429,9 @@ void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
                              static_cast<MultigridDriver*>(pmgd_alpha),
                              static_cast<MultigridDriver*>(pmgd_pietax),
                              static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+    // Kerr never solves the flat drivers, so their per-block arrays (sized only in
+    // Solve's PrepareForAMR) still hold the pre-regrid block count: resize them first
+    if (kerr_background_) d->PrepareForAMR();
     d->SaveFinestState(dst, n, ng);
     n += d->NumVars();
   }
@@ -3454,6 +3457,7 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
   // re-seed from adm exactly as the continuous run does (C-100, c100_rst7)
   psi_seeded_ = rst_psi_seeded_;
   alpha_psi_seeded_ = rst_alpha_psi_seeded_;
+  kerr_pgen_psi_ = kerr_pgen_chi_ = false;   // adm is the restored (assembled) metric
 }
 
 void CFC::SaveRestartScalars(ParameterInput *pin) const {

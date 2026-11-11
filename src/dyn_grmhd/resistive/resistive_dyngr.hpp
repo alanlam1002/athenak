@@ -52,6 +52,13 @@ enum {kEX = 0, kEY = 1, kEZ = 2, kBX = 3, kBY = 4, kBZ = 5, kNEMC = 6};
 // (consumed and cleared by ResistiveC2P) and the cell E it returned (R if it failed)
 enum {kWU = 0, kWR = 3, kWB = 6, kWS = 9, kWF = 10, kWE = 11, kNWORK = 14};
 enum {kFlagSolved = 1, kFlagFallback = 2};
+// test-only probe (07 v2.9 §3.2.4(e), resistive_probe.hpp): per-cell implicit-solve
+// record (reason, CellSolveResult flag bits, iterations, W of the ideal c2p on the
+// pre-solve totals and its error code, W and E of the returned state) and the EdgeSolve
+// split of the E~ edge EMF (unsloped four-cell average, sloped average, full value)
+enum {kPReason = 0, kPFlags = 1, kPIter = 2, kPWIL = 3, kPILErr = 4, kPWSol = 5,
+      kPE = 6, kNPST = 9};
+enum {kPEdgeAvg = 0, kPEdgeSlope = 1, kPEdgeFull = 2, kNPEDGE = 9};
 
 class ResistiveDynGR {
  public:
@@ -76,6 +83,12 @@ class ResistiveDynGR {
   // resistive_freeze_background only: -(initial discrete dE~/dt), added in CTE
   DvceFaceFld4D<Real> esrc;
   bool esrc_set = false;
+  // test-only probe: first probe_cycles cycles (0 = off); arrays allocated only if on
+  int probe_cycles = 0;
+  std::string probe_base;
+  DvceArray5D<Real> pst;    // (nmb, kNPST, n3, n2, n1)
+  DvceArray5D<Real> pedge;  // (nmb, 3*kk + part, n3+1, n2+1, n1+1)
+  bool Probing() const;
 
   // Separate boundary objects, one per E~ exchange round within a stage (each owns its
   // own MPI communicators and buffers): explicit round (+ h* edge sync), post-implicit

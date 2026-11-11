@@ -8,6 +8,8 @@
 //! \file dyn_grmhd.hpp
 //  \brief definitions for DynGRMHD class
 
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "tasklist/task_list.hpp"
@@ -115,6 +117,10 @@ class DynGRMHD {
   Real dmp_M;               // threshold multiplier for discrete maximum principle.
   bool fixed_evolution;     // Disable mhd evolution
   bool scalar_pplimiter;    // Apply positivity preserving limiter on scalar
+  // test-only resistive_probe_cycles (07 v2.9 §3.2.4(e)): ideal-path c2p dumps for the
+  // K5-cold-z comparison; 0 (key absent) = off, output only
+  int probe_cycles = 0;
+  std::string probe_base;
 };
 
 template<class EOSPolicy, class ErrorPolicy>

@@ -29,6 +29,7 @@
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
 #include "dyn_grmhd/resistive/resistive_dyngr.hpp"
+#include "dyn_grmhd/resistive/resistive_probe.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
@@ -164,6 +165,8 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   if (pmy_pack->pmhd != nullptr && pmy_pack->pmhd->resist_params.enabled) {
     presist = new resistive::ResistiveDynGR(pmy_pack, pin);
   }
+  probe_cycles = resistive::ProbeCycles(pin);
+  if (probe_cycles > 0) probe_base = pin->GetString("job", "basename");
 }
 
 DynGRMHD::~DynGRMHD() {
@@ -331,8 +334,24 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   int n1m1 = indcs.nx1 + 2*ng - 1;
   int n2m1 = (indcs.nx2 > 1)? (indcs.nx2 + 2*ng - 1) : 0;
   int n3m1 = (indcs.nx3 > 1)? (indcs.nx3 + 2*ng - 1) : 0;
+  const bool probe = (pmy_pack->pmesh->ncycle < probe_cycles);
+  if (probe) {
+    auto *pmhd = pmy_pack->pmhd;
+    resistive::ProbeFile f(probe_base, pmy_pack, stage, "C0");
+    f.Add("u0", pmhd->u0);
+    f.Add("w0", pmhd->w0);
+    f.Add("b1", pmhd->b0.x1f);
+    f.Add("b2", pmhd->b0.x2f);
+    f.Add("b3", pmhd->b0.x3f);
+  }
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
+  if (probe) {
+    resistive::ProbeFile f(probe_base, pmy_pack, stage, "C");
+    f.Add("u0", pmy_pack->pmhd->u0);
+    f.Add("w0", pmy_pack->pmhd->w0);
+    f.Add("temp", temperature);
+  }
   return TaskStatus::complete;
 }
 

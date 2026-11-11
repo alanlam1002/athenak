@@ -30,6 +30,7 @@
 #include "dyn_grmhd/resistive/resistive_edge.hpp"
 #include "dyn_grmhd/resistive/resistive_implicit.hpp"
 #include "dyn_grmhd/resistive/resistive_riemann.hpp"
+#include "dyn_grmhd/resistive/resistive_probe.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
@@ -124,6 +125,19 @@ Real FaceAvg(const DvceFaceFld4D<Real> &f, const int d, const int m, const int k
   return 0.5*(f.x3f(m, k, j, i) + f.x3f(m, k+1, j, i));
 }
 
+}  // namespace
+
+//----------------------------------------------------------------------------------------
+//! Test-only probe dumps (07 v2.9 §3.2.4(e); resistive_probe.hpp).
+
+namespace {
+template <class F>
+void ProbeFace(resistive::ProbeFile *f, const char *nm, const F &v) {
+  const std::string s(nm);
+  f->Add((s + "1").c_str(), v.x1f);
+  f->Add((s + "2").c_str(), v.x2f);
+  f->Add((s + "3").c_str(), v.x3f);
+}
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -270,6 +284,14 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver *d, int
     presist->ExchangeEBlocking();
   }
   ResistiveC2P(stage > 0);
+  if (presist->Probing()) {
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, stage, "C");
+    f.Add("u0", pmy_pack->pmhd->u0);
+    f.Add("w0", pmy_pack->pmhd->w0);
+    f.Add("temp", temperature);
+    f.Add("emc", presist->emc);
+    f.Add("cw", presist->cwork);
+  }
   if (stage == d->nexp_stages) {
     presist->MaybeWriteHist(pmy_pack->pmesh->time + pmy_pack->pmesh->dt,
                             pmy_pack->pmesh->ncycle + 1);
@@ -307,6 +329,15 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveFluxes(Driver *pdriver,
   auto &mbsize = pmy_pack->pmb->mb_size;
   const bool rusanov = (presist->params.charge_flux == resistive::ChargeFlux::rusanov);
   const bool mhllc = (presist->params.rsolver == resistive::RSolver::mhllc);
+  if (presist->Probing()) {
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, stage, "F");
+    f.Add("u0", u0_);
+    f.Add("w0", w0_);
+    f.Add("temp", temperature);
+    f.Add("emc", emc_);
+    ProbeFace(&f, "e", ef);
+    ProbeFace(&f, "b", bf);
+  }
 
   for (int d = 0; d < 3; ++d) {
     if (!act[d]) continue;
@@ -462,8 +493,28 @@ template<class EOSPolicy, class ErrorPolicy>
 void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
                                                                 int estage) {
   const int istage = estage + 2;
+  const bool probe = presist->Probing();
+  if (probe) {
+    auto *pmhd = pmy_pack->pmhd;
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, istage, "Ia");
+    f.Add("u0", pmhd->u0);
+    f.Add("w0", pmhd->w0);
+    ProbeFace(&f, "e", presist->e0);
+    ProbeFace(&f, "b", pmhd->b0);
+    ProbeFace(&f, "f", pmhd->uflx);
+    ProbeFace(&f, "q", presist->qflx);
+    f.Add("ee1", pmhd->efld.x1e);
+    f.Add("ee2", pmhd->efld.x2e);
+    f.Add("ee3", pmhd->efld.x3e);
+    f.Add("pedge", presist->pedge);
+  }
   presist->AddImexSources(pdriver, istage);
   if (estage >= pdriver->nexp_stages) return;
+  if (probe) {
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, istage, "Ib");
+    f.Add("u0", pmy_pack->pmhd->u0);
+    ProbeFace(&f, "e", presist->e0);
+  }
 
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int n1 = indcs.nx1 + 2*indcs.ng;
@@ -510,6 +561,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
   const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
   const int je = (indcs.nx2 > 1) ? indcs.je : js;
   const int ke = (indcs.nx3 > 1) ? indcs.ke : ks;
+  auto pst = presist->pst;
 
   par_for("resist_impl_cell", DevExeSpace(), 0, nmb1, 0, n3-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -538,6 +590,34 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
     resistive::CellSolveResult res = resistive::ResistiveCellSolve(
         ps_, pm.g, gu, sdt, cons, B, R, ug, tol, maxit, fallback, prim, E, opt);
     nstat.Record(res.iterations, res.fallback, res.failed);
+    if (probe) {
+      // 07 v2.9 §3.2.4(e) items 2 and 4: ideal c2p W on the pre-solve totals
+      Real cil[NCONS], pil[NPRIM], gd[NSPMETRIC], gi[NSPMETRIC];
+      for (int n = 0; n < NCONS; ++n) cil[n] = cons[n];
+      for (int n = 0; n < NPRIM; ++n) pil[n] = 0.0;
+      for (int n = 0; n < NSPMETRIC; ++n) {
+        gd[n] = pm.g[n];
+        gi[n] = gu[n];
+      }
+      const Primitive::SolverResult ri = resistive::detail::IdealC2P(ps_, pil, cil, B,
+                                                                     gd, gi);
+      const Real uil[3] = {pil[PVX], pil[PVY], pil[PVZ]};
+      const Real usl[3] = {prim[PVX], prim[PVY], prim[PVZ]};
+      const int fl = (res.converged ? 1 : 0) | (res.fallback ? 2 : 0) |
+                     (res.failed ? 4 : 0) | (res.floor ? 8 : 0) | (res.retry ? 16 : 0) |
+                     (res.prestep_inadmissible ? 32 : 0) | (res.continued ? 64 : 0) |
+                     (res.fa ? 128 : 0) | (res.fa_reject ? 256 : 0) |
+                     (res.blend ? 512 : 0) | (res.il ? 1024 : 0) |
+                     (res.il_floor ? 2048 : 0) | (res.keep ? 4096 : 0);
+      pst(m, resistive::kPReason, k, j, i) = static_cast<Real>(res.reason);
+      pst(m, resistive::kPFlags, k, j, i) = static_cast<Real>(fl);
+      pst(m, resistive::kPIter, k, j, i) = static_cast<Real>(res.iterations);
+      pst(m, resistive::kPWIL, k, j, i) = sqrt(1.0 + resistive::Dot(pm.g, uil, uil));
+      pst(m, resistive::kPILErr, k, j, i) = static_cast<Real>(static_cast<int>(ri.error));
+      pst(m, resistive::kPWSol, k, j, i) = res.failed ? -1.0
+                                         : sqrt(1.0 + resistive::Dot(pm.g, usl, usl));
+      for (int a = 0; a < 3; ++a) pst(m, resistive::kPE + a, k, j, i) = E[a];
+    }
     if (i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
       // b^2/(rho h) from the solved state, or from the pre-solve w0, T and E~ if failed
       Real hp[NPRIM], eh[3];
@@ -656,6 +736,14 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
       rs(s, m, d, k, j, i) = (enew - eold)/adt;
       ex(m, k, j, i) = enew;
     });
+  }
+  if (probe) {
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, istage, "Ic");
+    f.Add("pst", presist->pst);
+    f.Add("cw", cw);
+    f.Add("w0", w0_);
+    f.Add("temp", temp_);
+    ProbeFace(&f, "e", ef);
   }
 }
 

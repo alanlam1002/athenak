@@ -31,6 +31,7 @@
 #include "dyn_grmhd/resistive/resistive_mesh_util.hpp"
 #include "dyn_grmhd/resistive/resistive_em.hpp"
 #include "dyn_grmhd/resistive/resistive_edge.hpp"
+#include "dyn_grmhd/resistive/resistive_probe.hpp"
 
 namespace resistive {
 
@@ -112,6 +113,12 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
   Kokkos::realloc(hfld.x3e, nmb, n3, n2+1, n1+1);
   Kokkos::realloc(emc, nmb, kNEMC, n3, n2, n1);
   Kokkos::realloc(cwork, nmb, kNWORK, n3, n2, n1);
+  probe_cycles = ProbeCycles(pin);
+  probe_base = pin->GetString("job", "basename");
+  if (probe_cycles > 0) {
+    Kokkos::realloc(pst, nmb, kNPST, n3, n2, n1);
+    Kokkos::realloc(pedge, nmb, kNPEDGE, n3+1, n2+1, n1+1);
+  }
   if (params.freeze_background) {
     if (pp->pmesh->adaptive) {
       std::cout << "### FATAL ERROR: <mhd> resistive_freeze_background is not "
@@ -178,6 +185,10 @@ ResistiveDynGR::~ResistiveDynGR() {
 //----------------------------------------------------------------------------------------
 //! Coordinate source terms are not added on the resistive path (Step 1a/2), so the ADM
 //! metric must be uniform. Checked once at start-up on all cells including ghosts.
+bool ResistiveDynGR::Probing() const {
+  return probe_cycles > 0 && pmy_pack->pmesh->ncycle < probe_cycles;
+}
+
 void ResistiveDynGR::CheckConstantMetric() const {
   if (pmy_pack->padm->is_dynamic) {
     Fatal(__LINE__, "<mhd> resistive = true: a time-dependent ADM metric is not "
@@ -435,6 +446,8 @@ TaskStatus ResistiveDynGR::EdgeSolve(Driver *d, int stage) {
   DvceFaceFld4D<Real> ef = e0;
   auto efld = pmy_pack->pmhd->efld;
   auto hf = hfld;
+  const bool probe = Probing();
+  auto pe = pedge;
 
   for (int kk = 0; kk < 3; ++kk) {
     int il = is, iu = ie+1, jl = js, ju = je+1, kl = ks, ku = ke+1;
@@ -451,7 +464,7 @@ TaskStatus ResistiveDynGR::EdgeSolve(Driver *d, int stage) {
       // metric: average of the (up to) four cells sharing the edge
       PointMetric pm;
       ZeroMetric(pm);
-      Real E4[2][2][3], B4[2][2][3];
+      Real E4[2][2][3], B4[2][2][3], E40[2][2][3], B40[2][2][3];
       for (int sa = 0; sa < 2; ++sa) {
         for (int sb = 0; sb < 2; ++sb) {
           int c[3];
@@ -478,8 +491,10 @@ TaskStatus ResistiveDynGR::EdgeSolve(Driver *d, int stage) {
             }
             if (n < 3) {
               E4[sa][sb][n] = v;
+              E40[sa][sb][n] = q;
             } else {
               B4[sa][sb][n-3] = v;
+              B40[sa][sb][n-3] = q;
             }
           }
         }
@@ -535,6 +550,21 @@ TaskStatus ResistiveDynGR::EdgeSolve(Driver *d, int stage) {
       LightSpeeds(pm.alpha, pm.beta[b], InverseDiag(gu, b), abp, abm);
       const Real ev = EdgeUpwind(fe, jb_a, jb_b, aap, aam, abp, abm);
       const Real hv = EdgeUpwind(fh, je_a, je_b, aap, aam, abp, abm);
+      if (probe) {
+        // 07 v2.9 §3.2.4(e) item 6: unsloped average, sloped average, full value
+        Real fe0[2][2];
+        for (int sa = 0; sa < 2; ++sa) {
+          for (int sb = 0; sb < 2; ++sb) {
+            Real Ed[3];
+            Lower(pm.g, E40[sa][sb], Ed);
+            fe0[sa][sb] = EdgeEMF(pm.alpha, pm.beta[a], pm.beta[b], Ed[kk],
+                                  sg*B40[sa][sb][a], sg*B40[sa][sb][b]);
+          }
+        }
+        pe(m, 3*kk + kPEdgeAvg, k, j, i) = EdgeUpwind(fe0, 0.0, 0.0, aap, aam, abp, abm);
+        pe(m, 3*kk + kPEdgeSlope, k, j, i) = EdgeUpwind(fe, 0.0, 0.0, aap, aam, abp, abm);
+        pe(m, 3*kk + kPEdgeFull, k, j, i) = ev;
+      }
       if (kk == 0) {
         efld.x1e(m, k, j, i) = ev;
         hf.x1e(m, k, j, i) = hv;

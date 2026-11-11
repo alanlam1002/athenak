@@ -734,6 +734,11 @@ class CFC {
   // background filled once as a smoke test, then the run stops.
   bool kerr_background_ = false;
   std::shared_ptr<KerrTable> kerr_table_;
+  // D3 (K-004 A1): gt blended to flat between kerr_blend_r1_ and kerr_blend_r2_ (mesh
+  // units about the hole; 0 = off), for W1 and the Kerr MG coefficients alike.
+  // kerr_r_ah_{min,max}_: min/max over theta of the horizon r_f (F1), times M.
+  Real kerr_blend_r1_ = 0.0, kerr_blend_r2_ = 0.0;
+  Real kerr_r_ah_min_ = 0.0, kerr_r_ah_max_ = 0.0;
 };
 
 }  // namespace cfc

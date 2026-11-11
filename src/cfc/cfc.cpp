@@ -590,10 +590,29 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
                 << std::endl << e.what() << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    // D3 (SPIN_DESIGN_SPEC D3; RK-012, RK-013 A1): gt blended to flat between f1 and f2
+    // times max_theta r_AH (F1 horizon r_f, in units of M), on whenever the background is.
+    // kerr_blend = false is a test switch only.
+    kerr_r_ah_max_ = puncture_mass_*pin->GetReal("cfc", "kerr_r_ah_max");
+    kerr_r_ah_min_ = puncture_mass_*pin->GetReal("cfc", "kerr_r_ah_min");
+    const bool kblend = pin->GetOrAddBoolean("cfc", "kerr_blend", true);
+    const Real kf1 = pin->GetOrAddReal("cfc", "kerr_blend_f1", 0.25);
+    const Real kf2 = pin->GetOrAddReal("cfc", "kerr_blend_f2", 0.5);
+    if (!(kerr_r_ah_min_ > 0.0) || kerr_r_ah_max_ < kerr_r_ah_min_ || !(kf1 >= 0.0) ||
+        !(kf2 > kf1) || kf2*kerr_r_ah_max_ >= 0.75*kerr_r_ah_min_) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> kerr_r_ah_min/max, kerr_blend_f1/f2: need 0 < r_ah_min"
+                << " <= r_ah_max, 0 <= f1 < f2 and f2 r_ah_max < 0.75 r_ah_min (the blend"
+                << " inside the D4 excision)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    kerr_blend_r1_ = kblend ? kf1*kerr_r_ah_max_ : 0.0;
+    kerr_blend_r2_ = kblend ? kf2*kerr_r_ah_max_ : 0.0;
     Real xbh[3];
     for (int a = 0; a < 3; ++a) { xbh[a] = puncture_enabled_ ? bg_xbh_[a] : xbh0_[a]; }
     DvceArray5D<Real> kbg("kerr_bg_smoke", nmb, kKbgN, ncells3, ncells2, ncells1);
-    FillKerrBackground(pmbp, *kerr_table_, puncture_mass_, xbh, kbg);
+    FillKerrBackground(pmbp, *kerr_table_, puncture_mass_, xbh, kerr_blend_r1_,
+                       kerr_blend_r2_, kbg);
     // the filled MeshBlocks only (nmb above is the allocation capacity)
     const int nfill = pmbp->nmb_thispack;
     Real psimin = 0.0, psimax = 0.0, almin = 0.0, almax = 0.0;
@@ -616,6 +635,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
               << ": a = " << kerr_table_->a << ", r_min = " << kerr_table_->rmin
               << ", nseg = " << kerr_table_->nseg << ", M = " << puncture_mass_
               << ", xbh = (" << xbh[0] << ", " << xbh[1] << ", " << xbh[2] << ")"
+              << ", D3 blend r1 = " << kerr_blend_r1_ << ", r2 = " << kerr_blend_r2_
+              << ", D4 floor 0.75 r_ah_min = " << 0.75*kerr_r_ah_min_
               << ", psi0 in [" << psimin << ", " << psimax << "], alpha0 in [" << almin
               << ", " << almax << "], non-finite " << nbad << " of " << kKbgN
               << " x cells, on " << nfill << " MeshBlocks" << std::endl;

@@ -91,7 +91,7 @@ void SyntheticM2(const CoefSource &cs, Real x, Real y, Real z, Real M[6], Real d
   ddM[Sym(2, 2)][4] = -0.25*ek2*cyz;
 }
 
-//! ConformalFromPhys: kerr_mg_ops.hpp (shared with the D3 blend, BlendNode).
+//! ConformalFromPhys, BlendNode (D3): kerr_background.hpp (shared with W1).
 
 //! \fn PointMetric2(cs, x, y, z, gt, gtu, dgt, ddgt)
 //! \brief PointMetric plus d_kl gt_ij (all analytic: the table's spectral ddg for Kerr,

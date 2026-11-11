@@ -24,7 +24,7 @@
 //!   runs        : comma-separated smoother/fill pairs, e.g. "gs8/rule_r,rb/rule_r";
 //!                 each: u = 0, ncycles V-cycles, defect per cycle, error against u*
 //!   e1_cycles   : V-cycles of E1 inside the solver (poison every hook), R then off
-//!   kerr_blend  : D3 test option (kmg::BlendNode): blend gt to flat between
+//!   kerr_blend  : D3 test option (BlendNode, kerr_background.hpp): blend gt to flat between
 //!                 kerr_blend_f1 (0.25) and kerr_blend_f2 (0.5) times kerr_r_ah (table
 //!                 units, max_theta r_AH) about xbh; default false
 //!   rad_shells  : comma-separated shell edges (mesh units, about xbh): the error per

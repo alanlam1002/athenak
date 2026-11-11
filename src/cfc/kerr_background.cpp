@@ -199,7 +199,8 @@ void LoadKerrTable(const std::string &f2_prefix, const std::string &kstab_path,
 }
 
 void FillKerrBackground(MeshBlockPack *pmbp, const KerrTable &t, Real m_bh,
-                        const Real xbh[3], DvceArray5D<Real> &bg) {
+                        const Real xbh[3], Real blend_r1, Real blend_r2,
+                        DvceArray5D<Real> &bg) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
   int &is = indcs.is; int &js = indcs.js; int &ks = indcs.ks;
@@ -217,6 +218,7 @@ void FillKerrBackground(MeshBlockPack *pmbp, const KerrTable &t, Real m_bh,
     Real x3v = CellCenterX(k-ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max) - xb2;
     Real v[kKnNV];
     KerrNodeCartesian(tt, m_bh, x1v, x2v, x3v, v, false);
+    if (blend_r2 > 0.0) { BlendNode(x1v, x2v, x3v, blend_r1, blend_r2, v); }
     KerrBgPoint b;
     KerrConformal(v, b);
     bg(m, kKbgPsi0, k, j, i) = b.psi0;

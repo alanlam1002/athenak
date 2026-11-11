@@ -13,6 +13,7 @@
 //   g++ -O3 -std=c++17 -fopenmp -I$KSTAB_INC kerr_host_checks.cpp -o kerr_host_checks
 //   kerr_host_checks f4  KSTAB_a0.60 F4_FILE
 //   kerr_host_checks run KSTAB A [NR NTH]
+//   kerr_host_checks blend KSTAB A RAHMAX F1 F2 [NRT NTH]   (K-004 A2: D3-blended gt)
 //========================================================================================
 #include <omp.h>
 
@@ -40,7 +41,55 @@ struct Conf {
 };
 
 // d1[k][q], d2[m][q] with m = Sym(k,l) as in kstab::eval_d.
-Conf Form(const double f[16], const double d1[3][16], const double d2[6][16]) {
+// D3 blend (K-004 A2), as BlendNode (kerr_background.hpp) then KerrConformal do it, but
+// written here independently at the conformal level: gt -> gb = M det(M)^(-1/3),
+// M = delta + w(r) (gt - delta), w the quintic smootherstep in r = |x| between r1 and r2;
+// det g (psi0) and K_ij are kept, so K is raised with g_b^-1 = gb^-1 det(g)^(-1/3).
+struct Blend { bool on = false; double x[3] = {0, 0, 0}, r1 = 0, r2 = 0; };
+
+// gt = e g (e = det(g)^(-1/3)) and its derivatives from g's (ddg[k][l] symmetric)
+void Conformal3(const double g[3][3], const double dg[3][3][3], const double ddg[3][3][3][3],
+                double gt[3][3], double gi[3][3], double dgt[3][3][3],
+                double ddgt[3][3][3][3], double *det) {
+  const double D = g[0][0]*(g[1][1]*g[2][2] - g[1][2]*g[2][1])
+                 - g[0][1]*(g[1][0]*g[2][2] - g[1][2]*g[2][0])
+                 + g[0][2]*(g[1][0]*g[2][1] - g[1][1]*g[2][0]);
+  gi[0][0] = (g[1][1]*g[2][2] - g[1][2]*g[2][1])/D;
+  gi[0][1] = (g[0][2]*g[2][1] - g[0][1]*g[2][2])/D;
+  gi[0][2] = (g[0][1]*g[1][2] - g[0][2]*g[1][1])/D;
+  gi[1][1] = (g[0][0]*g[2][2] - g[0][2]*g[2][0])/D;
+  gi[1][2] = (g[0][2]*g[1][0] - g[0][0]*g[1][2])/D;
+  gi[2][2] = (g[0][0]*g[1][1] - g[0][1]*g[1][0])/D;
+  gi[1][0] = gi[0][1]; gi[2][0] = gi[0][2]; gi[2][1] = gi[1][2];
+  const double e = std::pow(D, -1.0/3.0);
+  double L[3], LL[3][3];
+  for (int k = 0; k < 3; ++k) {
+    L[k] = 0;
+    for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) L[k] += gi[a][b]*dg[k][a][b];
+  }
+  for (int k = 0; k < 3; ++k) for (int l = 0; l < 3; ++l) {
+    double s = 0;
+    for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) {
+      s += gi[a][b]*ddg[k][l][a][b];
+      for (int c = 0; c < 3; ++c) for (int d = 0; d < 3; ++d)
+        s -= gi[a][c]*gi[b][d]*dg[l][c][d]*dg[k][a][b];
+    }
+    LL[k][l] = s;
+  }
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+    gt[i][j] = e*g[i][j];
+    for (int k = 0; k < 3; ++k) {
+      dgt[k][i][j] = e*(dg[k][i][j] - L[k]*g[i][j]/3);
+      for (int l = 0; l < 3; ++l)
+        ddgt[k][l][i][j] = e*(ddg[k][l][i][j] - L[l]*dg[k][i][j]/3 - L[k]*dg[l][i][j]/3
+                              - LL[k][l]*g[i][j]/3 + L[k]*L[l]*g[i][j]/9);
+    }
+  }
+  *det = D;
+}
+
+Conf Form(const double f[16], const double d1[3][16], const double d2[6][16],
+          const Blend &bl = Blend()) {
   Conf o{};
   double g[3][3], gi[3][3], dg[3][3][3], ddg[3][3][3][3];
   for (int i = 0; i < 3; ++i)
@@ -85,6 +134,54 @@ Conf Form(const double f[16], const double d1[3][16], const double d2[6][16]) {
       for (int l = 0; l < 3; ++l)
         ddgt[k][l][i][j] = e*(ddg[k][l][i][j] - L[l]*dg[k][i][j]/3 - L[k]*dg[l][i][j]/3
                               - LL[k][l]*g[i][j]/3 + L[k]*L[l]*g[i][j]/9);
+    }
+  }
+  if (bl.on) {
+    const double r = std::sqrt(bl.x[0]*bl.x[0] + bl.x[1]*bl.x[1] + bl.x[2]*bl.x[2]);
+    if (r < bl.r2) {
+      double w = 0, w1 = 0, w2 = 0;
+      if (r > bl.r1) {
+        const double Lw = bl.r2 - bl.r1, q = (r - bl.r1)/Lw;
+        w = q*q*q*(10 + q*(-15 + 6*q));
+        w1 = 30*q*q*(1 - q)*(1 - q)/Lw;
+        w2 = 60*q*(1 - q)*(1 - 2*q)/(Lw*Lw);
+      }
+      double dw[3] = {0, 0, 0}, ddw[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+      if (r > bl.r1) {
+        for (int k = 0; k < 3; ++k) {
+          const double nk = bl.x[k]/r;
+          dw[k] = w1*nk;
+          for (int l = 0; l < 3; ++l) {
+            const double nl = bl.x[l]/r;
+            ddw[k][l] = w2*nk*nl + w1*((k == l ? 1.0 : 0.0) - nk*nl)/r;
+          }
+        }
+      }
+      double M[3][3], dM[3][3][3], ddM[3][3][3][3];
+      for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+        const double h = gt[i][j] - (i == j ? 1.0 : 0.0);
+        M[i][j] = (i == j ? 1.0 : 0.0) + w*h;
+        for (int k = 0; k < 3; ++k) {
+          dM[k][i][j] = dw[k]*h + w*dgt[k][i][j];
+          for (int l = 0; l < 3; ++l)
+            ddM[k][l][i][j] = ddw[k][l]*h + dw[k]*dgt[l][i][j] + dw[l]*dgt[k][i][j]
+                              + w*ddgt[k][l][i][j];
+        }
+      }
+      double Mi[3][3], dum;
+      Conformal3(M, dM, ddM, gt, Mi, dgt, ddgt, &dum);
+      // gtu = gb^-1 = Mi det(M)^(1/3) ... recompute from gt directly
+      const double Dg = gt[0][0]*(gt[1][1]*gt[2][2] - gt[1][2]*gt[2][1])
+                      - gt[0][1]*(gt[1][0]*gt[2][2] - gt[1][2]*gt[2][0])
+                      + gt[0][2]*(gt[1][0]*gt[2][1] - gt[1][1]*gt[2][0]);
+      gtu[0][0] = (gt[1][1]*gt[2][2] - gt[1][2]*gt[2][1])/Dg;
+      gtu[0][1] = (gt[0][2]*gt[2][1] - gt[0][1]*gt[2][2])/Dg;
+      gtu[0][2] = (gt[0][1]*gt[1][2] - gt[0][2]*gt[1][1])/Dg;
+      gtu[1][1] = (gt[0][0]*gt[2][2] - gt[0][2]*gt[2][0])/Dg;
+      gtu[1][2] = (gt[0][2]*gt[1][0] - gt[0][0]*gt[1][2])/Dg;
+      gtu[2][2] = (gt[0][0]*gt[1][1] - gt[0][1]*gt[1][0])/Dg;
+      gtu[1][0] = gtu[0][1]; gtu[2][0] = gtu[0][2]; gtu[2][1] = gtu[1][2];
+      for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) gi[i][j] = gtu[i][j]*e;
     }
   }
   // Gamma_lij (lowered) and its derivative; Gt^k_ij and d_m Gt^k_ij
@@ -146,11 +243,18 @@ Conf Form(const double f[16], const double d1[3][16], const double d2[6][16]) {
   return o;
 }
 
-Conf AtPolar(const kstab::Table &t, double rf, double th, double ph = 0) {
+Conf AtPolar(const kstab::Table &t, double rf, double th, double ph = 0, double br1 = 0,
+             double br2 = 0) {
   double f[16], d1[3][16], d2[6][16];
-  t.eval_d(rf*std::sin(th)*std::cos(ph), rf*std::sin(th)*std::sin(ph), rf*std::cos(th),
-           f, d1, d2);
-  return Form(f, d1, d2);
+  Blend bl;
+  bl.x[0] = rf*std::sin(th)*std::cos(ph);
+  bl.x[1] = rf*std::sin(th)*std::sin(ph);
+  bl.x[2] = rf*std::cos(th);
+  bl.on = br2 > 0;
+  bl.r1 = br1;
+  bl.r2 = br2;
+  t.eval_d(bl.x[0], bl.x[1], bl.x[2], f, d1, d2);
+  return Form(f, d1, d2, bl);
 }
 
 // N = -alpha^2 + g_ij chi^i chi^j on phi = 0 (y = 0): chi = beta + Omega_H (0, x, 0)
@@ -341,13 +445,104 @@ int Run(const char *tab, double a, int nr, int nth) {
                                           static_cast<int>(t.fallback_count()));
   return 0;
 }
+// K-004 A2: V2a-U on the D3-blended gt. r1, r2 = (f1, f2) max_th r_AH (F1), table units.
+// Regions: r_f < r1 (flat gt: Rt = 0), [r1, r2] (linear in r_f, >= 50 points), r_f >= r2;
+// each scanned on a deterministic (r_f, th) grid, then refined twice about the minimum.
+int RunBlend(const char *tab, double a, double rahmax, double f1, double f2, int nrt,
+             int nth) {
+  kstab::Table t(tab);
+  const double rmin = t.rmin, rmax = 1e3, r1 = f1*rahmax, r2 = f2*rahmax;
+  struct Best { double v = 1e300, r = 0, th = 0, c0 = 0, rt = 0, psi = 0; };
+  // wst/umin: the largest drop of 4 r_f^2 c0 caused by the blend (unblended minus blended at
+  // the same point; > 0 where the blend lowers it) and the unblended minimum, over the scan
+  auto scan = [&](bool logr, double ra, double rb, double t0, double t1, int n1, int n2,
+                  Best &b, int &nneg, double &dmax, double &gmax, Best &wst, double &umin) {
+    std::vector<Best> bs(omp_get_max_threads()), ws(bs.size());
+    std::vector<double> um(bs.size(), 1e300);
+    for (Best &x : ws) x.v = -1e300;
+    std::vector<int> ng(bs.size(), 0);
+    std::vector<double> dm(bs.size(), 0), gm(bs.size(), 0);
+#pragma omp parallel for collapse(2) schedule(dynamic, 16)
+    for (int i = 0; i < n1; ++i) for (int j = 0; j < n2; ++j) {
+      const double q = static_cast<double>(i)/(n1 - 1);
+      const double r = logr ? std::exp(std::log(ra) + (std::log(rb) - std::log(ra))*q)
+                            : ra + (rb - ra)*q;
+      const double th = t0 + (t1 - t0)*j/(n2 - 1);
+      Conf c = AtPolar(t, r, th, 0.0, r1, r2);
+      const int me = omp_get_thread_num();
+      const double v = 4*r*r*c.c0;
+      if (c.c0 < 0) ng[me]++;
+      dm[me] = std::fmax(dm[me], c.detm1);
+      gm[me] = std::fmax(gm[me], c.gtrace);
+      if (v < bs[me].v) bs[me] = {v, r, th, c.c0, c.rt, c.psi};
+      const double vu = (r < r2) ? 4*r*r*AtPolar(t, r, th).c0 : v;
+      um[me] = std::fmin(um[me], vu);
+      if (vu - v > ws[me].v) ws[me] = {vu - v, r, th, 0, 0, 0};
+    }
+    for (size_t m = 0; m < bs.size(); ++m) {
+      if (bs[m].v < b.v) b = bs[m];
+      nneg += ng[m];
+      dmax = std::fmax(dmax, dm[m]);
+      gmax = std::fmax(gmax, gm[m]);
+      if (ws[m].v > wst.v) wst = ws[m];
+      umin = std::fmin(umin, um[m]);
+    }
+  };
+  struct Reg { const char *name; bool logr; double ra, rb; int n1; };
+  const Reg regs[3] = {{"r_f<r1   ", true, rmin*(1 + 1e-12), r1, 64},
+                       {"r1<=r_f<r2", false, r1, r2, nrt},
+                       {"r_f>=r2  ", true, r2, rmax, 1024}};
+  std::printf("BLEND a %.3f r_AH,max %.6f f1 %.3f f2 %.3f: r1 %.6f r2 %.6f; D4 floor needs "
+              "r_AH,min from F1\n", a, rahmax, f1, f2, r1, r2);
+  for (const Reg &g : regs) {
+    Best b, wst;
+    wst.v = -1e300;
+    int nneg = 0;
+    double dmax = 0, gmax = 0, umin = 1e300;
+    scan(g.logr, g.ra, g.rb, 0, M_PI, g.n1, nth, b, nneg, dmax, gmax, wst, umin);
+    const int ncoarse = nneg;
+    double dq = 1.0/(g.n1 - 1), dt = M_PI/(nth - 1);
+    for (int pass = 0; pass < 2; ++pass) {
+      int dummy = 0;
+      double d1 = 0, d2 = 0, u1 = 1e300;
+      Best w1;
+      w1.v = -1e300;
+      double lo, hi;
+      if (g.logr) {
+        const double L = std::log(g.rb/g.ra);
+        lo = std::fmax(g.ra, b.r*std::exp(-2*dq*L));
+        hi = std::fmin(g.rb, b.r*std::exp(2*dq*L));
+      } else {
+        lo = std::fmax(g.ra, b.r - 2*dq*(g.rb - g.ra));
+        hi = std::fmin(g.rb, b.r + 2*dq*(g.rb - g.ra));
+      }
+      scan(g.logr, lo, hi, std::fmax(0.0, b.th - 2*dt), std::fmin(M_PI, b.th + 2*dt), 33, 33,
+           b, dummy, d1, d2, w1, u1);
+      dq /= 8; dt /= 8;
+    }
+    std::printf("BHARDY a %.3f %s: min 4 r_f^2 c0 = %+.6e at r_f %.6e (r_f/r_AH,max %.4f) "
+                "th %.6f (c0 %+.4e, Rt/8 %+.4e, 7/8 psi^-8 A^2 %+.4e); c0 < 0 at %d of %d; "
+                "max|det gt - 1| %.2e max|Gt^k_ki| %.2e; unblended min %+.6e; largest drop "
+                "by the blend (unblended - blended) %+.3e at r_f/r_AH,max %.4f th %.4f [info; gate is A3]\n", a,
+                g.name, b.v, b.r, b.r/rahmax, b.th, b.c0, b.rt/8, b.c0 - b.rt/8, ncoarse,
+                g.n1*nth, dmax, gmax, umin, wst.v, wst.r/rahmax, wst.th);
+  }
+  if (t.fallback_count() > 0) std::printf("WARNING fallback used %d times\n",
+                                          static_cast<int>(t.fallback_count()));
+  return 0;
+}
 }  // namespace
 
 int main(int argc, char **argv) {
+  if (argc >= 7 && std::string(argv[1]) == "blend")
+    return RunBlend(argv[2], std::atof(argv[3]), std::atof(argv[4]), std::atof(argv[5]),
+                    std::atof(argv[6]), argc > 7 ? std::atoi(argv[7]) : 200,
+                    argc > 8 ? std::atoi(argv[8]) : 257);
   if (argc >= 4 && std::string(argv[1]) == "f4") return F4Check(argv[2], argv[3]);
   if (argc >= 4 && std::string(argv[1]) == "run")
     return Run(argv[2], std::atof(argv[3]), argc > 4 ? std::atoi(argv[4]) : 1024,
                argc > 5 ? std::atoi(argv[5]) : 257);
-  std::fprintf(stderr, "usage: %s f4 KSTAB F4 | run KSTAB A [NR NTH]\n", argv[0]);
+  std::fprintf(stderr, "usage: %s f4 KSTAB F4 | run KSTAB A [NR NTH] | blend KSTAB A RAHMAX "
+               "F1 F2 [NRT NTH]\n", argv[0]);
   return 2;
 }

@@ -110,8 +110,10 @@ struct SigmaMHist {
 // blend/IL) and the FA energy deficit |dtau|/(tau + D). Bins: [0] < 1e-12, [1..56]
 // quarter decades from 1e-12 to 1e2, [57] >= 1e2 or NaN; plus the exact maximum per
 // (set, magn bin). Written to <basename>.rlog.txt at the rhist times; not carried
-// across restarts.
-enum LogSet {kLogEpsUnflagged = 0, kLogEpsFlagged = 1, kLogFADeficit = 2, kNLogSets = 3};
+// across restarts. kLogDoff (resistive_d4 = offset|offset_emc, 07 v2.10 §3.2.5(g)):
+// |dE_c|/|B| of all interior cells at every recorded c2p.
+enum LogSet {kLogEpsUnflagged = 0, kLogEpsFlagged = 1, kLogFADeficit = 2, kLogDoff = 3,
+             kNLogSets = 4};
 constexpr int kLogBins = 58;
 
 struct ProtoLog {

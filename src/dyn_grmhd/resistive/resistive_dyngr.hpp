@@ -16,6 +16,7 @@
 //!  * qflx    : explicit convective charge current through each face (07 §2.3).
 //!  * emc     : cell-centred undensitised Eulerian (E^x,E^y,E^z,B^x,B^y,B^z), set by c2p.
 //!  * cwork   : cell work array of the implicit step: u^i, R_e^i, B^i, sdt.
+//!  * doff    : resistive_d4 = offset|offset_emc only: persistent cell offset dE_c.
 //! The Ohmic stiff sources of E~ are stored in Driver::impl_src_e.
 //!
 //! SMR (static refinement, 07 D3): E~ is restricted (face-area average) before and
@@ -51,7 +52,8 @@ enum {kEX = 0, kEY = 1, kEZ = 2, kBX = 3, kBY = 4, kBZ = 5, kNEMC = 6};
 // cell layout of cwork; kWF/kWE (07 v2.8 §3.2.3(d)): flag bits of the last implicit solve
 // (consumed and cleared by ResistiveC2P) and the cell E it returned (R if it failed)
 enum {kWU = 0, kWR = 3, kWB = 6, kWS = 9, kWF = 10, kWE = 11, kNWORK = 14};
-enum {kFlagSolved = 1, kFlagFallback = 2};
+// kFlagFailed (resistive_d4 = offset|offset_emc|resplit only): the solve hard-failed
+enum {kFlagSolved = 1, kFlagFallback = 2, kFlagFailed = 4};
 // test-only probe (07 v2.9 §3.2.4(e), resistive_probe.hpp): per-cell implicit-solve
 // record (reason, CellSolveResult flag bits, iterations, W of the ideal c2p on the
 // pre-solve totals and its error code, W and E of the returned state) and the EdgeSolve
@@ -80,6 +82,13 @@ class ResistiveDynGR {
   DvceEdgeFld4D<Real> hfld;
   DvceArray5D<Real> emc;
   DvceArray5D<Real> cwork;
+  // resistive_d4 = offset|offset_emc only (07 v2.10 §3.2.5): persistent cell offset
+  // dE_c = E_solve - FaceAvg(E~)/sqrt(gamma) (undensitised), set at the c2p after each
+  // cell solve, restarted; (nmb, 3, n3, n2, n1)
+  DvceArray5D<Real> doff;
+  // resistive_d4 = resplit only: cumulative volume-integrated EM energy change of the
+  // re-split (interior cells, this rank; reduced when written to the rlog)
+  Real resplit_de = 0.0;
   // resistive_freeze_background only: -(initial discrete dE~/dt), added in CTE
   DvceFaceFld4D<Real> esrc;
   bool esrc_set = false;
@@ -153,20 +162,27 @@ class ResistiveDynGR {
   // The blob starts with a format header (07 v2.6 R1): 8-byte magic, uint32 version,
   // uint32 payload size. Bump kRestartVersion whenever the payload layout changes.
   static constexpr char kRestartMagic[9] = "ATKRESIS";
-  static constexpr uint32_t kRestartVersion = 2;  // 2: rhist columns of 07 v2.8
+  // 2: rhist columns of 07 v2.8; 3: + uint32 dE_c flag and pad (07 v2.10 §3.2.5(e)),
+  // the dE_c cell data follow e0 in the MeshBlock data. Version 2 is still read (no
+  // dE_c), except under resistive_d4 = offset|offset_emc.
+  static constexpr uint32_t kRestartVersion = 3;
   static constexpr std::size_t RestartHeaderSize() { return 8 + 2*sizeof(uint32_t); }
-  static constexpr std::size_t RestartStateSize() {
+  static constexpr std::size_t RestartStateSize(uint32_t ver = kRestartVersion) {
     return 2*sizeof(Real) + sizeof(int64_t)*(kNewtonNCounters +
-                                             kHistBinnings*kHistBins*kHNCounters);
+                                             kHistBinnings*kHistBins*kHNCounters) +
+           ((ver >= 3) ? 2*sizeof(uint32_t) : 0);
   }
   // header + payload, as written to the restart file
   static constexpr std::size_t RestartBlockSize() {
     return RestartHeaderSize() + RestartStateSize();
   }
-  // Aborts with a clear message unless the header matches this binary's format.
-  static void CheckRestartHeader(const char *hdr);
+  // Aborts with a clear message unless the header is a format this binary reads;
+  // returns the payload size.
+  static std::size_t CheckRestartHeader(const char *hdr);
   void PackRestartState(char *buf) const;      // writes header + payload
-  void UnpackRestartState(const char *buf);    // reads the payload (header checked first)
+  // reads the payload of the given size (header checked first); aborts if the file's
+  // dE_c presence does not match resistive_d4
+  void UnpackRestartState(const char *buf, std::size_t size);
 
  private:
   MeshBlockPack *pmy_pack;

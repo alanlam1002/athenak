@@ -268,8 +268,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
       MPI_Bcast(rhdr.data(), hsize, MPI_CHAR, 0, MPI_COMM_WORLD);
     }
 #endif
-    resistive::ResistiveDynGR::CheckRestartHeader(rhdr.data());
-    const std::size_t rsize = resistive::ResistiveDynGR::RestartStateSize();
+    const std::size_t rsize = resistive::ResistiveDynGR::CheckRestartHeader(rhdr.data());
     std::vector<char> rdata(rsize);
     if (global_variable::my_rank == 0 || single_file_per_rank) {
       if (resfile.Read_bytes(rdata.data(), 1, rsize, single_file_per_rank) != rsize) {
@@ -284,7 +283,7 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
       MPI_Bcast(rdata.data(), rsize, MPI_CHAR, 0, MPI_COMM_WORLD);
     }
 #endif
-    presist->UnpackRestartState(rdata.data());
+    presist->UnpackRestartState(rdata.data(), rsize);
   }
 
   // root process reads size of CC and FC data arrays from restart file
@@ -335,6 +334,9 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     data_size_ += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
     data_size_ += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
     data_size_ += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
+    if (presist->params.Offset()) {
+      data_size_ += nout1*nout2*nout3*3*sizeof(Real);    // resistive doff
+    }
   }
   if (prad != nullptr) {
     data_size_ += nout1*nout2*nout3*nrad*sizeof(Real);   // rad i0
@@ -561,6 +563,31 @@ ProblemGenerator::ProblemGenerator(ParameterInput *pin, Mesh *pm, IOWrapper resf
     offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
     offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
     myoffset = offset_myrank;
+    if (presist->params.Offset()) {
+      // persistent cell offset dE_c (07 v2.10 §3.2.5(e))
+      Kokkos::realloc(ccin, nmb, 3, nout3, nout2, nout1);
+      for (int m=0; m<noutmbs_max; ++m) {
+        if (m >= pm->nmb_thisrank) continue;
+        auto mbptr = Kokkos::subview(ccin, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        const bool sfr = single_file_per_rank;
+        size_t nr = (m < noutmbs_min) ?
+            resfile.Read_Reals_at_all(mbptr.data(), mbcnt, myoffset, sfr) :
+            resfile.Read_Reals_at(mbptr.data(), mbcnt, myoffset, sfr);
+        if (nr != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "resistive doff not read correctly from rst file, "
+                    << "restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+      }
+      Kokkos::deep_copy(Kokkos::subview(presist->doff, std::make_pair(0,nmb),
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), ccin);
+      offset_myrank += nout1*nout2*nout3*3*sizeof(Real);    // resistive doff
+      myoffset = offset_myrank;
+    }
   }
 
   if (prad != nullptr) {

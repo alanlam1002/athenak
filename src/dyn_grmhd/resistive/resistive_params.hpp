@@ -46,7 +46,8 @@ enum class ChargeFlux {upwind, rusanov};
 enum class RSolver {mhllc, lf};
 enum class SigmaModel {uniform, density};
 enum class NewtonFallback {lagged_v, fail, blend};
-enum class D4Mode {average, keep};
+// 07 v2.10 §3.2.5(g): offset (a'), offset_emc (a''), resplit (b, comparison only)
+enum class D4Mode {average, keep, offset, offset_emc, resplit};
 enum class ImplicitResidual {c2p, momentum};
 
 struct ResistiveParams {
@@ -71,8 +72,11 @@ struct ResistiveParams {
   int fail_reason_cycles = 0;
   // FA/blend or d4 keep on: ResistiveC2P consumes the per-cell flags (D4 keep/eps_D4)
   bool Prototype() const {
-    return newton_fallback == NewtonFallback::blend || floor_accept || d4 == D4Mode::keep;
+    return newton_fallback == NewtonFallback::blend || floor_accept ||
+           d4 != D4Mode::average;
   }
+  // persistent cell offset dE_c (07 v2.10 §3.2.5) allocated, used and restarted
+  bool Offset() const { return d4 == D4Mode::offset || d4 == D4Mode::offset_emc; }
 };
 
 // True only if <block>/resistive exists and is true. Never adds keys to pin.

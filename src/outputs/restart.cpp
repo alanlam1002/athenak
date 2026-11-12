@@ -331,6 +331,9 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     data_size += (nout1+1)*nout2*nout3*sizeof(Real);    // resistive e0.x1f
     data_size += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
     data_size += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
+    if (presist->params.Offset()) {
+      data_size += nout1*nout2*nout3*3*sizeof(Real);    // resistive doff
+    }
   }
   if (prad != nullptr) {
     data_size += nout1*nout2*nout3*nrad*sizeof(Real);   // radiation i0
@@ -548,6 +551,32 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
     offset_myrank += nout1*(nout2+1)*nout3*sizeof(Real);    // resistive e0.x2f
     offset_myrank += nout1*nout2*(nout3+1)*sizeof(Real);    // resistive e0.x3f
     myoffset = offset_myrank;
+    if (presist->params.Offset()) {
+      // persistent cell offset dE_c (07 v2.10 §3.2.5(e))
+      HostArray5D<Real> dout("rst-doff", nmb, 3, nout3, nout2, nout1);
+      Kokkos::deep_copy(dout, Kokkos::subview(presist->doff, std::make_pair(0,nmb),
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL));
+      for (int m=0; m<noutmbs_max; ++m) {
+        if (m >= pm->nmb_thisrank) continue;
+        auto mbptr = Kokkos::subview(dout, m, Kokkos::ALL, Kokkos::ALL, Kokkos::ALL,
+                                     Kokkos::ALL);
+        size_t mbcnt = mbptr.size();
+        size_t nw = (m < noutmbs_min) ?
+            resfile.Write_any_type_at_all(mbptr.data(), mbcnt, myoffset, "Real",
+                                          single_file_per_rank) :
+            resfile.Write_any_type_at(mbptr.data(), mbcnt, myoffset, "Real",
+                                      single_file_per_rank);
+        if (nw != mbcnt) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "resistive doff not written correctly to rst file, "
+                    << "restart file is broken." << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        myoffset += data_size;
+      }
+      offset_myrank += nout1*nout2*nout3*3*sizeof(Real);    // resistive doff
+      myoffset = offset_myrank;
+    }
   }
 
   if (prad != nullptr) {

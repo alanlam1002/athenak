@@ -266,7 +266,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistivePre2(Driver *d, int stag
 
 template<class EOSPolicy, class ErrorPolicy>
 TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2PPre(Driver *d, int stage) {
-  if (stage == 1) ResistiveC2P();
+  if (stage == 1) ResistiveC2P(false, 0);
   return TaskStatus::complete;
 }
 
@@ -283,7 +283,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver *d, int
     presist->CheckConstantMetric();
     presist->ExchangeEBlocking();
   }
-  ResistiveC2P(stage > 0);
+  ResistiveC2P(stage > 0, (stage > 0) ? stage : -1);
   if (presist->Probing()) {
     resistive::ProbeFile f(presist->probe_base, pmy_pack, stage, "C");
     f.Add("u0", pmy_pack->pmhd->u0);
@@ -291,6 +291,7 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver *d, int
     f.Add("temp", temperature);
     f.Add("emc", presist->emc);
     f.Add("cw", presist->cwork);
+    if (presist->params.Offset()) f.Add("doff", presist->doff);
   }
   if (stage == d->nexp_stages) {
     presist->MaybeWriteHist(pmy_pack->pmesh->time + pmy_pack->pmesh->dt,
@@ -547,6 +548,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
   opt.floor_accept = presist->params.floor_accept;
   opt.floor_accept_tol = presist->params.floor_accept_tol;
   const bool proto = presist->params.Prototype();
+  // 07 v2.10 §3.2.5: R = E_split = FaceAvg(E~)/sqrt(gamma) + dE_c in the cell solve
+  const bool doffon = presist->params.Offset();
+  const bool d4fail = doffon || (presist->params.d4 == resistive::D4Mode::resplit);
+  auto doff_ = presist->doff;
   const resistive::ProtoLog plog = presist->plog;
   const int ncyc = pmy_pack->pmesh->ncycle;
   const bool dorfail = (ncyc < presist->params.fail_reason_cycles);
@@ -579,16 +584,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
     cons[CSZ] = u0_(m, IM3, k, j, i)*isg;
     cons[CTA] = u0_(m, IEN, k, j, i)*isg;
     for (int n = 0; n < nscal; ++n) cons[CYD + n] = u0_(m, nmhd + n, k, j, i)*isg;
-    Real B[3], R[3], ug[3];
+    // R: face average (also the face solves' input via kWR); Rs: the cell solve's
+    Real B[3], R[3], Rs[3], ug[3];
     for (int a = 0; a < 3; ++a) {
       B[a] = FaceAvg(bf, a, m, k, j, i)*isg;
       R[a] = FaceAvg(ef, a, m, k, j, i)*isg;
+      Rs[a] = doffon ? R[a] + doff_(m, a, k, j, i) : R[a];
       ug[a] = w0_(m, IVX + a, k, j, i);
     }
     const Real sdt = cond(w0_(m, IDN, k, j, i)).par*pm.alpha*adt;
     Real prim[NPRIM], E[3];
     resistive::CellSolveResult res = resistive::ResistiveCellSolve(
-        ps_, pm.g, gu, sdt, cons, B, R, ug, tol, maxit, fallback, prim, E, opt);
+        ps_, pm.g, gu, sdt, cons, B, Rs, ug, tol, maxit, fallback, prim, E, opt);
     nstat.Record(res.iterations, res.fallback, res.failed);
     if (probe) {
       // 07 v2.9 §3.2.4(e) items 2 and 4: ideal c2p W on the pre-solve totals
@@ -629,7 +636,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
         for (int n = 0; n < nscal; ++n) hp[PYF + n] = w0_(m, nmhd + n, k, j, i);
         for (int a = 0; a < 3; ++a) {
           hp[PVX + a] = ug[a];
-          eh[a] = R[a];
+          eh[a] = Rs[a];
         }
       }
       const Real rho = hp[PRH]*mb;
@@ -688,9 +695,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
       // flag + cell E for ResistiveC2P (07 v2.8 §3.2.3(d)): FA and blend/IL cells
       const bool flg = res.fa || res.blend || res.il;
       cw(m, resistive::kWF, k, j, i) = static_cast<Real>(
-          resistive::kFlagSolved + (flg ? resistive::kFlagFallback : 0));
+          resistive::kFlagSolved + (flg ? resistive::kFlagFallback : 0) +
+          ((d4fail && res.failed) ? resistive::kFlagFailed : 0));
       for (int a = 0; a < 3; ++a) {
-        cw(m, resistive::kWE + a, k, j, i) = res.failed ? R[a] : E[a];
+        cw(m, resistive::kWE + a, k, j, i) = res.failed ? Rs[a] : E[a];
       }
     }
   });
@@ -752,7 +760,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver *pdriver,
 //! the EM part from (S_i, tau), hydro c2p with B = 0. Sets w0, temperature, bcc0 and emc.
 
 template<class EOSPolicy, class ErrorPolicy>
-void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
+void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record,
+                                                     const int pstage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   const int n1 = indcs.nx1 + 2*indcs.ng;
   const int n2 = (indcs.nx2 > 1)? (indcs.nx2 + 2*indcs.ng) : 1;
@@ -776,6 +785,18 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
   // resistive_d4 = keep) keep their implicit-step fluid state; eps_D4 is logged
   const bool proto = presist->params.Prototype();
   const bool d4keep = (presist->params.d4 == resistive::D4Mode::keep);
+  // 07 v2.10 §3.2.5: the fluid split uses E_split = FaceAvg(E~)/sqrt(gamma) + dE_c, with
+  // dE_c = E_solve - FaceAvg(E~)/sqrt(gamma) set here after each cell solve (0 where the
+  // solve hard-failed). offset_emc also puts E_split into emc. resplit (comparison arm):
+  // after a solve, u0 += EM(E_face) - EM(E_solve) at fixed fluid.
+  const bool doffon = presist->params.Offset();
+  const bool emcsplit = (presist->params.d4 == resistive::D4Mode::offset_emc);
+  const bool resplit = (presist->params.d4 == resistive::D4Mode::resplit);
+  auto doff_ = presist->doff;
+  Kokkos::View<Real, DevMemSpace> rde;
+  if (resplit) rde = Kokkos::View<Real, DevMemSpace>("resist_resplit_de");
+  auto &mbsize = pmy_pack->pmb->mb_size;
+  const bool multi_d = (indcs.nx2 > 1), three_d = (indcs.nx3 > 1);
   const resistive::ProtoLog plog = presist->plog;
   auto cw = presist->cwork;
   const Real sigmax = presist->params.sigma_max;
@@ -783,6 +804,57 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
   const int is = indcs.is, ie = indcs.ie, js = indcs.js, ks = indcs.ks;
   const int je = (indcs.nx2 > 1) ? indcs.je : js;
   const int ke = (indcs.nx3 > 1) ? indcs.ke : ks;
+
+  if (doffon || resplit) {
+    // set dE_c after a cell solve (0 where it hard-failed), or re-split u0 (resplit)
+    const int nmb1 = nmb - 1;
+    par_for("resist_d4split", DevExeSpace(), 0, nmb1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      const int flag = static_cast<int>(cw(m, resistive::kWF, k, j, i));
+      if ((flag & resistive::kFlagSolved) == 0) return;
+      const bool sfailed = (flag & resistive::kFlagFailed) != 0;
+      resistive::PointMetric pm;
+      resistive::LoadMetric(adm, m, k, j, i, pm);
+      const Real sg = resistive::SqrtDet(pm.g);
+      const Real isg = 1.0/sg;
+      Real Ef[3], Es[3], B[3];
+      for (int a = 0; a < 3; ++a) {
+        B[a] = FaceAvg(bf, a, m, k, j, i)*isg;
+        Ef[a] = FaceAvg(ef, a, m, k, j, i)*isg;
+        Es[a] = cw(m, resistive::kWE + a, k, j, i);
+      }
+      if (doffon) {
+        for (int a = 0; a < 3; ++a) doff_(m, a, k, j, i) = sfailed ? 0.0 : Es[a] - Ef[a];
+        return;
+      }
+      if (sfailed) return;
+      Real ss_em[3], es_em, sf_em[3], ef_em;
+      resistive::EMParts(pm.g, sg, Es, B, ss_em, es_em);
+      resistive::EMParts(pm.g, sg, Ef, B, sf_em, ef_em);
+      u0_(m, IM1, k, j, i) += (sf_em[0] - ss_em[0])*sg;
+      u0_(m, IM2, k, j, i) += (sf_em[1] - ss_em[1])*sg;
+      u0_(m, IM3, k, j, i) += (sf_em[2] - ss_em[2])*sg;
+      u0_(m, IEN, k, j, i) += (ef_em - es_em)*sg;
+      if (i >= is && i <= ie && j >= js && j <= je && k >= ks && k <= ke) {
+        Real dv = mbsize.d_view(m).dx1;
+        if (multi_d) dv *= mbsize.d_view(m).dx2;
+        if (three_d) dv *= mbsize.d_view(m).dx3;
+        Kokkos::atomic_add(&rde(), (ef_em - es_em)*sg*dv);
+      }
+    });
+  }
+
+  if (presist->Probing() && pstage >= 0) {
+    // 07 v2.10 §3.2.5: c2p input (totals, solve flags and E, E~, dE_c) to log the
+    // admissibility of the fluid split with E_split and with FaceAvg(E~)
+    resistive::ProbeFile f(presist->probe_base, pmy_pack, (pstage > 0) ? pstage : 1,
+                           (pstage > 0) ? "P" : "Ppre");
+    f.Add("u0", u0_);
+    f.Add("cw", cw);
+    ProbeFace(&f, "e", ef);
+    ProbeFace(&f, "b", bf);
+    if (doffon) f.Add("doff", doff_);
+  }
 
   int nerr = 0;
   Kokkos::parallel_reduce("resist_c2p", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
@@ -804,6 +876,9 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
       bcc[a] = FaceAvg(bf, a, m, k, j, i);
       B[a] = bcc[a]*isg;
       E[a] = FaceAvg(ef, a, m, k, j, i)*isg;
+    }
+    if (doffon) {
+      for (int a = 0; a < 3; ++a) E[a] += doff_(m, a, k, j, i);
     }
     Real s_em[3], e_em;
     resistive::EMParts(pm.g, sg, E, B, s_em, e_em);
@@ -866,10 +941,20 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
       if (resistive::Dot(pm.g, E, E) > b2) hist.Add(bs, bm, resistive::kHEgtB);
       if (solved) {
         Real de[3];
-        for (int a = 0; a < 3; ++a) de[a] = E[a] - cw(m, resistive::kWE + a, k, j, i);
+        for (int a = 0; a < 3; ++a) {
+          // eps_D4 is against the face average (E - dE_c under offset|offset_emc)
+          de[a] = (doffon ? E[a] - doff_(m, a, k, j, i) : E[a])
+                  - cw(m, resistive::kWE + a, k, j, i);
+        }
         const Real eps = sqrt(fmax(resistive::Dot(pm.g, de, de), 0.0))/sqrt(b2);
         plog.Add(flagged ? resistive::kLogEpsFlagged : resistive::kLogEpsUnflagged, bm,
                  eps);
+      }
+      if (doffon) {
+        Real dc[3];
+        for (int a = 0; a < 3; ++a) dc[a] = doff_(m, a, k, j, i);
+        plog.Add(resistive::kLogDoff, bm,
+                 sqrt(fmax(resistive::Dot(pm.g, dc, dc), 0.0))/sqrt(b2));
       }
     }
     w0_(m, IDN, k, j, i) = prim[PRH]*mb;
@@ -881,7 +966,8 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
     temp_(m, 0, k, j, i) = prim[PTM];
     for (int a = 0; a < 3; ++a) {
       bcc_(m, a, k, j, i) = bcc[a];
-      emc_(m, resistive::kEX + a, k, j, i) = E[a];
+      emc_(m, resistive::kEX + a, k, j, i) =
+          (doffon && !emcsplit) ? E[a] - doff_(m, a, k, j, i) : E[a];
       emc_(m, resistive::kBX + a, k, j, i) = B[a];
     }
     if (res.cons_floor || res.cons_adjusted) {
@@ -893,6 +979,11 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(const bool record) {
       for (int n = 0; n < nscal; ++n) u0_(m, nmhd + n, k, j, i) = cons[CYD + n]*sg;
     }
   }, Kokkos::Sum<int>(nerr));
+  if (resplit) {
+    Real h = 0.0;
+    Kokkos::deep_copy(h, rde);
+    presist->resplit_de += h;
+  }
   if (nerr > 0) {
     std::cout << "### WARNING: resistive c2p failed in " << nerr << " cells on rank "
               << global_variable::my_rank << std::endl;
@@ -973,7 +1064,7 @@ template TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicit(Driver
 template TaskStatus \
     DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveConToPrim(Driver*, int); \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveImplicitSolve(Driver*, int); \
-template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(bool); \
+template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistiveC2P(bool, int); \
 template void DynGRMHDPS<EOSPolicy, ErrorPolicy>::ResistivePrimToCon(int, int, int, int, \
                                                                      int, int);
 

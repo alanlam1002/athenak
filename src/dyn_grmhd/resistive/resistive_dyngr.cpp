@@ -61,6 +61,7 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
     hfld("resist_h", 1, 1, 1, 1),
     emc("resist_emc", 1, 1, 1, 1, 1),
     cwork("resist_cwork", 1, 1, 1, 1, 1),
+    doff("resist_doff", 1, 1, 1, 1, 1),
     esrc("resist_esrc", 1, 1, 1, 1),
     pbval_e(nullptr), pbval_ei(nullptr), pbval_ep(nullptr), pbval_ep2(nullptr),
     psync{nullptr, nullptr, nullptr, nullptr},
@@ -113,6 +114,8 @@ ResistiveDynGR::ResistiveDynGR(MeshBlockPack *pp, ParameterInput *pin) :
   Kokkos::realloc(hfld.x3e, nmb, n3, n2+1, n1+1);
   Kokkos::realloc(emc, nmb, kNEMC, n3, n2, n1);
   Kokkos::realloc(cwork, nmb, kNWORK, n3, n2, n1);
+  // dE_c = 0 at the pgen (no solve yet); a restart overwrites it
+  if (params.Offset()) Kokkos::realloc(doff, nmb, 3, n3, n2, n1);
   probe_cycles = ProbeCycles(pin);
   probe_base = pin->GetString("job", "basename");
   if (probe_cycles > 0) {
@@ -813,6 +816,10 @@ void ResistiveDynGR::MaybeWriteRLog(const Real t_end, const int cycle) {
   Real mx[kNLogSets][kHistBins];
   plog.Read(h, mx);
   plog.Reset();
+  Real rde = resplit_de;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &rde, 1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
   if (global_variable::my_rank != 0) return;
   FILE *fp = std::fopen(rlog_fname.c_str(), rlog_header ? "a" : "w");
   if (fp == nullptr) return;
@@ -823,13 +830,19 @@ void ResistiveDynGR::MaybeWriteRLog(const Real t_end, const int cycle) {
                  kLogBins - 1);
   }
   rlog_header = true;
-  const char *label[kNLogSets] = {"eps_d4", "eps_d4_flagged", "fa_deficit"};
-  for (int s = 0; s < kNLogSets; ++s) {
+  const char *label[kNLogSets] = {"eps_d4", "eps_d4_flagged", "fa_deficit", "doff"};
+  const int nsets = params.Offset() ? kNLogSets : kLogDoff;
+  for (int s = 0; s < nsets; ++s) {
     for (int b = 0; b < kHistBins; ++b) {
       std::fprintf(fp, "%s %.10e %d %d %.6e", label[s], t_end, cycle, b, mx[s][b]);
       for (int c = 0; c < kLogBins; ++c) std::fprintf(fp, " %" PRId64, h[s][b][c]);
       std::fprintf(fp, "\n");
     }
+  }
+  // resistive_d4 = resplit: cumulative volume-integrated EM energy change (since the
+  // start of this run segment)
+  if (params.d4 == D4Mode::resplit) {
+    std::fprintf(fp, "resplit_de %.10e %d -1 %.10e\n", t_end, cycle, rde);
   }
   std::fclose(fp);
 }
@@ -866,7 +879,7 @@ void ResistiveDynGR::WriteRFail(const int cycle, const int stage) {
 //----------------------------------------------------------------------------------------
 //! Restart state: hist_dt, hist_next, Newton counters, pending histogram counts.
 
-void ResistiveDynGR::CheckRestartHeader(const char *hdr) {
+std::size_t ResistiveDynGR::CheckRestartHeader(const char *hdr) {
   uint32_t ver, size;
   std::memcpy(&ver, hdr + 8, sizeof(uint32_t));
   std::memcpy(&size, hdr + 8 + sizeof(uint32_t), sizeof(uint32_t));
@@ -875,12 +888,14 @@ void ResistiveDynGR::CheckRestartHeader(const char *hdr) {
           "written by a binary older than the R1 tag (07 v2.6) or without "
           "<mhd> resistive = true; it cannot be read by this binary.");
   }
-  if (ver != kRestartVersion || size != RestartStateSize()) {
+  if ((ver != 2 && ver != kRestartVersion) || size != RestartStateSize(ver)) {
     Fatal(__LINE__, "resistive restart block format mismatch: file version " +
           std::to_string(ver) + " (" + std::to_string(size) + " bytes), this binary "
-          "expects version " + std::to_string(kRestartVersion) + " (" +
+          "reads version 2 (" + std::to_string(RestartStateSize(2)) + " bytes) or " +
+          std::to_string(kRestartVersion) + " (" +
           std::to_string(RestartStateSize()) + " bytes).");
   }
+  return size;
 }
 
 void ResistiveDynGR::PackRestartState(char *buf) const {
@@ -898,10 +913,12 @@ void ResistiveDynGR::PackRestartState(char *buf) const {
   std::memcpy(buf + o, &hist_dt, sizeof(Real)); o += sizeof(Real);
   std::memcpy(buf + o, &hist_next, sizeof(Real)); o += sizeof(Real);
   std::memcpy(buf + o, ns, sizeof(ns)); o += sizeof(ns);
-  std::memcpy(buf + o, h, sizeof(h));
+  std::memcpy(buf + o, h, sizeof(h)); o += sizeof(h);
+  const uint32_t has_doff[2] = {params.Offset() ? 1u : 0u, 0u};
+  std::memcpy(buf + o, has_doff, sizeof(has_doff));
 }
 
-void ResistiveDynGR::UnpackRestartState(const char *buf) {
+void ResistiveDynGR::UnpackRestartState(const char *buf, const std::size_t size) {
   int64_t ns[kNewtonNCounters];
   int64_t h[kHistBinnings][kHistBins][kHNCounters];
   Real dt_rst, next_rst;
@@ -909,7 +926,16 @@ void ResistiveDynGR::UnpackRestartState(const char *buf) {
   std::memcpy(&dt_rst, buf + o, sizeof(Real)); o += sizeof(Real);
   std::memcpy(&next_rst, buf + o, sizeof(Real)); o += sizeof(Real);
   std::memcpy(ns, buf + o, sizeof(ns)); o += sizeof(ns);
-  std::memcpy(h, buf + o, sizeof(h));
+  std::memcpy(h, buf + o, sizeof(h)); o += sizeof(h);
+  uint32_t has_doff = 0;
+  if (size >= o + 2*sizeof(uint32_t)) std::memcpy(&has_doff, buf + o, sizeof(uint32_t));
+  if ((has_doff != 0) != params.Offset()) {
+    Fatal(__LINE__, std::string("resistive restart: the file ") +
+          (has_doff ? "holds" : "has no") + " persistent cell offset dE_c but this run "
+          "has <mhd> resistive_d4 " + (params.Offset() ? "= offset|offset_emc" :
+          "!= offset|offset_emc") + " (07 v2.10 §3.2.5(e)); restart with the key of "
+          "the run that wrote the file.");
+  }
   newton.Load(ns);
   hist.Load(h);
   if (dt_rst == hist_dt) hist_next = next_rst;

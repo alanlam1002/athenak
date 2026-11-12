@@ -163,9 +163,15 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
     rp.d4 = D4Mode::average;
   } else if (d4 == "keep") {
     rp.d4 = D4Mode::keep;
+  } else if (d4 == "offset") {
+    rp.d4 = D4Mode::offset;
+  } else if (d4 == "offset_emc") {
+    rp.d4 = D4Mode::offset_emc;
+  } else if (d4 == "resplit") {
+    rp.d4 = D4Mode::resplit;
   } else {
     Fatal(__LINE__, "<" + block + "> resistive_d4 = '" + d4 +
-          "' not recognised; use average|keep");
+          "' not recognised; use average|keep|offset|offset_emc|resplit");
   }
   rp.fail_reason_cycles = pin->GetOrAddInteger(block, "resistive_fail_reason_cycles", 0);
   if (rp.fail_reason_cycles < 0) {

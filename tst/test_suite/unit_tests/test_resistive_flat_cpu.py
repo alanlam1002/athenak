@@ -321,6 +321,25 @@ def test_restart_format_tag():
         assert proc.returncode != 0 and msg in proc.stdout, proc.stdout[-2000:]
 
 
+def test_restart_d4_offset():
+    """07 v2.10 §3.2.5(e): under resistive_d4 = offset the cell offset dE_c is restarted
+    (restarted run bitwise identical); restarting across offset/average keys aborts."""
+    keys = ["<output1>", "file_type = rst", "dt = 0.125"]
+    flags = _OT + ["meshblock/nx1=32", "meshblock/nx2=32", "mhd/resistive_sigma=100"]
+    _run("rt_off", keys + ["<mhd>", "resistive_d4 = offset"], flags)
+    os.makedirs("rt_offr", exist_ok=True)
+    _run("rt_off", restart=os.path.abspath("rst/rt_off.00001.rst"), cwd="rt_offr")
+    assert _state("rt_off") == _state("rt_offr/rt_off")
+    _run("rt_avg", keys, flags)
+    for name, d4, msg in (("rt_off", "average", "holds persistent cell offset"),
+                          ("rt_avg", "offset", "has no persistent cell offset")):
+        rst = os.path.abspath("rst/%s.00001.rst" % name)
+        proc = subprocess.run(_cmd(name, restart=rst) + ["mhd/resistive_d4=" + d4],
+                              cwd="rt_offr", stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, universal_newlines=True)
+        assert proc.returncode != 0 and msg in proc.stdout, proc.stdout[-2000:]
+
+
 # GR1 (07 step 2): constant sheared/boosted flat metric, alpha = 0.8, beta = (0.3, -0.2,
 # 0.1), gamma = M^T M with M lower triangular (all off-diagonal gamma_ij nonzero)
 _GR1 = ["gr1 = true", "alpha0 = 0.8", "beta1 = 0.3", "beta2 = -0.2", "beta3 = 0.1",

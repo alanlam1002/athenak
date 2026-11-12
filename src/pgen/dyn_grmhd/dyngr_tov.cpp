@@ -1017,6 +1017,26 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     tde_deb.dryrun        = pin->GetOrAddBoolean("problem", "amr_dryrun", false);
     tde_deb.diag_ncycle   = pin->GetOrAddInteger("problem", "amr_diag_ncycle", 50);
     tde_deb.gamma         = pin->GetOrAddReal("mhd", "gamma", 5.0/3.0);
+    // binding-aware policy (R-257 item 3(ii); tde_debris_refine.hpp header). Read only when
+    // the key exists (default off), so decks without it keep their parameter dump.
+    tde_deb.bind = pin->DoesParameterExist("problem", "amr_bind_policy") &&
+                   pin->GetBoolean("problem", "amr_bind_policy");
+    if (tde_deb.bind) {
+      tde_deb.bind_eunb        = pin->GetReal("problem", "amr_bind_eunb");
+      tde_deb.bind_r_unb       = pin->GetOrAddReal("problem", "amr_bind_r_unb", 30.0);
+      tde_deb.bind_r_unb2      = pin->GetOrAddReal("problem", "amr_bind_r_unb2", 150.0);
+      tde_deb.bind_r_zone      = pin->GetReal("problem", "amr_bind_r_zone");
+      tde_deb.bind_width_cells = pin->GetOrAddReal("problem", "amr_bind_width_cells", 4.0);
+      tde_deb.bind_lev_unb1    = pin->GetInteger("problem", "amr_bind_lev_unb1");
+      tde_deb.bind_lev_unb2    = pin->GetInteger("problem", "amr_bind_lev_unb2");
+      tde_deb.bind_lev_min     = pin->GetInteger("problem", "amr_bind_lev_min");
+      if (pmbp->pcfc == nullptr || pmbp->padm == nullptr || tde_deb.dryrun) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                  << "amr_bind_policy needs CFC (the hole's position and the frame velocity) "
+                  << "and amr_dryrun = false" << std::endl;
+        exit(EXIT_FAILURE);
+      }
+    }
     if (!(tde_deb.ladder_factor > 1.0) || !(tde_deb.deref_factor > 0.0) ||
         tde_deb.deref_factor > 1.0) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__

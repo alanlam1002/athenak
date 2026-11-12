@@ -107,9 +107,12 @@ void LoadKerrTable(const std::string &f2_prefix, const std::string &kstab_path,
                    KerrTable &t);
 
 //! \fn void KerrSetRow0Exact(KerrTable &t)
-//! \brief Replace F2's row 0 by the spectral nodes at r_f = r_min exactly. F2's row 0 sits
-//! at exp(ln r_min), 1 ulp below r_min at a = 0 and 0.6, where the generator's KSTAB reader
-//! returns its cylinder fallback (radial derivatives p F/r instead of the table's). Called
+//! \brief Replace F2's row 0 by the spectral nodes at r_f = r_min exactly. Some of F2's
+//! row-0 nodes are evaluated 1 ulp below r_min, where the generator's KSTAB reader returns
+//! its cylinder fallback (radial derivatives p F/r instead of the table's): at a = 0 and 0.6
+//! because the row sits at exp(ln r_min), and at 0.97, 0.98, 0.995 and 0.997 because the
+//! reader's recomputed r_f = hypot(r sin th, r cos th) (kstab.hpp:275) rounds below r_min
+//! at some th (KS-108, RK-017). The replacement evaluates r_f = r_min as given. Called
 //! by the CFC path at load unless <cfc> kerr_row0_exact = false (RK-004 sec. 8.1); the unit
 //! test does the same unless KERR_ROW0_EXACT=0.
 void KerrSetRow0Exact(KerrTable &t);

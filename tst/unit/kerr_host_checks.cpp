@@ -368,6 +368,13 @@ int Run(const char *tab, double a, int nr, int nth) {
               nah, (nbad == 0 && amax/amin < 1.5) ? "PASS" : "FAIL");
   std::printf("AH a %.3f blend 0.5 max r_AH %.6f vs excision 0.75 min r_AH %.6f\n", a,
               0.5*amax, rexc);
+  // KHC_AH_ONLY (K-006 D5): print r_AH at every th and skip (a)
+  const char *aho = std::getenv("KHC_AH_ONLY");
+  if (aho != nullptr && std::atoi(aho) != 0) {
+    for (int j = 0; j < nah; ++j)
+      std::printf("AHPROF a %.3f j %d th %.17e r_AH %.17e\n", a, j, M_PI*j/(nah - 1), rah[j]);
+    return nbad == 0 ? 0 : 1;
+  }
   // (a) V2a-U on a (ln r_f, th) grid over [r_min, 1e3] x [0, pi], then refine at the minima
   struct Best { double v = 1e300, r = 0, th = 0, c0 = 0, rt = 0, ah = 0, psi = 0; };
   auto scan = [&](double lr0, double lr1, double t0, double t1, int n1, int n2, double rcut,

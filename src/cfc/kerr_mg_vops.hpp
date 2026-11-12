@@ -303,20 +303,25 @@ template <class Acc>
 KOKKOS_INLINE_FUNCTION
 void VecS(const Acc &A, int k, int j, int i, Real h, Real S[3]) {
   using kerr_impl::Sym;
-  Real Tl[3][6], Tu[3][6];
-  FaceT(A, 0, k, j, i, h, Tl[0]);
-  FaceT(A, 0, k, j, i + 1, h, Tu[0]);
-  FaceT(A, 1, k, j, i, h, Tl[1]);
-  FaceT(A, 1, k, j + 1, i, h, Tu[1]);
-  FaceT(A, 2, k, j, i, h, Tl[2]);
-  FaceT(A, 2, k + 1, j, i, h, Tu[2]);
-  Real Tb[6];
-  for (int q = 0; q < 6; ++q) {
-    Tb[q] = (Tl[0][q] + Tu[0][q] + Tl[1][q] + Tu[1][q] + Tl[2][q] + Tu[2][q])/6.0;
-  }
+  // One face pair at a time (K-006a A): with the six-face Tl/Tu[3][6] form, the vector Defect
+  // kernel gave different results on bitwise-identical inputs (A1: ~100 events per run on
+  // PVC); this form cuts that to ~1 event in 50 runs. Same summation order as that form, so
+  // the results are bitwise the same when the kernel behaves.
+  Real Tl[6], Tu[6], Tb[6], sd[3] = {0.0, 0.0, 0.0};
+  FaceT(A, 0, k, j, i, h, Tl);
+  FaceT(A, 0, k, j, i + 1, h, Tu);
+  for (int q = 0; q < 6; ++q) { Tb[q] = Tl[q] + Tu[q]; }
+  for (int a = 0; a < 3; ++a) { sd[a] += Tu[Sym(a, 0)] - Tl[Sym(a, 0)]; }
+  FaceT(A, 1, k, j, i, h, Tl);
+  FaceT(A, 1, k, j + 1, i, h, Tu);
+  for (int q = 0; q < 6; ++q) { Tb[q] = Tb[q] + Tl[q] + Tu[q]; }
+  for (int a = 0; a < 3; ++a) { sd[a] += Tu[Sym(a, 1)] - Tl[Sym(a, 1)]; }
+  FaceT(A, 2, k, j, i, h, Tl);
+  FaceT(A, 2, k + 1, j, i, h, Tu);
+  for (int q = 0; q < 6; ++q) { Tb[q] = (Tb[q] + Tl[q] + Tu[q])/6.0; }
+  for (int a = 0; a < 3; ++a) { sd[a] += Tu[Sym(a, 2)] - Tl[Sym(a, 2)]; }
   for (int a = 0; a < 3; ++a) {
-    Real s = 0.0;
-    for (int d = 0; d < 3; ++d) { s += Tu[d][Sym(a, d)] - Tl[d][Sym(a, d)]; }
+    const Real s = sd[a];
     Real gs = 0.0;
     for (int q = 0; q < 6; ++q) {
       const Real w = (q == 0 || q == 3 || q == 5) ? 1.0 : 2.0;

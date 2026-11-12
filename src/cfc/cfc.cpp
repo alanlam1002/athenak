@@ -1483,8 +1483,13 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
 
   // <cfc> mg_regrid_norm = max (R-218 item 1): the four solves of this re-solve (X, psi
   // here; alpha_psi, beta in RunLapseShiftAssemblePass below) converge on the max norm to
-  // regrid_thr_; restored after RunLapseShiftAssemblePass
+  // regrid_thr_; restored after RunLapseShiftAssemblePass. On the Kerr path the passes
+  // solve with the Kerr drivers (cfc.cpp:2659, :2817, :2934, :2994 -> cfc_kerr.cpp:423-600),
+  // so they get the override instead
   MultigridDriver *rdrv[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
+  if (kerr_background_) {
+    rdrv[0] = pkx_; rdrv[1] = pkpsi_; rdrv[2] = pkchi_; rdrv[3] = pkbeta_;
+  }
   if (regrid_max_) {
     for (auto *d : rdrv) d->BeginConvergenceOverride(MGNormScaling::max, regrid_thr_);
   }

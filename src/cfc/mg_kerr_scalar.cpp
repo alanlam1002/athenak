@@ -451,11 +451,16 @@ void MGKerrScalarDriver::Prepare() {
     // restrictions leave its channels alone (Multigrid::RestrictCoefficients writes levels
     // < finest only; TransferCoeffToRoot reads level-0 interiors, which it has written),
     // so only the coarser block levels need the second fill (bitwise as before, K-005 B1)
+    // K-006 C: if this driver's own key still matches (no regrid since its last Prepare,
+    // the same arrays), its finest background is intact and the coarser block levels'
+    // background is restored from bgsave_ (saved at the last fill) instead of refilled
     const int lfin = lv->GetNumberOfLevels() - 1;
-    key_.ok = false;
     lv->FillAllLevelsBg(cs_, 1, 0);   // extents and storage only
-    const bool shared = CopyBgFromDonor(lfin, lfin);
-    if (!shared) { lv->FillAllLevelsBg(cs_, lfin, lfin); }
+    const bool self = coeff_cache_ && static_cast<int>(bgsave_.size()) == lfin &&
+                      BgIntactFor(cs_);
+    key_.ok = false;
+    const bool shared = !self && CopyBgFromDonor(lfin, lfin);
+    if (!self && !shared) { lv->FillAllLevelsBg(cs_, lfin, lfin); }
     rt->FillAllLevelsBg(cs_);
     if (matter_ext_) {
       lv->FillFinestMatterExt(ext_m_, ext_da2_, ext_dpsi_, kind_ == kmg::kKindChi, ext_ngh_);
@@ -466,13 +471,25 @@ void MGKerrScalarDriver::Prepare() {
     TransferCoeffToRoot();
     RestrictCoeffOctets();
     rt->RestrictCoefficients();
-    if (lfin > 0 && !(shared && CopyBgFromDonor(0, lfin - 1))) {
-      lv->FillAllLevelsBg(cs_, 0, lfin - 1);
+    if (lfin > 0) {
+      bool restored = self;
+      for (int lev = 0; restored && lev < lfin; ++lev) {
+        restored = kmg::CopyBgChannels(lv->CoeffAtLevel(lev).d_view, bgsave_[lev]);
+      }
+      if (!restored && !(shared && CopyBgFromDonor(0, lfin - 1))) {
+        lv->FillAllLevelsBg(cs_, 0, lfin - 1);
+      }
+    }
+    if (coeff_cache_ && !self) {
+      bgsave_.clear();
+      for (int lev = 0; lev < lfin; ++lev) {
+        bgsave_.push_back(kmg::CloneView(lv->CoeffAtLevel(lev).d_view));
+      }
     }
     rt->FillAllLevelsBg(cs_);
     FillOctetCoeffs(true);
-    if (shared) { ++bg_copies_; } else { ++bg_fills_; }
-    if (shared && cache_check_) {
+    if (self) { ++bg_self_; } else if (shared) { ++bg_copies_; } else { ++bg_fills_; }
+    if ((self || shared) && cache_check_) {
       // KERR_MG_CACHECHECK: refill the copied background and count what differs
       std::vector<DvceArray5D<Real>> save;
       for (int lev = 0; lev <= lfin; ++lev) {

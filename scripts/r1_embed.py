@@ -40,7 +40,8 @@ import sys
 import numpy as np
 
 LEVEL_KEYS = ('amr_level_bh', 'amr_level_bh_fine', 'amr_level_core', 'amr_level_debris', 'amr_level_floor',
-              'amr_level_stream', 'amr_pin_level')
+              'amr_level_stream', 'amr_pin_level', 'amr_level_debris_fine',   # c258: variant A's fine level
+              'amr_bind_lev_unb1', 'amr_bind_lev_unb2', 'amr_bind_lev_min')   # c258: the binding-aware policy (R-257 3(ii))
 
 
 def read(fn):

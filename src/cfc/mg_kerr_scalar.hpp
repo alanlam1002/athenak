@@ -199,12 +199,10 @@ class MGKerrScalarDriver : public MultigridDriver {
 
   //! K-005 B1 (kinds psi/chi): the block levels' background channels are copied from
   //! bg_donor_ (cfc_kerr.cpp: chi takes psi's, filled earlier in the same stage) when its
-  //! kmg::CoeffKey still matches; K-006 C: or, when the driver's own key still matches,
-  //! kept from its previous Prepare (bg_self_; see Prepare). KERR_MG_NOCACHE=1 fills every
-  //! solve (the A/B check)
+  //! kmg::CoeffKey still matches; KERR_MG_NOCACHE=1 fills every solve (the A/B check)
   MGKerrScalarDriver *bg_donor_ = nullptr;
   bool coeff_cache_ = true;
-  long bg_fills_ = 0, bg_copies_ = 0, bg_self_ = 0;
+  long bg_fills_ = 0, bg_copies_ = 0;
   //! KERR_MG_CACHECHECK: checks done and entries that differed from a refill (must be 0)
   bool cache_check_ = false;
   //! K-005 B2 (bitwise restart): ZeroHierarchy before SolveMG, so a solve does not start
@@ -220,9 +218,6 @@ class MGKerrScalarDriver : public MultigridDriver {
   bool CopyBgFromDonor(int lo, int hi);
   kmg::CoeffKey key_;
   std::vector<const Real*> key_ptr_;
-  //! K-006 C: the block levels 0..finest-1's coefficients after the last background fill
-  //! (their background channels are restored from here while key_ matches)
-  std::vector<DvceArray5D<Real>> bgsave_;
   //! all channels (linear) or the background channels only (psi/chi)
   void FillOctetCoeffs(bool bg_only);
   //! W3b: every channel of the coarsest block cell into the root grid or its parent octet

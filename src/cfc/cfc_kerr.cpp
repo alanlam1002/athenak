@@ -433,19 +433,18 @@ void CFC::KerrSolveX(Driver *pdriver, int stage) {
   if (kerr_log_ > 0 && global_variable::my_rank == 0 && stage <= 1 &&
       pmy_pack->pmesh->ncycle % kerr_log_ == 0) {
     std::printf("KERR FILL cycle= %d n= %ld total_s= %.4e per_fill_ms= %.4f "
-                "vcoef fill/reuse/copy X= %ld/%ld/%ld beta= %ld/%ld/%ld sbg fill/copy/self "
-                "psi= %ld/%ld/%ld chi= %ld/%ld/%ld\n",
+                "vcoef fill/reuse/copy X= %ld/%ld/%ld beta= %ld/%ld/%ld sbg fill/copy psi= %ld/%ld "
+                "chi= %ld/%ld\n",
                 pmy_pack->pmesh->ncycle, kerr_fill_n_, kerr_fill_sec_,
                 1.0e3*kerr_fill_sec_/static_cast<double>(std::max(kerr_fill_n_, 1L)),
                 pkx_->coeff_fills_, pkx_->coeff_reuses_, pkx_->coeff_copies_,
                 pkbeta_->coeff_fills_, pkbeta_->coeff_reuses_, pkbeta_->coeff_copies_,
-                pkpsi_->bg_fills_, pkpsi_->bg_copies_, pkpsi_->bg_self_, pkchi_->bg_fills_,
-                pkchi_->bg_copies_, pkchi_->bg_self_);
+                pkpsi_->bg_fills_, pkpsi_->bg_copies_, pkchi_->bg_fills_,
+                pkchi_->bg_copies_);
     if (pkx_->cache_check_ || pkchi_->cache_check_) {
-      std::printf("KERR CACHECHECK cycle= %d X= %ld/%ld beta= %ld/%ld psi= %ld/%ld "
-                  "chi= %ld/%ld (checks/diffs, rank 0)\n", pmy_pack->pmesh->ncycle,
-                  pkx_->check_n_, pkx_->check_diff_, pkbeta_->check_n_,
-                  pkbeta_->check_diff_, pkpsi_->check_n_, pkpsi_->check_diff_,
+      std::printf("KERR CACHECHECK cycle= %d X= %ld/%ld beta= %ld/%ld chi= %ld/%ld "
+                  "(checks/diffs, rank 0)\n", pmy_pack->pmesh->ncycle, pkx_->check_n_,
+                  pkx_->check_diff_, pkbeta_->check_n_, pkbeta_->check_diff_,
                   pkchi_->check_n_, pkchi_->check_diff_);
     }
   }

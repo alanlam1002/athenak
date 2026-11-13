@@ -126,6 +126,11 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   if ((pm->pmb_pack->padm != nullptr) && (pm->pmb_pack->pcfc != nullptr)) {
     ncc_tosend += (pm->pmb_pack->padm->u_adm.extent_int(1));
   }
+  // a pending CFC -> Z4c handoff later swaps u_adm for z4c->u0 (nz4c variables)
+  if (pm->pmb_pack->phandoff != nullptr) {
+    ncc_tosend += std::max(0, static_cast<int>(z4c::Z4c::nz4c) -
+                              pm->pmb_pack->padm->u_adm.extent_int(1));
+  }
   int nmb = std::max((pm->pmb_pack->nmb_thispack), (pm->nmb_maxperrank));
   // number of cells per MB, including ghost zones
   int ncells = (pm->mb_indcs.nx1 + 2*pm->mb_indcs.ng);

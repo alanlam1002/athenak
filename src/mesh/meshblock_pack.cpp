@@ -33,6 +33,7 @@
 #include "meshblock_pack.hpp"
 #include "gravity/gravity.hpp"
 #include "cfc/cfc.hpp"
+#include "cfc/cfc_z4c_handoff.hpp"
 
 //----------------------------------------------------------------------------------------
 // MeshBlockPack constructor:
@@ -56,6 +57,7 @@ MeshBlockPack::MeshBlockPack(Mesh *pm, int igids, int igide) :
 MeshBlockPack::~MeshBlockPack() {
   if (ppart  != nullptr) {delete ppart;}
   if (pnr    != nullptr) {delete pnr;}
+  if (phandoff != nullptr) {delete phandoff;}
   if (pcfc   != nullptr) {delete pcfc;}
   if (pdyngr != nullptr) {delete pdyngr;}
   if (ptmunu != nullptr) {delete ptmunu;}
@@ -191,8 +193,11 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   }
 
   // (7) Z4c and ADM
-  // Create Z4c and ADM physics module.
-  if (pin->DoesBlockExist("z4c")) {
+  // Create Z4c and ADM physics module. With <cfc>/handoff = true the run starts as a
+  // CFC run (Z4c is built in-run by cfc::Z4cHandoff), and as a Z4c run once
+  // <cfc>/handoff_done is set (restart after the handoff).
+  const cfc::HandoffState handoff = cfc::GetHandoffState(pin);
+  if (pin->DoesBlockExist("z4c") && handoff != cfc::HandoffState::pending) {
     pz4c = new z4c::Z4c(this, pin);
     padm = new adm::ADM(this, pin);
     ptmunu = nullptr;
@@ -207,7 +212,7 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     nphysics++;
   } else {
     pz4c = nullptr;
-    if (pin->DoesBlockExist("adm")) {
+    if (pin->DoesBlockExist("adm") || handoff == cfc::HandoffState::pending) {
       padm = new adm::ADM(this, pin);
     } else {
       padm = nullptr;
@@ -234,11 +239,12 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   // from a "z4c" or "adm" input block) and the matter stress-energy tensor (ptmunu,
   // from a "z4c"/"adm" block combined with "mhd") to already have been constructed
   // above.
-  if (pin->DoesBlockExist("cfc")) {
-    if (pin->DoesBlockExist("z4c")) {
+  if (pin->DoesBlockExist("cfc") && handoff != cfc::HandoffState::done) {
+    if (pin->DoesBlockExist("z4c") && handoff == cfc::HandoffState::none) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
           << std::endl << "The <cfc> and <z4c> blocks are mutually exclusive -- CFC "
-          << "and Z4c are alternative spacetime evolution schemes." << std::endl;
+          << "and Z4c are alternative spacetime evolution schemes (set <cfc>/handoff "
+          << "= true to start with CFC and switch to Z4c during the run)." << std::endl;
       std::exit(EXIT_FAILURE);
     }
     if (padm == nullptr || ptmunu == nullptr) {
@@ -251,6 +257,9 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
     // CFC module uses Multigrid module (like gravity)
     pcfc = new cfc::CFC(this, pin);
     nphysics++;
+    if (handoff == cfc::HandoffState::pending) {
+      phandoff = new cfc::Z4cHandoff(this, pin);
+    }
   } else {
     pcfc = nullptr;
   }
@@ -290,4 +299,19 @@ void MeshBlockPack::AddPhysics(ParameterInput *pin) {
   }
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn MeshBlockPack::RebuildNumericalRelativityTasks(ParameterInput *pin)
+//! \brief Re-assembles the NumericalRelativity task graph (before_stagen, stagen,
+//! after_stagen) from the currently allocated pz4c/pcfc/pdyngr. Only valid for runs in
+//! which no other module adds tasks to these lists (cfc::Z4cHandoff checks this).
+
+void MeshBlockPack::RebuildNumericalRelativityTasks(ParameterInput *pin) {
+  for (const char *name : {"before_stagen", "stagen", "after_stagen"}) {
+    tl_map[name] = std::make_shared<TaskList>();
+  }
+  if (pnr != nullptr) {delete pnr;}
+  pnr = new numrel::NumericalRelativity(this, pin);
+  pnr->AssembleNumericalRelativityTasks(tl_map);
 }

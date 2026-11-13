@@ -29,6 +29,7 @@
 #include "coordinates/coordinates.hpp"
 #include "gravity/gravity.hpp"
 #include "cfc/cfc.hpp"
+#include "cfc/cfc_z4c_handoff.hpp"
 #include "utils/utils.hpp"
 
 #if MPI_PARALLEL_ENABLED
@@ -371,6 +372,17 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
     pmesh->NewTimeStep(tlim);
   }
 
+  //---- Step 2b. CFC -> Z4c handoff already due (handoff_cycle = 0, or a restart past
+  // the trigger): switch before the initial outputs.
+  if (pmesh->pmb_pack->phandoff != nullptr) {
+    auto &ph = pmesh->pmb_pack->phandoff;
+    if (ph->CheckAndExecute(this, pin, pout)) {
+      delete ph;
+      ph = nullptr;
+      if (time_evolution != TimeEvolution::tstatic) {pmesh->NewTimeStep(tlim);}
+    }
+  }
+
   //---- Step 3.  Cycle through output Types and load data / write files.
   if (!res_flag) { // only write outputs at the beginning of the run
     for (auto &out : pout->pout_list) {
@@ -474,6 +486,16 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
         }
         lb_efficiency_ += static_cast<float>(minnmb*(global_variable::nranks))/
             static_cast<float>(pmesh->nmb_total);
+      }
+
+      // CFC -> Z4c handoff (cfc/cfc_z4c_handoff.cpp): checked at the end of a full
+      // cycle, before outputs, so the outputs and the next dt see the Z4c run.
+      if (pmesh->pmb_pack->phandoff != nullptr) {
+        auto &ph = pmesh->pmb_pack->phandoff;
+        if (ph->CheckAndExecute(this, pin, pout)) {
+          delete ph;
+          ph = nullptr;
+        }
       }
 
       // Test for/make outputs

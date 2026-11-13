@@ -481,6 +481,8 @@ class Outputs {
  public:
   Outputs(ParameterInput *pin, Mesh *pm);
   ~Outputs();
+  // re-create pout_list for the currently allocated physics (CFC -> Z4c handoff)
+  void Rebuild(ParameterInput *pin, Mesh *pm);
 
   // use vector of pointers to BaseTypeOutputs since it is an abstract base class
   std::vector<BaseTypeOutput*> pout_list;

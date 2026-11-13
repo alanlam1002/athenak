@@ -28,6 +28,7 @@
 #include "z4c/tmunu.hpp"
 #include "dyn_grmhd.hpp"
 #include "tasklist/numerical_relativity.hpp"
+#include "cfc/cfc_z4c_handoff.hpp"
 
 #include "eos/primitive_solver_hyd.hpp"
 #include "eos/primitive-solver/idealgas.hpp"
@@ -165,6 +166,10 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
                 << "<dyn_grmhd> tau_source_K must be 'xcfc' or 'kcfc', not '" << tk << "'"
                 << std::endl;
       std::exit(EXIT_FAILURE);
+    }
+    // after a CFC -> Z4c handoff (restart) K_ij is Z4c's own extrinsic curvature
+    if (cfc::GetHandoffState(pin) == cfc::HandoffState::done) {
+      tau_source_k = 0;
     }
   }
   gr_dt = pin->GetOrAddBoolean("time", "gr_dt", false);

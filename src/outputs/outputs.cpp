@@ -44,8 +44,11 @@
 #include <cstring>    // strcmp
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <string>   // std::string, to_string()
+#include <utility>
+#include <vector>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"
@@ -187,6 +190,15 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
         opar.file_id = pin->GetOrAddString(opar.block_name,"id",opar.variable);
       }
 
+      // Z4c variables only exist after a pending CFC -> Z4c handoff has fired; such
+      // blocks are added then, by Outputs::Rebuild()
+      if (pm->pmb_pack->phandoff != nullptr && pm->pmb_pack->pz4c == nullptr &&
+          (opar.variable.compare(0, 3, "z4c") == 0 ||
+           opar.variable.compare(0, 4, "weyl") == 0 ||
+           opar.variable.compare(0, 3, "con") == 0)) {
+        continue;
+      }
+
       // check that pdf variables are single variables
       // raise error if variable = mhd_w, mhd_u, hydro_w, hydro_u
       if (opar.file_type.compare("pdf") == 0) {
@@ -317,4 +329,47 @@ Outputs::~Outputs() {
     delete pnode;
   }
   pout_list.clear();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Outputs::Rebuild()
+//! \brief Re-creates all outputs from the input file for the physics modules that are
+//! allocated now (used after the CFC -> Z4c handoff swaps padm and adds pz4c). The
+//! output schedules carry over through the last_time/file_number values kept in pin;
+//! header_written flags of history/event-log files carry over here.
+
+void Outputs::Rebuild(ParameterInput *pin, Mesh *pm) {
+  std::map<std::string, std::vector<std::pair<PhysicsModule, bool>>> hst_flags;
+  std::map<std::string, std::pair<bool, bool>> log_flags;
+  for (BaseTypeOutput *pnode : pout_list) {
+    const std::string &name = pnode->out_params.block_name;
+    if (auto *ph = dynamic_cast<HistoryOutput*>(pnode)) {
+      for (auto &data : ph->hist_data) {
+        hst_flags[name].emplace_back(data.physics, data.header_written);
+      }
+    } else if (auto *pl = dynamic_cast<EventLogOutput*>(pnode)) {
+      log_flags[name] = std::make_pair(pl->header_written, pl->no_output);
+    }
+  }
+
+  Outputs fresh(pin, pm);
+  std::swap(pout_list, fresh.pout_list);   // fresh's destructor frees the old list
+
+  for (BaseTypeOutput *pnode : pout_list) {
+    const std::string &name = pnode->out_params.block_name;
+    if (auto *ph = dynamic_cast<HistoryOutput*>(pnode)) {
+      auto it = hst_flags.find(name);
+      if (it == hst_flags.end()) continue;
+      for (auto &data : ph->hist_data) {
+        for (auto &flag : it->second) {
+          if (flag.first == data.physics) {data.header_written = flag.second;}
+        }
+      }
+    } else if (auto *pl = dynamic_cast<EventLogOutput*>(pnode)) {
+      auto it = log_flags.find(name);
+      if (it == log_flags.end()) continue;
+      pl->header_written = it->second.first;
+      pl->no_output = it->second.second;
+    }
+  }
 }

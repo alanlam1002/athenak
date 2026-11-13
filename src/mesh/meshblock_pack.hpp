@@ -37,6 +37,7 @@ namespace particles {class Particles;}
 namespace units {class Units;}
 namespace gravity {class Gravity;}
 namespace cfc {class CFC;}
+namespace cfc {class Z4cHandoff;}
 
 //----------------------------------------------------------------------------------------
 //! \class MeshBlockPack
@@ -78,6 +79,8 @@ class MeshBlockPack {
   particles::Particles *ppart=nullptr;
   gravity::Gravity *pgrav=nullptr;
   cfc::CFC *pcfc=nullptr;
+  // CFC -> Z4c in-run handoff controller (<cfc>/handoff = true, until it has fired)
+  cfc::Z4cHandoff *phandoff=nullptr;
 
 
   // units (needed to convert code units to cgs for, e.g., cooling or radiation)
@@ -90,6 +93,9 @@ class MeshBlockPack {
   void AddPhysics(ParameterInput *pin);
   void AddMeshBlocks(ParameterInput *pin);
   void AddCoordinates(ParameterInput *pin);
+  // rebuilds the before_stagen/stagen/after_stagen task lists from the currently
+  // active NR modules (used by the CFC -> Z4c handoff)
+  void RebuildNumericalRelativityTasks(ParameterInput *pin);
 
  private:
   // data

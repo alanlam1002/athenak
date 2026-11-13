@@ -105,6 +105,9 @@ class DynGRMHD {
   // the old, maximally conservative max_dv=1 behavior.
   virtual TaskStatus NewTimeStep(Driver *pdrive, int stage) = 0;
 
+  // CFC -> Z4c handoff (cfc/cfc_z4c_handoff.cpp): K_ij is Z4c's from then on
+  void DisableTauSourceKCFC() { tau_source_k = 0; }
+
   // DynGRMHD policies
   DynGRMHD_RSolver rsolver_method;
   DynGRMHD_RSolver fofc_method;

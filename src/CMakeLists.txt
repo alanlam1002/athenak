@@ -31,6 +31,7 @@ add_executable(
 
         cfc/cfc.cpp
         cfc/cfc_reconstruct.cpp
+        cfc/cfc_z4c_handoff.cpp
         cfc/mg_cfc_conformal_factor.cpp
         cfc/mg_cfc_lapse.cpp
         cfc/mg_cfc_vector_poisson.cpp

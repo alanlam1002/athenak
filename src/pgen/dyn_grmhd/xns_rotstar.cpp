@@ -29,6 +29,7 @@
 #include "mhd/mhd.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cfc/cfc.hpp"
+#include "cfc/cfc_z4c_handoff.hpp"
 #include "utils/xns/xns_rotator.hpp"
 
 namespace {
@@ -199,7 +200,8 @@ void SetupXNSRotStar(ParameterInput *pin, Mesh *pmy_mesh_) {
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
-  if (pmbp->pcfc == nullptr) {
+  if (pmbp->pcfc == nullptr &&
+      cfc::GetHandoffState(pin) != cfc::HandoffState::done) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
               << std::endl << "XNS rotating-star problem requires the <cfc> block "
               << "(CFC metric solver)" << std::endl;

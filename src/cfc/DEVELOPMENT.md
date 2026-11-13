@@ -504,6 +504,8 @@ src/cfc/
   cfc_reconstruct.hpp/.cpp              # free-function Kokkos kernels: Adual^ij from
                                          # X^i, vector reconstruction from (P_i, eta),
                                          # final ADM assembly into padm->u_adm
+  cfc_z4c_handoff.hpp/.cpp              # one-way in-run CFC -> Z4c switch
+                                         # (<cfc> handoff, item 64)
 ```
 
 4 multigrid driver instances total (was 6 before item 18's merge): `pmgd_pietax`
@@ -691,6 +693,12 @@ src/cfc/
   `AssembleVectorSource`/matter-source building; `w0` (primitives) is read by
   `RescaleMatterSources` after `MHD_C2P` has populated it. `cfc` never calls
   `ConToPrim` itself.
+- CFC → Z4c handoff (item 64): `MeshBlockPack::phandoff`/
+  `RebuildNumericalRelativityTasks` and the handoff-state branches in `AddPhysics`;
+  `Driver::Initialize` (step 2b) and `Driver::Execute` (end of cycle, before
+  outputs) call `Z4cHandoff::CheckAndExecute`; `Outputs::Rebuild` plus the
+  pending-state skip of `z4c`/`weyl`/`con` output blocks; `MeshRefinement` buffer
+  sizing; `DynGRMHD::DisableTauSourceKCFC`; `xns_rotstar.cpp`'s CFC check.
 
 ## Open items / next steps
 
@@ -8070,3 +8078,165 @@ multilevel run with an odd `nghost`. Only an even `nghost>=6` would fall
 through the switch silently.
 
 Knob and topic branch discarded; no source change kept.
+
+## 64. CFC → Z4c in-run handoff (`<cfc> handoff`)
+
+**Goal.** CFC is an approximation: it drops the evolution of the conformal metric,
+so it has no gravitational waves and degrades as a source gets strongly dynamical or
+compact (collapse, mergers). Any CFC hypersurface is valid 3+1 initial data, though:
+it satisfies the Hamiltonian and momentum constraints, with maximal slicing (K = 0),
+a conformally flat 3-metric, and the CFC lapse/shift. The handoff converts the current
+CFC slice into Z4c variables during the run and continues as a native Z4c + dyn_grmhd
+run. The switch is one-way. Files: `cfc_z4c_handoff.{hpp,cpp}` (controller +
+kernels), test deck `inputs/dyn_grmhd/cfc_tov_to_z4c.athinput`.
+
+**Activation.** The run needs both a `<cfc>` block with `handoff = true` and a `<z4c>`
+block. The `<z4c>` block supplies the gauge and dissipation settings for after the
+switch. Without `handoff = true` the two blocks stay mutually exclusive (same fatal as
+before, with a hint at the new key). Runs without the key are unchanged: CFC-only and
+Z4c-only `.hst`/`.bin` outputs are bitwise identical to the base commit (`96cda0ed`,
+see Tests). `cfc::GetHandoffState(pin)` returns one of three states, and
+`MeshBlockPack::AddPhysics` builds the modules for that state:
+
+| state | condition | modules built |
+|---|---|---|
+| `none` | no `handoff = true` | as before |
+| `pending` | `handoff = true`, not yet fired | CFC + ADM in the CFC layout (built even without `<adm>`) + Tmunu; **Z4c deferred** (`pz4c == nullptr`); `phandoff = new Z4cHandoff` |
+| `done` | `handoff_done = true` (written at the switch) | native Z4c + ADM; CFC never built; `dyn_grmhd`'s `tau_source_k` forced to 0 |
+
+**Parameters** (all in `<cfc>`):
+
+| key | default | meaning |
+|---|---|---|
+| `handoff` | false | enable |
+| `handoff_time` | -1 (off) | switch at the end of the first cycle with `time >= handoff_time` (float compare, like outputs) |
+| `handoff_cycle` | -1 (off) | switch when `ncycle >= handoff_cycle`; 0 = switch at init, before the t = 0 outputs |
+| `handoff_alpha_min` | -1 (off) | auto: switch when the global min lapse drops below this |
+| `handoff_cf_residual` | -1 (off) | auto: switch when ε_CF (below) exceeds this |
+| `handoff_cf_floor` | 1e-10 | floor on ε_CF's denominator |
+| `handoff_check_dcycle` | 1 | cadence (cycles) of the auto criteria; time/cycle triggers are checked every cycle |
+| `handoff_resolve` | true | re-solve CFC from the current matter before converting |
+| `handoff_output` | false | write every output once just before and once just after the switch |
+| `handoff_verbose` | false | print α_min / ε_CF at every check |
+| `handoff_done`, `handoff_done_time`, `handoff_done_cycle` | (written) | set at the switch; restart files carry them |
+
+At least one trigger must be set (fatal otherwise). Unsupported together with
+`<turb_driving>`, `<particles>` or `<radiation>`: these add their own tasks to the
+`before_stagen`/`after_stagen` lists, which the switch rebuilds from the
+NumericalRelativity queues only (fatal). Needs `nghost` 2–4.
+
+**ε_CF.** For a conformally flat 3-metric, the trace-free part of d_t γ_ij is
+(L_β γ)^TF_ij − 2αK_ij. CFC sets d_t γ̃_ij = 0, so the volume-weighted RMS of
+‖(L_β γ)^TF − 2αK‖_γ, divided by max(RMS‖2αK‖_γ, cf_floor), measures the d_t γ̃ that
+CFC drops. It uses 4th-order (`Dx<NGHOST>`) derivatives of the u_adm ghosts. Caveat: for
+a static star K ≈ 0 and both terms are truncation noise. The ratio is then O(0.05) and
+meaningless (TOV, 32³: 0 at cycle 0, ≈0.05 afterwards). It is meant for dynamical
+spacetimes, where 2αK is resolved. Use α_min or time/cycle for near-static cases.
+
+**Switch sequence** (`Z4cHandoff::Execute`, collective). It is called from
+`Driver::Execute` at the end of a full cycle, before the outputs, AMR and
+`Mesh::NewTimeStep`. It is also called once at the end of `Driver::Initialize`
+(step 2b, before the t = 0 outputs) for `handoff_cycle = 0` or a restart already past
+the trigger.
+1. Optional CFC re-solve (`InitBoundaryValuesAndPrimitives(pm, true)` → `CFC::
+   ReinitializeMetricForAMR`). The last stage's solve used that stage's starting
+   matter, or an older cycle's with `solve_interval > 1`; this brings the metric up
+   to date. An MG non-convergence here only warns (`nlim` restored).
+2. Optional pre-switch snapshot (`handoff_output`). This is the final CFC slice, i.e.
+   the Z4c initial data. The restart file it writes is still `pending`, so a restart
+   from it re-runs the handoff.
+3. `new z4c::Z4c` (+ CCE dumps), exactly as `AddPhysics` would.
+4. CFC α, β^i (ghosts included, since CFC exchanges u_adm after every solve) →
+   `z4c->u0`. The CFC gauge becomes the initial gauge of Z4c's evolved 1+log /
+   Gamma-driver.
+5. `new adm::ADM` in the Z4c layout (α/β alias `z4c->u0`); deep-copy g_ij, K_ij, ψ⁴
+   from the old ADM.
+6. `ADMToZ4c<ng>`: χ, γ̃_ij, K̂ = K (≈ 0), Ã_ij, Θ = 0, Γ̃^i from γ̃_ij (interior).
+7. Delete CFC; `DisableTauSourceKCFC()`.
+8. `MeshBlockPack::RebuildNumericalRelativityTasks`: fresh `before_stagen`/`stagen`/
+   `after_stagen` lists and a new `NumericalRelativity`. `dyn_grmhd`'s queue now adds
+   `MHD_SetTmunu`; the `CFC_*` optional dependencies disappear.
+9. `InitBoundaryValuesAndPrimitives(pm)`: Z4c restriction, ghost exchange,
+   prolongation and BCs (the same path as native Z4c initial data), then
+   `ConvertZ4cToADM` + con2prim.
+10. `SetTmunu` and `ADMConstraints`. Prints the CFC → Z4c → ADM round-trip max
+    difference (g, K, ψ⁴) and ‖H‖₂, ‖M‖₂, max|H|.
+11. `Outputs::Rebuild`. While pending, the `Outputs` ctor skips `z4c*`/`weyl*`/`con*`
+    blocks. Rebuild re-creates all outputs from `pin`, so `adm` outputs point at the
+    new ADM and the skipped blocks start. Numbering and schedules carry over
+    (`file_number`/`last_time` live in `pin`), and so do the history/event-log
+    `header_written` flags.
+12. Z4c and dyn_grmhd `NewTimeStep`. The driver's `Mesh::NewTimeStep` follows.
+13. Set `handoff_done*` in `pin`, delete the old ADM, optional post-switch snapshot,
+    and the driver deletes `phandoff`.
+
+**Restarts.**
+- After the switch, the restart is a native Z4c run (`done`) and is bitwise
+  continuous.
+- Before the switch, it is `pending` and the handoff re-runs.
+  - With `handoff_resolve = false` it is bitwise.
+  - With the re-solve, it agrees only to ~1e-9 (TOV 32³: max|Δα| 1.9e-9, |Δρ| 3e-11).
+    The X^i/β vector-Poisson solves warm-start from CFC's internal arrays, which are
+    not in restart files. A plain CFC restart on this branch is likewise not bitwise
+    (~1e-13).
+
+**AMR/SMR.**
+- `MeshRefinement` sizes its send buffers in the pending state for the larger of
+  u_adm and `z4c->u0` (`nz4c`), so the buffers built at startup still fit after the
+  switch.
+- After the switch, regrids follow the native Z4c path.
+- The switch itself uses the same restrict/exchange/prolong path as native Z4c
+  initial data.
+- **Not yet tested on refined meshes** (Aurora R2).
+
+**Other edits.**
+- `xns_rotstar.cpp` no longer fatals for the missing CFC in the `done` state.
+- `DynGRMHD::DisableTauSourceKCFC()` turns off the CFC-only K_ij source option at the
+  switch.
+- Pre-existing quirk, left alone: `HistoryOutput`'s filename switch has a missing
+  `break`, so the z4c history goes to `<basename>.z4c.user.hst`, as in any Z4c run.
+
+**Tests (local, Mac CPU, MPI build, `-DPROBLEM=dyn_grmhd/dyngr_tov`).** The deck
+setup: TOV, K = 100, Γ = 2, ρ_c = 1.28e-3, isotropic. Local runs used 32³ on
+[−24,24]³ with 16³ blocks.
+
+*Handoff at cycle 5:*
+- Round trip: g 2.2e-16, K 5.4e-20, ψ⁴ 2.2e-16.
+- Constraints after the switch: ‖H‖₂ 1.7e-4, ‖M‖₂ 1.2e-6.
+- ρ_max and α_min are identical in the pre-switch, post-switch and regular `.hst`
+  rows at the switch time, and evolve smoothly afterwards.
+- Z-norm ~1e-28 and Θ = 0 at the switch.
+
+*Determinism and triggers:*
+- np4 vs np1: relative diffs ≤ 7e-16 (user hst) and ≤ 4e-14 (z4c hst).
+- All four triggers fire as specified: time, cycle (incl. 0), α_min, ε_CF (printed
+  each cycle).
+
+*Bitwise regression (np2, 10 cycles):* CFC-only and Z4c-only decks give identical
+`.hst` and `.bin` files on the branch and the base build.
+
+*Handoff at t = 0 vs native Z4c TOV data* (same deck, same resolution, z4c hst
+`H-norm2`; the first t ≈ 3):
+
+| | H(t=0) | H(t=3) | Δρ_max/ρ_max at t=3 | Δα_min at t=3 |
+|---|---|---|---|---|
+| handoff, 32³ | 4.2e-3 | 2.9e-3 | 5.5e-3 | 2.6e-3 |
+| handoff, 64³ | 1.2e-3 | 1.0e-3 | 1.7e-3 | 7.1e-4 |
+| native, 32³ | 1.6e-4 | 2.1e-3 | 9e-7 | 4.5e-5 |
+| native, 64³ | 3.9e-4 | 1.0e-3 | 2.5e-4 | −2e-6 |
+
+The CFC slice has the multigrid's 2nd-order error: H(0) falls ×3.5 and the
+post-switch drift ×3.3 per doubling. By 64³ the post-switch H matches native Z4c.
+The extra drift is the CFC discretization error relaxing under Z4c, not a conversion
+error.
+
+**Found on the way (pre-existing, not from this item).** For the TOV deck on an
+octant [0,L]³ with reflecting inner faces, CFC's multigrid stalls: defect ratio → 1
+at ~2.5e-5 (32³) and ~1e-4 (64³), never reaching `mg_threshold` 1e-10. It reproduces
+on the base build. The full box with diode faces converges cleanly. The test deck
+therefore uses the full box [−32,32]³ at 128³ (header comment). Open item: the
+reflect-BC multigrid path.
+
+**Status.** CPU-validated as above. The GPU build (Aurora, SYCL) and the full-deck run
+(128³, switch at t = 50, tlim 500) are pending (R1). After that: SMR with 2 levels and
+a switch across levels, restarts, and the α_min trigger (R2).

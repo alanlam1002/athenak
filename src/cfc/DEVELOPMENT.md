@@ -8088,7 +8088,9 @@ it satisfies the Hamiltonian and momentum constraints, with maximal slicing (K =
 a conformally flat 3-metric, and the CFC lapse/shift. The handoff converts the current
 CFC slice into Z4c variables during the run and continues as a native Z4c + dyn_grmhd
 run. The switch is one-way. Files: `cfc_z4c_handoff.{hpp,cpp}` (controller +
-kernels), test deck `inputs/dyn_grmhd/cfc_tov_to_z4c.athinput`.
+kernels), test decks `inputs/dyn_grmhd/cfc_tov_to_z4c.athinput` (stable star, fixed
+switch time) and `inputs/dyn_grmhd/cfc_collapse_to_z4c.athinput` (collapsing star,
+α_min trigger).
 
 **Activation.** The run needs both a `<cfc>` block with `handoff = true` and a `<z4c>`
 block. The `<z4c>` block supplies the gauge and dissipation settings for after the
@@ -8187,12 +8189,17 @@ the trigger.
 - After the switch, regrids follow the native Z4c path.
 - The switch itself uses the same restrict/exchange/prolong path as native Z4c
   initial data.
-- **Not yet tested on refined meshes** (Aurora R2).
+- Tested on a 2-level SMR mesh locally (below). Dynamic AMR at the switch is not yet
+  tested.
 
 **Other edits.**
 - `xns_rotstar.cpp` no longer fatals for the missing CFC in the `done` state.
 - `DynGRMHD::DisableTauSourceKCFC()` turns off the CFC-only K_ij source option at the
   switch.
+- In the pending state the `Z4cHandoff` constructor marks every line of `<z4c>`,
+  `<cce>` and of output blocks whose `variable` starts with `z4c`/`weyl`/`con` as
+  accessed. Those are read only at the switch, so `CheckUnusedParameters` (run before
+  the main loop) would otherwise report all of them as likely typos.
 - Pre-existing quirk, left alone: `HistoryOutput`'s filename switch has a missing
   `break`, so the z4c history goes to `<basename>.z4c.user.hst`, as in any Z4c run.
 
@@ -8230,6 +8237,42 @@ post-switch drift ×3.3 per doubling. By 64³ the post-switch H matches native Z
 The extra drift is the CFC discretization error relaxing under Z4c, not a conversion
 error.
 
+*2-level SMR* (root 32³ on [−24,24]³, 8³ blocks, `refined_region1` level 1 on
+[−12,12]³, 120 MeshBlocks, np4, handoff at t = 0):
+- Round trip 4.4e-16. The post-switch restart is bitwise. The pending-state CFC ψ⁴ is
+  bitwise identical to the base build.
+- H-norm2 at the switch is 1.17e-2 (native SMR Z4c: 3.9e-4). |H| peaks at the
+  refined region's corners and faces (8e-3 at x = y = −11.6). It decays to ~3e-3 by
+  t ≈ 1 and stays there to t = 3.75 (native: 2.1e-3); M-norm2 2–2.5e-4 vs 7.7e-6.
+- Cause: CFC's own multigrid seam at the coarse-fine boundary, not the conversion. The
+  ψ⁴ error vs the analytic TOV solution jumps from 1.6e-3 on the fine side to 6e-4 on
+  the coarse side, and differs between the four equivalent corners (1.15e-3 /
+  0.91e-3 / 0.91e-3 / 0.67e-3). That is consistent with item 63's finding that
+  `ProlongateFCMG` fills coarse-fine ghosts at 2nd order on faces but by plain
+  injection (0th order) on edges and corners. A sharper CFC solution at refinement
+  boundaries would shrink the post-switch H spike.
+
+*Collapse on the α_min trigger* (coarse, local; the
+`cfc_collapse_to_z4c.athinput` star at 64³ on [−16,16]³, dx = 0.5, ~8.5 cells per
+R_iso, 16³ blocks, np8):
+- CFC's default iterated t = 0 solve gives NaN for every ρ_c tried from 3e-3 to 8e-3
+  (2e-3 is fine). This is items 22/24 again, so the deck uses
+  `init_freeze_conserved` (item 29).
+- Under CFC the star contracts: α_min 0.2875 → 0.1995 at t = 11.375 (cycle 91), where
+  the trigger fired. Round trip 1.8e-15; banner ‖H‖₂ 2.1e-3, ‖M‖₂ 1.2e-3.
+- ε_CF ≈ 0.09 on this star (32³). This is the first test with K_ij ≠ 0: CFC's K_ij
+  and shift agree in sign and normalization (a sign flip would give ε_CF ≈ 2).
+- Switching at cycle 0 instead (z4c hst norms): H 0.158 → 3.06e-2 from 32³ to 64³
+  (×5.2), M 3.3e-3 → 1.19e-3. Native Z4c from the same pgen data (TOV metric, K = 0
+  despite v ≠ 0) has H 1.5e-3 but M 2.8e-2. The CFC slice satisfies the momentum
+  constraint 23× better and the Hamiltonian constraint 20× worse at this resolution.
+- After the switch, z4c hst H grew from 0.2 to 0.67 (t = 20) and 9.6 (t = 34). ρ_max
+  fell after t ≈ 29, α_min stalled at 0.14–0.16, and no black hole formed by t = 34.
+  The native Z4c run on the same grid had already reached H ≈ 0.1 by t = 6 (stopped
+  at t = 15, H 0.095). This grid is too coarse to separate handoff-specific growth
+  from under-resolution; Aurora R2b repeats it at 128³ and 256³ on [−32,32]³ with
+  native references.
+
 **Found on the way (pre-existing, not from this item).** For the TOV deck on an
 octant [0,L]³ with reflecting inner faces, CFC's multigrid stalls: defect ratio → 1
 at ~2.5e-5 (32³) and ~1e-4 (64³), never reaching `mg_threshold` 1e-10. It reproduces
@@ -8237,6 +8280,8 @@ on the base build. The full box with diode faces converges cleanly. The test dec
 therefore uses the full box [−32,32]³ at 128³ (header comment). Open item: the
 reflect-BC multigrid path.
 
-**Status.** CPU-validated as above. The GPU build (Aurora, SYCL) and the full-deck run
-(128³, switch at t = 50, tlim 500) are pending (R1). After that: SMR with 2 levels and
-a switch across levels, restarts, and the α_min trigger (R2).
+**Status.** CPU-validated as above. Pending on Aurora (GPU, SYCL):
+- R1: the GPU build, bitwise regression, and the full stable-star deck (128³, switch
+  at t = 50, tlim 500) with restarts.
+- R2a: 2-level SMR with a switch across levels.
+- R2b: the collapse deck on the α_min trigger against native Z4c at two resolutions.

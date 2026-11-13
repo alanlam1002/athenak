@@ -377,6 +377,8 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
     Fatal(block + "/mp_source must be 'self' or 'rhs'.");
   }
   mp_outer_ = pin->GetOrAddInteger(block, "mp_outer", 3);
+  min_first_only_ = pin->GetOrAddBoolean(block, "mg_min_vcycles_first_only", false);
+  solve_timers_ = pin->GetOrAddBoolean(block, "solve_timers", false);
   coeff_cache_ = kmg::CoeffCacheEnabled();
   cache_check_ = coeff_cache_ && kmg::CoeffCacheCheck();
   const RegionSize &msz = pmbp->pmesh->mesh_size;
@@ -420,6 +422,7 @@ MGKerrVectorDriver::~MGKerrVectorDriver() {
 }
 
 void MGKerrVectorDriver::Prepare() {
+  kmg::PhaseLap lap(solve_timers_);
   // VecS assumes cubic cells (one h for all directions)
   {
     auto &mbs = pmy_pack_->pmb->mb_size;
@@ -476,6 +479,7 @@ void MGKerrVectorDriver::Prepare() {
   kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
   lv->SetSyncMask(blk_sync_);
   rt->SetSyncMask(root_sync_);
+  lap.Mark(st_.sec[kmg::SolveTimers::kAMR]);
   if (coeff_cache_ && CoeffsIntact()) {
     ++coeff_reuses_;
     if (cache_check_) { CheckAgainstRefill(); }
@@ -487,12 +491,16 @@ void MGKerrVectorDriver::Prepare() {
     key_.ok = false;
     bad_dinv_[0] = lv->FillAllLevels(cs_);
     bad_dinv_[1] = rt->FillAllLevels(cs_);
+    lap.Mark(st_.sec[kmg::SolveTimers::kBg]);
     FillOctetCoeffs();
+    lap.Mark(st_.sec[kmg::SolveTimers::kOct]);
     ++coeff_fills_;
     StoreKey();
   }
+  lap.Mark(st_.sec[kmg::SolveTimers::kBg]);
   SetupMultigrid(0.0, false);
   Kokkos::fence();
+  lap.Mark(st_.sec[kmg::SolveTimers::kSetup]);
 }
 
 namespace {
@@ -638,12 +646,21 @@ void MGKerrVectorDriver::ComputeMoments() {
 
 void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   Prepare();
+  kmg::PhaseLap lap(solve_timers_);
   const int nout = (kelvin_ && mp_self_) ? std::max(mp_outer_, 1) : 1;
+  const int minv = min_vcycles_;
   for (int n = 0; n < nout; ++n) {
+    if (min_first_only_ && n > 0) min_vcycles_ = 0;
     ComputeMoments();
+    lap.Mark(st_.sec[kmg::SolveTimers::kMoments]);
     if (zero_coarse_) ZeroHierarchy();
+    lap.Mark(st_.sec[kmg::SolveTimers::kZero]);
     SolveMG(pdriver);
+    lap.Mark(st_.sec[kmg::SolveTimers::kSolveMG]);
   }
+  min_vcycles_ = minv;
+  ++st_.calls;
+  st_.passes += nout;
   Kokkos::fence();
 }
 

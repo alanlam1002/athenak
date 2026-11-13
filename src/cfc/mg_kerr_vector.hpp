@@ -142,6 +142,12 @@ class MGKerrVectorDriver : public MultigridDriver {
   bool kelvin_ = true;        // block/mg_outer_bc_vec = kelvin | zerofixed
   bool mp_self_ = true;       // block/mp_source = self | rhs
   int mp_outer_ = 3;
+  //! K-007 M1 (<block> mg_min_vcycles_first_only, default false): mg_min_vcycles acts on
+  //! the first of the mp_outer_ kelvin passes of each Solve only
+  bool min_first_only_ = false;
+  //! K-007 M2 (<block> solve_timers, default false)
+  bool solve_timers_ = false;
+  kmg::SolveTimers st_;
   bool src_blob_ = false;
   Real mpo_[3] = {0.0, 0.0, 0.0};   // the multipole origin (block/mp_x01..3)
   kmg::VMoments mom_;

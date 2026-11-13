@@ -197,6 +197,10 @@ class MGKerrScalarDriver : public MultigridDriver {
 
   long nonfinite_oct_ = 0;
 
+  //! K-007 M2 (<block> solve_timers, default false)
+  bool solve_timers_ = false;
+  kmg::SolveTimers st_;
+
   //! K-005 B1 (kinds psi/chi): the block levels' background channels are copied from
   //! bg_donor_ (cfc_kerr.cpp: chi takes psi's, filled earlier in the same stage) when its
   //! kmg::CoeffKey still matches; KERR_MG_NOCACHE=1 fills every solve (the A/B check)

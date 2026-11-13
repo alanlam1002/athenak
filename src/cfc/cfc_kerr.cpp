@@ -447,6 +447,22 @@ void CFC::KerrSolveX(Driver *pdriver, int stage) {
                   pkx_->check_diff_, pkbeta_->check_n_, pkbeta_->check_diff_,
                   pkchi_->check_n_, pkchi_->check_diff_);
     }
+    // K-007 M2: cumulative, rank 0; mg_timers_ (vc, def) accumulate only with mg_verbose > 0
+    auto prt = [&](const char *nm, const kmg::SolveTimers &s, const MGTimers &t) {
+      using ST = kmg::SolveTimers;
+      std::printf("KERR SOLVE cycle= %d drv= %s calls= %ld passes= %ld amr= %.4e bg= %.4e "
+                  "matter= %.4e xfer= %.4e oct= %.4e setup= %.4e mom= %.4e zero= %.4e "
+                  "smg= %.4e vc= %.4e def= %.4e nsmg= %d nvc= %d\n",
+                  pmy_pack->pmesh->ncycle, nm, s.calls, s.passes, s.sec[ST::kAMR],
+                  s.sec[ST::kBg], s.sec[ST::kMatter], s.sec[ST::kXfer], s.sec[ST::kOct],
+                  s.sec[ST::kSetup], s.sec[ST::kMoments], s.sec[ST::kZero],
+                  s.sec[ST::kSolveMG], t.vcycle_sec, t.defect_sec, t.solve_count,
+                  t.vcycle_count);
+    };
+    if (pkx_->solve_timers_) prt("X", pkx_->st_, pkx_->mg_timers_);
+    if (pkbeta_->solve_timers_) prt("beta", pkbeta_->st_, pkbeta_->mg_timers_);
+    if (pkpsi_->solve_timers_) prt("psi", pkpsi_->st_, pkpsi_->mg_timers_);
+    if (pkchi_->solve_timers_) prt("chi", pkchi_->st_, pkchi_->mg_timers_);
   }
 }
 

@@ -32,6 +32,7 @@
 //!    bilinear fill B) where the block has a single cell along a or b. It reads face ghosts
 //!    and interior cells only.
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -659,6 +660,34 @@ bool CoeffCacheCheck();
 DvceArray5D<Real> CloneView(const DvceArray5D<Real> &a);
 //! number of entries of a and b that differ (NaN = NaN; -1 if the shapes differ)
 long CountDiff(const DvceArray5D<Real> &a, const DvceArray5D<Real> &b);
+
+//! \struct SolveTimers
+//! \brief K-007 M2: a Kerr driver's Solve wall time by phase (<block> solve_timers, default
+//! false). Accumulated with PhaseLap, which fences at every mark, so values are unchanged.
+//! The split inside SolveMG (V-cycles, defect norms) is MultigridDriver::mg_timers_
+//! (<block> mg_verbose > 0).
+struct SolveTimers {
+  enum Phase { kAMR, kBg, kMatter, kXfer, kOct, kSetup, kMoments, kZero, kSolveMG, kN };
+  double sec[kN] = {};
+  long calls = 0, passes = 0;
+};
+//! adds the wall time since the previous mark (or construction) to acc; inert when off
+class PhaseLap {
+ public:
+  explicit PhaseLap(bool on) : on_(on) {
+    if (on_) { Kokkos::fence(); t_ = std::chrono::steady_clock::now(); }
+  }
+  void Mark(double &acc) {
+    if (!on_) return;
+    Kokkos::fence();
+    const auto n = std::chrono::steady_clock::now();
+    acc += std::chrono::duration<double>(n - t_).count();
+    t_ = n;
+  }
+ private:
+  bool on_;
+  std::chrono::steady_clock::time_point t_;
+};
 
 }  // namespace kmg
 }  // namespace cfc

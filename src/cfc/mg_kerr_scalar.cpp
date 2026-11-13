@@ -342,6 +342,7 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   fshowdef_ = pin->GetOrAddInteger(block, "mg_verbose", 0);
   ReadConvergenceOptions(pin, block);
   min_vcycles_ = pin->GetOrAddInteger(block, "mg_min_vcycles", 0);
+  solve_timers_ = pin->GetOrAddBoolean(block, "solve_timers", false);
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
   npresmooth_ = pin->GetOrAddInteger(block, "mg_npresmooth", npresmooth_);
@@ -427,6 +428,8 @@ MGKerrScalarDriver::~MGKerrScalarDriver() {
 }
 
 void MGKerrScalarDriver::Prepare() {
+  kmg::PhaseLap lap(solve_timers_);
+  using ST = kmg::SolveTimers;
   PrepareForAMR();
   auto *lv = static_cast<MGKerrScalar*>(mglevels_);
   auto *rt = static_cast<MGKerrScalar*>(mgroot_);
@@ -439,6 +442,7 @@ void MGKerrScalarDriver::Prepare() {
   kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
   lv->SetSyncMask(blk_sync_);
   rt->SetSyncMask(root_sync_);
+  lap.Mark(st_.sec[ST::kAMR]);
   if (kind_ == kmg::kKindLinear) {
     lv->FillAllLevels(cs_, mf_);
     rt->FillAllLevels(cs_, mf_);
@@ -457,20 +461,27 @@ void MGKerrScalarDriver::Prepare() {
     const bool shared = CopyBgFromDonor(lfin, lfin);
     if (!shared) { lv->FillAllLevelsBg(cs_, lfin, lfin); }
     rt->FillAllLevelsBg(cs_);
+    lap.Mark(st_.sec[ST::kBg]);
     if (matter_ext_) {
       lv->FillFinestMatterExt(ext_m_, ext_da2_, ext_dpsi_, kind_ == kmg::kKindChi, ext_ngh_);
     } else {
       lv->FillFinestMatterManuf(kind_, cs_, mf_, mm_);
     }
     lv->RestrictCoefficients();
+    lap.Mark(st_.sec[ST::kMatter]);
     TransferCoeffToRoot();
+    lap.Mark(st_.sec[ST::kXfer]);
     RestrictCoeffOctets();
+    lap.Mark(st_.sec[ST::kOct]);
     rt->RestrictCoefficients();
+    lap.Mark(st_.sec[ST::kMatter]);
     if (lfin > 0 && !(shared && CopyBgFromDonor(0, lfin - 1))) {
       lv->FillAllLevelsBg(cs_, 0, lfin - 1);
     }
     rt->FillAllLevelsBg(cs_);
+    lap.Mark(st_.sec[ST::kBg]);
     FillOctetCoeffs(true);
+    lap.Mark(st_.sec[ST::kOct]);
     if (shared) { ++bg_copies_; } else { ++bg_fills_; }
     if (shared && cache_check_) {
       // KERR_MG_CACHECHECK: refill the copied background and count what differs
@@ -491,8 +502,10 @@ void MGKerrScalarDriver::Prepare() {
       key_ptr_.push_back(lv->CoeffAtLevel(lev).d_view.data());
     }
   }
+  lap.Mark(st_.sec[ST::kBg]);
   SetupMultigrid(0.0, false);
   Kokkos::fence();
+  lap.Mark(st_.sec[ST::kSetup]);
 }
 
 bool MGKerrScalarDriver::BgIntactFor(const kmg::CoefSource &cs) const {
@@ -529,8 +542,13 @@ bool MGKerrScalarDriver::CopyBgFromDonor(int lo, int hi) {
 
 void MGKerrScalarDriver::Solve(Driver *pdriver, int stage, Real dt) {
   Prepare();
+  kmg::PhaseLap lap(solve_timers_);
   if (zero_coarse_) ZeroHierarchy();
+  lap.Mark(st_.sec[kmg::SolveTimers::kZero]);
   SolveMG(pdriver);
+  lap.Mark(st_.sec[kmg::SolveTimers::kSolveMG]);
+  ++st_.calls;
+  ++st_.passes;
   Kokkos::fence();
 }
 

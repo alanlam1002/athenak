@@ -15,7 +15,7 @@
 //!  - ell, ln h, rho, p: gr_torus.cpp (CalculateLFromRPeak :853-860, LogHAux :876-904,
 //!    the in-torus test :351-355, rho and p :363-370);
 //!  - u^t and Omega = u^phi/u^t: gr_torus.cpp's FM branch of CalculateVelocityInTorus
-//!    (FM 3.3; :1046ff), i.e. FM's own equilibrium velocity (K-007: the RK-023 W2 item 4
+//!    (FM 3.3; :1180-1195), i.e. FM's own equilibrium velocity (K-007: the RK-023 W2 item 4
 //!    form -(g_tp + l g_tt)/(g_pp + l g_tp) is the constant-(-u_phi/u_t) rotation law and,
 //!    with FM's l = u^t u_phi, is not FM's; measured: 10% super-Keplerian at r_max);
 //!  - ut^i = u^t (Omega xi^i + beta0^i), xi = (-(y - y_bh), x - x_bh, 0), beta0 from W1

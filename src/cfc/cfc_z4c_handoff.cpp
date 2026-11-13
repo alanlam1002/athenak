@@ -298,6 +298,25 @@ Z4cHandoff::Z4cHandoff(MeshBlockPack *ppack, ParameterInput *pin) : pmy_pack(ppa
       pin->DoesBlockExist("radiation")) {
     fatal("not supported together with <turb_driving>, <particles> or <radiation>");
   }
+
+  // <z4c>, <cce> and the z4c/weyl/con output blocks are only read at the switch; keep
+  // ParameterInput::CheckUnusedParameters (before the main loop) from flagging them.
+  for (auto &blk : pin->block) {
+    bool deferred = (blk.block_name == "z4c" || blk.block_name == "cce");
+    if (!deferred && blk.block_name.compare(0, 6, "output") == 0) {
+      InputLine *pl = blk.GetPtrToLine("variable");
+      if (pl != nullptr) {
+        const std::string &v = pl->param_value;
+        deferred = (v.compare(0, 3, "z4c") == 0 || v.compare(0, 4, "weyl") == 0 ||
+                    v.compare(0, 3, "con") == 0);
+      }
+    }
+    if (deferred) {
+      for (auto &line : blk.line) {
+        line.accessed = true;
+      }
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------

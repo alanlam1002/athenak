@@ -28,6 +28,7 @@
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "cfc/cfc.hpp"
 #include "cfc/cfc_puncture.hpp"
+#include "cfc/kerr_torus.hpp"
 #include "utils/tov/tov.hpp"
 #include "utils/tov/tov_polytrope.hpp"
 #include "utils/tov/tov_tabulated.hpp"
@@ -1005,6 +1006,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       TestFlowRestart(pin, pmbp);
       user_srcs_func = &TestFlowHold;
     }
+    // K-007 W (Kerr path only): the FM torus's parameters and F1 (V4's rho0), and V4
+    if (tflow_r == "fm_torus") cfc::KerrFMTorusInit(pin, pmbp, true);
+    cfc::KerrV4Setup(pin, pmbp);
     if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_ideal) {
       SolveTOV<tov::PolytropeEOS>(pin, pmy_mesh_);
     } else if (pmbp->pdyngr->eos_policy == DynGRMHD_EOS::eos_compose) {
@@ -1123,12 +1127,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   if (tflow == "michel" || tflow == "hydrostatic") {
     SetupTestFlow(pin, pmbp, tflow);
     user_srcs_func = &TestFlowHold;
+  } else if (tflow == "fm_torus") {   // K-007 W: a Fishbone-Moncrief torus (Kerr path)
+    cfc::KerrFMTorusInit(pin, pmbp, false);
   } else if (tflow != "none") {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<problem> test_flow = '" << tflow << "' (none, michel or hydrostatic)"
-              << std::endl;
+              << "<problem> test_flow = '" << tflow << "' (none, michel, hydrostatic or "
+              << "fm_torus)" << std::endl;
     exit(EXIT_FAILURE);
   }
+
+  cfc::KerrV4Setup(pin, pmbp);   // K-007 W5: <cfc> kerr_v4_dt > 0 only
 
   // Convert primitives to conserved
   pmbp->pdyngr->PrimToConInit(0, (n1-1), 0, (n2-1), 0, (n3-1));
@@ -1553,10 +1561,12 @@ void FinalizeTOV(ParameterInput *pin, Mesh *pm) {
     delete ptf;
     ptf = nullptr;
   }
+  cfc::KerrTorusFinalize();
 }
 
 // History function
 void TOVHistory(HistoryData *pdata, Mesh *pm) {
+  cfc::KerrV4Diag(pm);   // K-007 W5: inert unless <cfc> kerr_v4_dt > 0; no hst columns
   // Select the number of outputs and create labels for them.
   pdata->nhist = 2;
   pdata->label[0] = "rho-max";

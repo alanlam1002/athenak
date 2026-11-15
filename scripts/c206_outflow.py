@@ -30,6 +30,8 @@ for f in fs[::a.every]:
     cat = lambda k: np.concatenate([np.asarray(P['mb_data'][k][q]).ravel() for q in range(len(g))]).astype(float)
     rho, p = cat('dens'), cat('press'); vx, vy, vz = cat('velx'), cat('vely'), cat('velz')
     m = rho*V; d0 = rho >= 0.01*RC
+    if not d0.any():   # no bound core left (full disruption, e.g. P18 after t ~ 1300): centre undefined, record t only
+        rows.append(dict(t=t)); print({'t': f'{t:.4g}', 'note': 'no rho >= 0.01 rho_c; centre undefined'}, flush=True); continue
     cx, cy, cz = (np.average(w[d0], weights=m[d0]) for w in (X, Y, Z))
     vcx, vcy, vcz = (np.average(w[d0], weights=m[d0]) for w in (vx, vy, vz))
     dx, dy, dz = X-cx, Y-cy, Z-cz; d = np.sqrt(dx*dx+dy*dy+dz*dz)
@@ -45,4 +47,4 @@ for f in fs[::a.every]:
     rows.append(row); print({k: (f'{v:.4g}' if isinstance(v, float) else v) for k, v in row.items()}, flush=True)
 import csv
 with open(a.out, 'w') as fo:
-    w = csv.DictWriter(fo, sorted({k for r in rows for k in r}, key=lambda k: list(rows[-1]).index(k) if k in rows[-1] else 99)); w.writeheader(); w.writerows(rows)
+    w = csv.DictWriter(fo, sorted({k for r in rows for k in r}, key=lambda k: list(max(rows, key=len)).index(k) if k in max(rows, key=len) else 99)); w.writeheader(); w.writerows(rows)

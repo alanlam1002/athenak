@@ -25,8 +25,9 @@ restart_embed_fill = true, restart_embed_box = the old box. The same edits go in
 restart's -i deck overrides the parameter copy.
 
 Checks (REGRID_SPEC §2 validation (i), (ii)): every old block's record is byte-identical in the output (sha256
-per block); the new tree is Z-sorted, tiles the box exactly (volume), has no overlaps and is 2:1 balanced
-across faces, edges and corners.
+per block); the new tree is in the reader's Z-order (written list re-read and checked), tiles the box exactly
+(volume), has no overlaps and is 2:1 balanced across faces,
+edges and corners.
     r1_embed.py IN.rst OUT.rst [--deck IN.par --deck-out OUT.par] [--manifest OUT.json]
 """
 import argparse
@@ -40,7 +41,8 @@ import sys
 import numpy as np
 
 LEVEL_KEYS = ('amr_level_bh', 'amr_level_bh_fine', 'amr_level_core', 'amr_level_debris', 'amr_level_floor',
-              'amr_level_stream', 'amr_pin_level')
+              'amr_level_stream', 'amr_pin_level', 'amr_level_debris_fine',   # c258: variant A's fine level
+              'amr_bind_lev_unb1', 'amr_bind_lev_unb2', 'amr_bind_lev_min')   # c258: the binding-aware policy (R-257 3(ii))
 
 
 def read(fn):
@@ -67,12 +69,28 @@ def read(fn):
 
 
 def zkey(lx, ly, lz, lev, lmax):
+    # Python ints: with numpy >= 2 (NEP 50) an np.int32 input stays int32 through the shifts below and
+    # bit b >= 10 (3b + 2 >= 32) wraps -- every key went wrong at lmax = 11 (12 logical levels; C-226)
+    lx, ly, lz, lev, lmax = int(lx), int(ly), int(lz), int(lev), int(lmax)
     s = lmax - lev
     x, y, z = lx << s, ly << s, lz << s
     k = 0
     for b in range(lmax + 1):
         k |= (((x >> b) & 1) << (3 * b)) | (((y >> b) & 1) << (3 * b + 1)) | (((z >> b) & 1) << (3 * b + 2))
     return k
+
+
+def tree_order_ok(ll):
+    """the reader's order, independent of zkey: Mesh::BuildTreeFromRestart (build_tree.cpp:458-464) rebuilds the
+    tree from the list and overwrites it with MeshBlockTree::CreateZOrderedLLList (meshblock_tree.cpp:336-350:
+    leaves n = mx + 2 my + 4 mz from the logical-level-0 node, depth first), while the data records stay in file
+    order -- a list not in that order puts records on the wrong blocks (C-226)"""
+    def path(b):
+        lx, ly, lz, L = (int(v) for v in b[:4])
+        return [((lx >> (L - l)) & 1) | (((ly >> (L - l)) & 1) << 1) | (((lz >> (L - l)) & 1) << 2)
+                for l in range(1, L + 1)]
+    p = [path(b) for b in ll]
+    return all(p[i] < p[i + 1] for i in range(len(p) - 1))
 
 
 def edit_par(text, old, new_box, deck=False, src=None):
@@ -103,7 +121,10 @@ def edit_par(text, old, new_box, deck=False, src=None):
             elif block.startswith('refined_region') and key == 'level':
                 nv = str(int(val) + 1)
             elif block == 'problem' and key in LEVEL_KEYS:
-                nv = str(int(val) + 1)
+                if int(val) >= 0:             # a negative level key means off (e.g. amr_pin_level = -1,
+                    nv = str(int(val) + 1)    # dyngr_tov.cpp:183): keep it off
+                else:
+                    seen.add((block, key))
             elif block == 'job' and key in ('restart_embed_fill', 'restart_embed_box', 'restart_embed_done', 'restart_embed_src'):
                 continue                      # an earlier embedding's keys (replaced above); restart_embed_done
                                               # (set at the earlier fill, restart_state.cpp:347) would make the
@@ -162,7 +183,7 @@ def main():
 
     # the old blocks, one level deeper, offset by o root blocks
     blocks = []                                  # (lx1, lx2, lx3, level, old index or -1)
-    for i, (lx, ly, lz, L) in enumerate(r['ll']):
+    for i, (lx, ly, lz, L) in enumerate(r['ll'].tolist()):   # Python ints, not np.int32 (C-226)
         s = (L + 1) - R
         blocks.append((int(lx) + o * (1 << s), int(ly) + o * (1 << s), int(lz) + o * (1 << s), int(L) + 1, i))
     # the new root blocks outside the old box
@@ -202,7 +223,7 @@ def main():
     lmax = max(b[3] for b in blocks)
     blocks.sort(key=lambda b: zkey(b[0], b[1], b[2], b[3], lmax))
 
-    # check (ii): Z-sorted (by construction), exact tiling, no overlap, 2:1
+    # check (ii): Z-sorted (checked against the reader's tree order, tree_order_ok), exact tiling, no overlap, 2:1
     vol = sum((1 << (lmax - b[3]))**3 for b in blocks)
     full = (n << (lmax - R))**3
     bad, lo, hi = neighbours_ok([b[:4] for b in blocks], lmax)
@@ -213,6 +234,8 @@ def main():
     overl = len(keys) != len(blocks)
     if vol != full or bad or overl:
         sys.exit(f'tree check failed: volume {vol}/{full}, unbalanced {len(bad)}, overlap {overl}')
+    if not tree_order_ok(blocks):
+        sys.exit('tree check failed: the block list is not in the reader\'s Z-order (build_tree.cpp:464)')
 
     # parameters
     par_txt = r['par'].decode()
@@ -255,6 +278,8 @@ def main():
                 nbad += 1
     if nbad or o2['nmb'] != len(blocks):
         sys.exit(f'bitwise check failed: {nbad} old blocks differ')
+    if not tree_order_ok(o2['ll'].tolist()):
+        sys.exit('order check failed: the written block list is not in the reader\'s Z-order (build_tree.cpp:464)')
 
     if a.deck:
         d, _ = edit_par(open(a.deck).read(), old, new_box, deck=True, src=src)
@@ -265,7 +290,7 @@ def main():
                levels_new=[min(b[3] for b in blocks) - R, lmax - R], nmb_old=r['nmb'], nmb_new=len(blocks),
                new_blocks=nnew, data_size=ds,
                edited=sorted(str(s) for s in seen),
-               checks=dict(old_blocks_bitwise=True, z_sorted=True, tiling=True, balance_2to1=True))
+               checks=dict(old_blocks_bitwise=True, z_sorted=True, reader_tree_order=True, tiling=True, balance_2to1=True))
     if a.manifest:
         json.dump(man, open(a.manifest, 'w'), indent=1)
     print(json.dumps(man, indent=1))

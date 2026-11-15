@@ -461,6 +461,9 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
   // check the tree structure by making sure total # of MBs counted in tree same as the
   // number read from the restart file.
   {
+    // the file's list, before CreateZOrderedLLList overwrites it with the tree's order
+    std::unique_ptr<LogicalLocation[]> lfile(new LogicalLocation[nmb_total]);
+    for (int i=0; i<nmb_total; i++) {lfile[i] = lloc_eachmb[i];}
     int nnb;
     ptree->CreateZOrderedLLList(lloc_eachmb, nullptr, nnb);
     if (nnb != nmb_total) {
@@ -468,6 +471,22 @@ void Mesh::BuildTreeFromRestart(ParameterInput *pin, IOWrapper &resfile,
         << std::endl << "Tree reconstruction failed. Total number of blocks in "
         << "reconstructed tree=" << nnb << ", number in file=" << nmb_total << std::endl;
       std::exit(EXIT_FAILURE);
+    }
+    // C-226: the data records are read in file order (gid = position in the file,
+    // pgen.cpp's offset_myrank), so the file's list must already be in the tree's
+    // Z-order; otherwise every record would land on another block's location
+    for (int i=0; i<nmb_total; i++) {
+      if (lfile[i].lx1 != lloc_eachmb[i].lx1 || lfile[i].lx2 != lloc_eachmb[i].lx2 ||
+          lfile[i].lx3 != lloc_eachmb[i].lx3 || lfile[i].level != lloc_eachmb[i].level) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "Restart file's MeshBlock list is not in Z-order: entry " << i
+          << " is (" << lfile[i].lx1 << "," << lfile[i].lx2 << "," << lfile[i].lx3
+          << ", level " << lfile[i].level << "), the tree's is (" << lloc_eachmb[i].lx1
+          << "," << lloc_eachmb[i].lx2 << "," << lloc_eachmb[i].lx3 << ", level "
+          << lloc_eachmb[i].level << "); the records would land on the wrong blocks"
+          << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
     }
   }
 

@@ -116,6 +116,7 @@ class CFC {
   // (ReinitializeMetricForAMR: X, psi, alpha_psi, beta) converges on the max norm to
   // <cfc> mg_regrid_threshold (default 1e-7, absolute); every other solve keeps the run's setting
   bool regrid_max_ = false;
+  bool shock_flags_off_ = false;   // <mhd> dual_energy_shock_flags = false (R-260)
   Real regrid_thr_ = 1.0e-7;
   bool rs_ramp_ = false;
   Real rs_const_ = 1.0, rs_f0_ = 1.0, rs_f1_ = 1.0, rs_t0_ = 0.0, rs_t1_ = 0.0;

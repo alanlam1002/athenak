@@ -238,6 +238,12 @@ class PrimitiveSolverHydro {
   // read without GetOrAdd. The shock flag, the second-law guard and dual_energy_eta1 are not
   // used by this mode (the flag is still computed for the diagnostics).
   bool de_cond = false;
+  // <mhd> dual_energy_shock_flags = false (R-260, conditioning only; default true): the legacy
+  // shock sensor is neither computed nor loaded (de_shock stays 0). Conditioning's decision
+  // does not read it (the D-ent block), so the solution is unchanged; de_diag slot 2 and the
+  // DESHK counters then read 0. With dual_energy_flag_exchange = false the flag slot is not
+  // allocated either; CFC's regrid refresh keeps the owner-flag path (cfc.cpp)
+  bool de_noshk = false;
   Real de_q1 = 3.0e-4, de_q2 = 3.0e-3, de_qdel = 0.1;
   // <mhd> dual_energy_variable = eint (D-int; R-223 addendum, R-225 item 2; needs dual_energy_mode =
   // conditioning): the partner is the specific internal energy, Y = eps (the scalar slot holds
@@ -1621,6 +1627,15 @@ class PrimitiveSolverHydro {
           std::exit(EXIT_FAILURE);
         }
       }
+      if (pin->DoesParameterExist(block, "dual_energy_shock_flags")) {   // R-260 (no GetOrAdd)
+        de_noshk = !pin->GetBoolean(block, "dual_energy_shock_flags");
+        if (de_noshk && !de_cond) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> dual_energy_shock_flags = false needs "
+                    << "dual_energy_mode = conditioning" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
       std::string var = pin->GetOrAddString(block, "dual_energy_variable", "k_1g");
       if (var == "k_1g") {
         de_ypow = 1.0/de_gamma;
@@ -2051,7 +2066,7 @@ class PrimitiveSolverHydro {
     }
   }
   void UpdateShockFlags() {
-    if (!de_on || !de_xchg) return;
+    if (!de_on || !de_xchg || de_noshk) return;
     SetFlagSlot();
     auto &indcs = pmy_pack->pmesh->mb_indcs;
     const int r = de_dilate + (de_isolated ? 1 : 0) + 1;
@@ -2234,7 +2249,18 @@ class PrimitiveSolverHydro {
                       prim.extent_int(4));
     }
     auto &dbr_ = de_dbr;
-    if (de_on_) {
+    if (de_on_ && de_noshk) {
+      // dual_energy_shock_flags = false: no sensor; de_shock only sized (zero) for the reads
+      // of de_diag slot 2 below
+      if (de_shock.extent_int(0) != prim.extent_int(0) ||
+          de_shock.extent_int(1) != prim.extent_int(2) ||
+          de_shock.extent_int(2) != prim.extent_int(3) ||
+          de_shock.extent_int(3) != prim.extent_int(4)) {
+        Kokkos::realloc(de_shock, prim.extent_int(0), prim.extent_int(2), prim.extent_int(3),
+                        prim.extent_int(4));
+        Kokkos::deep_copy(DevExeSpace(), de_shock, 0);
+      }
+    } else if (de_on_) {
       if (de_xchg) {
         // the owner's flag, carried in the cons slot (see UpdateShockFlags)
         SetFlagSlot();

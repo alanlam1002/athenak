@@ -45,8 +45,14 @@ class Coordinates;
 // standard requires signed int tag, with MPI_TAG_UB>=2^15-1 = 32,767 (inclusive). In fact
 // virtually every library allows this limit to be exceeded. As of 2025, the Intel MPI
 // library provided the most stringent limit of 20 bits per tag. Six bits are needed to
-// store the buffer ID, leaving NUM_BITS_LID=14
-#define NUM_BITS_LID 14
+// store the buffer ID.
+// bhstar/aurora-build: ALCF Aurora's MPICH (5.x, libfabric 2.3) reports MPI_TAG_UB =
+// 262143 (18 bits) and rejects larger tags ("Invalid tag") at the first boundary
+// exchange. 6 bits of buffer ID + 12 bits of local ID = 18 bits, so the largest tag is
+// (63<<12)|4095 = 262143. This caps MeshBlocks per rank at 4096.
+// (The multigrid tags in multigrid_bvals.cpp use bufid+64 and still exceed 18 bits;
+// multigrid/self-gravity is not used in this project.)
+#define NUM_BITS_LID 12
 
 #define SQR(x) ( (x)*(x) )
 #define SIGN(x) ( ((x) < 0.0) ? -1.0 : 1.0 )

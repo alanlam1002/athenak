@@ -991,6 +991,17 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
   RefreshExcisionMasks();
   eos.de_stage = stage;   // dual_energy_diag per-stage slots only
   eos.MetricProbe(0, stage);   // R-072 item 1 (debug; off unless the probe is set)
+  if (eos.mlk_on) {   // K-011 mass_ledger_killing: CFC's stored background (refilled by
+    // regrids / the moving puncture, so set every stage)
+    if (pmy_pack->pcfc == nullptr) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<mhd> mass_ledger_killing needs a <cfc> block" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    eos.mlk_psi0 = pmy_pack->pcfc->u_psi0;
+    eos.mlk_ap0 = pmy_pack->pcfc->u_alpha0_psi0;
+    eos.mlk_b0 = pmy_pack->pcfc->u_beta0;
+  }
   eos.MassLedgerPre(stage);
   if (pmclose != nullptr) pmclose->StagePre(stage);
   eos.ConsToPrim(pmy_pack->pmhd->u0, pmy_pack->pmhd->b0, pmy_pack->pmhd->bcc0,

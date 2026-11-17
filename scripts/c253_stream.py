@@ -2,7 +2,8 @@
 """c253 (R-253 items 2-3, user-approved 2026-11-09): the debris stream's refinement-level census and transverse
 structure from the prim_3d dumps of one run (offline).
 Per dump (t - t_p in [--t0, --t1]):
-  remnant: centroid x_c of rho >= 0.01 rho_c (if none: the densest cell); r = |x_c - x_BH| (x_BH from the hst
+  remnant: centroid x_c of rho >= 0.01 rho_c (if none, --seed rel (c265, default): of rho >= 0.01 of the dump's
+    rho_max outside r_BH < 3; --seed abs (c253): the densest cell, M_H = 0 so r_H = 0); r = |x_c - x_BH| (x_BH from the hst
     frame columns, c160_coldmax.xbh); the self-consistent Hill sphere r_H = r (M_H/3M)^(1/3), M_H the mass inside it
     (as c142's M_Hsc; M = M_BH = 1, coordinate volumes);
   stream = 1e-6 <= rho/rho_c < 0.01 (c169/c193's class), outside r_H about x_c and outside r_BH < 3;
@@ -11,7 +12,7 @@ Per dump (t - t_p in [--t0, --t1]):
     mass (2-deg bins); the cells within +-15 deg of it: the mass-weighted Gaussian FWHM (2.3548 sigma) across the
     stream in z (thin direction) and in-plane (R sigma_phi), the mass-weighted dx and FWHM/dx, the peak density, and
     the mass-weighted K/K0. A moment width, not a fitted profile: the same method in every rung.
-    c253_stream.py OUT_PREFIX RUNDIR TP [--t0 -60] [--t1 1e9] [--every 1] [--radii 10,20,40,80]"""
+    c253_stream.py OUT_PREFIX RUNDIR TP [--t0 -60] [--t1 1e9] [--every 1] [--radii 10,20,40,80] [--seed rel|abs]"""
 import argparse, glob, sys, types, csv
 import numpy as np
 sys.modules.setdefault('h5py', types.ModuleType('h5py'))
@@ -25,6 +26,7 @@ ap = argparse.ArgumentParser(); ap.add_argument('out'); ap.add_argument('run'); 
 ap.add_argument('--t0', type=float, default=-60.0); ap.add_argument('--t1', type=float, default=1e9)
 ap.add_argument('--every', type=int, default=1); ap.add_argument('--radii', default='10,20,40,80')
 ap.add_argument('--excl', type=float, default=5.0)   # transverse: only cells this far from x_c
+ap.add_argument('--seed', choices=('rel', 'abs'), default='rel')   # c265: 'abs' = the c253 seeding (r_H = 0 once rho_max < 0.01 rho_c)
 ap.add_argument('--dt', type=float, default=12.0)   # the prim_3d cadence: dump i is at t ~ i dt (pre-filter, avoids reading)
 a = ap.parse_args()
 RAD = [float(x) for x in a.radii.split(',')]
@@ -48,10 +50,16 @@ for f in fs[::a.every]:
     xb = xbh(a.run, t)
     rbh = np.sqrt((X-xb[0])**2 + (Y-xb[1])**2 + (Z-xb[2])**2)
     d1 = rho >= 0.01*RC
+    seed = 'abs'
+    if not d1.any() and a.seed == 'rel':
+        # c265: the remnant's rho_max fell below 0.01 rho_c (L32T from t_p + 787, P18T from t_p + 889): seed from
+        # rho >= 0.01 of the dump's own rho_max outside r_BH < 3, so M_H > 0 and the iteration below reaches the Hill
+        # sphere instead of r_H = 0 (rows with an abs seed are unchanged)
+        d1 = (rbh >= 3.0) & (rho >= 0.01*np.where(rbh >= 3.0, rho, 0).max()); seed = 'rel'
     if d1.any():
         xc = np.array([np.average(w[d1], weights=m[d1]) for w in (X, Y, Z)]); MH = m[d1].sum()
     else:
-        i = np.argmax(np.where(rbh > 3, rho, 0)); xc = np.array([X[i], Y[i], Z[i]]); MH = 0.0
+        i = np.argmax(np.where(rbh > 3, rho, 0)); xc = np.array([X[i], Y[i], Z[i]]); MH = 0.0; seed = 'none'
     r = np.linalg.norm(xc - xb); dc = np.sqrt((X-xc[0])**2 + (Y-xc[1])**2 + (Z-xc[2])**2)
     rH = 0.0
     for _ in range(40):
@@ -60,7 +68,7 @@ for f in fs[::a.every]:
         MH = MH_new
     st = (rho >= 1e-6*RC) & (rho < 0.01*RC) & (dc >= rH) & (rbh >= 3.0)
     Ms = m[st].sum()
-    row = dict(t=t, t_tp=t - a.tp, rho_max=rho.max()/RC, r_rem=r, r_H=rH, M_H=MH/MS, M_stream=Ms/MS)
+    row = dict(t=t, t_tp=t - a.tp, rho_max=rho.max()/RC, r_rem=r, r_H=rH, M_H=MH/MS, M_stream=Ms/MS, seed=seed)
     for h in sorted(set(np.round(H, 8))):
         row[f'f_dx{1/h:g}'] = m[st & (np.abs(H - h) < 1e-9)].sum()/Ms if Ms > 0 else np.nan
     # the stream mass above the finest dx's 1/2-level: mass-weighted dx

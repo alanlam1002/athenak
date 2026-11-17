@@ -223,7 +223,8 @@ enforce_maximum = false
 atmosphere_frame_velocity = true
 atmosphere_frame_gate = 6.0
 dual_energy_div = covariant
-dual_energy_flag_exchange = true    # (A), explicit (the code default is also true)
+dual_energy_flag_exchange = false   # R-260/C-229 (user 2026-11-16): no u0 flag slot; with the next key, 0.9% of the step, bitwise
+dual_energy_shock_flags = false     # R-260/C-229: no legacy shock sensor (conditioning only; needs proj/tde >= fd32fae3); DESHK lines read 0
 dual_energy_shock_counters = 100    # R-112 item 1 DESHK lines every N cycles (0 = off); R-115 Q3c: on
 atmosphere_zone = true
 atmosphere_zone_unmask = true   # R7 shell fix F1 (C-072; production per the user 2026-10-20; needs proj/tde >= d8635dae)

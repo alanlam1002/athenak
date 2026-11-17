@@ -434,6 +434,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // leaves every existing run bit-for-bit unchanged wherever alpha > 0.
   alpha_floor_ = pin->GetOrAddReal("cfc", "alpha_floor", 0.0);
   mg_log_vcycles_ = pin->GetOrAddBoolean("cfc", "mg_log_vcycles", false);
+  // <mhd> dual_energy_shock_flags (R-260; see primitive_solver_hyd.hpp de_noshk)
+  shock_flags_off_ = pin->DoesParameterExist("mhd", "dual_energy_shock_flags") &&
+                     !pin->GetBoolean("mhd", "dual_energy_shock_flags");
   // <cfc> mg_regrid_norm / mg_regrid_threshold (R-218 item 1; see cfc.hpp). Read without
   // GetOrAdd, so an input without the keys leaves the parameter block unchanged.
   if (pin->DoesParameterExist("cfc", "mg_regrid_norm")) {
@@ -1512,7 +1515,10 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   // interiors (from the interior C2P just done) and the MHD ghost exchange carries them
   // into the ghosts before the ghost-only C2P below, which then reads them instead of
   // recomputing the flag inside each slab
-  if (pmy_pack->pmhd->nflag > 0) {
+  // <mhd> dual_energy_shock_flags = false (R-260): the same exchange and whole-block C2P
+  // without the flag slot, so the regrid path (and the solution) is the production one
+  const bool own_flags = pmy_pack->pmhd->nflag > 0 || shock_flags_off_;
+  if (own_flags) {
     pmy_pack->pdyngr->UpdateShockFlags();
     pdriver->ExchangeMHDGhosts(pmy_pack->pmesh);
   }
@@ -1534,7 +1540,7 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     int n1 = indcs.nx1 + 2*ng;
     int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*ng) : 1;
     int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*ng) : 1;
-    if (pmy_pack->pmhd->nflag > 0) {
+    if (own_flags) {
       // owner flags: one C2P over the whole block (interior + ghosts) with the
       // exchanged flags, so interior and ghost primitives come from the same flags
       pdyngr->ConToPrimBC(0, n1-1, 0, n2-1, 0, n3-1);

@@ -695,7 +695,29 @@ class CFC {
   // refill the analytic background at x_BH(t) and point the ADM outer-BC falloff there
   void RefillMovingPuncture(Real t);
 
+  // <problem> star_vel_mode = coordinate (RK-034/K-012; default eulerian = never
+  // called, nothing allocated). The problem generator calls EnableCoordVel with the
+  // star's BH-frame coordinate velocity V^i before InitializeMetric, then sets
+  // cv_mask = 1 on the cells of its boost gate. InitializeMetric then holds
+  // alpha v^i - beta_BH^i = V^i on those cells through its passes
+  // (beta_BH = adm.beta_u - padm->frame_vel_u), see CoordVelUpdate.
+  void EnableCoordVel(const Real V[3], Real tol, int iter_max);
+  bool CoordVelEnabled() const { return cv_on_; }
+  DvceArray4D<Real> cv_mask;   // allocated by EnableCoordVel only
+  // the stored background (alpha0, beta0^i, psi0) in the cell containing x on the
+  // finest MeshBlock that holds x (u_alpha0_psi0, u_beta0, u_psi0); collective
+  void BackgroundAtPoint(const Real x[3], Real &alpha0, Real beta0[3], Real &psi0);
+
  private:
+  bool cv_on_ = false;
+  Real cv_V_[3] = {0.0, 0.0, 0.0};
+  Real cv_tol_ = 1.0e-12;
+  int cv_iter_max_ = 20;
+  // the X^i/psi part of InitializeMetric (frozen one-shot or iterated), unchanged
+  void InitXPsiSolve(Driver *pdriver);
+  // u~^i = W v^i, v^i = (V^i + beta_BH^i)/alpha on cv_mask cells with the current
+  // metric; returns max |du~|/|u~| and max |alpha v_old - beta_BH - V|/|V| (old u~)
+  void CoordVelUpdate(Real &du_max, Real &res_max);
 
   // One pass of "solve X^i, ghost-exchange, compute Adual^ij/Ahat^2, solve psi" --
   // extracted from InitializeMetric()'s Picard-loop body so it can be called either

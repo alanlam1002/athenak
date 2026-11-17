@@ -1095,6 +1095,73 @@ void CFC::InitializeMetric(Driver *pdriver) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
 
+  InitXPsiSolve(pdriver);
+
+  // Lapse/shift/final-assembly tail, shared with CFC::ReinitializeMetricForAMR.
+  // Reconcile primitives vs. conserved variables in whichever direction matches
+  // what was just held fixed: freeze_conserved held Utilde fixed, so recover
+  // primitives via ConToPrim; the iterative loop held primitives fixed throughout,
+  // so rebuild conserved variables from them one last time via PrimToConInit.
+  if (cfc_init_freeze_conserved_) {
+    pmy_pack->pdyngr->ConToPrim(pdriver, 0);
+  } else {
+    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+  }
+
+  RunLapseShiftAssemblePass(pdriver);
+
+  // star_vel_mode = coordinate (K-012): re-evaluate the star's u~ from the full
+  // alpha, beta_BH, gamma_ij just assembled, rebuild the conserved variables, and
+  // re-solve X^i/psi and lapse/shift, until u~ stops changing. Off: never entered.
+  if (cv_on_) {
+    bool cv_conv = false;
+    for (int pass = 0; pass < cv_iter_max_; ++pass) {
+      Real du = 0.0, res = 0.0;
+      CoordVelUpdate(du, res);
+      pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+      if (global_variable::my_rank == 0) {
+        std::cout << std::setprecision(6) << "CFC coordvel pass " << pass
+                  << ": max|du~|/|u~| = " << du
+                  << ", max|alpha v - beta_BH - V|/|V| (before) = " << res << std::endl;
+      }
+      if (du < cv_tol_) { cv_conv = true; break; }
+      InitXPsiSolve(pdriver);
+      pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
+      RunLapseShiftAssemblePass(pdriver);
+    }
+    if (!cv_conv) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<problem> star_vel_mode = coordinate: u~ did not converge"
+                << " to star_vel_tol in star_vel_iter_max passes" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+
+  // Re-exchange hydro ghost cells and rebuild primitives everywhere (interior +
+  // ghost) against the now-final metric: PrimToConInit/ConToPrim above only
+  // touch whichever of {u0, w0} was reconciled, and (for u0) only the interior,
+  // so the other quantity's ghost cells -- or, for ConToPrim's ghost-inclusive
+  // recompute, the metric ghosts it read -- are stale until padm->u_adm's own
+  // ghost exchange (inside RunLapseShiftAssemblePass) completes. Reuses the same
+  // function already run once before this solve (Driver::Initialize()); safe to
+  // call again since it doesn't touch padm->SetADMVariables.
+  pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
+  // Phase 2 M2: xidot(0) from the star (fresh starts only; restarts restore the state)
+  if (frame_ctrl_ && !fc_init_) { InitFrameControl(pdriver); }
+  return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::InitXPsiSolve(Driver *pdriver)
+//! \brief the X^i/psi part of InitializeMetric(), moved here unchanged so the
+//! star_vel_mode = coordinate loop can repeat it (K-012).
+
+void CFC::InitXPsiSolve(Driver *pdriver) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  int &is = indcs.is; int &ie = indcs.ie;
+  int &js = indcs.js; int &je = indcs.je;
+  int &ks = indcs.ks; int &ke = indcs.ke;
+
   if (cfc_init_freeze_conserved_) {
     // One-shot mode: Utilde/S-tilde_i are built exactly once (inside
     // RunXPsiSolvePass, from the conserved state the pgen's own initial metric
@@ -1221,32 +1288,166 @@ void CFC::InitializeMetric(Driver *pdriver) {
                 << std::endl;
     }
   }
-
-  // Lapse/shift/final-assembly tail, shared with CFC::ReinitializeMetricForAMR.
-  // Reconcile primitives vs. conserved variables in whichever direction matches
-  // what was just held fixed: freeze_conserved held Utilde fixed, so recover
-  // primitives via ConToPrim; the iterative loop held primitives fixed throughout,
-  // so rebuild conserved variables from them one last time via PrimToConInit.
-  if (cfc_init_freeze_conserved_) {
-    pmy_pack->pdyngr->ConToPrim(pdriver, 0);
-  } else {
-    pmy_pack->pdyngr->PrimToConInit(is, ie, js, je, ks, ke);
-  }
-
-  RunLapseShiftAssemblePass(pdriver);
-
-  // Re-exchange hydro ghost cells and rebuild primitives everywhere (interior +
-  // ghost) against the now-final metric: PrimToConInit/ConToPrim above only
-  // touch whichever of {u0, w0} was reconciled, and (for u0) only the interior,
-  // so the other quantity's ghost cells -- or, for ConToPrim's ghost-inclusive
-  // recompute, the metric ghosts it read -- are stale until padm->u_adm's own
-  // ghost exchange (inside RunLapseShiftAssemblePass) completes. Reuses the same
-  // function already run once before this solve (Driver::Initialize()); safe to
-  // call again since it doesn't touch padm->SetADMVariables.
-  pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
-  // Phase 2 M2: xidot(0) from the star (fresh starts only; restarts restore the state)
-  if (frame_ctrl_ && !fc_init_) { InitFrameControl(pdriver); }
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::EnableCoordVel(const Real V[3], Real tol, int iter_max)
+//! \brief star_vel_mode = coordinate (K-012): store V^i and allocate cv_mask (zeroed;
+//! the problem generator marks its star cells).
+
+void CFC::EnableCoordVel(const Real V[3], Real tol, int iter_max) {
+  if (cfc_init_freeze_conserved_) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+              << std::endl << "<problem> star_vel_mode = coordinate requires <cfc> "
+              << "init_freeze_conserved = false (u~ is re-evaluated each pass)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  for (int a = 0; a < 3; ++a) { cv_V_[a] = V[a]; }
+  cv_tol_ = tol;
+  cv_iter_max_ = iter_max;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int n1 = indcs.nx1 + 2*indcs.ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+  Kokkos::realloc(cv_mask, pmy_pack->nmb_thispack, n3, n2, n1);
+  Kokkos::deep_copy(cv_mask, 0.0);
+  cv_on_ = true;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::CoordVelUpdate(Real &du_max, Real &res_max)
+//! \brief on cv_mask cells (interior): v^i = (V^i + beta_BH^i)/alpha with
+//! beta_BH = adm.beta_u - padm->frame_vel_u, W = (1 - gamma_ij v^i v^j)^(-1/2),
+//! u~^i = W v^i, all from the current padm->adm. du_max = max |du~|/|u~_new|;
+//! res_max = max |alpha v_old - beta_BH - V|/|V| of the u~ it replaces.
+
+void CFC::CoordVelUpdate(Real &du_max, Real &res_max) {
+  if (pmy_pack->pmesh->mesh_indcs.nx3 <= 1) {   // star cells are 3D by construction
+    std::cout << "### FATAL ERROR: star_vel_mode = coordinate needs a 3D mesh" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  const int nmb = pmy_pack->nmb_thispack;
+  if (cv_mask.extent_int(0) != nmb) {           // the mesh changed since the pgen
+    std::cout << "### FATAL ERROR: star_vel_mode = coordinate: MeshBlocks changed between"
+              << " the problem generator and InitializeMetric" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &adm = pmy_pack->padm->adm;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &mask = cv_mask;
+  const Real V0 = cv_V_[0], V1 = cv_V_[1], V2 = cv_V_[2];
+  const Real gx0 = pmy_pack->padm->frame_vel_u[0], gx1 = pmy_pack->padm->frame_vel_u[1];
+  const Real gx2 = pmy_pack->padm->frame_vel_u[2];
+  const Real vnorm = sqrt(V0*V0 + V1*V1 + V2*V2);
+  const Real ivn = (vnorm > 0.0) ? 1.0/vnorm : 1.0;
+  Real du = 0.0, res = 0.0;
+  Kokkos::parallel_reduce("cfc_coordvel_update",
+    Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                          {nmb, ke+1, je+1, ie+1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
+                  Real &ldu, Real &lres) {
+      if (mask(m,k,j,i) == 0.0) return;
+      Real g[3][3];
+      g[0][0] = adm.g_dd(m,0,0,k,j,i); g[0][1] = adm.g_dd(m,0,1,k,j,i);
+      g[0][2] = adm.g_dd(m,0,2,k,j,i); g[1][1] = adm.g_dd(m,1,1,k,j,i);
+      g[1][2] = adm.g_dd(m,1,2,k,j,i); g[2][2] = adm.g_dd(m,2,2,k,j,i);
+      g[1][0] = g[0][1]; g[2][0] = g[0][2]; g[2][1] = g[1][2];
+      const Real al = adm.alpha(m,k,j,i);
+      const Real b[3] = {adm.beta_u(m,0,k,j,i) - gx0, adm.beta_u(m,1,k,j,i) - gx1,
+                         adm.beta_u(m,2,k,j,i) - gx2};
+      const Real Vc[3] = {V0, V1, V2};
+      const Real uo[3] = {w0(m,IVX,k,j,i), w0(m,IVY,k,j,i), w0(m,IVZ,k,j,i)};
+      // the u~ being replaced: W_old = sqrt(1 + gamma_ij u~^i u~^j), v_old = u~/W_old
+      Real usq = 0.0, vsq = 0.0, v[3];
+      for (int a = 0; a < 3; ++a) { v[a] = (Vc[a] + b[a])/al; }
+      for (int a = 0; a < 3; ++a) for (int c = 0; c < 3; ++c) {
+        usq += g[a][c]*uo[a]*uo[c];
+        vsq += g[a][c]*v[a]*v[c];
+      }
+      const Real wo = sqrt(1.0 + usq);
+      Real r2 = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        const Real d = al*uo[a]/wo - b[a] - Vc[a];
+        r2 += d*d;
+      }
+      lres = fmax(lres, sqrt(r2)*ivn);
+      const Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.9999));
+      Real d2 = 0.0, n2 = 0.0;
+      for (int a = 0; a < 3; ++a) {
+        const Real un = wl*v[a];
+        d2 += (un - uo[a])*(un - uo[a]);
+        n2 += un*un;
+      }
+      ldu = fmax(ldu, (n2 > 0.0) ? sqrt(d2/n2) : 0.0);
+      w0(m,IVX,k,j,i) = wl*v[0];
+      w0(m,IVY,k,j,i) = wl*v[1];
+      w0(m,IVZ,k,j,i) = wl*v[2];
+    }, Kokkos::Max<Real>(du), Kokkos::Max<Real>(res));
+#if MPI_PARALLEL_ENABLED
+  Real loc[2] = {du, res}, glob[2];
+  MPI_Allreduce(loc, glob, 2, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+  du = glob[0]; res = glob[1];
+#endif
+  du_max = du;
+  res_max = res;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::BackgroundAtPoint(const Real x[3], Real &alpha0, Real beta0[3],
+//!                                 Real &psi0)
+//! \brief the stored analytic background in the cell containing x, on the finest
+//! MeshBlock (over all ranks) that holds x. Host-side; collective.
+
+void CFC::BackgroundAtPoint(const Real x[3], Real &alpha0, Real beta0[3], Real &psi0) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  auto &size = pmy_pack->pmb->mb_size;
+  int best_m = -1, bi = 0, bj = 0, bk = 0;
+  Real best_dx = std::numeric_limits<Real>::max();
+  for (int m = 0; m < pmy_pack->nmb_thispack; ++m) {
+    const auto &s = size.h_view(m);
+    if (x[0] < s.x1min || x[0] >= s.x1max || x[1] < s.x2min || x[1] >= s.x2max ||
+        x[2] < s.x3min || x[2] >= s.x3max) continue;
+    if (s.dx1 < best_dx) {
+      best_dx = s.dx1; best_m = m;
+      bi = indcs.is + static_cast<int>((x[0] - s.x1min)/s.dx1);
+      bj = indcs.js + static_cast<int>((x[1] - s.x2min)/s.dx2);
+      bk = indcs.ks + static_cast<int>((x[2] - s.x3min)/s.dx3);
+      bi = std::min(bi, indcs.ie); bj = std::min(bj, indcs.je); bk = std::min(bk, indcs.ke);
+    }
+  }
+  Real val[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // psi0, alpha0 psi0, beta0^1..3
+  if (best_m >= 0) {
+    auto hp = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                Kokkos::subview(u_psi0, best_m, 0, bk, bj, bi));
+    auto ha = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                Kokkos::subview(u_alpha0_psi0, best_m, 0, bk, bj, bi));
+    val[0] = hp(); val[1] = ha();
+    for (int a = 0; a < 3; ++a) {
+      auto hb = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                  Kokkos::subview(u_beta0, best_m, a, bk, bj, bi));
+      val[2 + a] = hb();
+    }
+  }
+#if MPI_PARALLEL_ENABLED
+  struct { double dx; int rank; } loc{static_cast<double>(best_dx), global_variable::my_rank},
+                                   glob;
+  MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
+  MPI_Bcast(val, 5, MPI_ATHENA_REAL, glob.rank, MPI_COMM_WORLD);
+  if (glob.dx == std::numeric_limits<double>::max()) best_m = -1; else best_m = 0;
+#endif
+  if (best_m < 0) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "CFC::BackgroundAtPoint: (" << x[0] << ", " << x[1] << ", " << x[2]
+              << ") is outside the mesh" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  psi0 = val[0];
+  alpha0 = val[1]/val[0];
+  for (int a = 0; a < 3; ++a) { beta0[a] = val[2 + a]; }
 }
 
 //----------------------------------------------------------------------------------------

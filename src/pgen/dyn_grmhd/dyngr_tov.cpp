@@ -9,9 +9,11 @@
 #include <math.h>     // abs(), cos(), exp(), log(), NAN, pow(), sin(), sqrt()
 
 #include <algorithm>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <sstream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -196,6 +198,50 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     }
     Real r0 = sqrt(SQR(x0 - xb[0]) + SQR(y0 - xb[1]) + SQR(z0 - xb[2]));
     if (r0 > 0.0) { psi_bg = sqrt(m_bh*cfc::TrumpetIsoToAreal(r0/m_bh)/r0); }
+  }
+  // <problem> star_vel_mode (RK-034/K-012): eulerian (default; star_vel = the Eulerian
+  // v^i, the boost below as before) or coordinate: star_vel = the star's BH-frame
+  // coordinate velocity V^i = alpha v^i - beta_BH^i, held on the boost-gate cells
+  // through CFC::InitializeMetric (cfc.cpp CoordVelUpdate). Read-only: a deck without
+  // the key is untouched and nothing below runs.
+  bool coordvel = false;
+  Real cv_V[3] = {star_vel_x1, star_vel_x2, star_vel_x3};
+  if (pin->DoesParameterExist("problem", "star_vel_mode")) {
+    std::string mode = pin->GetString("problem", "star_vel_mode");
+    if (mode == "coordinate") {
+      coordvel = true;
+    } else if (mode != "eulerian") {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<problem> star_vel_mode must be eulerian or coordinate" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+  if (coordvel) {
+    cfc::CFC *pcfc = pmy_mesh_->pmb_pack->pcfc;
+    if (pcfc == nullptr || !has_boost || v_pert != 0.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<problem> star_vel_mode = coordinate needs a <cfc> block, a nonzero "
+                << "star_vel and v_pert = 0" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    // First guess and the TOV shape's contraction: the background Eulerian velocity at
+    // the star's centre, v0 = (V + beta0)/alpha0 (beta0 in the BH frame), normed with
+    // psi4_bg below as in the eulerian mode.
+    Real xc[3] = {x0, y0, z0}, al0, be0[3], ps0;
+    pcfc->BackgroundAtPoint(xc, al0, be0, ps0);
+    star_vel_x1 = (cv_V[0] + be0[0])/al0;
+    star_vel_x2 = (cv_V[1] + be0[1])/al0;
+    star_vel_x3 = (cv_V[2] + be0[2])/al0;
+    pcfc->EnableCoordVel(cv_V, pin->GetOrAddReal("problem", "star_vel_tol", 1.0e-12),
+                         pin->GetOrAddInteger("problem", "star_vel_iter_max", 20));
+    if (global_variable::my_rank == 0) {
+      std::cout << std::setprecision(12) << "star_vel_mode = coordinate: V = (" << cv_V[0]
+                << ", " << cv_V[1] << ", " << cv_V[2] << "); background at the centre "
+                << "alpha0 = " << al0 << ", beta0 = (" << be0[0] << ", " << be0[1] << ", "
+                << be0[2] << "), psi0 = " << ps0 << "; first-guess Eulerian v0 = ("
+                << star_vel_x1 << ", " << star_vel_x2 << ", " << star_vel_x3 << ")"
+                << std::setprecision(6) << std::endl;
+    }
   }
   const bool rescale = bg_rescale && (psi_bg != 1.0);
   const bool contract = boost_contract && has_boost;
@@ -389,6 +435,28 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     adm.vK_dd(m,0,0,k,j,i) = adm.vK_dd(m,0,1,k,j,i) = adm.vK_dd(m,0,2,k,j,i) = 0.0;
     adm.vK_dd(m,1,1,k,j,i) = adm.vK_dd(m,1,2,k,j,i) = adm.vK_dd(m,2,2,k,j,i) = 0.0;
   });
+
+  // star_vel_mode = coordinate: mark the boost gate's cells (r_schw <= R_edge of the
+  // isotropic branch above, the same rt) for CFC::CoordVelUpdate. Off: not run.
+  if (coordvel) {
+    auto mask = pmbp->pcfc->cv_mask;
+    par_for("pgen_tov_cv_mask", DevExeSpace(), 0, nmb1, 0, (n3-1), 0, (n2-1), 0, (n1-1),
+    KOKKOS_LAMBDA(int m, int k, int j, int i) {
+      Real x1v = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+      Real x2v = CellCenterX(j-js, indcs.nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+      Real x3v = CellCenterX(k-ks, indcs.nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+      Real r = sqrt(SQR(x1v-x0) + SQR(x2v-y0) + SQR(x3v-z0));
+      Real rt = r;
+      if (new_place) {
+        Real dpar = (x1v-x0)*vh1 + (x2v-y0)*vh2 + (x3v-z0)*vh3;
+        rt = len_scale*sqrt(r*r + w0sq_m1*dpar*dpar);
+      }
+      Real rho, p, mass, alp;
+      tov_.GetPrimitivesAtIsoPoint(eos_, rt, rho, p, mass, alp);
+      Real r_schw = tov_.FindSchwarzschildR(rt, mass);
+      mask(m,k,j,i) = (r_schw <= tov_.R_edge) ? 1.0 : 0.0;
+    });
+  }
 
   // parse some parameters
   Real b_norm = pin->GetOrAddReal("problem", "b_norm", 0.0);

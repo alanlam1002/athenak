@@ -42,6 +42,16 @@ class CartesianGrid {
   void SetInterpolationWeights();      // set weights for interpolation
   void ResetCenterAndExtent(Real center[3], Real extent[3]);
 
+  // K-013 (wip/cartplane): optional tilted grid and nearest-cell sampling, both default off.
+  // Tilted: point (nx,ny,nz) = center + u e1 + v e2 + w e3, (u,v,w) on the usual uniform/Chebyshev
+  // grid over [-extent, extent]; e1, e2 orthonormalised (Gram-Schmidt), e3 = e1 x e2.
+  bool tilted = false;
+  Real e1[3] = {1.0, 0.0, 0.0}, e2[3] = {0.0, 1.0, 0.0}, e3[3] = {0.0, 0.0, 1.0};
+  void SetPlane(const Real a1[3], const Real a2[3]);   // fatal if degenerate; resets indices/weights
+  bool nearest = false;                                 // weight 1 on the cell containing the point
+  void SetNearest(bool on);
+  void PointCoord(int nx, int ny, int nz, Real &x1, Real &x2, Real &x3) const;
+
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Hydro
   DualArray4D<int> interp_indcs;   // indices of MeshBlock and zones therein for interp

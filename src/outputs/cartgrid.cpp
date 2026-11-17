@@ -9,6 +9,8 @@
 #include <sys/stat.h>  // mkdir
 
 #include <cstdio> // snprintf
+#include <cstdlib>
+#include <iostream>
 #include <fstream>
 #include <string>
 #include <sstream>
@@ -41,6 +43,59 @@ CartesianGridOutput::CartesianGridOutput(ParameterInput *pin, Mesh *pm,
   is_cheb = pin->GetOrAddBoolean(op.block_name, "chebyshev", false);
 
   pcart = new CartesianGrid(pm->pmb_pack, center, extent, numpoints, is_cheb);
+
+  // K-013 (wip/cartplane): an optional tilted grid (plane_e1_*, plane_e2_*: both vectors required;
+  // default off = the axis-aligned grid) and nearest-cell sampling (interp = nearest; default
+  // lagrange, as before). Read with DoesParameterExist so a deck without them is unchanged.
+  const char *ax[3] = {"x", "y", "z"};
+  bool has1 = false, has2 = false;
+  for (int d = 0; d < 3; ++d) {
+    has1 = has1 || pin->DoesParameterExist(op.block_name, std::string("plane_e1_") + ax[d]);
+    has2 = has2 || pin->DoesParameterExist(op.block_name, std::string("plane_e2_") + ax[d]);
+  }
+  if (has1 != has2) {
+    std::cout << "### FATAL ERROR in CartesianGridOutput: <" << op.block_name << "> needs both "
+              << "plane_e1_* and plane_e2_* for a tilted grid" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (has1) {
+    Real a1[3], a2[3];
+    for (int d = 0; d < 3; ++d) {
+      a1[d] = pin->DoesParameterExist(op.block_name, std::string("plane_e1_") + ax[d]) ?
+              pin->GetReal(op.block_name, std::string("plane_e1_") + ax[d]) : 0.0;
+      a2[d] = pin->DoesParameterExist(op.block_name, std::string("plane_e2_") + ax[d]) ?
+              pin->GetReal(op.block_name, std::string("plane_e2_") + ax[d]) : 0.0;
+    }
+    pcart->SetPlane(a1, a2);
+  }
+  if (pin->DoesParameterExist(op.block_name, "interp")) {
+    std::string im = pin->GetString(op.block_name, "interp");
+    if (im == "nearest") {
+      pcart->SetNearest(true);
+    } else if (im != "lagrange") {
+      std::cout << "### FATAL ERROR in CartesianGridOutput: interp = " << im
+                << " (lagrange | nearest)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  // the grid's geometry, once, beside the data (the binary MetaData is unchanged)
+  if (global_variable::my_rank == 0 && (pcart->tilted || pcart->nearest)) {
+    char fn[BUFSIZ];
+    std::snprintf(fn, BUFSIZ, "cart/%s.%s.plane.txt", op.file_basename.c_str(),
+                  op.file_id.c_str());
+    std::ofstream f(fn);
+    f.precision(17);
+    f << "# K-013 cart grid geometry: point(i,j,k) = center + u e1 + v e2 + w e3,\n"
+      << "# u,v,w uniform (or Chebyshev) over [-extent, extent]; data written k, j, i\n";
+    f << "center " << center[0] << " " << center[1] << " " << center[2] << "\n";
+    f << "extent " << extent[0] << " " << extent[1] << " " << extent[2] << "\n";
+    f << "numpoints " << numpoints[0] << " " << numpoints[1] << " " << numpoints[2] << "\n";
+    f << "chebyshev " << (is_cheb ? 1 : 0) << "\n";
+    f << "e1 " << pcart->e1[0] << " " << pcart->e1[1] << " " << pcart->e1[2] << "\n";
+    f << "e2 " << pcart->e2[0] << " " << pcart->e2[1] << " " << pcart->e2[2] << "\n";
+    f << "e3 " << pcart->e3[0] << " " << pcart->e3[1] << " " << pcart->e3[2] << "\n";
+    f << "interp " << (pcart->nearest ? "nearest" : "lagrange") << "\n";
+  }
 
   for (int d = 0; d < 3; ++d) {
     md.center[d] = center[d];

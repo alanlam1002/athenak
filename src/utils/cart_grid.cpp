@@ -8,6 +8,7 @@
 
 // C/C++ headers
 #include <cmath>
+#include <cstdlib>
 #include <iostream>
 #include <list>
 
@@ -57,9 +58,10 @@ CartesianGrid::CartesianGrid(MeshBlockPack *pmy_pack, Real center[3],
   nx3 = numpoints[2];
 
   // resolution
-  d_x1 = (max_x1-min_x1)/(nx1-1);
-  d_x2 = (max_x2-min_x2)/(nx2-1);
-  d_x3 = (max_x3-min_x3)/(nx3-1);
+  // K-013: an axis with one point sits at the centre (was 0/0 = NaN coordinates)
+  d_x1 = (nx1 > 1) ? (max_x1-min_x1)/(nx1-1) : 0.0;
+  d_x2 = (nx2 > 1) ? (max_x2-min_x2)/(nx2-1) : 0.0;
+  d_x3 = (nx3 > 1) ? (max_x3-min_x3)/(nx3-1) : 0.0;
 
   // allocate memory for interpolation coordinates, indices, and weights
   int &ng = pmy_pack->pmesh->mb_indcs.ng;
@@ -124,18 +126,18 @@ void CartesianGrid::SetInterpolationIndices() {
   int nmb1 = pmy_pack->nmb_thispack - 1;
 
   auto &iindcs = interp_indcs;
+  const Real mx1max = pmy_pack->pmesh->mesh_size.x1max;
+  const Real mx2max = pmy_pack->pmesh->mesh_size.x2max;
+  const Real mx3max = pmy_pack->pmesh->mesh_size.x3max;
+  auto Own = [](Real x, Real lo, Real hi, Real mhi) {
+    return x >= lo && (x < hi || (x == hi && hi == mhi));
+  };
   for (int nx=0; nx<nx1; ++nx) {
     for (int ny=0; ny<nx2; ++ny) {
       for (int nz=0; nz<nx3; ++nz) {
         // calculate x, y, z coordinate for each point
-        Real x1 = min_x1 + nx * d_x1;
-        Real x2 = min_x2 + ny * d_x2;
-        Real x3 = min_x3 + nz * d_x3;
-        if (is_cheby) {
-          x1 = center_x1 + extent_x1*std::cos(nx*M_PI/(nx1-1));
-          x2 = center_x2 + extent_x2*std::cos(ny*M_PI/(nx2-1));
-          x3 = center_x3 + extent_x3*std::cos(nz*M_PI/(nx3-1));
-        }
+        Real x1, x2, x3;
+        PointCoord(nx, ny, nz, x1, x2, x3);
         // indices default to -1 if point does not reside in this MeshBlockPack
         iindcs.h_view(nx,ny,nz,0) = -1;
         iindcs.h_view(nx,ny,nz,1) = -1;
@@ -158,9 +160,11 @@ void CartesianGrid::SetInterpolationIndices() {
           // save MeshBlock and zone indicies for nearest
           // position to spherical patch center
           // if this angle position resides in this MeshBlock
-          if ((x1 >= x1min && x1 <= x1max) &&
-              (x2 >= x2min && x2 <= x2max) &&
-              (x3 >= x3min && x3 <= x3max)) {
+          // K-013: half-open ownership [min, max) (closed at the mesh's upper faces), so a point
+          // on a face between MeshBlocks on different ranks is not claimed twice and doubled by
+          // the MPI_SUM of the output (was closed [min, max] on every block)
+          if (Own(x1, x1min, x1max, mx1max) && Own(x2, x2min, x2max, mx2max) &&
+              Own(x3, x3min, x3max, mx3max)) {
               iindcs.h_view(nx,ny,nz,0) = m;
               iindcs.h_view(nx,ny,nz,1) =
                   static_cast<int>(std::floor((x1-(x1min+dx1/2.0))/dx1));
@@ -205,14 +209,8 @@ void CartesianGrid::SetInterpolationWeights() {
       }
     } else {
       // extract cartesian grid positions
-      Real x0 = min_x1 + nx * d_x1;
-      Real y0 = min_x2 + ny * d_x2;
-      Real z0 = min_x3 + nz * d_x3;
-      if (is_cheby) {
-        x0 = center_x1 + extent_x1*std::cos(nx*M_PI/(nx1-1));
-        y0 = center_x2 + extent_x2*std::cos(ny*M_PI/(nx2-1));
-        z0 = center_x3 + extent_x3*std::cos(nz*M_PI/(nx3-1));
-      }
+      Real x0, y0, z0;
+      PointCoord(nx, ny, nz, x0, y0, z0);
       // extract MeshBlock bounds
       Real &x1min = size.h_view(ii0).x1min;
       Real &x1max = size.h_view(ii0).x1max;
@@ -238,6 +236,22 @@ void CartesianGrid::SetInterpolationWeights() {
             Real x3vpj1 = CellCenterX(ii3-ng+j+1, indcs.nx3, x3min, x3max);
             iwghts.h_view(nx,ny,nz,i,2) *= (z0-x3vpj1)/(x3vpi1-x3vpj1);
           }
+        }
+      }
+      if (nearest) {
+        // K-013: weight 1 on the cell that contains the point. The stencil's cell i is
+        // ii-ng+i+1 (ii = the cell centre at or left of the point), so the containing cell
+        // floor((x-xmin)/dx) is stencil entry ng-1 or ng.
+        const Real xs[3] = {x0, y0, z0};
+        const Real lo[3] = {x1min, x2min, x3min}, hi[3] = {x1max, x2max, x3max};
+        const int iis[3] = {ii1, ii2, ii3};
+        const int nn[3] = {indcs.nx1, indcs.nx2, indcs.nx3};
+        for (int d=0; d<3; ++d) {
+          const Real dx = (hi[d] - lo[d])/nn[d];
+          int near = static_cast<int>(std::floor((xs[d] - lo[d])/dx));
+          near = (near < 0) ? 0 : ((near > nn[d]-1) ? nn[d]-1 : near);
+          const int isel = near - iis[d] + ng - 1;
+          for (int i=0; i<2*ng; ++i) iwghts.h_view(nx,ny,nz,i,d) = (i == isel) ? 1.0 : 0.0;
         }
       }
     }
@@ -309,3 +323,70 @@ void CartesianGrid::InterpolateToGrid(int ind, DvceArray5D<Real> &val) {
   return;
 }
 
+
+//----------------------------------------------------------------------------------------
+//! \fn void CartesianGrid::PointCoord
+//! \brief the position of grid point (nx,ny,nz). Untilted: the original arithmetic exactly
+//! (min + n d, or the Chebyshev nodes); an axis with one point sits at the centre (K-013).
+
+void CartesianGrid::PointCoord(int nx, int ny, int nz, Real &x1, Real &x2, Real &x3) const {
+  if (!tilted) {
+    x1 = min_x1 + nx * d_x1;
+    x2 = min_x2 + ny * d_x2;
+    x3 = min_x3 + nz * d_x3;
+    if (is_cheby) {
+      x1 = center_x1 + extent_x1*std::cos(nx*M_PI/(nx1-1));
+      x2 = center_x2 + extent_x2*std::cos(ny*M_PI/(nx2-1));
+      x3 = center_x3 + extent_x3*std::cos(nz*M_PI/(nx3-1));
+    }
+    if (nx1 == 1) x1 = center_x1;
+    if (nx2 == 1) x2 = center_x2;
+    if (nx3 == 1) x3 = center_x3;
+    return;
+  }
+  Real u = -extent_x1 + nx * d_x1, v = -extent_x2 + ny * d_x2, w = -extent_x3 + nz * d_x3;
+  if (is_cheby) {
+    if (nx1 > 1) u = extent_x1*std::cos(nx*M_PI/(nx1-1));
+    if (nx2 > 1) v = extent_x2*std::cos(ny*M_PI/(nx2-1));
+    if (nx3 > 1) w = extent_x3*std::cos(nz*M_PI/(nx3-1));
+  }
+  if (nx1 == 1) u = 0.0;
+  if (nx2 == 1) v = 0.0;
+  if (nx3 == 1) w = 0.0;
+  x1 = center_x1 + u*e1[0] + v*e2[0] + w*e3[0];
+  x2 = center_x2 + u*e1[1] + v*e2[1] + w*e3[1];
+  x3 = center_x3 + u*e1[2] + v*e2[2] + w*e3[2];
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CartesianGrid::SetPlane
+//! \brief tilt the grid: e1 = a1/|a1|, e2 = (a2 - (a2.e1) e1)/|.|, e3 = e1 x e2 (K-013)
+
+void CartesianGrid::SetPlane(const Real a1[3], const Real a2[3]) {
+  Real n1 = std::sqrt(a1[0]*a1[0] + a1[1]*a1[1] + a1[2]*a1[2]);
+  if (!(n1 > 0.0)) {
+    std::cout << "### FATAL ERROR in CartesianGrid::SetPlane: plane_e1 has zero length" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  for (int d=0; d<3; ++d) e1[d] = a1[d]/n1;
+  Real p = a2[0]*e1[0] + a2[1]*e1[1] + a2[2]*e1[2];
+  for (int d=0; d<3; ++d) e2[d] = a2[d] - p*e1[d];
+  Real n2 = std::sqrt(e2[0]*e2[0] + e2[1]*e2[1] + e2[2]*e2[2]);
+  if (!(n2 > 1.0e-8*std::sqrt(a2[0]*a2[0] + a2[1]*a2[1] + a2[2]*a2[2]))) {
+    std::cout << "### FATAL ERROR in CartesianGrid::SetPlane: plane_e2 is parallel to plane_e1"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  for (int d=0; d<3; ++d) e2[d] /= n2;
+  e3[0] = e1[1]*e2[2] - e1[2]*e2[1];
+  e3[1] = e1[2]*e2[0] - e1[0]*e2[2];
+  e3[2] = e1[0]*e2[1] - e1[1]*e2[0];
+  tilted = true;
+  SetInterpolationIndices();
+  SetInterpolationWeights();
+}
+
+void CartesianGrid::SetNearest(bool on) {
+  nearest = on;
+  SetInterpolationWeights();
+}

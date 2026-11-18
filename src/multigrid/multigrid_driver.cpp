@@ -809,7 +809,29 @@ void MultigridDriver::ZeroFinestSolution() {
   Kokkos::deep_copy(u.h_view, 0.0);
 }
 
+// The multigrid's block count nmmb_ follows the mesh only through ReallocateForAMR,
+// i.e. a Solve/Load* call. With <cfc> residual_scale f = 0 every solve and load is
+// skipped (CFC rs_bg_only_), so after a regrid nmmb_ is stale and u_ holds pre-regrid
+// blocks: looping over it overran dst (sized nmb_thispack) on net derefinement, a GPU
+// NotPresent write fault in the restart write (C-230). A count that differs from the
+// array's means there is no current state to save or load: leave the slots as they
+// are (dst/the restart block is zero-initialised; u_ keeps its stale content, which no
+// solve reads until the next Load*/Solve reallocates it). Equal counts: unchanged.
+static bool MGFinestStateStale(int nmmb, int nmb_array, const char *what) {
+  if (nmmb == nmb_array) return false;
+  static bool told = false;
+  if (!told && global_variable::my_rank == 0) {
+    std::cout << "MultigridDriver::" << what << ": multigrid holds " << nmmb
+              << " MeshBlocks, the array " << nmb_array << " (no solve since the last "
+              << "regrid, e.g. residual_scale f = 0): MG state not copied (C-230)"
+              << std::endl;
+  }
+  told = true;
+  return true;
+}
+
 void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
+  if (MGFinestStateStale(mglevels_->nmmb_, dst.extent_int(0), "SaveFinestState")) return;
   auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
   const int off = ngh - mglevels_->ngh_;
   par_for("MG::SaveFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,
@@ -820,6 +842,7 @@ void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
 }
 
 void MultigridDriver::LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh) {
+  if (MGFinestStateStale(mglevels_->nmmb_, src.extent_int(0), "LoadFinestState")) return;
   auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
   const int off = ngh - mglevels_->ngh_;
   par_for("MG::LoadFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,

@@ -391,6 +391,15 @@ class CFC {
   Real fc_m0_ = 0.0;                      // m_ref (0: unknown -> no automatic switch)
   Real fc_tsw_ = 0.0;                     // switch time
   Real fc_xdsw_[3] = {0.0, 0.0, 0.0};     // xidot at the switch (ramp start)
+  // K-017b (user ruling 2026-11-18): <cfc> frame_floor_follow (default off; read with
+  // DoesParameterExist). In ramp mode the tracked measurement keeps running about a target
+  // that follows the tracked centroid, and the floors' Eulerian velocity (padm->floor_vel_u,
+  // read by the C2P's atmosphere_frame_velocity and the CFL) is the star's BH-frame
+  // coordinate velocity <alpha u/W - beta'>_D + xidot; with nothing tracked the last value is
+  // held. So the atmosphere keeps moving with the star after the grid stops. State in
+  // restarts (frame_ctrl_fvel1..3) only when on. Off: padm->floor_vel_on stays false.
+  bool fc_floor_follow_ = false;
+  Real fc_fvel_[3] = {0.0, 0.0, 0.0};
   Real fc_ramp_T_ = 50.0;
   Real fc_bound_rho_ = 0.0, fc_bound_rmin_ = 6.0;
   // bound-gas reduction, same layout as MeasureTracked

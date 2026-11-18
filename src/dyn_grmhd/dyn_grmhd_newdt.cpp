@@ -107,8 +107,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::NewTimeStep(Driver *pdrive, int s
   auto &dtc_ = dt_lim_cell;
   auto &exc_flux_ = pmy_pack->pcoord->excision_flux;
   const bool atm_fv_ = eos.atm_frame_vel;
-  const Real fv0 = pmy_pack->padm->frame_vel_u[0], fv1 = pmy_pack->padm->frame_vel_u[1];
-  const Real fv2 = pmy_pack->padm->frame_vel_u[2];
+  const Real *fvp_ = pmy_pack->padm->FloorVel();     // frame_vel_u unless K-017b
+  const Real fv0 = fvp_[0], fv1 = fvp_[1], fv2 = fvp_[2];
   const Real fg2_ = eos.atm_frame_gate*eos.atm_frame_gate;
   const Real fgx_ = pmy_pack->padm->bc_center[0], fgy_ = pmy_pack->padm->bc_center[1];
   const Real fgz_ = pmy_pack->padm->bc_center[2];

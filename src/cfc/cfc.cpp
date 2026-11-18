@@ -375,6 +375,8 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       fc_acc_r_ = pin->GetOrAddReal("cfc", "frame_switch_accretion_radius", 6.0);
       fc_acc_w_ = pin->GetOrAddReal("cfc", "frame_switch_accretion_shell", 2.0);
     }
+    fc_floor_follow_ = pin->DoesParameterExist("cfc", "frame_floor_follow") &&
+                       pin->GetBoolean("cfc", "frame_floor_follow");   // K-017b
     fc_bound_rho_ = pin->GetOrAddReal("cfc", "frame_bound_rho", 1.0e-4*fc_rho_thr_);
     // R-054 (R-053 §4): bound_centroid must ignore the near-BH atmosphere zone, so both
     // gates must cover it: frame_bound_rho >= the zone's rho_thr (the default 1e-4 x
@@ -420,6 +422,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
         }
         if (!pin->DoesParameterExist("cfc", "frame_switch_mref")) {
           fc_m0_ = pin->GetReal("cfc", "frame_ctrl_m0");
+        }
+      }
+      // K-017b: the followed floor velocity; on a switch made by restart overrides (mode 2,
+      // no fvel yet) it starts from the switch's xidot
+      if (fc_floor_follow_ && fc_mode_ == 2) {
+        for (int a = 0; a < 3; ++a) {
+          const std::string k = "frame_ctrl_fvel" + std::to_string(a + 1);
+          fc_fvel_[a] = pin->DoesParameterExist("cfc", k) ? pin->GetReal("cfc", k) : fc_xdsw_[a];
         }
       }
     }
@@ -758,6 +768,10 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     Real xd[3];
     FrameVel(pmbp->pmesh->time, xd);
     for (int a = 0; a < 3; ++a) { pmbp->padm->frame_vel_u[a] = xd[a]; }
+    if (frame_ctrl_ && fc_floor_follow_ && fc_mode_ == 2) {   // K-017b, as restored
+      pmbp->padm->floor_vel_on = true;
+      for (int a = 0; a < 3; ++a) { pmbp->padm->floor_vel_u[a] = fc_fvel_[a]; }
+    }
   }
 
   // Elliptic source/output NaN scan; see cfc.hpp. Default 0 = off.
@@ -3503,10 +3517,26 @@ void CFC::FrameControlStep(Real t_new) {
     }
   }
   if (fc_mode_ == 2) {                 // ramp: xidot -> 0 from the switch value
+    Real sf[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    if (fc_floor_follow_) {            // K-017b: measured with this step's xidot (as remnant)
+      MeasureTracked(sf);
+      if (sf[0] > 0.0) {
+        for (int a = 0; a < 3; ++a) {
+          fc_fvel_[a] = sf[4 + a]/sf[0] + fc_xd_[a];
+          fc_tgt_[a] = sf[1 + a]/sf[0];
+        }
+      }
+      pmy_pack->padm->floor_vel_on = true;
+      for (int a = 0; a < 3; ++a) { pmy_pack->padm->floor_vel_u[a] = fc_fvel_[a]; }
+    }
     const Real s = fmin(1.0, fmax(0.0, (t_new - fc_tsw_)/fc_ramp_T_));
     const Real f = (fc_ramp_shape_ == 1) ? 1.0 - s*s*(3.0 - 2.0*s) : 1.0 - s;
     for (int a = 0; a < 3; ++a) { fc_xd_[a] = f*fc_xdsw_[a]; fc_meas_[a] = 0.0; }
     fc_meas_[3] = 0.0; fc_meas_[4] = 0.0;
+    if (sf[0] > 0.0) {                 // K-017b: the followed star's grid velocity and mass
+      for (int a = 0; a < 3; ++a) { fc_meas_[a] = sf[4 + a]/sf[0]; }
+      fc_meas_[3] = sf[0];
+    }
     ApplyFrameShiftUpdate(t_new);
     return;
   }
@@ -3760,6 +3790,11 @@ void CFC::SaveFrameState(ParameterInput *pin) const {
   pin->SetInteger("cfc", "frame_ctrl_mode", fc_mode_);
   pin->SetReal("cfc", "frame_ctrl_tsw", fc_tsw_);
   pin->SetReal("cfc", "frame_ctrl_m0", fc_m0_);
+  if (fc_floor_follow_ && fc_mode_ == 2) {   // K-017b
+    for (int a = 0; a < 3; ++a) {
+      pin->SetReal("cfc", "frame_ctrl_fvel" + std::to_string(a + 1), fc_fvel_[a]);
+    }
+  }
 }
 
 //----------------------------------------------------------------------------------------

@@ -657,6 +657,16 @@ class PrimitiveSolverHydro {
   // Per stage: the sums before / after the C2P, of the u1 register, the outer-face flux, and
   // the C2P's change by class (the ml_cls classes); one MLEDGER3 line per variable per cycle.
   // Off: nothing allocated, no kernel entered.
+  // Excised cells (pcoord->excision_floor, when excising) are left out of every sum: near a
+  // (moving) puncture alpha0 = (alpha0 psi0)/psi0 is unbounded (trumpet psi0 ~ r^-1/2) and one
+  // inf/NaN would poison the totals. The excision boundary's flux and any change of the mask
+  // between sums then land in Y.
+  // Caveats (tde review of K-011, 2026-11-18): (a) T is conserved only on the fixed background:
+  // a self-gravitating flow (g != g0) adds the Killing source Sigma (C-131's killing_energy), which
+  // this ledger does not book, so it lands in Y; subtract it before reading Y as a numerical
+  // loss. (b) Comoving gauge: beta0 is the BH-frame shift placed at x_BH(t), so T is the BH-frame
+  // Killing energy, but the fluxes are grid-frame and the moving outer boundary's
+  // -xidot.(T density) term is not booked; negligible while matter stays off the boundary.
   bool mlk_on = false;
   DvceArray5D<Real> mlk_psi0, mlk_ap0, mlk_b0;   // background views (DynGRMHD, per stage)
   DvceArray5D<Real> mlk_c0;                      // tau, S_1..3 before the stage's C2P
@@ -671,6 +681,8 @@ class PrimitiveSolverHydro {
     const int nmb = pmy_pack->nmb_thispack, nkji = nx3*nx2*nx1, nji = nx2*nx1;
     auto &size = pmy_pack->pmb->mb_size;
     auto &ps0 = mlk_psi0; auto &ap0 = mlk_ap0; auto &b0 = mlk_b0;
+    const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &xm = pmy_pack->pcoord->excision_floor;
     const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
     Real ts = 0.0, jj = 0.0;
     Kokkos::parallel_reduce("mlk_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
@@ -679,6 +691,7 @@ class PrimitiveSolverHydro {
       const int k = (idx - m*nkji)/nji + ks;
       const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
       const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+      if (exc && xm(m, k, j, i)) return;
       auto &sz = size.d_view(m);
       const Real dv = sz.dx1*sz.dx2*sz.dx3;
       const Real al = ap0(m, 0, k, j, i)/ps0(m, 0, k, j, i);
@@ -705,6 +718,8 @@ class PrimitiveSolverHydro {
     const Real mx1 = ms.x1min, Mx1 = ms.x1max, mx2 = ms.x2min, Mx2 = ms.x2max;
     const Real mx3 = ms.x3min, Mx3 = ms.x3max;
     auto &ps0 = mlk_psi0; auto &ap0 = mlk_ap0; auto &b0 = mlk_b0;
+    const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &xm = pmy_pack->pcoord->excision_floor;
     const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
     Real a = 0.0, b = 0.0;
     Kokkos::parallel_reduce("mlk_fout", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
@@ -718,7 +733,7 @@ class PrimitiveSolverHydro {
       const bool any = (i == is && sz.x1min <= mx1 + tol) || (i == ie && sz.x1max >= Mx1 - tol) ||
                        (j == js && sz.x2min <= mx2 + tol) || (j == je && sz.x2max >= Mx2 - tol) ||
                        (k == ks && sz.x3min <= mx3 + tol) || (k == ke && sz.x3max >= Mx3 - tol);
-      if (!any) return;
+      if (!any || (exc && xm(m, k, j, i))) return;
       const Real al = ap0(m, 0, k, j, i)/ps0(m, 0, k, j, i);
       const Real bb[3] = {b0(m, 0, k, j, i), b0(m, 1, k, j, i), b0(m, 2, k, j, i)};
       const Real x = CellCenterX(i - is, nx1, sz.x1min, sz.x1max) - cx;
@@ -749,6 +764,8 @@ class PrimitiveSolverHydro {
     auto &u0 = pmy_pack->pmhd->u0;
     auto &d0 = ml_d0; auto &c0 = mlk_c0; auto &cls = ml_cls;
     auto &ps0 = mlk_psi0; auto &ap0 = mlk_ap0; auto &b0 = mlk_b0;
+    const bool exc = pmy_pack->pcoord->coord_data.bh_excise;
+    auto &xm = pmy_pack->pcoord->excision_floor;
     const Real cx = pmy_pack->padm->bc_center[0], cy = pmy_pack->padm->bc_center[1];
     for (int c = 0; c < kMlNC; ++c) {
       const Real cc = static_cast<Real>(c);
@@ -759,7 +776,7 @@ class PrimitiveSolverHydro {
         const int k = (idx - m*nkji)/nji + ks;
         const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
         const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
-        if (cls(m, k, j, i) != cc) return;
+        if (cls(m, k, j, i) != cc || (exc && xm(m, k, j, i))) return;
         auto &sz = size.d_view(m);
         const Real dv = sz.dx1*sz.dx2*sz.dx3;
         const Real dD = u0(m, IDN, k, j, i) - d0(m, k, j, i);

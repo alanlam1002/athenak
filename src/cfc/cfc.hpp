@@ -623,6 +623,14 @@ class CFC {
   // ReinitializeMetricForAMR) always returns true -- see cfc.cpp, this avoids a
   // real deadlock.
   bool DoSolveThisStage(Driver *pdriver, int stage) const;
+  // solve_interval >= 1 engages only while the frame is static (C-231 item 2): the
+  // moving-puncture background is refilled only on solve stages, so a moving frame
+  // would see it lag (the C-041 heating). Static = no frame and no moving puncture, a
+  // constant zero frame velocity, or the controller's ramp to xidot = 0 complete at
+  // pmesh->time (constant over the cycle, so every task of a cycle agrees; the frame
+  // state is identical on all ranks). Otherwise every stage solves, as solve_interval 0.
+  bool FrameStaticForCadence() const;
+  mutable int cad_state_ = -1;   // last reported FrameStaticForCadence (rank-0 notice)
 
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's

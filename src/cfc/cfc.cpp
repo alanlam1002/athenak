@@ -955,8 +955,33 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   if (cfc_solve_interval_ <= 0) {
     return true;
   }
+  const bool fs = FrameStaticForCadence();
+  if (static_cast<int>(fs) != cad_state_) {
+    cad_state_ = static_cast<int>(fs);
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC solve_interval = " << cfc_solve_interval_ << ": cycle "
+                << pmy_pack->pmesh->ncycle << " t = " << pmy_pack->pmesh->time
+                << (fs ? ": frame static, reduced cadence engaged"
+                       : ": frame moving, every stage solves") << std::endl;
+    }
+  }
+  if (!fs) {
+    return true;
+  }
   return (pmy_pack->pmesh->ncycle % cfc_solve_interval_ == 0) &&
          (stage == pdriver->nexp_stages);
+}
+
+bool CFC::FrameStaticForCadence() const {
+  if (frame_ctrl_) {
+    return (fc_mode_ == 2) && (pmy_pack->pmesh->time >= fc_tsw_ + fc_ramp_T_);
+  }
+  if (frame_enabled_) {
+    for (int a = 0; a < 3; ++a) {
+      if (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0) return false;
+    }
+  }
+  return true;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1968,6 +1993,11 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) {
+    // C-231 item 2: drain the excision tally on EVERY stage, solve or not. The RK-stage
+    // weights (AccreteExcisedMass, item 60) need each stage's removals in its own slot;
+    // skipped stages used to fall into the next solve stage's drain at weight 1 (the
+    // 1.92x over-count). Same call as on solve stages; solve_interval 0 never gets here.
+    AccreteExcisedMass(pdriver, stage);
     // The solved part of adm.beta_u is reused; keep the gauge part current.
     ApplyFrameShiftUpdate(StageTime(pdriver, stage));
     if (frame_ctrl_ && stage == pdriver->nexp_stages) {

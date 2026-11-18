@@ -1434,12 +1434,14 @@ void CFC::CoordVelUpdate(Real &du_max, Real &res_max) {
   const Real gx2 = pmy_pack->padm->frame_vel_u[2];
   const Real vnorm = sqrt(V0*V0 + V1*V1 + V2*V2);
   const Real ivn = (vnorm > 0.0) ? 1.0/vnorm : 1.0;
-  Real du = 0.0, res = 0.0;
+  Real du = 0.0, res = 0.0, vsq_max = 0.0;
   Kokkos::parallel_reduce("cfc_coordvel_update",
     Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
                                                           {nmb, ke+1, je+1, ie+1}),
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i,
-                  Real &ldu, Real &lres) {
+                  Real &ldu, Real &lres, Real &lvsq) {
+      // cells off the mask (atmosphere) keep the pgen's background-only first guess: a
+      // ~5e-4 jump in alpha v - beta_BH at the mask edge, harmless under the floor.
       if (mask(m,k,j,i) == 0.0) return;
       Real g[3][3];
       g[0][0] = adm.g_dd(m,0,0,k,j,i); g[0][1] = adm.g_dd(m,0,1,k,j,i);
@@ -1465,6 +1467,7 @@ void CFC::CoordVelUpdate(Real &du_max, Real &res_max) {
         r2 += d*d;
       }
       lres = fmax(lres, sqrt(r2)*ivn);
+      lvsq = fmax(lvsq, vsq);   // vsq >= 1 (superluminal target) is FATAL on the host below
       const Real wl = 1.0/sqrt(1.0 - fmin(vsq, 0.9999));
       Real d2 = 0.0, n2 = 0.0;
       for (int a = 0; a < 3; ++a) {
@@ -1476,12 +1479,19 @@ void CFC::CoordVelUpdate(Real &du_max, Real &res_max) {
       w0(m,IVX,k,j,i) = wl*v[0];
       w0(m,IVY,k,j,i) = wl*v[1];
       w0(m,IVZ,k,j,i) = wl*v[2];
-    }, Kokkos::Max<Real>(du), Kokkos::Max<Real>(res));
+    }, Kokkos::Max<Real>(du), Kokkos::Max<Real>(res), Kokkos::Max<Real>(vsq_max));
 #if MPI_PARALLEL_ENABLED
-  Real loc[2] = {du, res}, glob[2];
-  MPI_Allreduce(loc, glob, 2, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
-  du = glob[0]; res = glob[1];
+  Real loc[3] = {du, res, vsq_max}, glob[3];
+  MPI_Allreduce(loc, glob, 3, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+  du = glob[0]; res = glob[1]; vsq_max = glob[2];
 #endif
+  if (!(vsq_max < 1.0)) {      // also catches NaN
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "star_vel_mode = coordinate: the target V gives a superluminal Eulerian"
+              << " velocity on the star, max gamma_ij v^i v^j = " << vsq_max
+              << " (v = (V + beta_BH)/alpha)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   du_max = du;
   res_max = res;
 }
@@ -1523,11 +1533,17 @@ void CFC::BackgroundAtPoint(const Real x[3], Real &alpha0, Real beta0[3], Real &
     }
   }
 #if MPI_PARALLEL_ENABLED
-  struct { double dx; int rank; } loc{static_cast<double>(best_dx), global_variable::my_rank},
-                                   glob;
+  // MPI_DOUBLE_INT needs a {double, int} pair whatever Real is: dx is carried as double
+  // and "no block holds x" is a flag, not a comparison against a Real limit.
+  struct DxRank { double dx; int rank; };   // the MPI_DOUBLE_INT pair
+  const bool have = (best_m >= 0);
+  DxRank loc{have ? static_cast<double>(best_dx) : std::numeric_limits<double>::max(),
+             global_variable::my_rank}, glob;
   MPI_Allreduce(&loc, &glob, 1, MPI_DOUBLE_INT, MPI_MINLOC, MPI_COMM_WORLD);
   MPI_Bcast(val, 5, MPI_ATHENA_REAL, glob.rank, MPI_COMM_WORLD);
-  if (glob.dx == std::numeric_limits<double>::max()) best_m = -1; else best_m = 0;
+  int any = have ? 1 : 0, anyg = 0;
+  MPI_Allreduce(&any, &anyg, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+  best_m = (anyg > 0) ? 0 : -1;
 #endif
   if (best_m < 0) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl

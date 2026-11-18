@@ -233,7 +233,7 @@ void SetupTOV(ParameterInput *pin, Mesh* pmy_mesh_) {
     star_vel_x2 = (cv_V[1] + be0[1])/al0;
     star_vel_x3 = (cv_V[2] + be0[2])/al0;
     pcfc->EnableCoordVel(cv_V, pin->GetOrAddReal("problem", "star_vel_tol", 1.0e-12),
-                         pin->GetOrAddInteger("problem", "star_vel_iter_max", 20));
+                         pin->GetOrAddInteger("problem", "star_vel_iter_max", 50));
     if (global_variable::my_rank == 0) {
       std::cout << std::setprecision(12) << "star_vel_mode = coordinate: V = (" << cv_V[0]
                 << ", " << cv_V[1] << ", " << cv_V[2] << "); background at the centre "

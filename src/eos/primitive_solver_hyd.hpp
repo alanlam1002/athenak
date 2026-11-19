@@ -238,6 +238,12 @@ class PrimitiveSolverHydro {
   // read without GetOrAdd. The shock flag, the second-law guard and dual_energy_eta1 are not
   // used by this mode (the flag is still computed for the diagnostics).
   bool de_cond = false;
+  // <mhd> dual_energy_excision_guard (K-020, default false = the old behaviour): skip the
+  // dual-energy blocks (conditioning and legacy) in excision_floor cells, as cold recovery
+  // and the zone already do. Without it a masked cell whose stored D exceeds
+  // dual_energy_rho_switch takes the tracer branch (the reset state is colder than K_tr),
+  // which copies cons_pt_old back and undoes the excision reset (K-020a).
+  bool de_xguard = false;
   // <mhd> dual_energy_shock_flags = false (R-260, conditioning only; default true): the legacy
   // shock sensor is neither computed nor loaded (de_shock stays 0). Conditioning's decision
   // does not read it (the D-ent block), so the solution is unchanged; de_diag slot 2 and the
@@ -1803,6 +1809,8 @@ class PrimitiveSolverHydro {
       de_second_law = pin->GetOrAddBoolean(block, "dual_energy_second_law", true);
       de_second_law_tol = pin->GetOrAddReal(block, "dual_energy_second_law_tol", -1.0e-3);
       de_eta1 = pin->GetOrAddReal(block, "dual_energy_eta1", 0.0);
+      de_xguard = pin->DoesParameterExist(block, "dual_energy_excision_guard") &&
+                  pin->GetBoolean(block, "dual_energy_excision_guard");   // K-020
       if (pin->DoesParameterExist(block, "dual_energy_mode")) {   // R-225 (no GetOrAdd)
         std::string md = pin->GetString(block, "dual_energy_mode");
         if (md == "conditioning") {
@@ -2432,6 +2440,7 @@ class PrimitiveSolverHydro {
     const bool de_2law_ = de_second_law;
     const Real de_2tol_ = de_second_law_tol;
     const bool de_cond_ = de_cond;
+    const bool de_xg_ = de_xguard && excise && !smoothing;
     const Real de_q1_ = de_q1, de_q2_ = de_q2, de_qdel_ = de_qdel;
     const bool de_eint_ = de_eint;
     const bool ddon_ = de_on_ && de_diag_on;
@@ -2862,7 +2871,9 @@ class PrimitiveSolverHydro {
         // dkeep (conditioning only): 0 the legacy write-back below; 1 the stored state is
         // left bitwise (the tracer supplies the pressure); 2 only the tracer slot is written
         int dkeep = 0;
-        if (de_on_ && de_cond_) {
+        // K-020: no dual-energy rewrite of an excised cell (its reset state stands)
+        const bool de_skip = de_xg_ && excision_floor_(m,k,j,i);
+        if (de_on_ && de_cond_ && !de_skip) {
           // D-ent (dual_energy_mode = conditioning; see de_cond). Inputs: this cell's stored
           // (D, S, tau, D Y) and its energy C2P (prim_pt): the same in a ghost and its owner
           const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
@@ -2981,7 +2992,7 @@ class PrimitiveSolverHydro {
             }
           }
           if (dcnt_) dbr_(m, k, j, i) = dbr;
-        } else if (de_on_) {
+        } else if (de_on_ && !de_skip) {
           const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
                                  k >= ks && k <= ke_);
           const Real D = cons_pt_old[CDN];

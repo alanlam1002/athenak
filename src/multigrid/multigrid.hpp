@@ -556,7 +556,8 @@ class MultigridDriver {
   void DoTaskListOneStage();
 
   virtual void SolveCoarsestGrid();
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  // compute_defect = false reuses def_ from the previous call (cfc_opt item D); default as before
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   // V-002 C4: all channels' norms from ONE defect computation and one MPI_Allreduce
   void CalculateDefectNormAll(MGNormType nrm, Real *out);
   Real CalculateSourceNorm(MGNormType nrm, int n);
@@ -619,6 +620,17 @@ class MultigridDriver {
   std::string mg_log_name_;
   int prof_id_ = mgprof::kCFC;
   bool in_log_ = false;          // charge norms inside LogSolve to mg_prof sLog   // mg_prof.hpp row (set by SetLogName)
+  // cfc_opt item D: the zero-guess source norms ||F(u=0)|| of every channel, computed once per
+  // solve by ComputeSourceNorms (one save/zero/defect/restore of u) and read by TotalSourceNorm
+  // and LogSolve, which formerly redid that evaluation per channel and per norm. Valid only
+  // inside one SolveIterative call: cleared at its start (both consumers run only there).
+  // src_l2mode_ is filled only when norm_mode_ is neither max nor rms (TotalSourceNorm, legacy).
+  bool src_norms_valid_ = false;
+  std::vector<Real> src_max_, src_l2rms_, src_l2mode_;
+  void ComputeSourceNorms();
+  // ATHENAK_MG_SRCNORM_CHECK=1 (environment, read once; off by default): also run the former
+  // per-call CalculateSourceNorm/CalculateDefectNorm path and require every value to be ==.
+  int srcnorm_check_ = -1;
 
   bool full_multigrid_;
   int fmg_ncycle_;

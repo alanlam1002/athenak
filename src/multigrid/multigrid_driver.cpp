@@ -841,12 +841,80 @@ Real MultigridDriver::TotalDefectNorm() {
 
 Real MultigridDriver::TotalSourceNorm() {
   MGNormType nrm = (norm_mode_ == MGNormScaling::max) ? MGNormType::max : MGNormType::l2;
+  // cfc_opt item D: per-channel values from the once-per-solve cache (ComputeSourceNorms),
+  // the same reductions on the same zero-guess defect as the former CalculateSourceNorm calls
+  if (!src_norms_valid_) ComputeSourceNorms();
   Real f = 0.0;
   for (int v = 0; v < nvar_; ++v) {
-    Real d = CalculateSourceNorm(nrm, v);
+    Real d = (norm_mode_ == MGNormScaling::max) ? src_max_[v]
+           : (norm_mode_ == MGNormScaling::rms) ? src_l2rms_[v] : src_l2mode_[v];
+    if (srcnorm_check_ > 0) {
+      Real dold = CalculateSourceNorm(nrm, v);
+      if (!(dold == d)) {
+        if (global_variable::my_rank == 0) {
+          std::cout << "### FATAL ERROR MGSRCNORM check (TotalSourceNorm) " << mg_log_name_
+                    << " cyc " << pmy_mesh_->ncycle << " ch " << v << std::scientific
+                    << std::setprecision(17) << ": cached " << d << " former " << dold
+                    << std::endl;
+        }
+        std::exit(EXIT_FAILURE);
+      }
+    }
     f = (norm_mode_ == MGNormScaling::legacy) ? f + d : std::max(f, d);
   }
+  if (srcnorm_check_ > 0 && global_variable::my_rank == 0) {
+    std::cout << "MGSRCNORM " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle
+              << " TotalSourceNorm OK" << std::endl;
+  }
   return f;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::ComputeSourceNorms()
+//! \brief cfc_opt item D: ||F(u=0)|| of every channel in max, in L2 under rms, and (only when
+//! norm_mode_ is neither max nor rms) in L2 under norm_mode_, from ONE save/zero/defect/restore
+//! of u. Per channel it runs the same reduction and the same 1-value MPI_Allreduce as the former
+//! CalculateSourceNorm(nrm, v), on a defect computed once (compute_defect = false after the first
+//! call, as CalculateDefectNormAll does). u is restored and def_ recomputed from it afterwards,
+//! so u and def_ leave in the state they entered. norm_mode_ is restored before returning.
+//! Collective. Fills src_max_, src_l2rms_, src_l2mode_ and sets src_norms_valid_.
+
+void MultigridDriver::ComputeSourceNorms() {
+  if (srcnorm_check_ < 0) {
+    const char *c = std::getenv("ATHENAK_MG_SRCNORM_CHECK");
+    srcnorm_check_ = (c != nullptr && std::atoi(c) != 0) ? 1 : 0;
+  }
+  src_max_.assign(nvar_, 0.0);
+  src_l2rms_.assign(nvar_, 0.0);
+  src_l2mode_.assign(nvar_, 0.0);
+  DvceArray5D<Real> usave;
+  if (mglevels_ != nullptr) {
+    auto u = mglevels_->GetCurrentData();
+    usave = DvceArray5D<Real>(Kokkos::view_alloc("mg_usave", Kokkos::WithoutInitializing),
+                              u.layout());
+    Kokkos::deep_copy(usave, u);
+    Kokkos::deep_copy(u, 0.0);
+  }
+  const MGNormScaling keep = norm_mode_;
+  for (int v = 0; v < nvar_; ++v) {
+    src_max_[v] = CalculateDefectNorm(MGNormType::max, v, v == 0);
+  }
+  norm_mode_ = MGNormScaling::rms;
+  for (int v = 0; v < nvar_; ++v) {
+    src_l2rms_[v] = CalculateDefectNorm(MGNormType::l2, v, false);
+  }
+  norm_mode_ = keep;
+  if (keep != MGNormScaling::max && keep != MGNormScaling::rms) {
+    for (int v = 0; v < nvar_; ++v) {
+      src_l2mode_[v] = CalculateDefectNorm(MGNormType::l2, v, false);
+    }
+  }
+  if (mglevels_ != nullptr) {
+    Kokkos::deep_copy(mglevels_->GetCurrentData(), usave);
+    mglevels_->CalculateDefectPack();
+    Kokkos::fence();
+  }
+  src_norms_valid_ = true;
 }
 
 //----------------------------------------------------------------------------------------
@@ -885,16 +953,57 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
                                double wall) {
   // L2 in the rms convention whatever mg_norm is: CalculateDefectNorm reads norm_mode_
   // for its volume weight, so switch it for these calls only (the solve is finished).
+  // cfc_opt item D: source norms from the once-per-solve cache. If it is not filled yet
+  // (mg_rtol_ref = initial) it is filled here, BEFORE the final-defect norms: ComputeSourceNorms
+  // restores u and recomputes def_, and the final-defect norms below leave def_ = defect of the
+  // final u for the max-location search. The final defect is computed once (v == 0) and reused
+  // for the other channels and for max, as CalculateDefectNormAll does; u does not change in
+  // between, so the values equal the former per-call recomputations.
+  if (!src_norms_valid_) ComputeSourceNorms();
   MGNormScaling keep = norm_mode_;
   norm_mode_ = MGNormScaling::rms;
   Real l2 = 0.0, mx = 0.0, fl2 = 0.0, fmx = 0.0;
+  std::vector<Real> dl2(nvar_), dmx(nvar_);
   for (int v = 0; v < nvar_; ++v) {
-    l2 = std::max(l2, CalculateDefectNorm(MGNormType::l2, v));
-    mx = std::max(mx, CalculateDefectNorm(MGNormType::max, v));
-    fl2 = std::max(fl2, CalculateSourceNorm(MGNormType::l2, v));
-    fmx = std::max(fmx, CalculateSourceNorm(MGNormType::max, v));
+    dl2[v] = CalculateDefectNorm(MGNormType::l2, v, v == 0);
+    dmx[v] = CalculateDefectNorm(MGNormType::max, v, false);
+    l2 = std::max(l2, dl2[v]);
+    mx = std::max(mx, dmx[v]);
+    fl2 = std::max(fl2, src_l2rms_[v]);
+    fmx = std::max(fmx, src_max_[v]);
   }
-  norm_mode_ = keep;
+  bool check_ok = true;
+  std::ostringstream cmsg;
+  if (srcnorm_check_ > 0) {
+    // former path: each call recomputes the defect; the source calls save/zero/restore u and
+    // recompute def_ (so def_ is again the defect of the final u afterwards)
+    for (int v = 0; v < nvar_ && check_ok; ++v) {
+      Real ol2 = CalculateDefectNorm(MGNormType::l2, v);
+      Real omx = CalculateDefectNorm(MGNormType::max, v);
+      Real ofl2 = CalculateSourceNorm(MGNormType::l2, v);
+      Real ofmx = CalculateSourceNorm(MGNormType::max, v);
+      if (!(ol2 == dl2[v] && omx == dmx[v] && ofl2 == src_l2rms_[v] && ofmx == src_max_[v])) {
+        check_ok = false;
+        cmsg << std::scientific << std::setprecision(17) << " ch " << v << " l2 " << dl2[v]
+             << "/" << ol2 << " max " << dmx[v] << "/" << omx << " src_l2 " << src_l2rms_[v]
+             << "/" << ofl2 << " src_max " << src_max_[v] << "/" << ofmx;
+      }
+    }
+  }
+  norm_mode_ = keep;   // restored before any exit below (S-006)
+  if (srcnorm_check_ > 0) {
+    if (!check_ok) {
+      if (global_variable::my_rank == 0) {
+        std::cout << "### FATAL ERROR MGSRCNORM check (LogSolve) " << mg_log_name_ << " cyc "
+                  << pmy_mesh_->ncycle << " (new/former):" << cmsg.str() << std::endl;
+      }
+      std::exit(EXIT_FAILURE);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "MGSRCNORM " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle
+                << " LogSolve OK" << std::endl;
+    }
+  }
   std::ostringstream os;
   os << std::scientific << std::setprecision(4)
      << "MGLOG " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle << " t "
@@ -1010,6 +1119,7 @@ void MultigridDriver::SolveFMGCoarser() {
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
   mgprof::Timer pt(prof_id_, mgprof::sIterative);
+  src_norms_valid_ = false;   // cfc_opt item D: source norms are per solve
   Real def = TotalDefectNorm();
   // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
   // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
@@ -1206,11 +1316,11 @@ void MultigridDriver::CalculateDefectNormAll(MGNormType nrm, Real *out) {
 //! \fn Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n)
 //! \brief calculate the defect norm
 
-Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
+Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect) {
   Real norm = 0.0;
   if (mglevels_ != nullptr) {
     mgprof::Timer pt(prof_id_, in_log_ ? mgprof::sLog : mgprof::sNormDev);
-    Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n);
+    Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n, compute_defect);
     if (nrm == MGNormType::max) {
       norm = Kokkos::max(norm, mg_norm);
     } else {

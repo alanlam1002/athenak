@@ -259,8 +259,8 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
   // The alpha_psi smoother, defect and FAS-RHS kernels have no host path: they always
   // run on the device copy of the root grid. With a host root that copy is never
-  // read, so the root levels would give no coarse-grid correction (cfc_opt O-021,
-  // DEVELOPMENT.md item 66). The key is still read (same parameter dump); the
+  // read, so the root levels would give no coarse-grid correction (DEVELOPMENT.md
+  // item 66). The key is still read (same parameter dump); the
   // root stays on the device whatever it says.
   bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);
   if (root_on_host && global_variable::my_rank == 0) {

@@ -18,9 +18,9 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <array>
 #include <type_traits>
 #include <unordered_map>
-#include <array>
 #include <vector>
 
 // AthenaK headers
@@ -556,7 +556,8 @@ class MultigridDriver {
   void DoTaskListOneStage();
 
   virtual void SolveCoarsestGrid();
-  // compute_defect = false reuses def_ from the previous call (cfc_opt item D); default as before
+  // compute_defect = false reuses def_ from the previous call (src/cfc/DEVELOPMENT.md
+  // item 65); the default is the former behaviour
   Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   // V-002 C4: all channels' norms from ONE defect computation and one MPI_Allreduce
   void CalculateDefectNormAll(MGNormType nrm, Real *out);
@@ -620,17 +621,19 @@ class MultigridDriver {
   std::string mg_log_name_;
   int prof_id_ = mgprof::kCFC;
   bool in_log_ = false;          // charge norms inside LogSolve to mg_prof sLog   // mg_prof.hpp row (set by SetLogName)
-  // cfc_opt item D: the zero-guess source norms ||F(u=0)|| of every channel, computed once per
-  // solve by ComputeSourceNorms (one save/zero/defect/restore of u) and read by TotalSourceNorm
-  // and LogSolve, which formerly redid that evaluation per channel and per norm. Valid only
-  // inside one SolveIterative call: cleared at its start (both consumers run only there).
-  // src_l2mode_ is filled only when norm_mode_ is neither max nor rms (TotalSourceNorm, legacy).
+  // Zero-guess source norms ||F(u=0)|| of every channel (src/cfc/DEVELOPMENT.md item
+  // 65), computed once per solve by ComputeSourceNorms (one save/zero/defect/restore of
+  // u) and read by TotalSourceNorm and LogSolve, which formerly redid that evaluation per
+  // channel and per norm. Valid only inside one SolveIterative call: cleared at its start
+  // (both consumers run only there). src_l2mode_ is filled only when norm_mode_ is
+  // neither max nor rms (TotalSourceNorm, legacy).
   bool src_norms_valid_ = false;
   std::vector<Real> src_max_, src_l2rms_, src_l2mode_;
   void ComputeSourceNorms();
-  // ATHENAK_MG_SRCNORM_CHECK=1 (environment, read once; off by default): also run the former
-  // per-call CalculateSourceNorm/CalculateDefectNorm path and require every value to be ==.
-  int srcnorm_check_ = -1;
+  // <cfc> mg_srcnorm_check = 1 (off by default; read only if present): also run the
+  // former per-call CalculateSourceNorm/CalculateDefectNorm path and require every value
+  // to be ==.
+  int srcnorm_check_ = 0;
 
   bool full_multigrid_;
   int fmg_ncycle_;
@@ -747,10 +750,11 @@ struct MGPerLevelIndcs {
   int isame_ndat = 0, icoar_ndat = 0, ifine_ndat = 0;
 };
 
-// cfc_opt item A: one active (MeshBlock, neighbour) pair of a PackMG or UnpackMG round at one
-// MG level. The box is copied verbatim from send_mg_indcs_/recv_mg_indcs_; buf points at the
-// start of the pair's payload (pack: where to write, unpack: where to read), element bi of the
-// payload being the same bi the per-slot kernels used. POD, so a View of it is device-safe.
+// One active (MeshBlock, neighbour) pair of a PackMG or UnpackMG round at one MG level
+// (src/cfc/DEVELOPMENT.md item 64). The box is copied verbatim from send_mg_indcs_/
+// recv_mg_indcs_; buf points at the start of the pair's payload (pack: where to write,
+// unpack: where to read), element bi of the payload being the same bi the per-slot
+// kernels used. POD, so a View of it is device-safe.
 struct MGPackPair {
   int m;          // local MeshBlock index
   int n;          // neighbour slot (self-check and diagnostics only)
@@ -813,18 +817,19 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   bool unpack_unfenced_ = false;
   long fallback_fences_ = 0;
 
-  // cfc_opt item A: per-MG-level cached lists of the active (MeshBlock, neighbour) pairs that
-  // PackMG/UnpackMG act on (formerly one team per nmb*nnghbr*nvar slot, empty ones included).
-  // A slot is rebuilt when its key changes: mesh AMR/load-balance sequence number, nmb, nvar,
-  // the fine/coarse skip, and the data pointers of every buffer a list entry can point into
-  // (the level's aggregate send/recv buffers and offset maps, sendbuf[n].vars, recvbuf[n].vars).
-  // Incremented wherever a buffer a list entry can point into is (re)allocated
+  // Per-MG-level cached lists of the active (MeshBlock, neighbour) pairs that PackMG/
+  // UnpackMG act on (src/cfc/DEVELOPMENT.md item 64; formerly one team per
+  // nmb*nnghbr*nvar slot, empty ones included). A slot is rebuilt when its key changes:
+  // mesh AMR/load-balance sequence number, nmb, nvar, the fine/coarse skip, and the data
+  // pointers of every buffer a list entry can point into (the level's aggregate send/recv
+  // buffers and offset maps, sendbuf[n].vars, recvbuf[n].vars).
+  // mg_buf_gen_ is incremented wherever such a buffer is (re)allocated
   // (BuildRankPackedMGMetadata, RemapIndicesForMG, ComputePerLevelIndices), so a list is
   // rebuilt even if a new allocation happens to reuse an old address.
-  long mg_buf_gen_ = 0;
+  std::int64_t mg_buf_gen_ = 0;
   struct MGPackListLevel {
     bool built = false;
-    long buf_gen = -1;
+    std::int64_t buf_gen = -1;
     int seq = -1, nmb = -1, nvar = -1;
     bool skip_fc = false;
     const void *agg_send = nullptr, *agg_recv = nullptr;
@@ -835,15 +840,14 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
     Kokkos::View<MGPackPair*, DevMemSpace> pack, unpack;
   };
   std::vector<MGPackListLevel> mg_pl_cache_;
-  // MG levels with at most this many cells per direction use a RangePolicy over (pair, variable)
-  // with serial cell loops ("PackMGFlat"/"UnpackMGFlat"); larger levels use one team per (pair,
-  // variable). Both forms copy the same elements. 8 measured fastest with 16 equal (cfc_opt T2a,
-  // T2a': warm set 2.74 -> 1.79 s at 8, 1.93 s with teams everywhere, 2.14 s flat everywhere).
+  // MG levels with at most this many cells per direction use a RangePolicy over (pair,
+  // variable) with serial cell loops, larger levels one team per (pair, variable); both
+  // copy the same elements (measurements: src/cfc/DEVELOPMENT.md item 64).
   static constexpr int kMGPackFlatMaxCells = 8;
-  // ATHENAK_MG_PACKLIST_CHECK=1 (environment, read once): verify every (re)built list against the
-  // former per-slot selection on the host, and print the functor sizes. Off by default; see
-  // src/cfc/DEVELOPMENT.md item 64.
-  int mg_packlist_check_ = -1;
+  // <cfc> mg_packlist_check = 1 (off by default; read only if present): verify every
+  // (re)built list against the former per-slot selection on the host, and print the
+  // functor sizes. See src/cfc/DEVELOPMENT.md item 64.
+  int mg_packlist_check_ = 0;
   bool mg_packlist_sizes_printed_ = false;
   MGPackListLevel &GetPackList(const int nvar, const int lev, const bool skip_fc);
   void CheckPackList(const MGPackListLevel &L, const int nvar, const int lev,

@@ -8091,9 +8091,11 @@ nothing ran after it and the kernels use no team scratch.
 `UnpackMG` 0.632 -> 0.17 ms per call (team form everywhere); warm solve set 2.74 -> 1.79 s
 (threshold 8; 1.93 s teams everywhere, 1.78 s threshold 16, 2.14 s flat everywhere). Only the
 two halo stages of the MGPROF table move (`bnd_send` 0.578 -> 0.163 s, `bnd_recv` 0.808 ->
-0.394 s per warm set). Default path verified with per-MeshBlock state checksums (T2a', 24
-N-vs-A pairs, every divergence a single-block `w0` con2prim flip as in C-070, MG lines identical
-before it).
+0.394 s per warm set). MG output unchanged: the list self-check below passed on every rank, and
+per-MeshBlock state checksum pairs (cfc_opt T2a', T2b) show identical MG lines and no divergence
+that starts in the metric. The run-to-run flips seen in those pairs are con2prim (`w0` and
+`temperature` differ from identical checksummed inputs) and occur in the unmodified 96cda0ed
+too (cfc_opt O-018).
 
 **List rebuild.** Key: AMR/load-balance sequence, `nmb`, `nvar`, fine/coarse skip, the data
 pointers of the aggregate and per-neighbour buffers, and `mg_buf_gen_`, a counter bumped wherever
@@ -8102,8 +8104,10 @@ the index boxes or buffers are rebuilt (`BuildRankPackedMGMetadata`, `RemapIndic
 a run each level's list is rebuilt several times (9 builds per solver for 5 MG levels on the
 130 m mesh); after that, none. This is expected, not a bug.
 
-**Self-check.** `ATHENAK_MG_PACKLIST_CHECK=1` (environment, read once; no input key, so restart
-files are unchanged) re-derives every pair on the host with the former per-slot logic after each
+**Self-check.** `<cfc> mg_packlist_check = 1` (off by default). The key is read only if it is
+present (`DoesParameterExist`), so it never enters the parameter dump of outputs and restarts.
+To switch it on, put `mg_packlist_check = 1` in the deck's `<cfc>` block (a command-line
+override `cfc/mg_packlist_check=1` works only for keys already in the deck). It re-derives every pair on the host with the former per-slot logic after each
 list (re)build and compares box, source/target and address (full stride arithmetic); checks that
 no writes overlap and that `has_cross_rank` agrees; prints the functor sizes. Prints one
 `MGPACKLIST ... OK` line per (rank, level, solver, build) or aborts on the first mismatch. Passed
@@ -8114,6 +8118,39 @@ fall back to `sendbuf[n]` rows, which cannot occur without MPI); (2) the fine/co
 (`skip_fc`, the 1-cell MG level: on the 130 m mesh level 0 has no exchange at all); (3) a mesh
 change (regrid) invalidating the lists. (3) matters for AMR trees (TDE, handoff) if they take
 this commit; production magweb meshes are static.
+
+## 65. Zero-guess source norms once per solve (cfc_opt item D, 2026-11-19)
+
+**Change** (`multigrid/multigrid_driver.cpp`: `ComputeSourceNorms`, `TotalSourceNorm`,
+`LogSolve`, `SolveIterative`; `CalculateDefectNorm` gains `compute_defect`, default true).
+`TotalSourceNorm` (before the solve, `mg_rtol_ref = source`) and `LogSolve` (after it,
+`mg_log >= 1`) evaluated ||F(u=0)|| per channel and per norm, each call saving `u` into a fresh
+allocation, zeroing it, recomputing the whole defect, reducing one channel, restoring `u` and
+recomputing the defect: 12 evaluations per X/beta solve and 3 per psi/alpha_psi solve.
+`LogSolve` also recomputed the final defect for every channel and norm (8 per X/beta solve).
+Now `ComputeSourceNorms` does one save/zero/defect/restore of `u` per solve and runs, per
+channel, the same reduction and the same 1-value `MPI_Allreduce` as the former
+`CalculateSourceNorm`: max, L2 under rms (`LogSolve`) and, only when `norm_mode_` is neither max
+nor rms, L2 under `norm_mode_` (`TotalSourceNorm`). The cache is cleared at the start of every
+`SolveIterative`. With `mg_rtol_ref = initial` it is filled inside `LogSolve` before the
+final-defect norms, so `def_` is the defect of the final `u` when the max-location search
+reads it. `LogSolve` computes the final defect once and reuses it for the other channels and
+for max, as `CalculateDefectNormAll` does. The zero-guess evaluation is kept for the linear
+X/beta solvers too (one code path; `src - L(0) == src` is not assumed).
+
+**Bitwise** if F(0) at the finest level is the same before and after the V-cycles (finest
+`src_`/`coeff_` untouched by them).
+
+**Measured** (C1-NS 130 m restart, 1 node, 12 ranks; cfc_opt `LOG.md` O-018): the MGPROF `log`
+stage 0.116 -> 0.020 s per warm set; the set-cost difference is at the noise floor. State
+checksum windows against item 64 alone: no divergence that starts in the metric.
+
+**Self-check.** `<cfc> mg_srcnorm_check = 1` (off by default; read in
+`ReadConvergenceOptions` only if present, so it never enters the parameter dump; put it in the
+deck's `<cfc>` block to switch it on). It also runs the former per-call path and requires every
+value to be `==`, printing one `MGSRCNORM ... OK` line per check site and solve, or aborting
+with both values. Passed in cfc_opt T2b (96 and 24 checks, at 1-cycle and at production
+cadence), then still under the former environment switch.
 
 ## 66. `<cfc> root_on_host` is ignored by the psi and alpha_psi solvers (cfc_opt item R, 2026-11-19)
 

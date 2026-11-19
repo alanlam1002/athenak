@@ -841,8 +841,9 @@ Real MultigridDriver::TotalDefectNorm() {
 
 Real MultigridDriver::TotalSourceNorm() {
   MGNormType nrm = (norm_mode_ == MGNormScaling::max) ? MGNormType::max : MGNormType::l2;
-  // cfc_opt item D: per-channel values from the once-per-solve cache (ComputeSourceNorms),
-  // the same reductions on the same zero-guess defect as the former CalculateSourceNorm calls
+  // Per-channel values from the once-per-solve cache (ComputeSourceNorms; DEVELOPMENT.md
+  // item 65): the same reductions on the same zero-guess defect as the former
+  // CalculateSourceNorm calls
   if (!src_norms_valid_) ComputeSourceNorms();
   Real f = 0.0;
   for (int v = 0; v < nvar_; ++v) {
@@ -852,7 +853,8 @@ Real MultigridDriver::TotalSourceNorm() {
       Real dold = CalculateSourceNorm(nrm, v);
       if (!(dold == d)) {
         if (global_variable::my_rank == 0) {
-          std::cout << "### FATAL ERROR MGSRCNORM check (TotalSourceNorm) " << mg_log_name_
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "MGSRCNORM check (TotalSourceNorm) " << mg_log_name_
                     << " cyc " << pmy_mesh_->ncycle << " ch " << v << std::scientific
                     << std::setprecision(17) << ": cached " << d << " former " << dold
                     << std::endl;
@@ -871,19 +873,16 @@ Real MultigridDriver::TotalSourceNorm() {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::ComputeSourceNorms()
-//! \brief cfc_opt item D: ||F(u=0)|| of every channel in max, in L2 under rms, and (only when
-//! norm_mode_ is neither max nor rms) in L2 under norm_mode_, from ONE save/zero/defect/restore
-//! of u. Per channel it runs the same reduction and the same 1-value MPI_Allreduce as the former
-//! CalculateSourceNorm(nrm, v), on a defect computed once (compute_defect = false after the first
-//! call, as CalculateDefectNormAll does). u is restored and def_ recomputed from it afterwards,
-//! so u and def_ leave in the state they entered. norm_mode_ is restored before returning.
-//! Collective. Fills src_max_, src_l2rms_, src_l2mode_ and sets src_norms_valid_.
+//! \brief ||F(u=0)|| of every channel in max, in L2 under rms, and (only when norm_mode_
+//! is neither max nor rms) in L2 under norm_mode_, from ONE save/zero/defect/restore of u
+//! (src/cfc/DEVELOPMENT.md item 65). Per channel it runs the same reduction and the same
+//! 1-value MPI_Allreduce as the former CalculateSourceNorm(nrm, v), on a defect computed
+//! once (compute_defect = false after the first call, as CalculateDefectNormAll does).
+//! u is restored and def_ recomputed from it afterwards, so u and def_ leave in the state
+//! they entered. norm_mode_ is restored before returning. Collective. Fills src_max_,
+//! src_l2rms_, src_l2mode_ and sets src_norms_valid_.
 
 void MultigridDriver::ComputeSourceNorms() {
-  if (srcnorm_check_ < 0) {
-    const char *c = std::getenv("ATHENAK_MG_SRCNORM_CHECK");
-    srcnorm_check_ = (c != nullptr && std::atoi(c) != 0) ? 1 : 0;
-  }
   src_max_.assign(nvar_, 0.0);
   src_l2rms_.assign(nvar_, 0.0);
   src_l2mode_.assign(nvar_, 0.0);
@@ -920,7 +919,8 @@ void MultigridDriver::ComputeSourceNorms() {
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin, ...)
 //! \brief <block>/mg_rtol_ref = initial (default) | source, <block>/mg_log = 0|1|2,
-//! <block>/mg_stall_cycles, <block>/mg_min_vcycles (default 0).
+//! <block>/mg_stall_cycles, <block>/mg_min_vcycles (default 0), and <block>/
+//! mg_srcnorm_check (read only if present, so it never enters the parameter dump).
 
 void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
                                              const std::string &block) {
@@ -937,6 +937,9 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
   min_vcycles_ = pin->GetOrAddInteger(block, "mg_min_vcycles", 0);
+  if (pin->DoesParameterExist(block, "mg_srcnorm_check")) {
+    srcnorm_check_ = (pin->GetInteger(block, "mg_srcnorm_check") != 0) ? 1 : 0;
+  }
   if (mg_log_ >= 3) mgprof::on = true;   // stage profiler (mg_prof.hpp), off by default
 }
 
@@ -953,12 +956,13 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
                                double wall) {
   // L2 in the rms convention whatever mg_norm is: CalculateDefectNorm reads norm_mode_
   // for its volume weight, so switch it for these calls only (the solve is finished).
-  // cfc_opt item D: source norms from the once-per-solve cache. If it is not filled yet
-  // (mg_rtol_ref = initial) it is filled here, BEFORE the final-defect norms: ComputeSourceNorms
-  // restores u and recomputes def_, and the final-defect norms below leave def_ = defect of the
-  // final u for the max-location search. The final defect is computed once (v == 0) and reused
-  // for the other channels and for max, as CalculateDefectNormAll does; u does not change in
-  // between, so the values equal the former per-call recomputations.
+  // Source norms from the once-per-solve cache (DEVELOPMENT.md item 65). If it is not
+  // filled yet (mg_rtol_ref = initial) it is filled here, BEFORE the final-defect norms:
+  // ComputeSourceNorms restores u and recomputes def_, and the final-defect norms below
+  // leave def_ = defect of the final u for the max-location search. The final defect is
+  // computed once (v == 0) and reused for the other channels and for max, as
+  // CalculateDefectNormAll does; u does not change in between, so the values equal the
+  // former per-call recomputations.
   if (!src_norms_valid_) ComputeSourceNorms();
   MGNormScaling keep = norm_mode_;
   norm_mode_ = MGNormScaling::rms;
@@ -975,26 +979,28 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
   bool check_ok = true;
   std::ostringstream cmsg;
   if (srcnorm_check_ > 0) {
-    // former path: each call recomputes the defect; the source calls save/zero/restore u and
-    // recompute def_ (so def_ is again the defect of the final u afterwards)
+    // former path: each call recomputes the defect; the source calls save/zero/restore u
+    // and recompute def_ (so def_ is again the defect of the final u afterwards)
     for (int v = 0; v < nvar_ && check_ok; ++v) {
       Real ol2 = CalculateDefectNorm(MGNormType::l2, v);
       Real omx = CalculateDefectNorm(MGNormType::max, v);
       Real ofl2 = CalculateSourceNorm(MGNormType::l2, v);
       Real ofmx = CalculateSourceNorm(MGNormType::max, v);
-      if (!(ol2 == dl2[v] && omx == dmx[v] && ofl2 == src_l2rms_[v] && ofmx == src_max_[v])) {
+      if (!(ol2 == dl2[v] && omx == dmx[v] && ofl2 == src_l2rms_[v] &&
+            ofmx == src_max_[v])) {
         check_ok = false;
-        cmsg << std::scientific << std::setprecision(17) << " ch " << v << " l2 " << dl2[v]
-             << "/" << ol2 << " max " << dmx[v] << "/" << omx << " src_l2 " << src_l2rms_[v]
-             << "/" << ofl2 << " src_max " << src_max_[v] << "/" << ofmx;
+        cmsg << std::scientific << std::setprecision(17) << " ch " << v << " l2 "
+             << dl2[v] << "/" << ol2 << " max " << dmx[v] << "/" << omx << " src_l2 "
+             << src_l2rms_[v] << "/" << ofl2 << " src_max " << src_max_[v] << "/" << ofmx;
       }
     }
   }
-  norm_mode_ = keep;   // restored before any exit below (S-006)
+  norm_mode_ = keep;   // restored before any exit below
   if (srcnorm_check_ > 0) {
     if (!check_ok) {
       if (global_variable::my_rank == 0) {
-        std::cout << "### FATAL ERROR MGSRCNORM check (LogSolve) " << mg_log_name_ << " cyc "
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "MGSRCNORM check (LogSolve) " << mg_log_name_ << " cyc "
                   << pmy_mesh_->ncycle << " (new/former):" << cmsg.str() << std::endl;
       }
       std::exit(EXIT_FAILURE);
@@ -1119,7 +1125,7 @@ void MultigridDriver::SolveFMGCoarser() {
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
   mgprof::Timer pt(prof_id_, mgprof::sIterative);
-  src_norms_valid_ = false;   // cfc_opt item D: source norms are per solve
+  src_norms_valid_ = false;   // source norms are per solve (DEVELOPMENT.md item 65)
   Real def = TotalDefectNorm();
   // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
   // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a

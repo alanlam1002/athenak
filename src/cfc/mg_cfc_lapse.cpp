@@ -257,8 +257,19 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   fsubtract_average_ = false;
 
   int nghost = pin->GetOrAddInteger("cfc", "mg_nghost", 1);
+  // The alpha_psi smoother, defect and FAS-RHS kernels have no host path: they always
+  // run on the device copy of the root grid. With a host root that copy is never
+  // read, so the root levels would give no coarse-grid correction (cfc_opt O-021,
+  // DEVELOPMENT.md item 66). The key is still read (same parameter dump); the
+  // root stays on the device whatever it says.
   bool root_on_host = pin->GetOrAddBoolean("cfc", "root_on_host", false);
-  mgroot_ = new MGCFCLapse(this, nullptr, nghost, root_on_host);
+  if (root_on_host && global_variable::my_rank == 0) {
+    std::cout << "### WARNING in MGCFCLapseDriver" << std::endl
+              << "<cfc> root_on_host = true is ignored by the alpha_psi solver: its "
+              << "kernels have no host path, so its root grid stays on the device"
+              << std::endl;
+  }
+  mgroot_ = new MGCFCLapse(this, nullptr, nghost, false);
   mglevels_ = new MGCFCLapse(this, pmbp, nghost);
   mglevels_->pbval = new MultigridBoundaryValues(pmbp, pin, false, mglevels_);
   mglevels_->pbval->InitializeBuffers(nvar_);

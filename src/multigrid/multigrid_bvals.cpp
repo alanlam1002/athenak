@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -216,6 +217,7 @@ void MultigridBoundaryValues::BuildRankPackedMGMetadata(const int nvars, const i
   mg_recv_var_reqs_.assign(mg_recv_var_msgs_.size(), MPI_REQUEST_NULL);
   mg_send_var_hdr_reqs_.assign(mg_send_var_msgs_.size(), MPI_REQUEST_NULL);
   mg_recv_var_hdr_reqs_.assign(mg_recv_var_msgs_.size(), MPI_REQUEST_NULL);
+  ++mg_buf_gen_;   // cfc_opt item A: invalidates the pack lists (see GetPackList)
 }
 #endif
 
@@ -607,6 +609,7 @@ void MultigridBoundaryValues::RemapIndicesForMG() {
     int cbnx1 = cnx1 + 2*ngh;
     Kokkos::realloc(coarse_buf_, nmb, nvar, cbnx3, cbnx2, cbnx1);
   }
+  ++mg_buf_gen_;   // cfc_opt item A: boxes/buffers may have changed (GetPackList)
 }
 
 //----------------------------------------------------------------------------------------
@@ -1018,6 +1021,7 @@ void MultigridBoundaryValues::ComputePerLevelIndices() {
     int cbn = cnx_f + 2*ngh;
     Kokkos::realloc(coarse_buf_, nmb, nvar, cbn, cbn, cbn);
   }
+  ++mg_buf_gen_;   // cfc_opt item A: boxes/buffers may have changed (GetPackList)
 }
 
 //----------------------------------------------------------------------------------------
@@ -2232,38 +2236,335 @@ TaskStatus MultigridBoundaryValues::FillFineCoarseMGGhosts(DvceArray5D<Real> &u)
 //! boundaries into boundary buffers and send to neighbors.
 //! Adapts to different block sizes per level.
 
-TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
-  if (pmy_mg == nullptr) return TaskStatus::complete;
+//----------------------------------------------------------------------------------------
+//! \fn MultigridBoundaryValues::GetPackList()
+//! \brief cfc_opt item A: return this MG level's cached list of active (MeshBlock, neighbour)
+//! pairs for PackMG and UnpackMG, rebuilding it if its key changed. The selection, the index
+//! boxes and the buffer targets are exactly those of the former per-slot kernels:
+//!   - a pair is active if the neighbour exists and is not a fine/coarse neighbour on a level
+//!     where fine/coarse exchange is skipped;
+//!   - box: isame / icoar / ifine of send_mg_indcs_ (pack) or recv_mg_indcs_ (unpack) for
+//!     nlev == / < / > mlev;
+//!   - pack target: recvbuf[dest].vars row (gid - mb_gid(0)) if the neighbour is on this rank,
+//!     else the aggregate send buffer at mg_send_agg_offset_(m*nnghbr+n) (MPI) or
+//!     sendbuf[n].vars row m (no MPI);
+//!   - unpack source: the aggregate recv buffer at mg_recv_agg_offset_(m*nnghbr+n) if that is
+//!     >= 0 (MPI), else recvbuf[n].vars row m.
+//! Pointers are formed as data() + row*stride(0) on the host (no View access); stride(1) == 1
+//! (LayoutRight) makes element bi of a row the same as vars(row, bi). Neighbour data come
+//! from device mirrors of nghbr/mb_lev/mb_gid, i.e. what the former kernels read.
+//! has_cross_rank is computed by the former host loop (nghbr.h_view) and cached with the list.
 
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  int nvar = u.extent_int(1);
+MultigridBoundaryValues::MGPackListLevel &
+MultigridBoundaryValues::GetPackList(const int nvar, const int lev, const bool skip_fc) {
+  if (mg_pack_flat_ncells_ < 0) {
+    const char *s = std::getenv("ATHENAK_MG_PACK_FLAT_NCELLS");
+    mg_pack_flat_ncells_ = (s != nullptr) ? std::max(0, std::atoi(s)) : 0;
+    const char *c = std::getenv("ATHENAK_MG_PACKLIST_CHECK");
+    mg_packlist_check_ = (c != nullptr && std::atoi(c) != 0) ? 1 : 0;
+    if (global_variable::my_rank == 0 &&
+        (mg_pack_flat_ncells_ > 0 || mg_packlist_check_ > 0)) {
+      std::cout << "MGPACKLIST settings: flat_ncells " << mg_pack_flat_ncells_
+                << " check " << mg_packlist_check_ << std::endl;
+    }
+  }
+  if (static_cast<int>(mg_pl_cache_.size()) < kMaxMGLevels) {
+    mg_pl_cache_.resize(kMaxMGLevels);
+  }
+  if (lev < 0 || lev >= kMaxMGLevels) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "MG level " << lev << " outside the pack-list cache" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &L = mg_pl_cache_[lev];
 
-  int my_rank = global_variable::my_rank;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mbgid = pmy_pack->pmb->mb_gid;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &sbuf = sendbuf;
-  auto &rbuf = recvbuf;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nnghbr = pmy_pack->pmb->nnghbr;
+  const int seq = pmy_pack->pmesh->GetAMRLoadBalanceUpdateSeq();
+  std::vector<const void*> ptrs(2*nnghbr);
+  for (int n = 0; n < nnghbr; ++n) {
+    ptrs[n] = sendbuf[n].vars.data();
+    ptrs[nnghbr + n] = recvbuf[n].vars.data();
+  }
+  const bool key_ok = L.built && L.buf_gen == mg_buf_gen_ &&
+                      L.seq == seq && L.nmb == nmb && L.nvar == nvar &&
+                      L.skip_fc == skip_fc &&
+                      L.agg_send == mg_rank_sendbuf_vars_.data() &&
+                      L.agg_recv == mg_rank_recvbuf_vars_.data() &&
+                      L.soff == mg_send_agg_offset_.data() &&
+                      L.roff == mg_recv_agg_offset_.data() &&
+                      L.buf_ptrs == ptrs;
+  if (key_ok) return L;
 
-  int lev_ = pmy_mg->GetCurrentLevel();
-  int nlev_total = pmy_mg->GetNumberOfLevels();
-  int shift_ps = nlev_total - 1 - lev_;
-  int ncells_ps = pmy_mg->GetSize() >> shift_ps;
-  bool skip_fc_this_level = (ncells_ps < 2);
-  auto &smgi = send_mg_indcs_;
-  auto cbuf = coarse_buf_;
-  // Fused-pack state: PackMG writes off-rank payloads straight into the aggregate
-  // send buffer at the per-(m,n) base offset. The aggregate buffers only exist
-  // under MPI; without MPI every neighbour is on-rank and no packing is needed,
-  // which is what `urp` (a compile-time constant) selects inside the kernels.
 #if MPI_PARALLEL_ENABLED
   const bool urp = true;
 #else
   const bool urp = false;
 #endif
-  auto aggsbuf = mg_rank_sendbuf_vars_;
-  auto soff = mg_send_agg_offset_;
+  const int my_rank = global_variable::my_rank;
+  auto nghbr_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->nghbr.d_view);
+  auto mblev_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->mb_lev.d_view);
+  auto mbgid_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->mb_gid.d_view);
+  auto soff_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), mg_send_agg_offset_);
+  auto roff_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), mg_recv_agg_offset_);
+
+  auto row_ptr = [&](const DvceArray2D<Real> &a, const int row, const char *what) -> Real* {
+    if (a.extent_int(1) > 1 && a.stride(1) != 1) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "MG " << what << " buffer is not LayoutRight (stride(1) = "
+                << a.stride(1) << ")" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    return a.data() + static_cast<std::size_t>(row) * a.stride(0);
+  };
+
+  std::vector<MGPackPair> hp, hu;
+  hp.reserve(nmb*nnghbr);
+  hu.reserve(nmb*nnghbr);
+  for (int m = 0; m < nmb; ++m) {
+    for (int n = 0; n < nnghbr; ++n) {
+      if (nghbr_h(m, n).gid < 0) continue;
+      const int nlev = nghbr_h(m, n).lev;
+      const int mlev = mblev_h(m);
+      if ((nlev != mlev) && skip_fc) continue;
+      const int off_rank = (nghbr_h(m, n).rank != my_rank) ? 1 : 0;
+      const MeshBufferIndcs &sb = (nlev == mlev) ? send_mg_indcs_[n][lev].isame :
+                                  (nlev < mlev) ? send_mg_indcs_[n][lev].icoar :
+                                                  send_mg_indcs_[n][lev].ifine;
+      const MeshBufferIndcs &rb = (nlev == mlev) ? recv_mg_indcs_[n][lev].isame :
+                                  (nlev < mlev) ? recv_mg_indcs_[n][lev].icoar :
+                                                  recv_mg_indcs_[n][lev].ifine;
+      MGPackPair p;
+      p.m = m; p.n = n; p.off_rank = off_rank;
+      p.use_cbuf = (nlev < mlev) ? 1 : 0;
+      p.il = sb.bis; p.ni = sb.bie - sb.bis + 1;
+      p.jl = sb.bjs; p.nj = sb.bje - sb.bjs + 1;
+      p.kl = sb.bks; p.nk = sb.bke - sb.bks + 1;
+      if (!off_rank) {
+        const int dm = nghbr_h(m, n).gid - mbgid_h(0);
+        const int dn = nghbr_h(m, n).dest;
+        p.buf = row_ptr(recvbuf[dn].vars, dm, "recv");
+      } else if (urp) {
+        p.buf = mg_rank_sendbuf_vars_.data() + soff_h(m*nnghbr + n);
+      } else {
+        p.buf = row_ptr(sendbuf[n].vars, m, "send");
+      }
+      hp.push_back(p);
+
+      MGPackPair q = p;
+      q.il = rb.bis; q.ni = rb.bie - rb.bis + 1;
+      q.jl = rb.bjs; q.nj = rb.bje - rb.bjs + 1;
+      q.kl = rb.bks; q.nk = rb.bke - rb.bks + 1;
+      const int base = urp ? roff_h(m*nnghbr + n) : -1;
+      q.buf = (base >= 0) ? (mg_rank_recvbuf_vars_.data() + base)
+                          : row_ptr(recvbuf[n].vars, m, "recv");
+      hu.push_back(q);
+    }
+  }
+
+  // has_cross_rank: the former per-call host loop of PackAndSendMG, unchanged
+  bool has_cross_rank = false;
+  {
+    auto &nghbr = pmy_pack->pmb->nghbr;
+    auto &mblev = pmy_pack->pmb->mb_lev;
+    for (int m=0; m<nmb && !has_cross_rank; ++m) {
+      for (int n=0; n<nnghbr && !has_cross_rank; ++n) {
+        if (nghbr.h_view(m,n).gid >= 0 && nghbr.h_view(m,n).rank != my_rank) {
+          int nlev_h = nghbr.h_view(m,n).lev;
+          int mlev_h = mblev.h_view(m);
+          bool is_fc_h = (nlev_h != mlev_h);
+          if (is_fc_h && skip_fc) continue;
+          has_cross_rank = true;
+        }
+      }
+    }
+  }
+
+  L.npairs = static_cast<int>(hp.size());
+  const int nalloc = std::max(L.npairs, 1);
+  L.pack = Kokkos::View<MGPackPair*, DevMemSpace>("mg_pack_pairs", nalloc);
+  L.unpack = Kokkos::View<MGPackPair*, DevMemSpace>("mg_unpack_pairs", nalloc);
+  {
+    auto hpv = Kokkos::create_mirror_view(L.pack);
+    auto huv = Kokkos::create_mirror_view(L.unpack);
+    for (int i = 0; i < L.npairs; ++i) { hpv(i) = hp[i]; huv(i) = hu[i]; }
+    Kokkos::deep_copy(L.pack, hpv);
+    Kokkos::deep_copy(L.unpack, huv);
+  }
+  L.has_cross_rank = has_cross_rank;
+  L.buf_gen = mg_buf_gen_;
+  L.seq = seq; L.nmb = nmb; L.nvar = nvar; L.skip_fc = skip_fc;
+  L.agg_send = mg_rank_sendbuf_vars_.data();
+  L.agg_recv = mg_rank_recvbuf_vars_.data();
+  L.soff = mg_send_agg_offset_.data();
+  L.roff = mg_recv_agg_offset_.data();
+  L.buf_ptrs = ptrs;
+  L.built = true;
+  if (mg_packlist_check_ > 0) CheckPackList(L, nvar, lev, skip_fc);
+  return L;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn MultigridBoundaryValues::CheckPackList()
+//! \brief cfc_opt item A self-check (ATHENAK_MG_PACKLIST_CHECK=1), host only, run after every
+//! list (re)build. (a) Re-derives, slot by slot in the former kernels' (m, n) order and with
+//! their branch structure, every active pair's box, source/target array and buffer address
+//! (full stride arithmetic, no LayoutRight assumption), and compares with the list.
+//! (b) Checks that no two pack payloads overlap and that no two unpack boxes of the same
+//! MeshBlock and target array overlap. (c) Compares has_cross_rank with the list's off-rank
+//! flags. Aborts on the first mismatch; prints one line per level otherwise.
+
+void MultigridBoundaryValues::CheckPackList(const MGPackListLevel &L, const int nvar,
+                                            const int lev, const bool skip_fc) {
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nnghbr = pmy_pack->pmb->nnghbr;
+  const int my_rank = global_variable::my_rank;
+#if MPI_PARALLEL_ENABLED
+  const bool urp = true;
+#else
+  const bool urp = false;
+#endif
+  auto fail = [&](const std::string &what, int m, int n) {
+    std::cout << "### FATAL ERROR MGPACKLIST check failed on rank " << my_rank << " level "
+              << lev << " (m, n) = (" << m << ", " << n << "): " << what << std::endl;
+    std::exit(EXIT_FAILURE);
+  };
+  auto nghbr_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->nghbr.d_view);
+  auto mblev_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->mb_lev.d_view);
+  auto mbgid_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(),
+                                                     pmy_pack->pmb->mb_gid.d_view);
+  auto soff_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), mg_send_agg_offset_);
+  auto roff_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), mg_recv_agg_offset_);
+  auto hp = Kokkos::create_mirror_view_and_copy(HostMemSpace(), L.pack);
+  auto hu = Kokkos::create_mirror_view_and_copy(HostMemSpace(), L.unpack);
+  auto &smgi = send_mg_indcs_;
+  auto &rmgi = recv_mg_indcs_;
+
+  // (a) former per-slot selection, literally
+  int p = 0;
+  for (int m = 0; m < nmb; ++m) {
+    for (int n = 0; n < nnghbr; ++n) {
+      if (nghbr_h(m, n).gid < 0) continue;
+      int nlev = nghbr_h(m, n).lev;
+      int mlev = mblev_h(m);
+      bool is_fc = (nlev != mlev);
+      if (is_fc && skip_fc) continue;
+      if (p >= L.npairs) fail("list shorter than the per-slot selection", m, n);
+      bool is_coarser = (nlev < mlev);
+      int il, iu, jl, ju, kl, ku;
+      if (nlev == mlev) {
+        il = smgi[n][lev].isame.bis; iu = smgi[n][lev].isame.bie;
+        jl = smgi[n][lev].isame.bjs; ju = smgi[n][lev].isame.bje;
+        kl = smgi[n][lev].isame.bks; ku = smgi[n][lev].isame.bke;
+      } else if (is_coarser) {
+        il = smgi[n][lev].icoar.bis; iu = smgi[n][lev].icoar.bie;
+        jl = smgi[n][lev].icoar.bjs; ju = smgi[n][lev].icoar.bje;
+        kl = smgi[n][lev].icoar.bks; ku = smgi[n][lev].icoar.bke;
+      } else {
+        il = smgi[n][lev].ifine.bis; iu = smgi[n][lev].ifine.bie;
+        jl = smgi[n][lev].ifine.bjs; ju = smgi[n][lev].ifine.bje;
+        kl = smgi[n][lev].ifine.bks; ku = smgi[n][lev].ifine.bke;
+      }
+      int dm = nghbr_h(m, n).gid - mbgid_h(0);
+      int dn = nghbr_h(m, n).dest;
+      const Real *addr;   // address of payload element bi = 0
+      if (nghbr_h(m, n).rank == my_rank) {
+        addr = recvbuf[dn].vars.data() + dm*recvbuf[dn].vars.stride(0);
+      } else if (urp) {
+        if (soff_h(m*nnghbr + n) < 0) fail("off-rank pack pair without a send offset", m, n);
+        addr = mg_rank_sendbuf_vars_.data() + soff_h(m*nnghbr + n);
+      } else {
+        addr = sendbuf[n].vars.data() + m*sendbuf[n].vars.stride(0);
+      }
+      const MGPackPair &a = hp(p);
+      if (a.m != m || a.n != n) fail("pack pair order", m, n);
+      if (a.use_cbuf != (is_coarser ? 1 : 0)) fail("pack source array", m, n);
+      if (a.il != il || a.ni != iu-il+1 || a.jl != jl || a.nj != ju-jl+1 ||
+          a.kl != kl || a.nk != ku-kl+1) fail("pack box", m, n);
+      if (a.buf != addr) fail("pack target address", m, n);
+      if (a.off_rank != ((nghbr_h(m, n).rank != my_rank) ? 1 : 0)) fail("off_rank", m, n);
+
+      bool from_coarser = (nlev < mlev);
+      if (nlev == mlev) {
+        il = rmgi[n][lev].isame.bis; iu = rmgi[n][lev].isame.bie;
+        jl = rmgi[n][lev].isame.bjs; ju = rmgi[n][lev].isame.bje;
+        kl = rmgi[n][lev].isame.bks; ku = rmgi[n][lev].isame.bke;
+      } else if (from_coarser) {
+        il = rmgi[n][lev].icoar.bis; iu = rmgi[n][lev].icoar.bie;
+        jl = rmgi[n][lev].icoar.bjs; ju = rmgi[n][lev].icoar.bje;
+        kl = rmgi[n][lev].icoar.bks; ku = rmgi[n][lev].icoar.bke;
+      } else {
+        il = rmgi[n][lev].ifine.bis; iu = rmgi[n][lev].ifine.bie;
+        jl = rmgi[n][lev].ifine.bjs; ju = rmgi[n][lev].ifine.bje;
+        kl = rmgi[n][lev].ifine.bks; ku = rmgi[n][lev].ifine.bke;
+      }
+      const int base = urp ? roff_h(m*nnghbr + n) : -1;
+      const Real *raddr = (base >= 0) ? mg_rank_recvbuf_vars_.data() + base
+                        : recvbuf[n].vars.data() + m*recvbuf[n].vars.stride(0);
+      if (nghbr_h(m, n).rank != my_rank && urp && base < 0)
+        fail("off-rank unpack pair without a recv offset", m, n);
+      const MGPackPair &b = hu(p);
+      if (b.m != m || b.n != n) fail("unpack pair order", m, n);
+      if (b.use_cbuf != (from_coarser ? 1 : 0)) fail("unpack target array", m, n);
+      if (b.il != il || b.ni != iu-il+1 || b.jl != jl || b.nj != ju-jl+1 ||
+          b.kl != kl || b.nk != ku-kl+1) fail("unpack box", m, n);
+      if (b.buf != raddr) fail("unpack source address", m, n);
+      ++p;
+    }
+  }
+  if (p != L.npairs) fail("list longer than the per-slot selection", -1, -1);
+
+  // (b) no overlapping writes. Pack: payload address ranges of all pairs disjoint.
+  {
+    std::vector<std::pair<const Real*, const Real*>> r;
+    for (int i = 0; i < L.npairs; ++i) {
+      const MGPackPair &a = hp(i);
+      if (a.ni <= 0 || a.nj <= 0 || a.nk <= 0) fail("empty pack box", a.m, a.n);
+      r.emplace_back(a.buf, a.buf + static_cast<std::size_t>(nvar)*a.ni*a.nj*a.nk);
+    }
+    std::sort(r.begin(), r.end());
+    for (std::size_t i = 1; i < r.size(); ++i) {
+      if (r[i].first < r[i-1].second) fail("overlapping pack payloads", -1, -1);
+    }
+  }
+  // Unpack: boxes of pairs with the same m and target array (u or coarse_buf_) disjoint.
+  for (int i = 0; i < L.npairs; ++i) {
+    const MGPackPair &a = hu(i);
+    if (a.ni <= 0 || a.nj <= 0 || a.nk <= 0) fail("empty unpack box", a.m, a.n);
+    for (int j = i + 1; j < L.npairs && hu(j).m == a.m; ++j) {
+      const MGPackPair &b = hu(j);
+      if (b.use_cbuf != a.use_cbuf) continue;
+      bool ox = a.il < b.il + b.ni && b.il < a.il + a.ni;
+      bool oy = a.jl < b.jl + b.nj && b.jl < a.jl + a.nj;
+      bool oz = a.kl < b.kl + b.nk && b.kl < a.kl + a.nk;
+      if (ox && oy && oz) fail("overlapping unpack boxes with slot " +
+                               std::to_string(b.n), a.m, a.n);
+    }
+  }
+  // (c) has_cross_rank
+  bool any_off = false;
+  for (int i = 0; i < L.npairs; ++i) any_off = any_off || (hp(i).off_rank != 0);
+  if (any_off != L.has_cross_rank) fail("has_cross_rank", -1, -1);
+
+  std::cout << "MGPACKLIST rank " << my_rank << " lev " << lev << " nvar " << nvar
+            << " skip_fc " << skip_fc << " pairs " << L.npairs << " of " << nmb*nnghbr
+            << " slots, cross_rank " << L.has_cross_rank << ": OK" << std::endl;
+}
+
+TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
+  if (pmy_mg == nullptr) return TaskStatus::complete;
+
+  int nvar = u.extent_int(1);
+  int lev_ = pmy_mg->GetCurrentLevel();
+  int nlev_total = pmy_mg->GetNumberOfLevels();
+  int shift_ps = nlev_total - 1 - lev_;
+  int ncells_ps = pmy_mg->GetSize() >> shift_ps;
+  bool skip_fc_this_level = (ncells_ps < 2);
 
 #if MPI_PARALLEL_ENABLED
   for (std::size_t i = 0; i < mg_send_var_reqs_.size(); ++i) {
@@ -2271,123 +2572,72 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
   }
 #endif
 
-  {
-  int nmnv = nmb * nnghbr * nvar;
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
-  Kokkos::parallel_for("PackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
-    const int m = tmember.league_rank() / (nnghbr * nvar);
-    const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;
-    const int v = tmember.league_rank() - m * nnghbr * nvar - n * nvar;
+  // cfc_opt item A: the kernels run over this level's cached list of active (MeshBlock,
+  // neighbour) pairs (GetPackList) instead of every nmb*nnghbr*nvar slot, and capture only
+  // Views and scalars. The former lambdas captured send_mg_indcs_[56][20] and the 56-element
+  // sendbuf/recvbuf arrays by value (> 100 kB), which Kokkos-SYCL launches indirectly: functor
+  // copied to host USM after a fence on the previous indirect launch
+  // (kokkos/core/src/SYCL/Kokkos_SYCL_Instance.hpp:236-320, threshold 1800 B). The static_asserts
+  // below keep the functors under that threshold. Element bi of a pair's payload, and so every
+  // buffer entry written, is the same as before: pure copies, no arithmetic.
+  auto &L = GetPackList(nvar, lev_, skip_fc_this_level);
+  const int npairs = L.npairs;
+  auto plist = L.pack;
+  auto uu = u;
+  auto cbuf = coarse_buf_;
+  const int nvar_l = nvar;
 
-    if (nghbr.d_view(m, n).gid < 0) {
-      tmember.team_barrier();
-      return;
-    }
-
-    int nlev = nghbr.d_view(m, n).lev;
-    int mlev = mblev.d_view(m);
-
-    bool is_fc = (nlev != mlev);
-    if (is_fc && skip_fc_this_level) {
-      tmember.team_barrier();
-      return;
-    }
-
-    int il, iu, jl, ju, kl, ku;
-    bool is_coarser = (nlev < mlev);
-
-    if (nlev == mlev) {
-      il = smgi[n][lev_].isame.bis; iu = smgi[n][lev_].isame.bie;
-      jl = smgi[n][lev_].isame.bjs; ju = smgi[n][lev_].isame.bje;
-      kl = smgi[n][lev_].isame.bks; ku = smgi[n][lev_].isame.bke;
-    } else if (is_coarser) {
-      il = smgi[n][lev_].icoar.bis; iu = smgi[n][lev_].icoar.bie;
-      jl = smgi[n][lev_].icoar.bjs; ju = smgi[n][lev_].icoar.bje;
-      kl = smgi[n][lev_].icoar.bks; ku = smgi[n][lev_].icoar.bke;
-    } else {
-      il = smgi[n][lev_].ifine.bis; iu = smgi[n][lev_].ifine.bie;
-      jl = smgi[n][lev_].ifine.bjs; ju = smgi[n][lev_].ifine.bje;
-      kl = smgi[n][lev_].ifine.bks; ku = smgi[n][lev_].ifine.bke;
-    }
-
-    int ni = iu - il + 1;
-    int nj = ju - jl + 1;
-    int nk = ku - kl + 1;
-    int nkj = nk * nj;
-
-    int dm = nghbr.d_view(m, n).gid - mbgid.d_view(0);
-    int dn = nghbr.d_view(m, n).dest;
-
-    if (is_coarser) {
-      // Restricted data is pre-computed in coarse_buf_ by FillCoarseMG:
-      //   face neighbors  -> face-aligned 2x2 avg in ghost cells
-      //   edge/corner     -> volume 2x2x2 avg in interior cells
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-        if (nghbr.d_view(m, n).rank == my_rank) {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            rbuf[dn].vars(dm, (i-il + ni*(j-jl + nj*(k-kl + nk*v))))
-                = cbuf(m, v, k, j, i);
-          });
-        } else {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
-            if (urp) {
-              aggsbuf(soff(m*nnghbr + n) + bi) = cbuf(m, v, k, j, i);
-            } else {
-              sbuf[n].vars(m, bi) = cbuf(m, v, k, j, i);
-            }
-          });
-        }
+  auto pack_team = KOKKOS_LAMBDA(TeamMember_t tmember) {
+    const int p = tmember.league_rank() / nvar_l;
+    const int v = tmember.league_rank() - p * nvar_l;
+    const MGPackPair pp = plist(p);
+    const int nkj = pp.nk * pp.nj;
+    Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
+    [&](const int idx) {
+      int k = idx / pp.nj;
+      int j = (idx - k * pp.nj) + pp.jl;
+      k += pp.kl;
+      Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, pp.il, pp.il + pp.ni),
+      [&](const int i) {
+        const int bi = (i-pp.il + pp.ni*(j-pp.jl + pp.nj*(k-pp.kl + pp.nk*v)));
+        pp.buf[bi] = pp.use_cbuf ? cbuf(pp.m, v, k, j, i) : uu(pp.m, v, k, j, i);
       });
-    } else {
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-
-        if (nghbr.d_view(m, n).rank == my_rank) {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            rbuf[dn].vars(dm, (i-il + ni*(j-jl + nj*(k-kl + nk*v))))
-                = u(m, v, k, j, i);
-          });
-        } else {
-          Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-          [&](const int i) {
-            const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
-            if (urp) {
-              aggsbuf(soff(m*nnghbr + n) + bi) = u(m, v, k, j, i);
-            } else {
-              sbuf[n].vars(m, bi) = u(m, v, k, j, i);
-            }
-          });
+    });
+  };
+  auto pack_flat = KOKKOS_LAMBDA(const int pv) {
+    const int p = pv / nvar_l;
+    const int v = pv - p * nvar_l;
+    const MGPackPair pp = plist(p);
+    for (int k = pp.kl; k < pp.kl + pp.nk; ++k) {
+      for (int j = pp.jl; j < pp.jl + pp.nj; ++j) {
+        for (int i = pp.il; i < pp.il + pp.ni; ++i) {
+          const int bi = (i-pp.il + pp.ni*(j-pp.jl + pp.nj*(k-pp.kl + pp.nk*v)));
+          pp.buf[bi] = pp.use_cbuf ? cbuf(pp.m, v, k, j, i) : uu(pp.m, v, k, j, i);
         }
-      });
+      }
     }
-    tmember.team_barrier();
-  });
+  };
+  // Kokkos-SYCL indirect-launch threshold: Kokkos_SYCL_Instance.hpp:236-246 (sizeof >= 1800)
+  static_assert(sizeof(pack_team) < 1800, "PackMG functor would be launched indirectly");
+  static_assert(sizeof(pack_flat) < 1800, "PackMGFlat functor would be launched indirectly");
+  if (mg_packlist_check_ > 0 && !mg_packlist_sizes_printed_ && global_variable::my_rank == 0) {
+    std::cout << "MGPACKLIST functor bytes: PackMG " << sizeof(pack_team) << " PackMGFlat "
+              << sizeof(pack_flat) << std::endl;
+  }
+
+  if (npairs > 0) {
+    if (ncells_ps <= mg_pack_flat_ncells_) {
+      Kokkos::parallel_for("PackMGFlat",
+                           Kokkos::RangePolicy<>(DevExeSpace(), 0, npairs * nvar_l),
+                           pack_flat);
+    } else {
+      Kokkos::TeamPolicy<> policy(DevExeSpace(), npairs * nvar_l, Kokkos::AUTO);
+      Kokkos::parallel_for("PackMG", policy, pack_team);
+    }
   }
 
   #if MPI_PARALLEL_ENABLED
-  bool has_cross_rank = false;
-  for (int m=0; m<nmb && !has_cross_rank; ++m) {
-    for (int n=0; n<nnghbr && !has_cross_rank; ++n) {
-      if (nghbr.h_view(m,n).gid >= 0 && nghbr.h_view(m,n).rank != my_rank) {
-        int nlev_h = nghbr.h_view(m,n).lev;
-        int mlev_h = mblev.h_view(m);
-        bool is_fc_h = (nlev_h != mlev_h);
-        if (is_fc_h && skip_fc_this_level) continue;
-        has_cross_rank = true;
-      }
-    }
-  }
+  const bool has_cross_rank = L.has_cross_rank;   // former per-call loop, cached per level
   if (has_cross_rank) {
     Kokkos::fence();
     unpack_unfenced_ = false;   // also completes any earlier UnpackMG (PostRecvMG)
@@ -2429,12 +2679,6 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
 
 TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
   if (pmy_mg == nullptr) return TaskStatus::complete;
-  // create local references for variables in kernel
-  int nmb = pmy_pack->nmb_thispack;
-  int nnghbr = pmy_pack->pmb->nnghbr;
-  auto &nghbr = pmy_pack->pmb->nghbr;
-  auto &mblev = pmy_pack->pmb->mb_lev;
-  auto &rbuf = recvbuf;
   int shift_ru = pmy_mg->GetNumberOfLevels() - 1 - pmy_mg->GetCurrentLevel();
   int ncells_ru = pmy_mg->GetSize() >> shift_ru;
   bool skip_fc_this_level = (ncells_ru < 2);
@@ -2464,99 +2708,78 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
   // Off-rank payloads are read directly out of the rank-packed aggregate recv
   // buffer (fuses the former MGRankUnpackScatter kernel); on-rank payloads sit
   // in their per-neighbour recv buffers, written there directly by the sender.
+  // cfc_opt item A: over the level's cached active-pair list (see PackAndSendMG); each
+  // entry's buf is the aggregate recv buffer at mg_recv_agg_offset_ (MPI, off-rank) or
+  // recvbuf[n].vars row m, so element bi is read from the same place as before.
   int nvar = u.extent_int(1);
-  int ngh = pmy_mg->GetGhostCells();
   int lev_ = pmy_mg->GetCurrentLevel();
+  auto &L = GetPackList(nvar, lev_, skip_fc_this_level);
+  const int npairs = L.npairs;
+  auto plist = L.unpack;
+  auto uu = u;
   auto cbuf = coarse_buf_;
-  auto &rmgi = recv_mg_indcs_;
-  // Off-rank payloads live in the aggregate recv buffer (MPI only); without MPI
-  // every neighbour is on-rank, so `urp` (a compile-time constant) makes the
-  // kernel read from the per-neighbour recv buffers instead.
-#if MPI_PARALLEL_ENABLED
-  const bool urp = true;
-#else
-  const bool urp = false;
-#endif
-  auto aggrbuf = mg_rank_recvbuf_vars_;
-  auto roff = mg_recv_agg_offset_;
+  const int nvar_l = nvar;
 
-  {
-  int nmnv = nmb * nnghbr * nvar;
+  auto unpack_team = KOKKOS_LAMBDA(TeamMember_t tmember) {
+    const int p = tmember.league_rank() / nvar_l;
+    const int v = tmember.league_rank() - p * nvar_l;
+    const MGPackPair pp = plist(p);
+    const int nkj = pp.nk * pp.nj;
+    Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
+    [&](const int idx) {
+      int k = idx / pp.nj;
+      int j = (idx - k * pp.nj) + pp.jl;
+      k += pp.kl;
+      Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, pp.il, pp.il + pp.ni),
+      [&](const int i) {
+        const int bi = (i-pp.il + pp.ni*(j-pp.jl + pp.nj*(k-pp.kl + pp.nk*v)));
+        if (pp.use_cbuf) {
+          cbuf(pp.m, v, k, j, i) = pp.buf[bi];
+        } else {
+          uu(pp.m, v, k, j, i) = pp.buf[bi];
+        }
+      });
+    });
+  };
+  auto unpack_flat = KOKKOS_LAMBDA(const int pv) {
+    const int p = pv / nvar_l;
+    const int v = pv - p * nvar_l;
+    const MGPackPair pp = plist(p);
+    for (int k = pp.kl; k < pp.kl + pp.nk; ++k) {
+      for (int j = pp.jl; j < pp.jl + pp.nj; ++j) {
+        for (int i = pp.il; i < pp.il + pp.ni; ++i) {
+          const int bi = (i-pp.il + pp.ni*(j-pp.jl + pp.nj*(k-pp.kl + pp.nk*v)));
+          if (pp.use_cbuf) {
+            cbuf(pp.m, v, k, j, i) = pp.buf[bi];
+          } else {
+            uu(pp.m, v, k, j, i) = pp.buf[bi];
+          }
+        }
+      }
+    }
+  };
+  // Kokkos-SYCL indirect-launch threshold: Kokkos_SYCL_Instance.hpp:236-246 (sizeof >= 1800)
+  static_assert(sizeof(unpack_team) < 1800, "UnpackMG functor would be launched indirectly");
+  static_assert(sizeof(unpack_flat) < 1800,
+                "UnpackMGFlat functor would be launched indirectly");
+  if (mg_packlist_check_ > 0 && !mg_packlist_sizes_printed_) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "MGPACKLIST functor bytes: UnpackMG " << sizeof(unpack_team)
+                << " UnpackMGFlat " << sizeof(unpack_flat) << std::endl;
+    }
+    mg_packlist_sizes_printed_ = true;
+  }
+
   unpack_unfenced_ = true;   // reads aggrbuf asynchronously: see PostRecvMG
-  Kokkos::TeamPolicy<> policy(DevExeSpace(), nmnv, Kokkos::AUTO);
-  Kokkos::parallel_for("UnpackMG", policy, KOKKOS_LAMBDA(TeamMember_t tmember) {
-    const int m = tmember.league_rank() / (nnghbr * nvar);
-    const int n = (tmember.league_rank() - m * nnghbr * nvar) / nvar;
-    const int v = tmember.league_rank() - m * nnghbr * nvar - n * nvar;
-
-    if (nghbr.d_view(m, n).gid < 0) {
-      tmember.team_barrier();
-      return;
-    }
-
-    int nlev = nghbr.d_view(m, n).lev;
-    int mlev = mblev.d_view(m);
-
-    bool is_fc = (nlev != mlev);
-    if (is_fc && skip_fc_this_level) {
-      tmember.team_barrier();
-      return;
-    }
-
-    bool from_coarser = (nlev < mlev);
-
-    int il, iu, jl, ju, kl, ku;
-
-    if (nlev == mlev) {
-      il = rmgi[n][lev_].isame.bis; iu = rmgi[n][lev_].isame.bie;
-      jl = rmgi[n][lev_].isame.bjs; ju = rmgi[n][lev_].isame.bje;
-      kl = rmgi[n][lev_].isame.bks; ku = rmgi[n][lev_].isame.bke;
-    } else if (from_coarser) {
-      il = rmgi[n][lev_].icoar.bis; iu = rmgi[n][lev_].icoar.bie;
-      jl = rmgi[n][lev_].icoar.bjs; ju = rmgi[n][lev_].icoar.bje;
-      kl = rmgi[n][lev_].icoar.bks; ku = rmgi[n][lev_].icoar.bke;
+  if (npairs > 0) {
+    if (ncells_ru <= mg_pack_flat_ncells_) {
+      Kokkos::parallel_for("UnpackMGFlat",
+                           Kokkos::RangePolicy<>(DevExeSpace(), 0, npairs * nvar_l),
+                           unpack_flat);
     } else {
-      il = rmgi[n][lev_].ifine.bis; iu = rmgi[n][lev_].ifine.bie;
-      jl = rmgi[n][lev_].ifine.bjs; ju = rmgi[n][lev_].ifine.bje;
-      kl = rmgi[n][lev_].ifine.bks; ku = rmgi[n][lev_].ifine.bke;
+      Kokkos::TeamPolicy<> policy(DevExeSpace(), npairs * nvar_l, Kokkos::AUTO);
+      Kokkos::parallel_for("UnpackMG", policy, unpack_team);
     }
-
-    int ni = iu - il + 1;
-    int nj = ju - jl + 1;
-    int nk = ku - kl + 1;
-    int nkj = nk * nj;
-
-    // base offset of this (m,n) payload in the aggregate recv buffer; -1 means
-    // on-rank (data already sits in rbuf) or legacy (non-rank-packed) path.
-    const int base = urp ? roff(m*nnghbr + n) : -1;
-
-    if (from_coarser) {
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-        Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-        [&](const int i) {
-          const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
-          cbuf(m, v, k, j, i) = (base >= 0) ? aggrbuf(base + bi) : rbuf[n].vars(m, bi);
-        });
-      });
-    } else {
-      Kokkos::parallel_for(Kokkos::TeamThreadRange<>(tmember, nkj),
-      [&](const int idx) {
-        int k = idx / nj;
-        int j = (idx - k * nj) + jl;
-        k += kl;
-        Kokkos::parallel_for(Kokkos::ThreadVectorRange(tmember, il, iu + 1),
-        [&](const int i) {
-          const int bi = (i-il + ni*(j-jl + nj*(k-kl + nk*v)));
-          u(m, v, k, j, i) = (base >= 0) ? aggrbuf(base + bi) : rbuf[n].vars(m, bi);
-        });
-      });
-    }
-    tmember.team_barrier();
-  });
   }
 
   return TaskStatus::complete;

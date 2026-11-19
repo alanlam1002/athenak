@@ -734,6 +734,19 @@ struct MGPerLevelIndcs {
   int isame_ndat = 0, icoar_ndat = 0, ifine_ndat = 0;
 };
 
+// cfc_opt item A: one active (MeshBlock, neighbour) pair of a PackMG or UnpackMG round at one
+// MG level. The box is copied verbatim from send_mg_indcs_/recv_mg_indcs_; buf points at the
+// start of the pair's payload (pack: where to write, unpack: where to read), element bi of the
+// payload being the same bi the per-slot kernels used. POD, so a View of it is device-safe.
+struct MGPackPair {
+  int m;          // local MeshBlock index
+  int n;          // neighbour slot (self-check and diagnostics only)
+  int use_cbuf;   // pack: read coarse_buf_ (send to coarser); unpack: write coarse_buf_
+  int off_rank;   // neighbour on another rank (self-check of has_cross_rank)
+  int il, ni, jl, nj, kl, nk;
+  Real *buf;
+};
+
 class MultigridBoundaryValues : public MeshBoundaryValuesCC {
  public:
   static constexpr int kMaxMGLevels = 20;
@@ -786,6 +799,40 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   // fence is ever missing, e.g. receives without a cross-rank send.
   bool unpack_unfenced_ = false;
   long fallback_fences_ = 0;
+
+  // cfc_opt item A: per-MG-level cached lists of the active (MeshBlock, neighbour) pairs that
+  // PackMG/UnpackMG act on (formerly one team per nmb*nnghbr*nvar slot, empty ones included).
+  // A slot is rebuilt when its key changes: mesh AMR/load-balance sequence number, nmb, nvar,
+  // the fine/coarse skip, and the data pointers of every buffer a list entry can point into
+  // (the level's aggregate send/recv buffers and offset maps, sendbuf[n].vars, recvbuf[n].vars).
+  // Incremented wherever a buffer a list entry can point into is (re)allocated
+  // (BuildRankPackedMGMetadata, RemapIndicesForMG, ComputePerLevelIndices), so a list is
+  // rebuilt even if a new allocation happens to reuse an old address.
+  long mg_buf_gen_ = 0;
+  struct MGPackListLevel {
+    bool built = false;
+    long buf_gen = -1;
+    int seq = -1, nmb = -1, nvar = -1;
+    bool skip_fc = false;
+    const void *agg_send = nullptr, *agg_recv = nullptr;
+    const void *soff = nullptr, *roff = nullptr;
+    std::vector<const void*> buf_ptrs;   // sendbuf[0..55].vars, recvbuf[0..55].vars
+    int npairs = 0;
+    bool has_cross_rank = false;
+    Kokkos::View<MGPackPair*, DevMemSpace> pack, unpack;
+  };
+  std::vector<MGPackListLevel> mg_pl_cache_;
+  // ATHENAK_MG_PACK_FLAT_NCELLS (read once): MG levels with ncells <= this value use a
+  // RangePolicy over (pair, variable) with serial cell loops instead of one team per (pair,
+  // variable). 0 (default) = teams everywhere. Both forms copy the same elements.
+  int mg_pack_flat_ncells_ = -1;
+  // ATHENAK_MG_PACKLIST_CHECK=1 (read once): verify every (re)built list against the old
+  // per-slot selection on the host, and print the functor sizes. Off by default.
+  int mg_packlist_check_ = -1;
+  bool mg_packlist_sizes_printed_ = false;
+  MGPackListLevel &GetPackList(const int nvar, const int lev, const bool skip_fc);
+  void CheckPackList(const MGPackListLevel &L, const int nvar, const int lev,
+                     const bool skip_fc);
   std::vector<RankPackedVarEntry> mg_send_var_entries_;
   std::vector<RankPackedVarEntry> mg_recv_var_entries_;
   std::vector<RankPackedVarMessage> mg_send_var_msgs_;

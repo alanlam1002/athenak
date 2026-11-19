@@ -606,8 +606,17 @@ class PrimitiveSolverHydro {
     Real a0 = c / a;
     Real s = fmax(a1*a1 - 4.0 * a0, 0.0);
     s = sqrt(s);
-    lambda_p = (a1 >= 0.0) ? -2.0 * a0 / (a1 + s) : (-a1 + s) / 2.0;
-    lambda_m = (a1 >= 0.0) ? (-a1 - s) / 2.0 : -2.0 * a0 / (a1 - s);
+    // Roots of x^2 + a1 x + a0 = 0, in the cancellation-free form for each sign of a1.
+    // At a1 == 0 that form gives lambda_p = -2 a0/s and lambda_m = -s/2, which are
+    // opposite only up to round-off; set lambda_m = -lambda_p exactly there, so that
+    // mirror-image states get mirror-image wave speeds.
+    if (a1 == 0.0) {
+      lambda_p = 0.5 * s;
+      lambda_m = -lambda_p;
+    } else {
+      lambda_p = (a1 >= 0.0) ? -2.0 * a0 / (a1 + s) : (-a1 + s) / 2.0;
+      lambda_m = (a1 >= 0.0) ? (-a1 - s) / 2.0 : -2.0 * a0 / (a1 - s);
+    }
   }
 
   // A function for converting PrimitiveSolver errors to strings

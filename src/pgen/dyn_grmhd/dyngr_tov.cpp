@@ -88,6 +88,8 @@ TDERefineParams tde_ref;
 // <problem> amr_condition = tde_debris (research R-050): absolute-anchored debris
 // criterion; see the header. Shares tde_ref's BH-box parameters.
 void TDERefineDebris(MeshBlockPack *pmbp);
+void TDEDebrisSaveResidence(Mesh *pm, ParameterInput *pin);
+void TDEDebrisStageResidence(ParameterInput *pin, bool restart);
 #include "tde_debris_refine.hpp"
 
 namespace {
@@ -995,6 +997,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                 << std::endl;
     }
     user_ref_func = &TDERefineDebris;
+    // C-233: the residence map is restart state (<problem> amr_residence_state)
+    user_rst_save_func = &TDEDebrisSaveResidence;
+    TDEDebrisStageResidence(pin, restart);
   }
 
   // initialize primitive variables for restart

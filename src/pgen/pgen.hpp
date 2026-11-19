@@ -20,6 +20,9 @@ using UserBoundaryFnPtr = void (*)(Mesh* pm);
 using UserSrctermFnPtr = void (*)(Mesh* pm, const Real bdt);
 using UserRefinementFnPtr = void (*)(MeshBlockPack* pmbp);
 using UserHistoryFnPtr = void (*)(HistoryData *pdata, Mesh *pm);
+// called by the restart writer (outputs/restart.cpp) before the parameter copy is written:
+// pgen run-time state that a bitwise restart needs goes into pin (C-233)
+using UserRestartSaveFnPtr = void (*)(Mesh *pm, ParameterInput *pin);
 
 //----------------------------------------------------------------------------------------
 //! \class ProblemGenerator
@@ -53,6 +56,7 @@ class ProblemGenerator {
   UserSrctermFnPtr user_srcs_func=nullptr;
   UserRefinementFnPtr user_ref_func=nullptr;
   UserHistoryFnPtr user_hist_func=nullptr;
+  UserRestartSaveFnPtr user_rst_save_func=nullptr;
 
   // predefined problem generator functions (default test suite)
   void CallProblemGenerator(ParameterInput *pin, bool is_restart);

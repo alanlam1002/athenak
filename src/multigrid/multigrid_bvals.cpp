@@ -1459,15 +1459,11 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
 
 MultigridBoundaryValues::MGPackListLevel &
 MultigridBoundaryValues::GetPackList(const int nvar, const int lev, const bool skip_fc) {
-  if (mg_pack_flat_ncells_ < 0) {
-    const char *s = std::getenv("ATHENAK_MG_PACK_FLAT_NCELLS");
-    mg_pack_flat_ncells_ = (s != nullptr) ? std::max(0, std::atoi(s)) : 0;
+  if (mg_packlist_check_ < 0) {
     const char *c = std::getenv("ATHENAK_MG_PACKLIST_CHECK");
     mg_packlist_check_ = (c != nullptr && std::atoi(c) != 0) ? 1 : 0;
-    if (global_variable::my_rank == 0 &&
-        (mg_pack_flat_ncells_ > 0 || mg_packlist_check_ > 0)) {
-      std::cout << "MGPACKLIST settings: flat_ncells " << mg_pack_flat_ncells_
-                << " check " << mg_packlist_check_ << std::endl;
+    if (global_variable::my_rank == 0 && mg_packlist_check_ > 0) {
+      std::cout << "MGPACKLIST self-check on (ATHENAK_MG_PACKLIST_CHECK)" << std::endl;
     }
   }
   if (static_cast<int>(mg_pl_cache_.size()) < kMaxMGLevels) {
@@ -1483,10 +1479,10 @@ MultigridBoundaryValues::GetPackList(const int nvar, const int lev, const bool s
   const int nmb = pmy_pack->nmb_thispack;
   const int nnghbr = pmy_pack->pmb->nnghbr;
   const int seq = pmy_pack->pmesh->GetAMRLoadBalanceUpdateSeq();
-  std::vector<const void*> ptrs(2*nnghbr);
-  for (int n = 0; n < nnghbr; ++n) {
-    ptrs[n] = sendbuf[n].vars.data();
-    ptrs[nnghbr + n] = recvbuf[n].vars.data();
+  bool ptrs_ok = true;   // compared in place: no allocation on the per-round path
+  for (int n = 0; n < 56 && ptrs_ok; ++n) {
+    ptrs_ok = (L.buf_ptrs[n] == sendbuf[n].vars.data()) &&
+              (L.buf_ptrs[56 + n] == recvbuf[n].vars.data());
   }
   const bool key_ok = L.built && L.buf_gen == mg_buf_gen_ &&
                       L.seq == seq && L.nmb == nmb && L.nvar == nvar &&
@@ -1495,7 +1491,7 @@ MultigridBoundaryValues::GetPackList(const int nvar, const int lev, const bool s
                       L.agg_recv == mg_rank_recvbuf_vars_.data() &&
                       L.soff == mg_send_agg_offset_.data() &&
                       L.roff == mg_recv_agg_offset_.data() &&
-                      L.buf_ptrs == ptrs;
+                      ptrs_ok;
   if (key_ok) return L;
 
 #if MPI_PARALLEL_ENABLED
@@ -1603,7 +1599,10 @@ MultigridBoundaryValues::GetPackList(const int nvar, const int lev, const bool s
   L.agg_recv = mg_rank_recvbuf_vars_.data();
   L.soff = mg_send_agg_offset_.data();
   L.roff = mg_recv_agg_offset_.data();
-  L.buf_ptrs = ptrs;
+  for (int n = 0; n < 56; ++n) {
+    L.buf_ptrs[n] = sendbuf[n].vars.data();
+    L.buf_ptrs[56 + n] = recvbuf[n].vars.data();
+  }
   L.built = true;
   if (mg_packlist_check_ > 0) CheckPackList(L, nvar, lev, skip_fc);
   return L;
@@ -1828,7 +1827,7 @@ TaskStatus MultigridBoundaryValues::PackAndSendMG(const DvceArray5D<Real> &u) {
   }
 
   if (npairs > 0) {
-    if (ncells_ps <= mg_pack_flat_ncells_) {
+    if (ncells_ps <= kMGPackFlatMaxCells) {
       Kokkos::parallel_for("PackMGFlat",
                            Kokkos::RangePolicy<>(DevExeSpace(), 0, npairs * nvar_l),
                            pack_flat);
@@ -1975,7 +1974,7 @@ TaskStatus MultigridBoundaryValues::RecvAndUnpackMG(DvceArray5D<Real> &u) {
 
   unpack_unfenced_ = true;   // reads aggrbuf asynchronously: see PostRecvMG
   if (npairs > 0) {
-    if (ncells_ru <= mg_pack_flat_ncells_) {
+    if (ncells_ru <= kMGPackFlatMaxCells) {
       Kokkos::parallel_for("UnpackMGFlat",
                            Kokkos::RangePolicy<>(DevExeSpace(), 0, npairs * nvar_l),
                            unpack_flat);

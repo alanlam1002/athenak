@@ -23,8 +23,14 @@
 // Hysteresis: want_ref uses the thresholds above, want_deref relaxed ones (densities times
 // amr_deref_factor < 1, N_H and N_J divided by it, so want_deref >= want_ref). Flag +1 if level <
 // want_ref; -1 if level > want_deref AND the block has sat at its level for >=
-// amr_min_residence cycles (tracked per rank by logical location; a block that migrated
-// ranks restarts its count, which only delays a de-refinement); else 0.
+// amr_min_residence cycles; else 0. Residence (C-233): the first check cycle at which each
+// (lx1, lx2, lx3, level) existed, kept for EVERY block of the mesh on every rank (each rank
+// replays the same global block list, so the map is identical on all ranks and a block that
+// migrates ranks keeps its count; before C-233 it was per rank and migration restarted it),
+// and saved in the restart (<problem> amr_residence_state, TDEDebrisSaveResidence): a
+// restart continues the counts, so its flags are the continuous run's. A restart without the
+// key (older files), or whose block list differs from the one saved (an R1 embed), starts
+// every count at its first check, as before.
 // Cells at/below rho_F never request refinement (this replaces tde_track's rho_max
 // corruption guard); non-finite cells are skipped, with a one-time warning.
 // Binding-aware policy (R-257 item 3(ii), user-approved 2026-11-12; <problem> amr_bind_policy,
@@ -45,10 +51,13 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -70,6 +79,70 @@ struct TDEDebrisParams {
   int bind_lev_unb1, bind_lev_unb2, bind_lev_min;
 };
 TDEDebrisParams tde_deb;
+
+// residence (C-233): key (lx1, lx2, lx3, level) -> the first check cycle it existed
+std::map<std::array<int, 4>, int> tde_deb_first_seen;
+// a restart's saved residence, applied at the first check (the mesh is complete then)
+std::string tde_deb_rst_state;
+
+// order-dependent hash of the mesh's block list (gid order), to match a saved state to its mesh
+uint64_t TDEDebrisTreeHash(const Mesh *pm) {
+  uint64_t h = 1469598103934665603ULL;   // FNV-1a over the 4 ints of each block
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const int v[4] = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    for (int q = 0; q < 4; ++q) {
+      uint64_t x = static_cast<uint32_t>(v[q]);
+      for (int b = 0; b < 4; ++b) { h ^= (x >> (8*b)) & 0xffULL; h *= 1099511628211ULL; }
+    }
+  }
+  return h;
+}
+
+// apply a staged restart state to tde_deb_first_seen (first check after the restart)
+void TDEDebrisApplyResidence(const Mesh *pm) {
+  std::stringstream ss(tde_deb_rst_state);
+  tde_deb_rst_state.clear();
+  std::string tok;
+  long ncyc = -1, nmb = -1, minres = -1;
+  unsigned long long hash = 0;
+  std::getline(ss, tok, ';');
+  if (std::sscanf(tok.c_str(), "v1 %ld %ld %ld %llx", &ncyc, &nmb, &minres, &hash) != 4) {
+    if (global_variable::my_rank == 0)
+      std::cout << "### WARNING tde_debris: amr_residence_state unreadable; every residence "
+                << "starts now (not bitwise continuous)" << std::endl;
+    return;
+  }
+  if (nmb != pm->nmb_total || hash != TDEDebrisTreeHash(pm)) {
+    if (global_variable::my_rank == 0)
+      std::cout << "tde_debris: amr_residence_state was saved for another block list (" << nmb
+                << " blocks vs " << pm->nmb_total << "; an R1 embed?): every residence "
+                << "starts now" << std::endl;
+    return;
+  }
+  // listed: young blocks (c0) and blocks created by the last regrid (c0 = -1: not yet seen);
+  // unlisted: resident >= minres cycles at the save
+  std::map<std::array<int, 4>, int> listed;
+  while (std::getline(ss, tok, ';')) {
+    int k[5];
+    if (std::sscanf(tok.c_str(), "%d,%d,%d,%d,%d", &k[0], &k[1], &k[2], &k[3], &k[4]) == 5)
+      listed[{k[0], k[1], k[2], k[3]}] = k[4];
+  }
+  tde_deb_first_seen.clear();
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    auto it = listed.find(key);
+    if (it == listed.end()) {
+      tde_deb_first_seen[key] = static_cast<int>(ncyc - minres);
+    } else if (it->second >= 0) {
+      tde_deb_first_seen[key] = it->second;
+    }
+  }
+  if (global_variable::my_rank == 0)
+    std::cout << "tde_debris: residence restored for " << pm->nmb_total << " blocks ("
+              << listed.size() << " listed) from cycle " << ncyc << std::endl;
+}
 
 // criterion ids for the diagnostics (want_ref attribution, ties in this order)
 enum TDEDebCrit {kDebCore = 0, kDebLadder = 1, kDebWidth = 2, kDebJeans = 3, kDebBH = 4,
@@ -295,10 +368,17 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
   const Real r2_bh = SQR(tde_ref.rad_bh), r2_bh_fine = SQR(tde_ref.rad_bh_fine);
   const Real rho_a = p.core_frac*p.rho_ref;
 
-  // residence: first cycle each (lx1, lx2, lx3, level) was seen on this rank
-  static std::map<std::array<int, 4>, int> first_seen;
+  // residence (C-233): the first check cycle at which each block existed, for every block of
+  // the mesh (identical on all ranks); a staged restart state is applied first
+  if (!tde_deb_rst_state.empty()) TDEDebrisApplyResidence(pmesh);
   static bool warned_nan = false;
   std::map<std::array<int, 4>, int> seen_now;
+  for (int g = 0; g < pmesh->nmb_total; ++g) {
+    const LogicalLocation &lg = pmesh->lloc_eachmb[g];
+    const std::array<int, 4> kg = {lg.lx1, lg.lx2, lg.lx3, lg.level};
+    auto ig = tde_deb_first_seen.find(kg);
+    seen_now[kg] = (ig == tde_deb_first_seen.end()) ? pmesh->ncycle : ig->second;
+  }
 
   // wants are clipped to the mesh's max level only when applied; a dry run reports
   // what deeper levels would need (sizing on runs with fewer levels)
@@ -317,11 +397,8 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
   for (int m = 0; m < nmb; ++m) {
     const LogicalLocation &ll = pmesh->lloc_eachmb[m + mbs];
     const int level = ll.level - pmesh->root_level;
-    std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
-    auto it = first_seen.find(key);
-    const int c0 = (it == first_seen.end()) ? pmesh->ncycle : it->second;
-    seen_now[key] = c0;
-    const int residence = pmesh->ncycle - c0;
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    const int residence = pmesh->ncycle - seen_now[key];
 
     // BH box distance (tde_track's AABB form)
     auto dist2 = [&](const Real px, const Real py, const Real pz) {
@@ -373,7 +450,7 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
       d_proj[lt] += std::pow(8.0, -(level - lt));
     }
   }
-  first_seen.swap(seen_now);
+  tde_deb_first_seen.swap(seen_now);
 
   if (apply) {
     refine_flag.template modify<HostMemSpace>();
@@ -429,6 +506,49 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
 }
 
 }  // namespace
+
+//! \fn void TDEDebrisSaveResidence(Mesh *pm, ParameterInput *pin)
+//! \brief restart writer hook (C-233): <problem> amr_residence_state = "v1 ncycle nmb_total
+//! min_residence hash;" + one "lx1,lx2,lx3,level,c0;" per block that matters: resident fewer
+//! than min_residence cycles (c0), or created by this cycle's regrid, after the check (c0 = -1).
+//! Every other block is resident >= min_residence. Identical on all ranks.
+void TDEDebrisSaveResidence(Mesh *pm, ParameterInput *pin) {
+  std::ostringstream os;
+  os << "v1 " << pm->ncycle << " " << pm->nmb_total << " " << tde_deb.min_residence << " "
+     << std::hex << TDEDebrisTreeHash(pm) << std::dec << ";";
+  long nlist = 0;
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    auto it = tde_deb_first_seen.find(key);
+    int c0;
+    if (it == tde_deb_first_seen.end()) {
+      c0 = -1;
+    } else if (pm->ncycle - it->second < tde_deb.min_residence) {
+      c0 = it->second;
+    } else {
+      continue;
+    }
+    os << ll.lx1 << "," << ll.lx2 << "," << ll.lx3 << "," << ll.level << "," << c0 << ";";
+    ++nlist;
+  }
+  if (os.str().size() > 512*1024 && global_variable::my_rank == 0) {
+    std::cout << "### WARNING tde_debris: amr_residence_state is " << os.str().size()
+              << " bytes (" << nlist << " blocks); the parameter copy is read up to 1 MB"
+              << std::endl;
+  }
+  pin->SetString("problem", "amr_residence_state", os.str());
+}
+
+//! \fn void TDEDebrisStageResidence(ParameterInput *pin, bool restart)
+//! \brief at a restart, stage the saved residence for the first check (C-233)
+void TDEDebrisStageResidence(ParameterInput *pin, bool restart) {
+  tde_deb_rst_state.clear();
+  if (restart && pin->DoesParameterExist("problem", "amr_residence_state")) {
+    tde_deb_rst_state = pin->GetString("problem", "amr_residence_state");
+    if (tde_deb_rst_state.empty()) tde_deb_rst_state = " ";   // unreadable -> warning
+  }
+}
 
 void TDERefineDebris(MeshBlockPack *pmbp) {
   if (tde_deb.dryrun) {

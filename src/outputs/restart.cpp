@@ -27,6 +27,7 @@
 #include "cfc/cfc.hpp"
 #include "dyn_grmhd/dyn_grmhd.hpp"
 #include "outputs/restart_state.hpp"
+#include "pgen/pgen.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/compact_object_tracker.hpp"
 #include "z4c/z4c.hpp"
@@ -238,6 +239,11 @@ void RestartOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // restart and continues the cumulative line
   if (pm->pmb_pack->pdyngr != nullptr && pm->pmb_pack->pdyngr->pmclose != nullptr) {
     pm->pmb_pack->pdyngr->pmclose->Save(pin);
+  }
+
+  // the problem generator's run-time state (e.g. tde_debris's de-refinement residence, C-233)
+  if (pm->pgen != nullptr && pm->pgen->user_rst_save_func != nullptr) {
+    pm->pgen->user_rst_save_func(pm, pin);
   }
 
   // <job> restart_state (restart_state.hpp): the evolution state beyond u0/b0/u_adm, as

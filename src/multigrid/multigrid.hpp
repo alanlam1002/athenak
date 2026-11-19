@@ -20,6 +20,7 @@
 #include <string>
 #include <type_traits>
 #include <unordered_map>
+#include <array>
 #include <vector>
 
 // AthenaK headers
@@ -816,18 +817,20 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
     bool skip_fc = false;
     const void *agg_send = nullptr, *agg_recv = nullptr;
     const void *soff = nullptr, *roff = nullptr;
-    std::vector<const void*> buf_ptrs;   // sendbuf[0..55].vars, recvbuf[0..55].vars
+    std::array<const void*, 112> buf_ptrs{};   // sendbuf[0..55].vars, recvbuf[0..55].vars
     int npairs = 0;
     bool has_cross_rank = false;
     Kokkos::View<MGPackPair*, DevMemSpace> pack, unpack;
   };
   std::vector<MGPackListLevel> mg_pl_cache_;
-  // ATHENAK_MG_PACK_FLAT_NCELLS (read once): MG levels with ncells <= this value use a
-  // RangePolicy over (pair, variable) with serial cell loops instead of one team per (pair,
-  // variable). 0 (default) = teams everywhere. Both forms copy the same elements.
-  int mg_pack_flat_ncells_ = -1;
-  // ATHENAK_MG_PACKLIST_CHECK=1 (read once): verify every (re)built list against the old
-  // per-slot selection on the host, and print the functor sizes. Off by default.
+  // MG levels with at most this many cells per direction use a RangePolicy over (pair, variable)
+  // with serial cell loops ("PackMGFlat"/"UnpackMGFlat"); larger levels use one team per (pair,
+  // variable). Both forms copy the same elements. 8 measured fastest with 16 equal (cfc_opt T2a,
+  // T2a': warm set 2.74 -> 1.79 s at 8, 1.93 s with teams everywhere, 2.14 s flat everywhere).
+  static constexpr int kMGPackFlatMaxCells = 8;
+  // ATHENAK_MG_PACKLIST_CHECK=1 (environment, read once): verify every (re)built list against the
+  // former per-slot selection on the host, and print the functor sizes. Off by default; see
+  // src/cfc/DEVELOPMENT.md item 64.
   int mg_packlist_check_ = -1;
   bool mg_packlist_sizes_printed_ = false;
   MGPackListLevel &GetPackList(const int nvar, const int lev, const bool skip_fc);

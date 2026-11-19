@@ -8070,3 +8070,47 @@ multilevel run with an odd `nghost`. Only an even `nghost>=6` would fall
 through the switch silently.
 
 Knob and topic branch discarded; no source change kept.
+
+## 64. MG halo pack/unpack over cached active-pair lists (cfc_opt item A, 2026-11-19)
+
+**Change** (`multigrid/multigrid_bvals.cpp`: `GetPackList`, `CheckPackList`, `PackAndSendMG`,
+`RecvAndUnpackMG`). `PackMG`/`UnpackMG` used one team per `nmb*nnghbr*nvar` slot, empty
+and skipped slots included, and captured `send_mg_indcs_`/`recv_mg_indcs_[56][20]` and the
+56-element `sendbuf`/`recvbuf` arrays by value (> 100 kB). Kokkos 4.7 SYCL launches every
+functor of >= 1800 B indirectly: it fences on the previous indirect launch and copies the
+functor into host USM, which the kernel then reads (`kokkos/core/src/SYCL/Kokkos_SYCL_Instance.hpp`
+:236-320). Each MG level now keeps a device list of its active (MeshBlock, neighbour) pairs
+(box copied from the index tables, source/target array, pointer to the pair's payload); the
+kernels capture only Views and scalars (128 B; `static_assert`s keep them < 1800 B). Levels with
+<= `kMGPackFlatMaxCells` (8) cells per direction use a `RangePolicy` over (pair, variable) with
+serial cell loops; larger levels one team per (pair, variable). Every payload element is read
+and written as before (pure copies). The former kernels' trailing `team_barrier()` is gone:
+nothing ran after it and the kernels use no team scratch.
+
+**Measured** (C1-NS 130 m, 1 node, 12 ranks; cfc_opt `LOG.md` O-009, O-011, O-012): `PackMG`/
+`UnpackMG` 0.632 -> 0.17 ms per call (team form everywhere); warm solve set 2.74 -> 1.79 s
+(threshold 8; 1.93 s teams everywhere, 1.78 s threshold 16, 2.14 s flat everywhere). Only the
+two halo stages of the MGPROF table move (`bnd_send` 0.578 -> 0.163 s, `bnd_recv` 0.808 ->
+0.394 s per warm set). Default path verified with per-MeshBlock state checksums (T2a', 24
+N-vs-A pairs, every divergence a single-block `w0` con2prim flip as in C-070, MG lines identical
+before it).
+
+**List rebuild.** Key: AMR/load-balance sequence, `nmb`, `nvar`, fine/coarse skip, the data
+pointers of the aggregate and per-neighbour buffers, and `mg_buf_gen_`, a counter bumped wherever
+the index boxes or buffers are rebuilt (`BuildRankPackedMGMetadata`, `RemapIndicesForMG`,
+`ComputePerLevelIndices`). The counter is shared by all levels, so during the first solve set of
+a run each level's list is rebuilt several times (9 builds per solver for 5 MG levels on the
+130 m mesh); after that, none. This is expected, not a bug.
+
+**Self-check.** `ATHENAK_MG_PACKLIST_CHECK=1` (environment, read once; no input key, so restart
+files are unchanged) re-derives every pair on the host with the former per-slot logic after each
+list (re)build and compares box, source/target and address (full stride arithmetic); checks that
+no writes overlap and that `has_cross_rank` agrees; prints the functor sizes. Prints one
+`MGPACKLIST ... OK` line per (rank, level, solver, build) or aborts on the first mismatch. Passed
+on all 12 ranks in cfc_opt T2a (bAchk, 432 lines).
+
+**Not exercised by any test so far:** (1) a build without MPI (`urp == false`: off-rank pairs
+fall back to `sendbuf[n]` rows, which cannot occur without MPI); (2) the fine/coarse skip branch
+(`skip_fc`, the 1-cell MG level: on the 130 m mesh level 0 has no exchange at all); (3) a mesh
+change (regrid) invalidating the lists. (3) matters for AMR trees (TDE, handoff) if they take
+this commit; production magweb meshes are static.

@@ -10524,3 +10524,30 @@ fall back to `sendbuf[n]` rows, which cannot occur without MPI); (2) the fine/co
 (`skip_fc`, the 1-cell MG level: on the 130 m mesh level 0 has no exchange at all); (3) a mesh
 change (regrid) invalidating the lists. (3) matters for AMR trees (TDE, handoff) if they take
 this commit; production magweb meshes are static.
+
+## 66. `<cfc> root_on_host` is ignored by the psi and alpha_psi solvers (cfc_opt item R, 2026-11-19)
+
+**Bug.** `MGCFCConformalFactor` and `MGCFCLapse` implement `SmoothPack`, `CalculateDefectPack`
+and `CalculateFASRHSPack` on the device only: the kernels read and write `u_`, `def_`, `src_`,
+`coeff_` through `d_view` on `DevExeSpace` and never look at `on_host_`. With
+`root_on_host = true` every other root operation (`MGRootBoundary`, restriction, prolongation,
+the transfers to and from the blocks) works on the host copy, and the sync helpers
+(`SyncRootToHost`/`SyncRootToDevice`/`MarkRootDeviceModified`) are no-ops for a host root. So
+the scalar smoother relaxes a device copy that nothing fills or reads, and the root levels
+give psi and alpha_psi almost no coarse-grid correction. The vector driver
+(`MGCFCVectorPoisson`) passes `on_host_` to its channel helpers and is correct.
+
+**Evidence** (cfc_opt `LOG.md` O-021, `SUPERVISOR.md` S-019; C1-NS 130 m restart, 1 node,
+T2b arms nN vs nF): with the key on, the final max defect of psi is +12/+30/+43 % and of
+alpha_psi +19/+44/+54 % at cycles 83300/83350/83400, with the same V-cycle counts (the
+MeshBlock levels still converge the solve). X and beta agree to round-off. The -9 % set cost
+measured with the key on (O-018) is mostly X and beta (~0.22 of 0.24 s).
+
+**Fix (option (b) of O-021).** Both scalar drivers build their root on the device whatever the
+key says and print one `### WARNING` on rank 0 when it is true. The key is still read with the
+same `GetOrAddBoolean`, so the parameter dump is unchanged. Key false (the default): the same
+objects are built in the same order as before. X and beta still honour the key. A host path for
+the scalar kernels (option (a), about 60 lines) was not written; it would need its own timing.
+
+**Test (cfc_opt T2c):** key off/on pairs on the fixed binary; with the key on, the psi and
+alpha_psi `MGLOG` lines of the first solve set must equal the key-off lines to round-off.

@@ -54,6 +54,11 @@
 //!   chk_npts    : the PointMetric2 self-check points (kerr/synthetic)
 //!   the driver's options: mg_outer_bc_vec (kelvin | zerofixed), mp_source, mp_outer,
 //!   mp_x01..3, smoother, edge_fill, mg_* as for the scalar driver.
+//!
+//! K-019 (driver = shibata, kerr_shibata.hpp): the same V* and s as driver = vector, solved by
+//! Option C (KerrShibataSolver; the scalar MG options and shib_* from <problem>) and by the
+//! direct vector driver (ncycles V-cycles from zero): the error of each against V*
+//! (interior, max and rms), max |V_C - V_A|, the Picard passes and the time.
 
 #include <algorithm>
 #include <array>
@@ -77,6 +82,7 @@
 #include "cfc/mg_kerr_scalar.hpp"
 #include "cfc/kerr_mg_vops.hpp"
 #include "cfc/mg_kerr_vector.hpp"
+#include "cfc/kerr_shibata.hpp"
 
 namespace {
 
@@ -485,6 +491,115 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
   }
 }
 
+//! K-019: Option C against the direct vector driver on the manufactured V*
+void RunShibata(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
+                const cfc::kmg::CoefSource &cs, const cfc::kmg::Manuf &mf,
+                const std::string &coef) {
+  const std::string B = "problem";
+  cfc::kmg::VManuf vm;
+  const Real vamp[3] = {pin->GetOrAddReal(B, "vamp1", 1.0), pin->GetOrAddReal(B, "vamp2", 0.7),
+                        pin->GetOrAddReal(B, "vamp3", -0.5)};
+  const Real vofs = pin->GetOrAddReal(B, "vofs", 0.0);
+  const bool nhmix = pin->GetOrAddBoolean(B, "vnh_mix", true);
+  for (int c = 0; c < 3; ++c) {
+    vm.c[c] = mf;
+    vm.c[c].amp = mf.amp*vamp[c];
+    vm.c[c].amp2 = mf.amp2*vamp[c];
+    vm.c[c].x0[c] += vofs;
+  }
+  if (nhmix) {
+    vm.c[1].nh[0] = 2.0;
+    vm.c[2].nh[2] = 2.0;
+  }
+  auto &indcs = pm->mb_indcs;
+  const int ng = indcs.ng, nmb = pmbp->nmb_thispack;
+  const int n1 = indcs.nx1 + 2*ng, n2 = indcs.nx2 + 2*ng, n3 = indcs.nx3 + 2*ng;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks, ke = indcs.ke;
+  DvceArray5D<Real> srcm("kshib_test_src", nmb, 4, n3, n2, n1);
+  DvceArray5D<Real> vc("kshib_test_vc", nmb, 3, n3, n2, n1);
+  DvceArray5D<Real> va("kshib_test_va", nmb, 3, n3, n2, n1);
+  DvceArray5D<Real> vs("kshib_test_vstar", nmb, 3, n3, n2, n1);
+  auto &size = pmbp->pmb->mb_size;
+  const cfc::kmg::VManuf vmc = vm;
+  const cfc::kmg::CoefSource csc = cs;
+  // s (DL V = s) = -ManufVecSource (= -(-DL V*)), and V* at the cell centres
+  par_for("kshib_test_fill", DevExeSpace(), 0, nmb-1, ks, ke, js, je, is, ie,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const Real x = size.d_view(m).x1min + (i - is + 0.5)*size.d_view(m).dx1;
+    const Real y = size.d_view(m).x2min + (j - js + 0.5)*size.d_view(m).dx2;
+    const Real z = size.d_view(m).x3min + (k - ks + 0.5)*size.d_view(m).dx3;
+    Real sv[3];
+    cfc::kmg::ManufVecSource(csc, vmc, x, y, z, sv);
+    for (int c = 0; c < 3; ++c) {
+      srcm(m, c, k, j, i) = -sv[c];
+      Real u, du[3], ddu[6];
+      cfc::kmg::ManufEval(vmc.c[c], x, y, z, u, du, ddu);
+      vs(m, c, k, j, i) = u;
+    }
+  });
+  Kokkos::Timer timer;
+  Driver dv(pin, pm, 1.0e30, &timer);
+  auto errs = [&](const DvceArray5D<Real> &v, const DvceArray5D<Real> &ref, Real &emax,
+                  Real &erms) {
+    Real mx = 0.0, s2 = 0.0, vol = 0.0;
+    Kokkos::parallel_reduce("kshib_test_err",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                                         {nmb, ke + 1, je + 1, ie + 1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &a, Real &b,
+                    Real &w) {
+        const Real dv3 = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+        for (int c = 0; c < 3; ++c) {
+          const Real e = v(m, c, k, j, i) - ref(m, c, k, j, i);
+          a = Kokkos::fmax(a, Kokkos::fabs(e));
+          b += e*e*dv3;
+        }
+        w += 3.0*dv3;
+      }, Kokkos::Max<Real>(mx), s2, vol);
+    emax = MaxR(mx);
+    erms = std::sqrt(SumR(s2)/SumR(vol));
+  };
+  // ---- Option C (from zero), then once more from its converged P, eta (warm start)
+  Kokkos::Timer tc;
+  cfc::KerrShibCommon com(pmbp, pin, B, cs);
+  cfc::KerrShibataSolver sol(pmbp, pin, B, &com, "T1");
+  sol.Solve(&dv, 0, cs, srcm, ng, vc);
+  Kokkos::fence();
+  const double sec_c = tc.seconds();
+  const int pass_c = sol.last_pass_;
+  const Real dv_c = sol.last_dv_;
+  Real ecm, ecr;
+  errs(vc, vs, ecm, ecr);
+  Kokkos::Timer tc2;
+  sol.Solve(&dv, 1, cs, srcm, ng, vc);
+  Kokkos::fence();
+  const double sec_c2 = tc2.seconds();
+  // ---- Option A (direct), ncycles V-cycles from zero
+  cfc::MGKerrVectorDriver drv(pmbp, pin, B, cs, vm);
+  drv.Prepare();
+  drv.ResetSolution();
+  const int ncyc = pin->GetOrAddInteger(B, "ncycles", 10);
+  Kokkos::Timer ta;
+  std::vector<Real> d = drv.RunCycles(&dv, ncyc);
+  Kokkos::fence();
+  const double sec_a = ta.seconds();
+  drv.RetrieveSolution(va);
+  Real eam, ear, dcm, dcr;
+  errs(va, vs, eam, ear);
+  errs(vc, va, dcm, dcr);
+  if (Root()) {
+    std::printf("KMG SHIB coef %s a %.3f nx %d %d %d | C passes %d dV %.3e err_max %.6e "
+                "err_rms %.6e s %.3f warm_passes %d warm_dV %.3e s_warm %.3f | A ncyc %d "
+                "def_end %.3e err_max %.6e err_rms %.6e s %.3f | max|VC-VA| %.6e rms %.6e "
+                "| geo fills %ld reuses %ld\n", coef.c_str(), cs.tab.a, pm->mesh_indcs.nx1,
+                pm->mesh_indcs.nx2, pm->mesh_indcs.nx3, pass_c, dv_c, ecm, ecr, sec_c,
+                sol.last_pass_, sol.last_dv_, sec_c2, ncyc, d.back(), eam, ear, sec_a, dcm,
+                dcr, com.fills, com.reuses);
+    std::printf("KMG DONE\n");
+    std::fflush(stdout);
+  }
+}
+
 }  // namespace
 
 void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
@@ -576,6 +691,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   if (pin->GetOrAddString(B, "driver", "scalar") == "vector") {
     RunVector(pin, pmbp, pmy_mesh_, cs, mf, coef);
+    return;
+  }
+  if (pin->GetString(B, "driver") == "shibata") {
+    RunShibata(pin, pmbp, pmy_mesh_, cs, mf, coef);
     return;
   }
 

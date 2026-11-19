@@ -44,6 +44,8 @@ namespace cfc {
 struct KerrTable;  // kerr_background.hpp
 class MGKerrScalarDriver;  // mg_kerr_scalar.hpp
 class MGKerrVectorDriver;  // mg_kerr_vector.hpp
+class KerrShibCommon;      // kerr_shibata.hpp (K-019)
+class KerrShibataSolver;   // kerr_shibata.hpp (K-019)
 
 class CFC {
  public:
@@ -792,6 +794,10 @@ class CFC {
   bool kbg_valid_ = false;
   MGKerrVectorDriver *pkx_ = nullptr, *pkbeta_ = nullptr;   // <cfc_kerr_x>, <cfc_kerr_beta>
   MGKerrScalarDriver *pkpsi_ = nullptr, *pkchi_ = nullptr;  // <cfc_kerr_psi>, <cfc_kerr_chi>
+  // K-019 (RK-041): Option C for X / beta_res (<cfc_kerr_x|beta> vec_solver = shibata);
+  // nullptr (the default, direct) leaves the vector drivers in charge, bitwise as before
+  KerrShibCommon *kshib_com_ = nullptr;
+  KerrShibataSolver *kshib_x_ = nullptr, *kshib_beta_ = nullptr;
   double kerr_fill_sec_ = 0.0;       // B1: wall time in KerrRefill (kbg_ + derived), summed
   long kerr_fill_n_ = 0;
   int kerr_log_ = 0;                 // <cfc> kerr_log: every n-th cycle, the fill timing

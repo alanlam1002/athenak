@@ -42,6 +42,7 @@
 #include "kerr_mg_ops.hpp"
 #include "mg_kerr_scalar.hpp"
 #include "mg_kerr_vector.hpp"
+#include "kerr_shibata.hpp"
 
 namespace cfc {
 
@@ -261,6 +262,29 @@ void CFC::KerrSetup(ParameterInput *pin) {
   if (pkx_->src_blob_ || pkbeta_->src_blob_) {
     KerrFatal("<cfc_kerr_x/beta> ssrc = blob is a test option.");
   }
+  // K-019 (RK-041): Option C, <cfc_kerr_x|beta> vec_solver = direct (default) | shibata;
+  // read without adding the key, so off leaves the pin and the solves unchanged
+  auto vsol = [&](const char *b) {
+    const std::string v = pin->DoesParameterExist(b, "vec_solver") ?
+                          pin->GetString(b, "vec_solver") : std::string("direct");
+    if (v != "direct" && v != "shibata") {
+      KerrFatal(std::string("<") + b + "> vec_solver must be direct or shibata.");
+    }
+    return v == "shibata";
+  };
+  const bool shx = vsol("cfc_kerr_x"), shb = vsol("cfc_kerr_beta");
+  if (shx || shb) {
+    kshib_com_ = new KerrShibCommon(pmy_pack, pin, shx ? "cfc_kerr_x" : "cfc_kerr_beta", cs);
+    if (shx) kshib_x_ = new KerrShibataSolver(pmy_pack, pin, "cfc_kerr_x", kshib_com_, "kX");
+    if (shb) {
+      kshib_beta_ = new KerrShibataSolver(pmy_pack, pin, "cfc_kerr_beta", kshib_com_, "kbeta");
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "[kerr] K-019 Option C (vec_solver = shibata) for" << (shx ? " X" : "")
+                << (shb ? " beta" : "") << "; the scalar driver's MG options from <"
+                << (shx ? "cfc_kerr_x" : "cfc_kerr_beta") << ">" << std::endl;
+    }
+  }
   pkx_->SetLogName("kX");
   pkbeta_->SetLogName("kbeta");
   pkpsi_->SetLogName("kpsi");
@@ -424,12 +448,18 @@ void CFC::KerrSolveX(Driver *pdriver, int stage) {
   ComputeVectorCentroidX();
   for (int a = 0; a < 3; ++a) { pkx_->mpo_[a] = r_com_X_[a]; }
   AssembleVectorSource(/*for_shift=*/false);
-  pkx_->LoadSource(u_p_src, mg_nghost_, -1.0);   // the driver solves -DL V = s
-  {
+  if (kshib_x_ != nullptr) {
+    // K-019: Option C solves DL V = s with s^i = u_p_src (kerr_shibata.hpp)
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
-    pkx_->Solve(pdriver, stage);
+    kshib_x_->Solve(pdriver, stage, pkx_->cs_, u_p_src, mg_nghost_, u_p_x);
+  } else {
+    pkx_->LoadSource(u_p_src, mg_nghost_, -1.0);   // the driver solves -DL V = s
+    {
+      MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+      pkx_->Solve(pdriver, stage);
+    }
+    pkx_->RetrieveSolution(u_p_x);
   }
-  pkx_->RetrieveSolution(u_p_x);
   if (kerr_log_ > 0 && global_variable::my_rank == 0 && stage <= 1 &&
       pmy_pack->pmesh->ncycle % kerr_log_ == 0) {
     std::printf("KERR FILL cycle= %d n= %ld total_s= %.4e per_fill_ms= %.4f "
@@ -570,12 +600,17 @@ void CFC::KerrSolveLapse(Driver *pdriver, int stage) {
 void CFC::KerrSolveShift(Driver *pdriver, int stage) {
   AssembleVectorSource(/*for_shift=*/true);
   for (int a = 0; a < 3; ++a) { pkbeta_->mpo_[a] = r_com_beta_[a]; }
-  pkbeta_->LoadSource(u_p_src, mg_nghost_, -1.0);
-  {
+  if (kshib_beta_ != nullptr) {
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
-    pkbeta_->Solve(pdriver, stage);
+    kshib_beta_->Solve(pdriver, stage, pkbeta_->cs_, u_p_src, mg_nghost_, u_p_beta);
+  } else {
+    pkbeta_->LoadSource(u_p_src, mg_nghost_, -1.0);
+    {
+      MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
+      pkbeta_->Solve(pdriver, stage);
+    }
+    pkbeta_->RetrieveSolution(u_p_beta);
   }
-  pkbeta_->RetrieveSolution(u_p_beta);
   if (mg_log_vcycles_) LogVcycles(stage);
 }
 

@@ -40,6 +40,7 @@
 #include "kerr_background.hpp"
 #include "mg_kerr_scalar.hpp"
 #include "mg_kerr_vector.hpp"
+#include "kerr_shibata.hpp"
 
 namespace cfc {
 
@@ -989,6 +990,9 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
 //! \fn CFC::~CFC()
 
 CFC::~CFC() {
+  delete kshib_x_;
+  delete kshib_beta_;
+  delete kshib_com_;
   delete pkx_;
   delete pkbeta_;
   delete pkpsi_;
@@ -1723,6 +1727,12 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
   MultigridDriver *rdrv[4] = {pmgd_pietax, pmgd_psi, pmgd_alpha, pmgd_pietabeta};
   if (kerr_background_) {
     rdrv[0] = pkx_; rdrv[1] = pkpsi_; rdrv[2] = pkchi_; rdrv[3] = pkbeta_;
+    // K-019: Option C solves through the shared scalar driver (once in the list)
+    if (kshib_x_ != nullptr) {
+      rdrv[0] = kshib_com_->sc;
+    } else if (kshib_beta_ != nullptr) {
+      rdrv[3] = kshib_com_->sc;
+    }
   }
   if (regrid_max_) {
     for (auto *d : rdrv) d->BeginConvergenceOverride(MGNormScaling::max, regrid_thr_);
@@ -3671,6 +3681,8 @@ int CFC::RestartStateVars() const {
             + pmgd_pietabeta->NumVars();
   if (kerr_background_) {
     n += pkpsi_->NumVars() + pkchi_->NumVars() + pkx_->NumVars() + pkbeta_->NumVars();
+    if (kshib_x_ != nullptr) n += kshib_x_->NumVars();       // K-019, only when on
+    if (kshib_beta_ != nullptr) n += kshib_beta_->NumVars();
   }
   return n;
 }
@@ -3690,7 +3702,11 @@ std::string CFC::KerrRestartLayout() const {
   return ",cfc.kmg_psi:" + std::to_string(pkpsi_->NumVars())
          + ",cfc.kmg_chi:" + std::to_string(pkchi_->NumVars())
          + ",cfc.kmg_x:" + std::to_string(pkx_->NumVars())
-         + ",cfc.kmg_beta:" + std::to_string(pkbeta_->NumVars());
+         + ",cfc.kmg_beta:" + std::to_string(pkbeta_->NumVars())
+         + ((kshib_x_ != nullptr) ? ",cfc.kshib_x:" + std::to_string(kshib_x_->NumVars())
+                                  : std::string())
+         + ((kshib_beta_ != nullptr) ? ",cfc.kshib_beta:" + std::to_string(kshib_beta_->NumVars())
+                                     : std::string());
 }
 
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
@@ -3722,6 +3738,12 @@ void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
       d->SaveFinestState(dst, n, ng);
       n += d->NumVars();
     }
+    // K-019: Option C's P_k, eta (only when on)
+    for (KerrShibataSolver *s : {kshib_x_, kshib_beta_}) {
+      if (s == nullptr) continue;
+      s->SaveState(dst, n, nmb);
+      n += s->NumVars();
+    }
   }
 }
 
@@ -3748,6 +3770,11 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
                                static_cast<MultigridDriver*>(pkbeta_)}) {
       d->LoadFinestState(src, n, ng);
       n += d->NumVars();
+    }
+    for (KerrShibataSolver *s : {kshib_x_, kshib_beta_}) {   // K-019, only when on
+      if (s == nullptr) continue;
+      s->LoadState(src, n, nmb);
+      n += s->NumVars();
     }
     // the drivers hold the restarted run's solutions: no re-seed from delta_psi /
     // delta_alpha_psi (a step that cleared psi_seeded_ still re-seeds, as continuous)

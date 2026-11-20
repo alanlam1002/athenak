@@ -2906,6 +2906,17 @@ class PrimitiveSolverHydro {
           }
           if (dcnt_) dbr_(m, k, j, i) = dbr;
         }
+        if (de_on_ && de_skip) {
+          // K-020e: the skipped cell's tracer from its reset state, as the not-dense branch
+          // does. The reset leaves Y = (D Y)/D of the pre-reset state, which a drained masked
+          // cell turns into a large Y; fluxes and the next reset then grow D Y without bound.
+          const Real rho_ = prim_pt[PRH]*mb;
+          const Real yk = !(rho_ > 0.0) ? 0.0 : (de_eint_ ?
+              prim_pt[PPR]/((de_gamma_ - 1.0)*rho_) :
+              DualEnergyY(prim_pt[PPR]/pow(rho_, de_gamma_), de_kmax_, de_ypow_));
+          prim_pt[PYF + de_idx_] = yk;
+          cons_pt[CYD + de_idx_] = cons_pt[CDN]*yk;
+        }
 
         // Regardless of failure, we need to copy the primitives.
         prim(m, IDN, k, j, i) = prim_pt[PRH]*mb;

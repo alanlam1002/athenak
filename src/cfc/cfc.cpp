@@ -605,6 +605,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Delta-n-cycle solve cadence; see cfc.hpp. <=0 (default) is a no-op.
   cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
+  // see cfc.hpp; read only when on, so the parameter block stays unchanged when off
+  if (pin->DoesParameterExist("cfc", "solve_interval_refill_bg")) {
+    si_refill_bg_ = pin->GetBoolean("cfc", "solve_interval_refill_bg");
+  }
+  if (si_refill_bg_ && global_variable::my_rank == 0) {
+    std::cout << "CFC solve_interval_refill_bg: stages without a solve refill the analytic "
+              << "background at the stage time and re-assemble adm from the held residual"
+              << (cfc_solve_interval_ <= 0 ? " (inactive: solve_interval <= 0)" : "")
+              << std::endl;
+  }
 
   // Comoving gauge (uniform shift xidot(t)); see cfc.hpp and DEVELOPMENT.md item 68.
   // All zero (default) leaves every run bit-for-bit unchanged.
@@ -1654,7 +1664,9 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
 // and z4c::Z4c; ADMBCs/ADMBCsCoarse (adm_bcs.cpp) are applied below by
 // ProlongADMTask/BCSADMTask.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
                                       true);
@@ -1662,15 +1674,21 @@ TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     // Step 1: apply physical BCs to the coarse array so the prolongation stencil
     // reads valid data in coarse ghost zones at a physical boundary.
@@ -1690,7 +1708,9 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
 //! (no neighbor block). Runs after ProlongADMTask so corner ghost zones between a
 //! coarse neighbor and a physical boundary read valid, already-prolongated data.
 TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
@@ -1702,7 +1722,11 @@ TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
 // z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
 // over CFC's 5 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    // solve_interval_refill_bg: only u_adm is exchanged on a refill stage
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->InitRecv(adm::ADM::nadm); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->InitRecv(4);
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
@@ -1711,7 +1735,10 @@ TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->ClearSend(); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->ClearSend();
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
@@ -1720,7 +1747,10 @@ TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->ClearRecv(); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->ClearRecv();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
@@ -1735,7 +1765,12 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 // AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    // solve_interval_refill_bg: CFC's first task of the stage, before MHD_C2P (which waits
+    // on CFC_AssemblePsiG, downstream of this task)
+    if (RefillThisStage(pdriver, stage)) { RefillHeldResidual(StageTime(pdriver, stage)); }
+    return TaskStatus::complete;
+  }
   // Phase 2 M1: the analytic background follows the puncture; refilled once per solve
   // (the solved delta fields are re-solved right after, so nothing needs re-anchoring)
   if (puncture_moving_) { RefillMovingPuncture(StageTime(pdriver, stage)); }
@@ -1897,6 +1932,14 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) {
+      // solve_interval_refill_bg: the refilled background + the held residual + xidot(t)
+      AssembleADM(StageTime(pdriver, stage));
+      if (frame_ctrl_ && stage == pdriver->nexp_stages) {
+        FrameControlStep(StageTime(pdriver, stage));
+      }
+      return TaskStatus::complete;
+    }
     // The solved part of adm.beta_u is reused; keep the gauge part current.
     ApplyFrameShiftUpdate(StageTime(pdriver, stage));
     if (frame_ctrl_ && stage == pdriver->nexp_stages) {
@@ -2934,6 +2977,32 @@ void CFC::RefillMovingPuncture(Real t) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::RefillHeldResidual(Real t)
+//! \brief see cfc.hpp (solve_interval_refill_bg). a_dd holds Ahat0 + the solved part
+//! (ComputeADualFromPotentials; KerrAhatImpl on wip/kerr), so the solved part is carried
+//! over to the new Ahat0 as a_dd - Ahat0_old + Ahat0_new. A puncture at rest has a fixed
+//! background: only the conformal metric is re-assembled.
+
+void CFC::RefillHeldResidual(Real t) {
+  if (puncture_enabled_ && puncture_moving_) {
+    auto ad = u_adual;
+    auto a0 = u_a0dual;
+    const int nmb = pmy_pack->nmb_thispack;
+    const int n3 = ad.extent_int(2), n2 = ad.extent_int(3), n1 = ad.extent_int(4);
+    par_for("cfc_si_refill_unanchor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      for (int c = 0; c < 6; ++c) { ad(m,c,k,j,i) -= a0(m,c,k,j,i); }
+    });
+    RefillMovingPuncture(t);
+    par_for("cfc_si_refill_reanchor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      for (int c = 0; c < 6; ++c) { ad(m,c,k,j,i) += a0(m,c,k,j,i); }
+    });
+  }
+  AssemblePsiMetric(true);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real CFC::ResidualScale(Real t) const
 //! \brief <cfc> residual_scale's f(t): the constant, or the C^1 smoothstep
 //! f0 + (f1 - f0) x^2 (3 - 2x), x = (t - t0)/(t1 - t0) clamped to [0, 1] (exactly f0 at
@@ -2975,6 +3044,7 @@ void CFC::AssemblePsiMetric(bool with_ghosts) {
 }
 
 void CFC::AssembleADM(Real time) {
+  si_refill_ready_ = true;   // the held residual (delta_psi, ..., a_dd, beta_u) is set
   Real xd[3] = {0.0, 0.0, 0.0};
   if (frame_enabled_) { FrameVel(time, xd); }
   if (rs_on_ && rs_f_ != 1.0) {

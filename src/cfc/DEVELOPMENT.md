@@ -8195,18 +8195,21 @@ MG-tolerance level. proj/tde found it by pre-filling NaN (TDE C-100) and fixed i
 
 **Switch.** `<cfc> mg_fc_fix`, read only if present (as `mg_packlist_check`), default 0:
 - 0: present behaviour, kernel source unchanged.
-- 1: `FillCoarseMG` first clears the part of `coarse_buf_` this level addresses (1eb11a70).
-- 2: as 1, plus aa824220's read range: each transverse end extends one cell past the
+- 2: `FillCoarseMG` first clears the part of `coarse_buf_` this level addresses (1eb11a70),
+  and the read range is aa824220's: each transverse end extends one cell past the
   received range only where the edge neighbour beyond is coarser (its `icoar` receive fills
   that cell), otherwise the range stops at the received cells and the one-sided slope takes its
   full value (`0.25`, applied as `2 * 0.125 * d`, which is exact). The present code halves a
   clamped slope. So mode 2 changes three things: the stale high-end read is gone; a low child's
   low end, and a high child's high end, read one more filled cell where the edge neighbour is
-  coarser; clamped ends use the full slope. Rank lines `MGFCENDS` (modes 1 and 2) count, per
+  coarser; clamped ends use the full slope. Rank lines `MGFCENDS` (mode 2) count, per
   rank, the kind-1 pair ends each part touches.
-- `<cfc> mg_fc_prefill_nan = 1` (debug, needs mode >= 1) clears with NaN instead of 0. Mode 2
+- `<cfc> mg_fc_prefill_nan = 1` (debug, needs mode 2) clears with NaN instead of 0. Mode 2
   with NaN must equal mode 2 exactly (no cell outside the filled ranges is read, by the
-  prolongation or by a pack); mode 1 with NaN shows whether the stale read occurs on a mesh.
+  prolongation or by a pack).
+- Mode 1 (the clear alone, with the present read range) existed until 2026-11-20 and was
+  removed on the user's decision after cfc_opt T3 and T3b-A. With NaN it showed whether the
+  stale read occurs on a mesh (130 m: never); `MGFCENDS ... stale_removed` gives the same count.
 
 **Clear extent.** Not the whole buffer as in 1eb11a70 but `[0, cnc + 2 ngh)` per direction,
 `cnc = ncells/2` of the current level. Equivalent, because every `coarse_buf_` access at that
@@ -8216,7 +8219,7 @@ level lies inside it: the restriction writes `[ngh, ngh+cnc)`, the face averages
 injection). The whole buffer would cost ~0.35-0.7 ms per call for 4-variable solvers (36 MB per
 rank at 32^3 x 192 blocks), every round; summed over the five levels the level box is 24.5 % of it.
 
-**Implementation.** `ProlongateFCMG` dispatches to `LaunchProlongateFCMG<0>` (modes 0 and 1) or
+**Implementation.** `ProlongateFCMG` dispatches to `LaunchProlongateFCMG<0>` (mode 0) or
 `<2>`; the mode-2 lines sit in `if constexpr (FCFIX == 2)` branches, so the default
 instantiation contains none of them and does not capture `fc_ends_`. Whether its generated code
 equals the previous kernel's is checked by the bitwise test (cfc_opt T3 xB0), not assumed: it is
@@ -8224,5 +8227,9 @@ a different instantiation and lambda type. `coarser_at` of aa824220 is evaluated
 per mesh in `BuildFCPairs` (4 bits per pair in `fc_ends_`) instead of 8 device look-ups per
 thread. Functor sizes print as `MGFCFIX functor bytes` when the key or `mg_packlist_check` is on.
 
-**Status.** Opt-in. How (and whether) it is adopted is decided with the user after cfc_opt T3
-(V-cycle counts, set cost, field differences per mode).
+**Status.** Opt-in. User decision 2026-11-20 (after cfc_opt T3, T3b, T3c, T3b-A): mode 1 removed
+now; after cfc_opt T4 passes, mode 0, the key and the template split are removed and mode 2's rule
+becomes unconditional for every multigrid solver (gravity included). Reasons: mode 0 (and main's
+c5a0d7f9 bounds) leave an O(1) gradient error at coarser-face block edges that does not shrink with
+resolution (manufactured-solution test, cfc_opt O-035/O-036); on the CFC mesh it is the largest
+|K_zz| on every refined level (O-034, S-037). Mode 2 is second order there.

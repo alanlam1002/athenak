@@ -49,22 +49,23 @@ MultigridBoundaryValues::MultigridBoundaryValues(
     }
   }
   // <cfc> mg_fc_fix (src/cfc/DEVELOPMENT.md item 67): 0 = present behaviour (default),
-  // 1 = clear the level's part of coarse_buf_ before each fill, 2 = clear and read the
-  // coarse face neighbour's transverse range only where filled. <cfc> mg_fc_prefill_nan
-  // (debug) clears with NaN instead of 0. Both are read only if present.
+  // 2 = clear the level's part of coarse_buf_ before each fill and read the coarse face
+  // neighbour's transverse range only where filled. (Mode 1, the clear alone, was removed
+  // after cfc_opt T3/T3b-A: user decision 2026-11-20.) <cfc> mg_fc_prefill_nan (debug,
+  // mode 2 only) clears with NaN instead of 0. Both are read only if present.
   if (pin->DoesParameterExist("cfc", "mg_fc_fix")) {
     mg_fc_fix_ = pin->GetInteger("cfc", "mg_fc_fix");
   }
   if (pin->DoesParameterExist("cfc", "mg_fc_prefill_nan")) {
     mg_fc_prefill_nan_ = (pin->GetInteger("cfc", "mg_fc_prefill_nan") != 0) ? 1 : 0;
   }
-  if (mg_fc_fix_ < 0 || mg_fc_fix_ > 2 || (mg_fc_prefill_nan_ > 0 && mg_fc_fix_ == 0)) {
+  if ((mg_fc_fix_ != 0 && mg_fc_fix_ != 2) || (mg_fc_prefill_nan_ > 0 && mg_fc_fix_ != 2)) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<cfc> mg_fc_fix = " << mg_fc_fix_ << " must be 0, 1 or 2, and "
-              << "mg_fc_prefill_nan needs mg_fc_fix >= 1" << std::endl;
+              << "<cfc> mg_fc_fix = " << mg_fc_fix_ << " must be 0 or 2, and "
+              << "mg_fc_prefill_nan needs mg_fc_fix = 2" << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  if (global_variable::my_rank == 0 && mg_fc_fix_ > 0) {
+  if (global_variable::my_rank == 0 && mg_fc_fix_ == 2) {
     std::cout << "MGFCFIX <cfc> mg_fc_fix = " << mg_fc_fix_ << ", prefill "
               << (mg_fc_prefill_nan_ ? "NaN" : "0") << std::endl;
   }
@@ -1070,7 +1071,7 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
   int cnc = ncells / 2;
   int nmb = pmy_pack->nmb_thispack;
   auto cbuf = coarse_buf_;
-  if (mg_fc_fix_ > 0) {
+  if (mg_fc_fix_ == 2) {
     // Item 67: clear the part of coarse_buf_ this level addresses, [0, cnc + 2 ngh) per
     // direction (this fill, the icoar pack/unpack boxes of ComputePerLevelIndices and the
     // ProlongateFCMG reads all lie inside it), so no read can see an earlier level's or
@@ -1205,14 +1206,14 @@ void MultigridBoundaryValues::BuildFCPairs() {
   Kokkos::deep_copy(fc_pairs_, fc_h);
   fc_pairs_seq_ = seq;
   fc_pairs_nmb_ = nmb;
-  // Item 67 (<cfc> mg_fc_fix >= 1): for every coarser-face pair (kind 1), whether
+  // Item 67 (<cfc> mg_fc_fix = 2): for every coarser-face pair (kind 1), whether
   // the edge neighbour beyond each end of the two transverse directions is coarser
   // (its icoar receive then fills the coarse_buf_ cell just past the face neighbour's
   // range; proj/tde aa824220's coarser_at, evaluated once per mesh instead of per
   // thread). Bits: 1/2 = first transverse direction low/high end, 4/8 = second; the
   // transverse pairs are (x2, x3) for an x1 face, (x1, x3) for x2, (x1, x2) for x3.
   // Also prints, per rank, how many ends each part of mode 2 changes.
-  if (mg_fc_fix_ > 0) {
+  if (mg_fc_fix_ == 2) {
     auto coarser_at = [&](const int m, const int a, const int b, const int c) {
       for (int f = 0; f <= 1; ++f) {
         const int nn = NeighborIndex(a, b, c, f, 0);
@@ -1310,8 +1311,8 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridBoundaryValues::LaunchProlongateFCMG()
-//! \brief The ProlongateFCMG kernel. FCFIX = 0: the present read range (<cfc> mg_fc_fix 0
-//! and 1). FCFIX = 2: proj/tde aa824220's range (item 67); its lines sit in if constexpr
+//! \brief The ProlongateFCMG kernel. FCFIX = 0: the present read range (<cfc> mg_fc_fix 0).
+//! FCFIX = 2: proj/tde aa824220's range (item 67); its lines sit in if constexpr
 //! branches that FCFIX = 0 does not instantiate.
 
 template <int FCFIX>
@@ -1557,7 +1558,7 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
         });
       }
   };
-  if ((mg_fc_fix_ > 0 || mg_packlist_check_ > 0) && !mg_fc_size_printed_ &&
+  if ((mg_fc_fix_ == 2 || mg_packlist_check_ > 0) && !mg_fc_size_printed_ &&
       global_variable::my_rank == 0) {
     std::cout << "MGFCFIX functor bytes: ProlongateFCMG<" << FCFIX << "> " << sizeof(kern)
               << " (Kokkos-SYCL launches indirectly from 1800)" << std::endl;

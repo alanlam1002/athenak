@@ -48,26 +48,25 @@ MultigridBoundaryValues::MultigridBoundaryValues(
       std::cout << "MGPACKLIST self-check on (<cfc> mg_packlist_check)" << std::endl;
     }
   }
-  // <cfc> mg_fc_fix (src/cfc/DEVELOPMENT.md item 67): 0 = present behaviour (default),
-  // 2 = clear the level's part of coarse_buf_ before each fill and read the coarse face
-  // neighbour's transverse range only where filled. (Mode 1, the clear alone, was removed
-  // after cfc_opt T3/T3b-A: user decision 2026-11-20.) <cfc> mg_fc_prefill_nan (debug,
-  // mode 2 only) clears with NaN instead of 0. Both are read only if present.
-  if (pin->DoesParameterExist("cfc", "mg_fc_fix")) {
-    mg_fc_fix_ = pin->GetInteger("cfc", "mg_fc_fix");
+  // src/cfc/DEVELOPMENT.md item 67: the coarser-face prolongation (ProlongateFCMG) always
+  // clears the level's part of coarse_buf_ before each fill and reads the coarse face
+  // neighbour's transverse range only where filled (proj/tde aa824220's rule), for every
+  // multigrid solver. The former switch <cfc> mg_fc_fix (0 = old rule) was removed on the
+  // user's decision (cfc_opt, 2026-11-20); a deck that still sets it to 2 is accepted, any
+  // other value stops the run so the old rule is never assumed silently.
+  // <cfc> mg_fc_prefill_nan = 1 (debug, read only if present) clears with NaN instead of 0.
+  if (pin->DoesParameterExist("cfc", "mg_fc_fix") &&
+      pin->GetInteger("cfc", "mg_fc_fix") != 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "<cfc> mg_fc_fix was removed: the multigrid coarser-face rule of former "
+              << "mode 2 is always used. Delete the key (or set it to 2)." << std::endl;
+    std::exit(EXIT_FAILURE);
   }
   if (pin->DoesParameterExist("cfc", "mg_fc_prefill_nan")) {
     mg_fc_prefill_nan_ = (pin->GetInteger("cfc", "mg_fc_prefill_nan") != 0) ? 1 : 0;
   }
-  if ((mg_fc_fix_ != 0 && mg_fc_fix_ != 2) || (mg_fc_prefill_nan_ > 0 && mg_fc_fix_ != 2)) {
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "<cfc> mg_fc_fix = " << mg_fc_fix_ << " must be 0 or 2, and "
-              << "mg_fc_prefill_nan needs mg_fc_fix = 2" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
-  if (global_variable::my_rank == 0 && mg_fc_fix_ == 2) {
-    std::cout << "MGFCFIX <cfc> mg_fc_fix = " << mg_fc_fix_ << ", prefill "
-              << (mg_fc_prefill_nan_ ? "NaN" : "0") << std::endl;
+  if (global_variable::my_rank == 0 && mg_fc_prefill_nan_ > 0) {
+    std::cout << "MGFCFIX coarse_buf_ prefill NaN (<cfc> mg_fc_prefill_nan)" << std::endl;
   }
 }
 
@@ -1071,7 +1070,7 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
   int cnc = ncells / 2;
   int nmb = pmy_pack->nmb_thispack;
   auto cbuf = coarse_buf_;
-  if (mg_fc_fix_ == 2) {
+  {
     // Item 67: clear the part of coarse_buf_ this level addresses, [0, cnc + 2 ngh) per
     // direction (this fill, the icoar pack/unpack boxes of ComputePerLevelIndices and the
     // ProlongateFCMG reads all lie inside it), so no read can see an earlier level's or
@@ -1206,14 +1205,15 @@ void MultigridBoundaryValues::BuildFCPairs() {
   Kokkos::deep_copy(fc_pairs_, fc_h);
   fc_pairs_seq_ = seq;
   fc_pairs_nmb_ = nmb;
-  // Item 67 (<cfc> mg_fc_fix = 2): for every coarser-face pair (kind 1), whether
+  // Item 67: for every coarser-face pair (kind 1), whether
   // the edge neighbour beyond each end of the two transverse directions is coarser
   // (its icoar receive then fills the coarse_buf_ cell just past the face neighbour's
   // range; proj/tde aa824220's coarser_at, evaluated once per mesh instead of per
   // thread). Bits: 1/2 = first transverse direction low/high end, 4/8 = second; the
   // transverse pairs are (x2, x3) for an x1 face, (x1, x3) for x2, (x1, x2) for x3.
-  // Also prints, per rank, how many ends each part of mode 2 changes.
-  if (mg_fc_fix_ == 2) {
+  // With <cfc> mg_fc_prefill_nan or mg_packlist_check on, also prints per rank how many
+  // ends each part of the rule touches (MGFCENDS; relative to the former rule).
+  {
     auto coarser_at = [&](const int m, const int a, const int b, const int c) {
       for (int f = 0; f <= 1; ++f) {
         const int nn = NeighborIndex(a, b, c, f, 0);
@@ -1268,9 +1268,11 @@ void MultigridBoundaryValues::BuildFCPairs() {
       }
     }
     Kokkos::deep_copy(fc_ends_, ends_h);
-    std::cout << "MGFCENDS rank " << global_variable::my_rank << " pairs " << fc_npairs_
-              << " kind1 " << nk1 << " ends " << 4*nk1 << " stale_removed " << n_stale
-              << " extended " << n_ext << " slope_only " << n_slope << std::endl;
+    if (mg_fc_prefill_nan_ > 0 || mg_packlist_check_ > 0) {
+      std::cout << "MGFCENDS rank " << global_variable::my_rank << " pairs " << fc_npairs_
+                << " kind1 " << nk1 << " ends " << 4*nk1 << " stale_removed " << n_stale
+                << " extended " << n_ext << " slope_only " << n_slope << std::endl;
+    }
   }
 }
 
@@ -1300,22 +1302,14 @@ TaskStatus MultigridBoundaryValues::ProlongateFCMG(DvceArray5D<Real> &u) {
 
   BuildFCPairs();
   if (fc_npairs_ == 0) return TaskStatus::complete;
-  // Item 67: mode 2 runs its own instantiation, so the default kernel keeps its source.
-  if (mg_fc_fix_ == 2) {
-    LaunchProlongateFCMG<2>(u, nvar, ngh, ncells);
-  } else {
-    LaunchProlongateFCMG<0>(u, nvar, ngh, ncells);
-  }
+  LaunchProlongateFCMG(u, nvar, ngh, ncells);
   return TaskStatus::complete;
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void MultigridBoundaryValues::LaunchProlongateFCMG()
-//! \brief The ProlongateFCMG kernel. FCFIX = 0: the present read range (<cfc> mg_fc_fix 0).
-//! FCFIX = 2: proj/tde aa824220's range (item 67); its lines sit in if constexpr
-//! branches that FCFIX = 0 does not instantiate.
+//! \brief The ProlongateFCMG kernel, with proj/tde aa824220's read range (item 67).
 
-template <int FCFIX>
 void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const int nvar,
                                                    const int ngh, const int ncells) {
   auto pairs = fc_pairs_;
@@ -1403,11 +1397,12 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
       } else if (kind == 1) {
         // Face neighbor from coarser: flux-conserving prolongation from coarse_buf_ into
         // fine ghost cells of u; one thread per coarse face cell (writes 4 fine ghosts).
-        // Low-edge valid-read bounds depend on the child parity, see the history note in
-        // DEVELOPMENT.md (the high bound is deliberately unconditional). FCFIX = 2 (item
-        // 67, proj/tde aa824220): each end extends one cell past the received range only
-        // where the edge neighbour beyond is coarser (fc_ends_), and a one-sided slope
-        // takes its full value.
+        // Transverse read range (item 67, proj/tde aa824220): the cells the coarse face
+        // neighbour sent for this child (low child: [ngh, ngh+half], high child:
+        // [ngh-1, ngh+half-1]); each end extends one cell further only where the edge
+        // neighbour beyond is coarser (fc_ends_: its icoar receive fills that cell). A
+        // slope clamped to one side takes its full value (0.25, applied as 2 * 0.125 * d,
+        // exact).
         const int child_x = fc_cx(m), child_y = fc_cy(m), child_z = fc_cz(m);
         Kokkos::parallel_for(Kokkos::TeamThreadRange(tm, half*half), [&](const int t) {
           const int ta = t % half, tb = t / half;
@@ -1416,17 +1411,11 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int fi  = (ox1 < 0) ? ngh_l : ngh_l + ncells_l - 1;
             int si  = (ox1 < 0) ? ngh_l - 1 : ngh_l + half;
             int sj0 = ngh_l, sk0 = ngh_l;
-            int y_lo = child_y ? ngh_l - 1 : ngh_l;
-            int y_hi = ngh_l + half;
-            int z_lo = child_z ? ngh_l - 1 : ngh_l;
-            int z_hi = ngh_l + half;
-            if constexpr (FCFIX == 2) {
-              const int ends = fce(p);
-              y_lo = (child_y || (ends & 1)) ? ngh_l - 1 : ngh_l;
-              y_hi = (!child_y || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
-              z_lo = (child_z || (ends & 4)) ? ngh_l - 1 : ngh_l;
-              z_hi = (!child_z || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
-            }
+            const int ends = fce(p);
+            const int y_lo = (child_y || (ends & 1)) ? ngh_l - 1 : ngh_l;
+            const int y_hi = (!child_y || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
+            const int z_lo = (child_z || (ends & 4)) ? ngh_l - 1 : ngh_l;
+            const int z_hi = (!child_z || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
             int sj = sj0 + ta, sk = sk0 + tb;
             int fj = ngh_l + 2*(sj - sj0);
             int fk = ngh_l + 2*(sk - sk0);
@@ -1437,10 +1426,8 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int skp = (sk < z_hi) ? sk+1 : sk;
             Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
             Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
-            if constexpr (FCFIX == 2) {   // one-sided: full slope (0.25, exact)
-              if (sjp - sjm != 2) gy *= 2.0;
-              if (skp - skm != 2) gz *= 2.0;
-            }
+            if (sjp - sjm != 2) gy *= 2.0;   // one-sided: full slope
+            if (skp - skm != 2) gz *= 2.0;
             u(m,v,fk  ,fj  ,fig)=ot*(2.0*(cc-gy-gz)+u(m,v,fk  ,fj  ,fi));
             u(m,v,fk  ,fj+1,fig)=ot*(2.0*(cc+gy-gz)+u(m,v,fk  ,fj+1,fi));
             u(m,v,fk+1,fj  ,fig)=ot*(2.0*(cc-gy+gz)+u(m,v,fk+1,fj  ,fi));
@@ -1450,17 +1437,11 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int fj  = (ox2 < 0) ? ngh_l : ngh_l + ncells_l - 1;
             int sj  = (ox2 < 0) ? ngh_l - 1 : ngh_l + half;
             int si0 = ngh_l, sk0 = ngh_l;
-            int x_lo = child_x ? ngh_l - 1 : ngh_l;
-            int x_hi = ngh_l + half;
-            int z_lo = child_z ? ngh_l - 1 : ngh_l;
-            int z_hi = ngh_l + half;
-            if constexpr (FCFIX == 2) {
-              const int ends = fce(p);
-              x_lo = (child_x || (ends & 1)) ? ngh_l - 1 : ngh_l;
-              x_hi = (!child_x || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
-              z_lo = (child_z || (ends & 4)) ? ngh_l - 1 : ngh_l;
-              z_hi = (!child_z || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
-            }
+            const int ends = fce(p);
+            const int x_lo = (child_x || (ends & 1)) ? ngh_l - 1 : ngh_l;
+            const int x_hi = (!child_x || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
+            const int z_lo = (child_z || (ends & 4)) ? ngh_l - 1 : ngh_l;
+            const int z_hi = (!child_z || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
             int si = si0 + ta, sk = sk0 + tb;
             int fi = ngh_l + 2*(si - si0);
             int fk = ngh_l + 2*(sk - sk0);
@@ -1471,10 +1452,8 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int skp = (sk < z_hi) ? sk+1 : sk;
             Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
             Real gz = 0.125*(cbuf(m,v,skp,sj,si)-cbuf(m,v,skm,sj,si));
-            if constexpr (FCFIX == 2) {   // one-sided: full slope (0.25, exact)
-              if (sip - sim != 2) gx *= 2.0;
-              if (skp - skm != 2) gz *= 2.0;
-            }
+            if (sip - sim != 2) gx *= 2.0;   // one-sided: full slope
+            if (skp - skm != 2) gz *= 2.0;
             u(m,v,fk  ,fjg,fi  )=ot*(2.0*(cc-gx-gz)+u(m,v,fk  ,fj,fi  ));
             u(m,v,fk  ,fjg,fi+1)=ot*(2.0*(cc+gx-gz)+u(m,v,fk  ,fj,fi+1));
             u(m,v,fk+1,fjg,fi  )=ot*(2.0*(cc-gx+gz)+u(m,v,fk+1,fj,fi  ));
@@ -1484,17 +1463,11 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int fk  = (ox3 < 0) ? ngh_l : ngh_l + ncells_l - 1;
             int sk  = (ox3 < 0) ? ngh_l - 1 : ngh_l + half;
             int si0 = ngh_l, sj0 = ngh_l;
-            int x_lo = child_x ? ngh_l - 1 : ngh_l;
-            int x_hi = ngh_l + half;
-            int y_lo = child_y ? ngh_l - 1 : ngh_l;
-            int y_hi = ngh_l + half;
-            if constexpr (FCFIX == 2) {
-              const int ends = fce(p);
-              x_lo = (child_x || (ends & 1)) ? ngh_l - 1 : ngh_l;
-              x_hi = (!child_x || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
-              y_lo = (child_y || (ends & 4)) ? ngh_l - 1 : ngh_l;
-              y_hi = (!child_y || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
-            }
+            const int ends = fce(p);
+            const int x_lo = (child_x || (ends & 1)) ? ngh_l - 1 : ngh_l;
+            const int x_hi = (!child_x || (ends & 2)) ? ngh_l + half : ngh_l + half - 1;
+            const int y_lo = (child_y || (ends & 4)) ? ngh_l - 1 : ngh_l;
+            const int y_hi = (!child_y || (ends & 8)) ? ngh_l + half : ngh_l + half - 1;
             int si = si0 + ta, sj = sj0 + tb;
             int fi = ngh_l + 2*(si - si0);
             int fj = ngh_l + 2*(sj - sj0);
@@ -1505,10 +1478,8 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
             int sjp = (sj < y_hi) ? sj+1 : sj;
             Real gx = 0.125*(cbuf(m,v,sk,sj,sip)-cbuf(m,v,sk,sj,sim));
             Real gy = 0.125*(cbuf(m,v,sk,sjp,si)-cbuf(m,v,sk,sjm,si));
-            if constexpr (FCFIX == 2) {   // one-sided: full slope (0.25, exact)
-              if (sip - sim != 2) gx *= 2.0;
-              if (sjp - sjm != 2) gy *= 2.0;
-            }
+            if (sip - sim != 2) gx *= 2.0;   // one-sided: full slope
+            if (sjp - sjm != 2) gy *= 2.0;
             u(m,v,fkg,fj  ,fi  )=ot*(2.0*(cc-gx-gy)+u(m,v,fk,fj  ,fi  ));
             u(m,v,fkg,fj  ,fi+1)=ot*(2.0*(cc+gx-gy)+u(m,v,fk,fj  ,fi+1));
             u(m,v,fkg,fj+1,fi  )=ot*(2.0*(cc-gx+gy)+u(m,v,fk,fj+1,fi  ));
@@ -1558,9 +1529,8 @@ void MultigridBoundaryValues::LaunchProlongateFCMG(DvceArray5D<Real> &u, const i
         });
       }
   };
-  if ((mg_fc_fix_ == 2 || mg_packlist_check_ > 0) && !mg_fc_size_printed_ &&
-      global_variable::my_rank == 0) {
-    std::cout << "MGFCFIX functor bytes: ProlongateFCMG<" << FCFIX << "> " << sizeof(kern)
+  if (mg_packlist_check_ > 0 && !mg_fc_size_printed_ && global_variable::my_rank == 0) {
+    std::cout << "MGFCFIX functor bytes: ProlongateFCMG " << sizeof(kern)
               << " (Kokkos-SYCL launches indirectly from 1800)" << std::endl;
   }
   mg_fc_size_printed_ = true;

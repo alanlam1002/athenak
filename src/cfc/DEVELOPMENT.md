@@ -8178,3 +8178,51 @@ the scalar kernels (option (a), about 60 lines) was not written; it would need i
 
 **Test (cfc_opt T2c):** key off/on pairs on the fixed binary; with the key on, the psi and
 alpha_psi `MGLOG` lines of the first solve set must equal the key-off lines to round-off.
+
+## 67. `<cfc> mg_fc_fix`: stale `coarse_buf_` read in `ProlongateFCMG` (cfc_opt item B, 2026-11-20; default off)
+
+**Bug.** For a face neighbour that is coarser (`ProlongateFCMG`, pair kind 1), the transverse
+slope reads `coarse_buf_` up to `ngh + half` in both transverse directions. The coarse
+neighbour sends (`ComputePerLevelIndices`, recv `icoar`) only this child's half of its face plus
+one overlap cell on the coarse block's interior side: `[ngh, ngh+half]` for a low child
+(`fc_child == 0`), `[ngh-1, ngh+half-1]` for a high one. A high child's read of `ngh+half` hits a
+cell that only the edge neighbour beyond fills, and only if that neighbour is coarser. Otherwise
+nothing writes it in that round. `coarse_buf_` is one buffer per solver, sized for the finest
+level, shared by every MG level and solve and never cleared, so the read returns whatever an
+earlier level, round or solve left at that index. Solutions therefore depend on history at the
+MG-tolerance level. proj/tde found it by pre-filling NaN (TDE C-100) and fixed it in 1eb11a70
+(clear the buffer) and aa824220 (read range); `cfc` had neither.
+
+**Switch.** `<cfc> mg_fc_fix`, read only if present (as `mg_packlist_check`), default 0:
+- 0: present behaviour, kernel source unchanged.
+- 1: `FillCoarseMG` first clears the part of `coarse_buf_` this level addresses (1eb11a70).
+- 2: as 1, plus aa824220's read range: each transverse end extends one cell past the
+  received range only where the edge neighbour beyond is coarser (its `icoar` receive fills
+  that cell), otherwise the range stops at the received cells and the one-sided slope takes its
+  full value (`0.25`, applied as `2 * 0.125 * d`, which is exact). The present code halves a
+  clamped slope. So mode 2 changes three things: the stale high-end read is gone; a low child's
+  low end, and a high child's high end, read one more filled cell where the edge neighbour is
+  coarser; clamped ends use the full slope. Rank lines `MGFCENDS` (modes 1 and 2) count, per
+  rank, the kind-1 pair ends each part touches.
+- `<cfc> mg_fc_prefill_nan = 1` (debug, needs mode >= 1) clears with NaN instead of 0. Mode 2
+  with NaN must equal mode 2 exactly (no cell outside the filled ranges is read, by the
+  prolongation or by a pack); mode 1 with NaN shows whether the stale read occurs on a mesh.
+
+**Clear extent.** Not the whole buffer as in 1eb11a70 but `[0, cnc + 2 ngh)` per direction,
+`cnc = ncells/2` of the current level. Equivalent, because every `coarse_buf_` access at that
+level lies inside it: the restriction writes `[ngh, ngh+cnc)`, the face averages `ngh-1-d` and
+`ngh+cnc+d` (`d < ngh`); the `icoar` send and receive boxes span `[cis-ngh, cie+ngh] =
+[0, cnc+2ngh-1]`; the prolongation reads at most index `ngh+half = ngh+cnc` (kind 1 and the kind-2
+injection). The whole buffer would cost ~0.35-0.7 ms per call for 4-variable solvers (36 MB per
+rank at 32^3 x 192 blocks), every round; summed over the five levels the level box is 24.5 % of it.
+
+**Implementation.** `ProlongateFCMG` dispatches to `LaunchProlongateFCMG<0>` (modes 0 and 1) or
+`<2>`; the mode-2 lines sit in `if constexpr (FCFIX == 2)` branches, so the default
+instantiation contains none of them and does not capture `fc_ends_`. Whether its generated code
+equals the previous kernel's is checked by the bitwise test (cfc_opt T3 xB0), not assumed: it is
+a different instantiation and lambda type. `coarser_at` of aa824220 is evaluated on the host once
+per mesh in `BuildFCPairs` (4 bits per pair in `fc_ends_`) instead of 8 device look-ups per
+thread. Functor sizes print as `MGFCFIX functor bytes` when the key or `mg_packlist_check` is on.
+
+**Status.** Opt-in. How (and whether) it is adopted is decided with the user after cfc_opt T3
+(V-cycle counts, set cost, field differences per mode).

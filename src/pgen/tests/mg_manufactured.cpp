@@ -8,11 +8,11 @@
 //  prolongation, src/cfc/DEVELOPMENT.md item 67) with the gravity solver on a periodic,
 //  statically refined mesh. Regression test:
 //  tst/test_suite/multigrid/test_mg_manufactured_*.
-//  Expected with the current rule (cfc_opt O-035..O-037): phi second order in L2 and max,
-//  the gradient second order in L2 and first order in max, and no kink (second
-//  differences O(h^2)) at parent, sibling, mid-face and open block ends. The former rule
-//  had an O(1)
-//  gradient error (0.126) and a first-order kink at parent-block edges.
+//  Expected with the current rule (src/cfc/DEVELOPMENT.md item 67): phi second order in
+//  L2 and max, the gradient second order in L2 and first order in max, and no kink
+//  (second differences O(h^2)) at parent, sibling, mid-face and open block ends. The
+//  former rule had an O(1) gradient error (0.126) and a first-order kink at parent-block
+//  edges.
 //
 //  phi_ex = A0 sin(2 pi x + a) sin(2 pi y + b) cos(2 pi z + c)
 //         + A1 exp(-|x-c1|^2 / (2 s1^2)) + A2 exp(-|x-c2|^2 / (2 s2^2))

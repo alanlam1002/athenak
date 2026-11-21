@@ -9,7 +9,8 @@ their mass is < 1e-9 of M*.
      (2.3548 sigma_z) and the peak rho (c253's moment method, restricted to bound gas);
   3. bound stream inside R_zone = 120: mass-weighted K/K0 (K = P/rho^Gamma);
   5. radial profiles of the bound stream, 2 M bins over r 60-200: mass, mass-weighted K/K0, peak rho, mass-weighted level.
-    c260_rst.py RST OUT.npz [--nproc 96] [--maxblocks N (test)]
+    c260_rst.py RST OUT.npz [--nproc 96] [--maxblocks N (test)] [--radii 50,100,150]
+--radii (c279): the annulus radii of item 2 (default 50,100,150; c273's stream at t = 800 lies at r ~ 61-67).
 """
 import argparse, os, sys, time
 import multiprocessing as mp
@@ -115,7 +116,10 @@ def main():
     ap.add_argument('rst'); ap.add_argument('out')
     ap.add_argument('--nproc', type=int, default=96); ap.add_argument('--nscal', type=int, default=1)
     ap.add_argument('--maxblocks', type=int, default=0); ap.add_argument('--first', type=int, default=0)
+    ap.add_argument('--radii', default='50,100,150')
     a = ap.parse_args()
+    global RADII
+    RADII = tuple(float(x) for x in a.radii.split(','))   # set before the fork: the workers inherit it
     t0 = time.time()
     t = header(a.rst)
     no, nx = 24, 16

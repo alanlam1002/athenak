@@ -12,7 +12,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -54,19 +53,12 @@ MultigridBoundaryValues::MultigridBoundaryValues(
   // multigrid solver. The former switch <cfc> mg_fc_fix (0 = old rule) was removed on the
   // user's decision (cfc_opt, 2026-11-20); a deck that still sets it to 2 is accepted, any
   // other value stops the run so the old rule is never assumed silently.
-  // <cfc> mg_fc_prefill_nan = 1 (debug, read only if present) clears with NaN instead of 0.
   if (pin->DoesParameterExist("cfc", "mg_fc_fix") &&
       pin->GetInteger("cfc", "mg_fc_fix") != 2) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "<cfc> mg_fc_fix was removed: the multigrid coarser-face rule of former "
               << "mode 2 is always used. Delete the key (or set it to 2)." << std::endl;
     std::exit(EXIT_FAILURE);
-  }
-  if (pin->DoesParameterExist("cfc", "mg_fc_prefill_nan")) {
-    mg_fc_prefill_nan_ = (pin->GetInteger("cfc", "mg_fc_prefill_nan") != 0) ? 1 : 0;
-  }
-  if (global_variable::my_rank == 0 && mg_fc_prefill_nan_ > 0) {
-    std::cout << "MGFCFIX coarse_buf_ prefill NaN (<cfc> mg_fc_prefill_nan)" << std::endl;
   }
 }
 
@@ -1075,7 +1067,7 @@ void MultigridBoundaryValues::FillCoarseMG(const DvceArray5D<Real> &u) {
     // direction (this fill, the icoar pack/unpack boxes of ComputePerLevelIndices and the
     // ProlongateFCMG reads all lie inside it), so no read can see an earlier level's or
     // solve's data. Same as proj/tde 1eb11a70's whole-buffer fill except in extent.
-    const Real fill = mg_fc_prefill_nan_ ? std::numeric_limits<Real>::quiet_NaN() : 0.0;
+    const Real fill = 0.0;
     const int cb = cnc + 2*ngh;
     Kokkos::deep_copy(DevExeSpace(),
                       Kokkos::subview(coarse_buf_, Kokkos::ALL, Kokkos::ALL,
@@ -1211,7 +1203,7 @@ void MultigridBoundaryValues::BuildFCPairs() {
   // range; proj/tde aa824220's coarser_at, evaluated once per mesh instead of per
   // thread). Bits: 1/2 = first transverse direction low/high end, 4/8 = second; the
   // transverse pairs are (x2, x3) for an x1 face, (x1, x3) for x2, (x1, x2) for x3.
-  // With <cfc> mg_fc_prefill_nan or mg_packlist_check on, also prints per rank how many
+  // With <cfc> mg_packlist_check on, also prints per rank how many
   // ends each part of the rule touches (MGFCENDS; relative to the former rule).
   {
     auto coarser_at = [&](const int m, const int a, const int b, const int c) {
@@ -1268,7 +1260,7 @@ void MultigridBoundaryValues::BuildFCPairs() {
       }
     }
     Kokkos::deep_copy(fc_ends_, ends_h);
-    if (mg_fc_prefill_nan_ > 0 || mg_packlist_check_ > 0) {
+    if (mg_packlist_check_ > 0) {
       std::cout << "MGFCENDS rank " << global_variable::my_rank << " pairs " << fc_npairs_
                 << " kind1 " << nk1 << " ends " << 4*nk1 << " stale_removed " << n_stale
                 << " extended " << n_ext << " slope_only " << n_slope << std::endl;

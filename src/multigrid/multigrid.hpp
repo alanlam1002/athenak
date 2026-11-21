@@ -804,8 +804,7 @@ class MultigridBoundaryValues : public MeshBoundaryValuesCC {
   // src/cfc/DEVELOPMENT.md item 67: FillCoarseMG clears the level's part of coarse_buf_,
   // and ProlongateFCMG reads the coarse face neighbour's transverse range only where
   // filled (fc_ends_: per pair, whether the edge neighbour beyond each transverse end is
-  // coarser). <cfc> mg_fc_prefill_nan = 1 (debug) clears with NaN instead of 0.
-  int mg_fc_prefill_nan_ = 0;
+  // coarser).
   bool mg_fc_size_printed_ = false;
   DvceArray1D<int> fc_ends_;
   void LaunchProlongateFCMG(DvceArray5D<Real> &u, const int nvar, const int ngh,

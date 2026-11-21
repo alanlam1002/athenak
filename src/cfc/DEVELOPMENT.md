@@ -8202,10 +8202,12 @@ one-sided slope takes its full value (`0.25`, applied as `2 * 0.125 * d`, which 
 former code halved a clamped slope. Against the former rule this changes three things: the stale
 high-end read is gone; a low child's low end, and a high child's high end, read one more filled
 cell where the edge neighbour is coarser; clamped ends use the full slope.
-- `<cfc> mg_fc_prefill_nan = 1` (debug, read only if present) clears with NaN instead of 0; the
-  result must equal the default run exactly (no cell outside the filled ranges is read, by the
-  prolongation or by a pack). With it (or `mg_packlist_check`) on, rank lines `MGFCENDS` count the
-  kind-1 pair ends each part of the rule touches (`stale_removed`, `extended`, `slope_only`).
+- With `<cfc> mg_packlist_check` on, rank lines `MGFCENDS` count the kind-1 pair ends each part
+  of the rule touches (`stale_removed`, `extended`, `slope_only`).
+- The debug key `<cfc> mg_fc_prefill_nan` (NaN instead of 0 in the clear) existed until
+  2026-11-21 and was dropped on the user's decision. With it, cfc_opt T3 and T3d showed that no
+  cell outside the filled ranges is read: the NaN run equalled the default run in every
+  checksum row. To repeat that check on a new mesh, set `fill` in `FillCoarseMG` to a NaN.
 - **History.** The rule was introduced behind `<cfc> mg_fc_fix` (0 = former rule, default; 1 = the
   clear alone; 2 = this rule). User decisions 2026-11-20: mode 1 removed (47fc61c5), then, after
   cfc_opt T4, mode 0, the key and the template split removed. A deck that still sets

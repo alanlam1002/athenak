@@ -123,6 +123,21 @@ class CFC {
   int rs_log_ = 0;           // <cfc> residual_scale_log_interval (cycles; 0 = no log)
   Real rs_f_ = 1.0;          // f of the state the current stage's CFC tasks see
   bool rs_bg_only_ = false;  // rs_f_ == 0: skip the MG solves
+  // S5 (R-255 item 1, C-217): the automatic CFC phase-out. <cfc> phaseout_time T_ph > 0
+  // (needs frame_track_rel > 0 and frame_lost_lambda > 0; exclusive with residual_scale*):
+  // armed once the lost-star switch has fired AND its ramp is complete (fc_mode_ == 2 and
+  // t >= t_sw + frame_ramp_time), so a self-bound remnant never phases out. Optional guard
+  // <cfc> phaseout_selfgrav_frac F > 0: the mass share of gas (rho > frame_track_rel_floor,
+  // r_BH >= 6) with rho > rho_tid(r_BH) = 3 M_BH/(4 pi r_BH^3) must stay below F
+  // continuously for phaseout_guard_time (default 20) -- a global reduction (MPI_Allreduce
+  // SUM + MPI_Bcast from rank 0), evaluated only while armed and not fired. On firing at
+  // t_f: the residual_scale ramp f: 1 -> 0 (C^1) over [t_f, t_f + T_ph]; f = 0 afterwards
+  // (the multigrid solves are skipped: background only). State (fired, t_f, the guard's
+  // start) is stored in restarts when the option is on.
+  Real ph_T_ = 0.0, ph_sg_frac_ = 0.0, ph_guard_T_ = 20.0, ph_guard_t0_ = -1.0;
+  bool ph_fired_ = false;
+  Real ph_sg_share_ = 0.0;   // the last guard measurement
+  void MeasureSelfGravShare(Real *share);
   Real ResidualScale(Real t) const;
   void SetResidualScale(Real t, int stage, bool last_stage);
   void AssemblePsiMetric(bool with_ghosts);
@@ -406,6 +421,36 @@ class CFC {
   Real fc_exit_[2] = {0.0, 0.0};          // last MeasureExit: approach measure, inflow
   // out = {min (r - max(v_in, 0) T_ramp) over the bound gas, the shell inflow rate}
   void MeasureExit(Real out[2]);
+  // R-252 (R-250's proposal, user-approved 2026-11-09): relative tracking and an automatic
+  // roll-back to the BH frame. All default off (frame_track_rel = 0: the remnant-mode path
+  // above, bitwise; no extra reduction, no extra restart key).
+  // <cfc> frame_track_rel f_rel > 0: in remnant mode the tracked set is the interior cells
+  //   within fc_rdyn_ of x'_tgt with rho > f_rel rho_max,loc, rho_max,loc = the peak rho
+  //   within fc_rdyn_ (MPI_MAX), provided rho_max,loc > frame_track_rel_floor (code units;
+  //   else nothing is tracked and xidot is kept, as before). The radius adapts:
+  //   fc_rdyn_ = max(frame_track_radius_min (default 3), 2 r_enc), r_enc = the largest
+  //   |x' - x'_tgt| over the tracked cells (MPI_MAX), applied from the next step; it starts
+  //   at frame_track_radius. frame_track_rho is not used for the tracked set then.
+  // <cfc> frame_lost_lambda L > 0 (needs frame_track_rel > 0): Lambda = rho_bar/rho_tid,
+  //   rho_bar = sum(rho dV)/sum(dV) over the tracked set (coordinate dV), rho_tid =
+  //   3 M_BH/(4 pi r^3), r = |x'_c - x_BH|. When Lambda < L (or nothing is tracked)
+  //   continuously for frame_lost_time (default 20), switch to ramp mode (FrameSwitch;
+  //   frame_ramp_shape/frame_ramp_time as for the other exits).
+  //   Arming (R-252 1(a): near pericentre Lambda ~ beta^-3 dips below 1 in a normal passage):
+  //   the switch is armed (latched) once t >= frame_lost_arm_time (default 0) and, with
+  //   <cfc> frame_lost_arm_rfac > 0, r >= rfac x the smallest r seen so far (past pericentre);
+  //   until then lost_t0 stays reset. Once switched, ramp mode is final (latched).
+  // Every input is a global reduction made identical on all ranks (sums: MPI_Allreduce then
+  // MPI_Bcast from rank 0, as MeasureTracked; maxima: MPI_Allreduce MPI_MAX, exact), so every
+  // rank takes the same decision. fc_rdyn_, fc_lost_t0_, fc_rlo_, fc_armed_ are stored in restarts.
+  Real fc_rel_ = 0.0, fc_rel_floor_ = 0.0, fc_rmin_ = 3.0, fc_rdyn_ = 0.0;
+  Real fc_lost_lam_ = 0.0, fc_lost_T_ = 20.0, fc_lost_t0_ = -1.0;
+  Real fc_arm_t_ = 0.0, fc_arm_rfac_ = 0.0, fc_rlo_ = -1.0;
+  bool fc_armed_ = false;
+  Real fc_rel_diag_[5] = {0.0, 0.0, 0.0, 0.0, 0.0};   // rho_max,loc, rho_bar, r_enc, r, Lambda
+  int fc_rel_log_ = 10, fc_rel_n_ = 0;
+  // out = MeasureTracked's 7 sums over the relative set; diag = {rho_max,loc, rho_bar, r_enc}
+  void MeasureTrackedRel(Real out[7], Real diag[3]);
   void FrameSwitch(Real t_new, int mode, const char *why);
   void FrameControlStep(Real t_new);
 
@@ -579,6 +624,14 @@ class CFC {
   // ReinitializeMetricForAMR) always returns true -- see cfc.cpp, this avoids a
   // real deadlock.
   bool DoSolveThisStage(Driver *pdriver, int stage) const;
+  // solve_interval >= 1 engages only while the frame is static (C-231 item 2): the
+  // moving-puncture background is refilled only on solve stages, so a moving frame
+  // would see it lag (the C-041 heating). Static = no frame and no moving puncture, a
+  // constant zero frame velocity, or the controller's ramp to xidot = 0 complete at
+  // pmesh->time (constant over the cycle, so every task of a cycle agrees; the frame
+  // state is identical on all ranks). Otherwise every stage solves, as solve_interval 0.
+  bool FrameStaticForCadence() const;
+  mutable int cad_state_ = -1;   // last reported FrameStaticForCadence (rank-0 notice)
 
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's

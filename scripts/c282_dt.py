@@ -153,11 +153,90 @@ def frame(args):
     return fn
 
 
+def slab(f, plane, var='rho'):
+    """slice: block boxes (a0, a1, b0, b1) in the plane's two axes and rho/rho_c or P/rho (nmb, nb, na)"""
+    p = bc.read_binary(f)
+    r = np.asarray(p['mb_data']['dens'])
+    if var == 'T':
+        r = np.asarray(p['mb_data']['press']) / r
+    else:
+        r = r / RHOC
+    g = np.asarray(p['mb_geometry'])
+    if plane == 'xy':
+        return p['time'], g[:, [0, 1, 2, 3]], r[:, 0]
+    return p['time'], g[:, [0, 1, 4, 5]], r[:, :, 0, :]
+
+
+def draw_rho(ax, t, g, r, ctr, half, mesh, norm, title, ylab, cmap='inferno'):
+    xs, ys = ctr
+    keep = ~((g[:, 1] < xs - half) | (g[:, 0] > xs + half) | (g[:, 3] < ys - half) | (g[:, 2] > ys + half))
+    im = None
+    for b in np.nonzero(keep)[0]:
+        im = ax.imshow(np.maximum(r[b], 1e-30), origin='lower', extent=tuple(g[b]), cmap=cmap, norm=norm,
+                       interpolation='nearest')
+    if mesh:
+        segs = [[(g[b, 0], g[b, 2]), (g[b, 1], g[b, 2]), (g[b, 1], g[b, 3]), (g[b, 0], g[b, 3]), (g[b, 0], g[b, 2])]
+                for b in np.nonzero(keep)[0]]
+        ax.add_collection(LineCollection(segs, colors='w', linewidths=mesh, alpha=0.35))
+    ax.add_patch(plt.Circle((xs, ys), RSTAR, fill=False, ec='c', ls=':', lw=0.8))
+    ax.set_xlim(xs - half, xs + half); ax.set_ylim(ys - half, ys + half); ax.set_aspect('equal')
+    ax.set_title(title, fontsize=10); ax.set_xlabel('x [M]'); ax.set_ylabel(ylab)
+    return im
+
+
+def frame_rho(args):
+    i, fw, fl, fwz, flz, half, mesh, out = args
+    norm = LogNorm(vmin=1e-21, vmax=1.0)          # dfloor 1e-24 = 3.1e-21 rho_c (W32.par:219)
+    tnorm = LogNorm(vmin=1e-4, vmax=1e-1)
+    fig, ax = plt.subplots(3, 2, figsize=(11.5, 16), constrained_layout=True)
+    for col, (fxy, fxz, lab) in enumerate(((fw, fwz, 'WENOZ W32'), (fl, flz, 'PPMX L32'))):
+        t, g, r = slab(fxy, 'xy')
+        m = np.unravel_index(np.argmax(r), r.shape)          # star centre = density maximum
+        nx = r.shape[-1]; dx = (g[m[0], 1] - g[m[0], 0]) / nx
+        ctr = (g[m[0], 0] + (m[2] + .5) * dx, g[m[0], 2] + (m[1] + .5) * dx)
+        im = draw_rho(ax[0, col], t, g, r, ctr, half, mesh, norm, f'{lab}  t = {t:.1f}  rho (z = 0)', 'y [M]')
+        t2, g2, r2 = slab(fxz, 'xz')
+        draw_rho(ax[1, col], t2, g2, r2, (ctr[0], 0.0), half, mesh, norm, f'{lab}  t = {t2:.1f}  rho (y = 0)', 'z [M]')
+        _, g3, r3 = slab(fxy, 'xy', 'T')
+        imt = draw_rho(ax[2, col], t, g3, r3, ctr, half, mesh, tnorm, f'{lab}  t = {t:.1f}  P/rho (z = 0)', 'y [M]', 'viridis')
+    fig.colorbar(im, ax=ax[:2, :], shrink=0.7).set_label('rho / rho_c (floor 3.1e-21)')
+    fig.colorbar(imt, ax=ax[2, :], shrink=0.9).set_label('P / rho (temperature proxy)')
+    fig.suptitle(f'c282: WENOZ vs PPMX at dx 1/32 around the star (dotted circle: R* = {RSTAR}; ±{half:g} M)', fontsize=11)
+    fn = f'{out}/frames_rho/f{i:04d}.png'; fig.savefig(fn, dpi=65); plt.close(fig)
+    return fn
+
+
+def make_movie(fr, out, stem, fps=4):
+    from PIL import Image
+    ims = [Image.open(f).convert('P', palette=Image.ADAPTIVE) for f in fr]
+    ims[0].save(f'{out}/{stem}.gif', save_all=True, append_images=ims[1:], duration=int(1000 / fps), loop=0)
+    ff = sorted(glob.glob('/opt/aurora/*/spack/unified/*/install/linux-x86_64/ffmpeg-*/bin/ffmpeg'))
+    if ff:
+        d = os.path.dirname(fr[0])
+        subprocess.run([ff[-1], '-y', '-loglevel', 'error', '-framerate', str(fps), '-i', f'{d}/f%04d.png', '-vf',
+                        'pad=ceil(iw/2)*2:ceil(ih/2)*2', '-pix_fmt', 'yuv420p', f'{out}/{stem}.mp4'])
+
+
+def main_rho(a):
+    os.makedirs(f'{a.out}/frames_rho', exist_ok=True)
+    tw = hst(RUNS['W32'][0])[:, 0].max()
+    D = {k: (dumps(RUNS[k][0], 'prim_xy', 0), dumps(RUNS[k][0], 'prim_xz', 0)) for k in ('W32', 'L32')}
+    n = min(len(D['W32'][0]), len(D['W32'][1]), len(D['L32'][0]))
+    jobs = [(i, D['W32'][0][i], D['L32'][0][i], D['W32'][1][i], D['L32'][1][i], a.half, a.mesh, a.out) for i in range(n)]
+    with ProcessPoolExecutor(a.nproc) as ex:
+        fr = list(ex.map(frame_rho, jobs))
+    make_movie(fr, a.out, f'c282_rho_anim_h{a.half:g}')
+    print('wrote density frames', n)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('out'); ap.add_argument('--tmax', type=float, default=92.0); ap.add_argument('--nproc', type=int, default=8)
     ap.add_argument('--half', type=float, default=4.0); ap.add_argument('--mesh', type=float, default=0.4)
+    ap.add_argument('--rho', action='store_true', help='density animation only')
     a = ap.parse_args()
+    if a.rho:
+        return main_rho(a)
     os.makedirs(f'{a.out}/frames', exist_ok=True)
     H = {k: hst(v[0]) for k, v in RUNS.items()}
     CR = {k: crecov(v[0]) for k, v in RUNS.items()}

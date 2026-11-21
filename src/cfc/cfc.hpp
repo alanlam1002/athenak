@@ -339,6 +339,26 @@ class CFC {
   // otherwise (padm->adm/psi/alpha_psi/beta are read-only downstream). Ported
   // from ~/athenak_cfc; see DEVELOPMENT.md item 6.
   int cfc_solve_interval_;
+  // <cfc> solve_interval_refill_bg (default false = the stages without a solve keep the
+  // whole metric: background, puncture position and solved residual). true (LTS K0, K3's
+  // design): on every RK stage that skips the solves (stage >= 1, solve_interval >= 1)
+  // the analytic background, the moving puncture included, is refilled at StageTime(stage)
+  // and adm is re-assembled from it plus the HELD solved residual: delta_psi,
+  // delta_alpha_psi, beta_u (the solved shift, from the beta potentials) and
+  // a_dd - a0_dd (Ahat's solved part, re-anchored on the new Ahat0), at the residual_scale
+  // f of the last solve; then u_adm's ghost exchange, as after a solve. Before the first
+  // assembly of a run segment (restart, solve_interval > 1) the held fields are not set:
+  // the stage falls back to the old behaviour.
+  bool si_refill_bg_ = false;
+  bool si_refill_ready_ = false;     // a solve/assembly has set the held fields
+  // true on a stage >= 1 that skips the solves and refills (the option on and ready)
+  bool RefillThisStage(Driver *pdriver, int stage) const {
+    return si_refill_bg_ && si_refill_ready_ && stage >= 1 &&
+           !DoSolveThisStage(pdriver, stage);
+  }
+  // the refill itself: background at t, Ahat re-anchored, the conformal metric (ghosts
+  // included, from the held, exchanged delta_psi) -- before this stage's C2P
+  void RefillHeldResidual(Real t);
 
   // Comoving gauge (DEVELOPMENT.md item 68): x' = x - xi(t) with the slicing
   // unchanged, i.e. a spatially uniform xidot^i(t) added to the shift that the fluid

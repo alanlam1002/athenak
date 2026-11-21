@@ -148,6 +148,7 @@ add_executable(
         pgen/tests/z4c_linear_wave.cpp
         pgen/tests/jeans_wave.cpp
         pgen/tests/binary_gravity.cpp
+        pgen/tests/mg_manufactured.cpp
         pgen/tests/be_collapse.cpp
 
         pgen/unit_tests/eos_compose.cpp

@@ -8240,5 +8240,12 @@ aa824220 is evaluated on the host once per mesh in `BuildFCPairs` (4 bits per pa
 `fc_ends_`) instead of 8 device look-ups per thread. The functor size prints as `MGFCFIX functor
 bytes` when `mg_packlist_check` is on.
 
+**Regression test.** `tst/test_suite/multigrid/test_mg_manufactured_{cpu,mpicpu,gpu}.py` run pgen
+`mg_manufactured` (decks `tst/inputs/mg_manufactured.athinput`, nested boxes, and
+`mg_manufactured_L.athinput`, L-shaped level 1) at 32^3 and 64^3 and require the observed orders
+above (phi >= 1.8-1.9, gradient L2 >= 1.8, gradient max >= 0.9 and < 6e-3, kinks at parent,
+sibling, mid-face and open ends >= 1.8). The former rule fails it on six checks per deck
+(cfc_opt, 2026-11-21: serial CPU, ~35 s).
+
 **Status.** Always on (see History). Verified for nested and L-shaped static meshes; AMR regrid
 untested.

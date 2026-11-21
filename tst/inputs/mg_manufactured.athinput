@@ -1,0 +1,106 @@
+# AthenaK input file: manufactured-solution test of the multigrid fine/coarse interface
+# (pgen mg_manufactured; tst/test_suite/multigrid). Gravity multigrid on a periodic
+# [-0.5,0.5]^3 mesh with nested refined boxes (levels 1-4 at +-0.25 ... +-0.03125).
+# Resolution from the command line: mesh/nx1..3 = 32/64/128 with meshblock/nx1..3 = 8/16/32
+# (the same block tree at every resolution). The pgen prints MGMANU (errors per cell class),
+# MGKINK (second differences at block edges on coarser faces) and MGOPEN lines.
+
+<job>
+basename  = mgmanu
+
+<mesh>
+nghost    = 2
+nx1       = 64
+x1min     = -0.5
+x1max     = 0.5
+ix1_bc    = periodic
+ox1_bc    = periodic
+nx2       = 64
+x2min     = -0.5
+x2max     = 0.5
+ix2_bc    = periodic
+ox2_bc    = periodic
+nx3       = 64
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 16
+nx2       = 16
+nx3       = 16
+
+<mesh_refinement>
+refinement = static
+
+<refined_region1>
+level = 1
+x1min = -0.25
+x1max = 0.25
+x2min = -0.25
+x2max = 0.25
+x3min = -0.25
+x3max = 0.25
+
+<refined_region2>
+level = 2
+x1min = -0.125
+x1max = 0.125
+x2min = -0.125
+x2max = 0.125
+x3min = -0.125
+x3max = 0.125
+
+<refined_region3>
+level = 3
+x1min = -0.0625
+x1max = 0.0625
+x2min = -0.0625
+x2max = 0.0625
+x3min = -0.0625
+x3max = 0.0625
+
+<refined_region4>
+level = 4
+x1min = -0.03125
+x1max = 0.03125
+x2min = -0.03125
+x2max = 0.03125
+x3min = -0.03125
+x3max = 0.03125
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 1.0e-10   # the hydro step must not change rho measurably (errors are evaluated after it)
+nlim       = 1
+tlim       = 1.0
+ndiag      = 1
+
+<hydro>
+eos         = isothermal
+reconstruct = plm
+rsolver     = llf
+iso_sound_speed = 1.0
+
+<gravity>
+four_pi_G = 1.0
+threshold = -1         # fixed V-cycle count (SolveIterativeFixedTimes): iterate to round-off
+niteration = 40
+npresmooth = 2
+npostsmooth = 2
+full_multigrid = true
+fmg_ncycle = 1
+show_defect = 2
+mg_verbose = 0
+mg_nghost = 1          # as <cfc> mg_nghost in production
+root_on_host = false
+# omega: gravity default 1.15 (mg_gravity.cpp:42), the same as <cfc> mg_omega for X and beta
+
+<hydro_srcterms>
+self_gravity = true
+
+
+<problem>
+pgen_name = mg_manufactured

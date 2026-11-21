@@ -321,3 +321,107 @@ def assert_defect_consistency(defects: List[float], max_spread: float,
             f"{label}Defect spread {spread:.2f} orders exceeds threshold "
             f"{max_spread}. Values: {[f'{d:.3e}' for d in defects]}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Manufactured-solution test of the fine/coarse interface (pgen mg_manufactured)
+# ---------------------------------------------------------------------------
+
+def parse_mg_manufactured(stdout: str) -> Dict[str, Dict[str, float]]:
+    """Parse the MGMANU, MGKINK and MGOPEN lines of pgen mg_manufactured.
+
+    Returns a dict with keys 'all', 'int', 'fcc', 'fc', 'fcend' (each with phi_l2,
+    phi_max, grad_l2, grad_max), 'kink' (parent, sibling, mid, open and their stencil
+    counts n_parent, ...) and 'open' (cells, phi_max, grad_max, act_grad_max, same,
+    finer, none), as far as present.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    num = r"([0-9.eE+\-]+)"
+    for cls in ("all", "int", "fcc", "fc", "fcend"):
+        m = re.search(rf"^MGMANU\s+{cls}\s+cells\s+\d+\s+phi_l2\s+{num}\s+phi_max\s+{num}"
+                      rf"\s+phi_share\s+\S+\s+grad_l2\s+{num}\s+grad_max\s+{num}",
+                      stdout, re.M)
+        if m:
+            out[cls] = dict(zip(("phi_l2", "phi_max", "grad_l2", "grad_max"),
+                                map(float, m.groups())))
+    m = re.search(rf"^MGKINK parent {num} \((\d+)\) sibling {num} \((\d+)\) mid {num}"
+                  rf" \((\d+)\) open {num} \((\d+)\)", stdout, re.M)
+    if m:
+        g = m.groups()
+        out["kink"] = {"parent": float(g[0]), "n_parent": int(g[1]),
+                       "sibling": float(g[2]), "n_sibling": int(g[3]),
+                       "mid": float(g[4]), "n_mid": int(g[5]),
+                       "open": float(g[6]), "n_open": int(g[7])}
+    m = re.search(rf"^MGOPEN cells (\d+) phi_max {num} grad_max {num} act_grad_max {num}"
+                  rf" ends: edge nbr same (\d+) finer (\d+) none (\d+)", stdout, re.M)
+    if m:
+        g = m.groups()
+        out["open"] = {"cells": int(g[0]), "phi_max": float(g[1]),
+                       "grad_max": float(g[2]), "act_grad_max": float(g[3]),
+                       "same": int(g[4]), "finer": int(g[5]), "none": int(g[6])}
+    return out
+
+
+def run_mg_manufactured(deck: str, res: int, mpi: bool = False, threads: int = 1):
+    """Run pgen mg_manufactured at resolution res^3 with (res/4)^3 MeshBlocks (the
+    same block tree at every resolution) and return the parsed diagnostics."""
+    mb = res // 4
+    flags = [f"mesh/nx1={res}", f"mesh/nx2={res}", f"mesh/nx3={res}",
+             f"meshblock/nx1={mb}", f"meshblock/nx2={mb}", f"meshblock/nx3={mb}"]
+    ok, stdout = run_athenak(deck, flags, mpi=mpi, threads=threads)
+    assert ok, f"mg_manufactured run failed: {deck} res {res}"
+    d = parse_mg_manufactured(stdout)
+    assert "all" in d and "kink" in d, \
+        f"mg_manufactured output not found: {deck} res {res}"
+    return d
+
+
+def _order(a: float, b: float) -> float:
+    return math.log2(a / b) if a > 0 and b > 0 else float("nan")
+
+
+def assert_mg_manufactured_orders(lo: Dict, hi: Dict, label: str = "",
+                                  open_ends: bool = False) -> None:
+    """Observed orders between two resolutions (factor 2) of mg_manufactured.
+
+    With the coarser-face rule of src/cfc/DEVELOPMENT.md item 67 (cfc_opt O-035/O-036):
+    phi second order in L2 and max, the gradient second order in L2 and first order in
+    max, second differences across block edges on coarser faces O(h^2) (no kink). The
+    former rule gave a gradient max of 0.126 that did not converge and first-order kinks
+    at parent-block edges; the thresholds below fail it by a wide margin.
+    """
+    checks = [
+        ("phi L2", lo["all"]["phi_l2"], hi["all"]["phi_l2"], 1.9),
+        ("phi max", lo["all"]["phi_max"], hi["all"]["phi_max"], 1.8),
+        ("grad L2", lo["all"]["grad_l2"], hi["all"]["grad_l2"], 1.8),
+        ("grad max", lo["all"]["grad_max"], hi["all"]["grad_max"], 0.9),
+        ("kink parent", lo["kink"]["parent"], hi["kink"]["parent"], 1.8),
+        ("kink sibling", lo["kink"]["sibling"], hi["kink"]["sibling"], 1.8),
+        ("kink mid", lo["kink"]["mid"], hi["kink"]["mid"], 1.8),
+    ]
+    if open_ends:
+        checks += [("kink open", lo["kink"]["open"], hi["kink"]["open"], 1.8),
+                   ("open phi max", lo["open"]["phi_max"], hi["open"]["phi_max"], 1.8)]
+    bad = []
+    for name, a, b, need in checks:
+        o = _order(a, b)
+        logging.info(f"{label}{name}: {a:.3e} -> {b:.3e}, order {o:.2f} "
+                     f"(need >= {need})")
+        if not o >= need:
+            bad.append(f"{name} order {o:.2f} < {need} ({a:.3e} -> {b:.3e})")
+    # absolute: the gradient error must not sit at the old rule's O(1) level
+    if not hi["all"]["grad_max"] < 6.0e-3:
+        bad.append(f"grad max {hi['all']['grad_max']:.3e} >= 6e-3 at the finer "
+                   "resolution")
+    # the kink at parent-block edges must be at the mid-face level, not above it
+    if not hi["kink"]["parent"] < 2.0 * hi["kink"]["mid"]:
+        bad.append(f"kink parent {hi['kink']['parent']:.3e} >= 2 x mid "
+                   f"{hi['kink']['mid']:.3e}")
+    if open_ends:
+        if not (hi["open"]["same"] > 0 and hi["open"]["finer"] == 0):
+            bad.append(f"open ends: same {hi['open']['same']}, finer "
+                       f"{hi['open']['finer']} (expected > 0 and 0)")
+    else:
+        if hi["kink"]["n_open"] != 0:
+            bad.append(f"nested mesh has {hi['kink']['n_open']} open-end stencils")
+    assert not bad, label + "; ".join(bad)

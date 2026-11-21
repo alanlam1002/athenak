@@ -75,6 +75,7 @@ class ProblemGenerator {
   void Z4cLinearWave(ParameterInput *pin, const bool restart);
   void SelfGravity(ParameterInput *pin, const bool restart);
   void BinaryGravity(ParameterInput *pin, const bool restart);
+  void MGManufactured(ParameterInput *pin, const bool restart);
   void BECollapse(ParameterInput *pin, const bool restart);
 
   // predefined problem generator functions for unit tests

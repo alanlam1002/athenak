@@ -51,8 +51,8 @@ MultigridBoundaryValues::MultigridBoundaryValues(
   // clears the level's part of coarse_buf_ before each fill and reads the coarse face
   // neighbour's transverse range only where filled (proj/tde aa824220's rule), for every
   // multigrid solver. The former switch <cfc> mg_fc_fix (0 = old rule) was removed on the
-  // user's decision (cfc_opt, 2026-11-20); a deck that still sets it to 2 is accepted, any
-  // other value stops the run so the old rule is never assumed silently.
+  // user's decision (cfc_opt, 2026-11-20); a deck that still sets it to 2 is accepted,
+  // any other value stops the run so the old rule is never assumed silently.
   if (pin->DoesParameterExist("cfc", "mg_fc_fix") &&
       pin->GetInteger("cfc", "mg_fc_fix") != 2) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl

@@ -84,6 +84,11 @@ struct TDERefineParams {
   Real rho_frac_fine = 0.0;
   Real deref_frac_fine = 0.0;
   Real buffer_fine = 0.0;
+  // <problem> amr_debris_bh_cap (K-023, default 0 = off, read only when present): blocks
+  // within this distance of the hole take the debris levels (amr_level_debris and
+  // amr_level_debris_fine, refinement and hysteresis) at most up to amr_level_bh. The
+  // 1/32 A32 smokes give NaN in the Kerr re-solve with h = 1/32 at the puncture (K-023a).
+  Real bh_cap = 0.0;
 };
 TDERefineParams tde_ref;
 } // namespace
@@ -997,6 +1002,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
       tde_ref.pin_level = pin->GetInteger("problem", "amr_pin_level");
       tde_ref.pin_box   = pin->GetReal("problem", "amr_pin_box");
     }
+    if (pin->DoesParameterExist("problem", "amr_debris_bh_cap")) {
+      tde_ref.bh_cap = pin->GetReal("problem", "amr_debris_bh_cap");
+    }
     if (tde_ref.deref_frac > tde_ref.rho_frac) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
                 << "amr_deref_frac must not exceed amr_density_frac" << std::endl;
@@ -1535,6 +1543,7 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
   }
   const Real buf2 = SQR(tde_ref.buffer);
   const Real buf2_f = SQR(tde_ref.buffer_fine);
+  const Real cap2 = SQR(tde_ref.bh_cap);   // K-023: 0 = off
 
   for (int m = 0; m < nmb; ++m) {
     Real &x1min = size.h_view(m).x1min;
@@ -1594,8 +1603,14 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
         }
       }
     }
-    if (deb_hot) { want = std::max(want, tde_ref.lev_debris); }
-    if (fin_hot) { want = std::max(want, tde_ref.lev_debris_fine); }
+    // K-023 amr_debris_bh_cap: near the hole the debris levels stop at the hole's level
+    int lev_deb = tde_ref.lev_debris, lev_fin = tde_ref.lev_debris_fine;
+    if (cap2 > 0.0 && d2_bh < cap2) {
+      lev_deb = std::min(lev_deb, tde_ref.lev_bh);
+      lev_fin = std::min(lev_fin, tde_ref.lev_bh);
+    }
+    if (deb_hot) { want = std::max(want, lev_deb); }
+    if (fin_hot) { want = std::max(want, lev_fin); }
     if (tde_ref.pin_level >= 0 && x1min < tde_ref.pin_box && x1max > -tde_ref.pin_box &&
         x2min < tde_ref.pin_box && x2max > -tde_ref.pin_box &&
         x3min < tde_ref.pin_box && x3max > -tde_ref.pin_box) {
@@ -1608,9 +1623,9 @@ void TDERefineTracker(MeshBlockPack *pmbp) {
     else if (level == want)   { flag =  0; }
     else                      { flag = -1; }
     // hysteresis: a block at or below the debris level near warm gas is held
-    if (flag == -1 && deb_warm && level <= tde_ref.lev_debris) { flag = 0; }
+    if (flag == -1 && deb_warm && level <= lev_deb) { flag = 0; }
     // and a block at or below the fine level near fine-warm gas
-    if (flag == -1 && fin_warm && level <= tde_ref.lev_debris_fine) { flag = 0; }
+    if (flag == -1 && fin_warm && level <= lev_fin) { flag = 0; }
     refine_flag.h_view(m + mbs) = flag;
   }
 

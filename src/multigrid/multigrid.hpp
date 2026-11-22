@@ -489,6 +489,11 @@ class MultigridDriver {
   // restart_state (outputs/restart_state.hpp): the finest level's u (the next solve's
   // warm start), MG ghosts included, to/from a(m, ns + v, ...) padded to ngh >= its ngh_
   int NumVars() const { return nvar_; }
+  // R-273 item 3: the finest-state save/load may skip a stale block count only while the
+  // owner (CFC) runs with residual_scale f = 0 (no solve, so no ReallocateForAMR since the
+  // last regrid; C-230). With f > 0 a count mismatch means a regrid the multigrid did not
+  // see: FATAL. Set by CFC::SetResidualScale every stage; default false (counts must match).
+  void SetStaleStateAllowed(bool a) { stale_state_ok_ = a; }
   void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
   // zero the finest level's solution (the next solve's initial guess): the regrid
   // re-solve's cold start for solvers without a seed (C-102)
@@ -792,6 +797,7 @@ class MultigridDriver {
   std::vector<Real> root_u_buf_, root_uold_buf_;
   int root_buf_nc_;
   bool root_flat_buf_stale_;
+  bool stale_state_ok_ = false;   // see SetStaleStateAllowed
   void BuildRootFlatBuffers();
   void SyncRootToHost();
   void SyncRootToDevice();

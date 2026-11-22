@@ -3134,6 +3134,14 @@ void CFC::SetResidualScale(Real t, int stage, bool last_stage) {
   const bool was = rs_bg_only_;
   rs_f_ = ResidualScale(t);
   rs_bg_only_ = (rs_f_ == 0.0);
+  // R-273 item 3: the multigrid finest-state save/load may skip a stale block count only
+  // while f = 0 (no solve since the last regrid); with f > 0 a mismatch is FATAL
+  for (MultigridDriver *d : {static_cast<MultigridDriver*>(pmgd_psi),
+                             static_cast<MultigridDriver*>(pmgd_alpha),
+                             static_cast<MultigridDriver*>(pmgd_pietax),
+                             static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+    if (d != nullptr) d->SetStaleStateAllowed(rs_bg_only_);
+  }
   if (global_variable::my_rank != 0) { return; }
   const int cyc = pmy_pack->pmesh->ncycle;
   if (rs_bg_only_ != was) {

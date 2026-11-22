@@ -9,6 +9,8 @@
 // C headers
 
 // C++ headers
+#include <cstdint>
+#include <limits>
 #include <algorithm>
 #include <cmath>
 #include <cstring>    // memset, memcpy
@@ -744,6 +746,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
   const bool have_mb = (pmy_pack_ != nullptr);
   const Real lfac3 = static_cast<Real>((1 << ll) * (1 << ll) * (1 << ll));
   const Real dV_root = dV;
+  const Real inf_ = std::numeric_limits<Real>::infinity();
 
   if (on_host_) {
     auto &def = def_[current_level_].h_view;
@@ -753,7 +756,12 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_max) {
-          local_max = Kokkos::max(local_max, Kokkos::fabs(def(m, v, k, j, i)));
+          // R-273 item 7: a non-finite cell (bit test; fast-math may fold x != x) counts
+          // as +inf, so the max norm cannot drop a NaN; finite cells are unchanged
+          Real a = Kokkos::fabs(def(m, v, k, j, i));
+          if ((Kokkos::bit_cast<std::uint64_t>(a) & 0x7ff0000000000000ULL) ==
+              0x7ff0000000000000ULL) a = inf_;
+          local_max = Kokkos::max(local_max, a);
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {
@@ -826,7 +834,12 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
             {0, n, ks, js, is}, {nmmb_, n+1, ke+1, je+1, ie+1}),
         KOKKOS_LAMBDA(const int m, const int v, const int k, const int j,
                        const int i, Real &local_max) {
-          local_max = Kokkos::max(local_max, Kokkos::fabs(def(m, v, k, j, i)));
+          // R-273 item 7: a non-finite cell (bit test; fast-math may fold x != x) counts
+          // as +inf, so the max norm cannot drop a NaN; finite cells are unchanged
+          Real a = Kokkos::fabs(def(m, v, k, j, i));
+          if ((Kokkos::bit_cast<std::uint64_t>(a) & 0x7ff0000000000000ULL) ==
+              0x7ff0000000000000ULL) a = inf_;
+          local_max = Kokkos::max(local_max, a);
         }, Kokkos::Max<Real>(norm));
       return norm;
     } else if (nrm == MGNormType::l1) {

@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>    // abs
+#include <cstring>    // memcpy (MGNonFinite)
 #include <iomanip>    // setprecision
 #include <iostream>   // endl
 #include <limits>
@@ -817,8 +818,16 @@ void MultigridDriver::ZeroFinestSolution() {
 // array's means there is no current state to save or load: leave the slots as they
 // are (dst/the restart block is zero-initialised; u_ keeps its stale content, which no
 // solve reads until the next Load*/Solve reallocates it). Equal counts: unchanged.
-static bool MGFinestStateStale(int nmmb, int nmb_array, const char *what) {
+static bool MGFinestStateStale(int nmmb, int nmb_array, const char *what, bool allowed) {
   if (nmmb == nmb_array) return false;
+  if (!allowed) {
+    // R-273 item 3: with residual_scale f > 0 every regrid is followed by a solve that
+    // reallocates the multigrid, so a mismatch here is a regrid the multigrid did not see
+    std::cout << "### FATAL ERROR in MultigridDriver::" << what << ": multigrid holds "
+              << nmmb << " MeshBlocks, the array " << nmb_array << ", while residual_scale"
+              << " f > 0 (a regrid the multigrid did not see; R-273)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   static bool told = false;
   if (!told && global_variable::my_rank == 0) {
     std::cout << "MultigridDriver::" << what << ": multigrid holds " << nmmb
@@ -831,7 +840,8 @@ static bool MGFinestStateStale(int nmmb, int nmb_array, const char *what) {
 }
 
 void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
-  if (MGFinestStateStale(mglevels_->nmmb_, dst.extent_int(0), "SaveFinestState")) return;
+  if (MGFinestStateStale(mglevels_->nmmb_, dst.extent_int(0), "SaveFinestState",
+                          stale_state_ok_)) return;
   auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
   const int off = ngh - mglevels_->ngh_;
   par_for("MG::SaveFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,
@@ -842,7 +852,8 @@ void MultigridDriver::SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh) {
 }
 
 void MultigridDriver::LoadFinestState(const DvceArray5D<Real> &src, int ns, int ngh) {
-  if (MGFinestStateStale(mglevels_->nmmb_, src.extent_int(0), "LoadFinestState")) return;
+  if (MGFinestStateStale(mglevels_->nmmb_, src.extent_int(0), "LoadFinestState",
+                          stale_state_ok_)) return;
   auto &u = mglevels_->u_[mglevels_->nlevel_-1].d_view;
   const int off = ngh - mglevels_->ngh_;
   par_for("MG::LoadFinestState", DevExeSpace(), 0, mglevels_->nmmb_-1, 0, nvar_-1,
@@ -900,6 +911,29 @@ void MultigridDriver::SolveMG(Driver *pdriver) {
   return;
 }
 
+// R-273 item 7: a NaN defect must not read as converged. Non-finite tests by bit pattern
+// (the device's fast-math may fold x != x away); max that propagates a non-finite argument
+// (std::max(0, NaN) returns 0). For finite arguments MGMaxNF(a, b) == std::max(a, b).
+static inline bool MGNonFinite(Real x) {
+  std::uint64_t b;
+  static_assert(sizeof(Real) == sizeof(b), "MGNonFinite assumes a 64-bit Real");
+  std::memcpy(&b, &x, sizeof(b));
+  return (b & 0x7ff0000000000000ULL) == 0x7ff0000000000000ULL;
+}
+static inline Real MGMaxNF(Real a, Real b) {
+  if (MGNonFinite(a) || MGNonFinite(b)) return std::numeric_limits<Real>::quiet_NaN();
+  return std::max(a, b);
+}
+// MGLOG field: a finite value streams exactly as before; a non-finite one prints "nan"
+struct MGNF {
+  Real v;
+  explicit MGNF(Real x) : v(x) {}
+};
+static inline std::ostream &operator<<(std::ostream &os, const MGNF &x) {
+  if (MGNonFinite(x.v)) return os << "nan";
+  return os << x.v;
+}
+
 //----------------------------------------------------------------------------------------
 //! \fn Real MultigridDriver::TotalDefectNorm()
 //! \brief Combine the nvar_ per-channel L2 defect norms into one convergence
@@ -918,13 +952,13 @@ Real MultigridDriver::TotalDefectNorm() {
   Real def = 0.0;
   if (norm_mode_ == MGNormScaling::max) {   // cfc a0bd94a4 (R-058); see MGNormScaling
     for (int v = 0; v < nvar_; ++v) {
-      def = std::max(def, CalculateDefectNorm(MGNormType::max, v));
+      def = MGMaxNF(def, CalculateDefectNorm(MGNormType::max, v));
     }
     return def;
   }
   for (int v = 0; v < nvar_; ++v) {
     Real d = CalculateDefectNorm(MGNormType::l2, v);
-    def = (norm_mode_ == MGNormScaling::rms) ? std::max(def, d) : def + d;
+    def = (norm_mode_ == MGNormScaling::rms) ? MGMaxNF(def, d) : def + d;
   }
   return def;
 }
@@ -940,7 +974,7 @@ Real MultigridDriver::TotalSourceNorm() {
   Real f = 0.0;
   for (int v = 0; v < nvar_; ++v) {
     Real d = CalculateSourceNorm(nrm, v);
-    f = (norm_mode_ == MGNormScaling::legacy) ? f + d : std::max(f, d);
+    f = (norm_mode_ == MGNormScaling::legacy) ? f + d : MGMaxNF(f, d);
   }
   return f;
 }
@@ -982,18 +1016,19 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
   norm_mode_ = MGNormScaling::rms;
   Real l2 = 0.0, mx = 0.0, fl2 = 0.0, fmx = 0.0;
   for (int v = 0; v < nvar_; ++v) {
-    l2 = std::max(l2, CalculateDefectNorm(MGNormType::l2, v));
-    mx = std::max(mx, CalculateDefectNorm(MGNormType::max, v));
-    fl2 = std::max(fl2, CalculateSourceNorm(MGNormType::l2, v));
-    fmx = std::max(fmx, CalculateSourceNorm(MGNormType::max, v));
+    l2 = MGMaxNF(l2, CalculateDefectNorm(MGNormType::l2, v));
+    mx = MGMaxNF(mx, CalculateDefectNorm(MGNormType::max, v));
+    fl2 = MGMaxNF(fl2, CalculateSourceNorm(MGNormType::l2, v));
+    fmx = MGMaxNF(fmx, CalculateSourceNorm(MGNormType::max, v));
   }
   norm_mode_ = keep;
   std::ostringstream os;
   os << std::scientific << std::setprecision(4)
      << "MGLOG " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle << " t "
-     << pmy_mesh_->time << " it " << niter << " wall " << wall << " conv0 " << def0
-     << " conv " << def << " ref " << ref << " target " << target << " l2 " << l2
-     << " max " << mx << " src_l2 " << fl2 << " src_max " << fmx;
+     << pmy_mesh_->time << " it " << niter << " wall " << wall << " conv0 " << MGNF(def0)
+     << " conv " << MGNF(def) << " ref " << MGNF(ref) << " target " << target << " l2 "
+     << MGNF(l2) << " max " << MGNF(mx) << " src_l2 " << MGNF(fl2) << " src_max "
+     << MGNF(fmx) << (MGNonFinite(def) ? " FAILED" : "");
   if (mg_log_ >= 2 && mglevels_ != nullptr) {
     // position of max |defect|: host copy of the finest per-block defect (just computed
     // by the CalculateDefectNorm calls above), then a MAXLOC over ranks
@@ -1091,6 +1126,9 @@ void MultigridDriver::SolveFMGCoarser() {
 void MultigridDriver::SolveIterative(Driver *pdriver) {
   Real def = TotalDefectNorm();
   MGChk("start", def);
+  // R-273 item 7: a non-finite defect is a failed solve (a NaN compares false against the
+  // target and would otherwise end the loop as "converged")
+  bool nonfinite = MGNonFinite(def);
   // rtol_ > 0.0: also accept a relative reduction from the initial defect, on
   // top of the absolute floor eps_ (max(), so eps_ still bounds how loose a
   // "converged" solve may be; rtol_ <= 0.0 reproduces the original eps_-only
@@ -1119,12 +1157,13 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   // start would skip, and cannot override a stall exit (eps_ == 0) or the cap.
   int n = 0, nstall = 0, ncyc = 0;   // ncyc: V-cycles run, incl. one ended by a stall
   Real best = std::numeric_limits<Real>::max();
-  while (def > target || n < min_vcycles_) {
+  while (!nonfinite && (def > target || n < min_vcycles_)) {
     SolveVCycle(pdriver, npresmooth_, npostsmooth_);
     ++ncyc;
     Real olddef = def;
     def = TotalDefectNorm();
     MGChk("vcycle", def);
+    if (MGNonFinite(def)) { nonfinite = true; break; }
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
@@ -1164,6 +1203,15 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       pdriver->nlim = pmy_mesh_->ncycle;
       break;
     }
+  }
+  if (nonfinite) {
+    if (global_variable::my_rank == 0) {
+      std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
+                << "Defect norm is not finite (nan) after " << ncyc << " V-cycles "
+                << "(initial defect " << (MGNonFinite(def0) ? std::string("nan") :
+                                          std::to_string(def0)) << ")" << std::endl;
+    }
+    pdriver->nlim = pmy_mesh_->ncycle;   // a failed solve, as the 40-cycle cap
   }
   last_nvcycle_ = n;
   last_def_ = def;
@@ -1255,7 +1303,7 @@ Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
   if (mglevels_ != nullptr) {
     Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n);
     if (nrm == MGNormType::max) {
-      norm = Kokkos::max(norm, mg_norm);
+      norm = MGMaxNF(norm, mg_norm);
     } else {
       norm += mg_norm;
     }

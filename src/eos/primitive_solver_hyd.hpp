@@ -393,6 +393,81 @@ class PrimitiveSolverHydro {
   Real zone_cum[2*kZoneLen] = {};   // cumulative since (re)start, all ranks
   int zone_bins_every = 50;         // <mhd> atmosphere_zone_bins_every: cycles per bins line
 
+  // <mhd> atm_ceiling (default false, read only if present, so a deck without the key keeps
+  // its parameter text; research R-270, user-approved 2026-11-21): every C2P call (not the
+  // FOFC probe), a non-excised cell not reset by the zone whose post-C2P density lies in the
+  // ABSOLUTE band rho < atm_ceiling_factor x dfloor (default 100; no temperature condition)
+  // is reset to a cold atmosphere at grid rest: v = beta'/alpha capped at atm_ceiling_vmax
+  // along beta' (ZoneGridRest, the zone's convention), rho = D/W (the stored D and the
+  // scalar densities D Y are kept bitwise, so no mass is changed), P = max(P(rho, tfloor),
+  // atm_ceiling_K rho^Gamma). The D-ent tracer is then set from this state by D-ent's
+  // non-dense branch (the band is far below dual_energy_rho_switch). Cell-local: inputs are
+  // the cell's own stored state and metric, as in a ghost and its owner. Booking (interior
+  // cells; ceil_acc, drained per RK stage with the stage weights, as DrainZone): the
+  // momentum and tau + D changed, the mass changed (0 by construction), the reset cells'
+  // count and mass, their max rho; plus the alarm census: the mass in [1, 10), [10, 100),
+  // [100, 1000) x the threshold (cells NOT reset). One ATMCEIL line per cycle;
+  // ATMCEIL_ALARM when the near-band mass exceeds atm_ceiling_alarm_mass.
+  bool ceil_on = false;
+  Real ceil_f = 100.0, ceil_K = 0.0, ceil_vmax = 0.9, ceil_gam = 5.0/3.0;
+  Real ceil_alarm = 1.0e-15;
+  static constexpr int kCeilN = 0, kCeilSx = 1, kCeilEn = 4, kCeilM = 5, kCeilMb = 6;
+  static constexpr int kCeilRmax = 7, kCeilNear = 8, kCeilNnear = 11, kCeilLen = 12;
+  DvceArray1D<Real> ceil_acc;
+  Real ceil_stage[4][kCeilLen];
+  Real ceil_cum[kCeilLen] = {};
+
+  //! Drain this C2P call's ceiling tallies (see ceil_on) into the stage slot; on the last
+  //! stage combine dS, d(tau + D), dM with the propagation weights (as DrainZone), take the
+  //! counts and the census from the last stage and the max over the stages, reduce over
+  //! ranks and print one ATMCEIL line (rank 0).
+  void DrainCeil(int stage, int ns, const Real *gam0, Real time, int cycle) {
+    if (!ceil_on) return;
+    if (stage < 1 || stage > ns || ns > 4) {
+      Kokkos::deep_copy(ceil_acc, 0.0);
+      return;
+    }
+    auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), ceil_acc);
+    for (int n = 0; n < kCeilLen; ++n) ceil_stage[stage-1][n] = h(n);
+    Kokkos::deep_copy(ceil_acc, 0.0);
+    if (stage != ns) return;
+    Real w[4];
+    w[ns-1] = 1.0;
+    for (int q = ns-2; q >= 0; --q) w[q] = gam0[q+1]*w[q+1];
+    Real sum[kCeilLen], mx = 0.0;
+    for (int n = 0; n < kCeilLen; ++n) sum[n] = 0.0;
+    for (int q = 0; q < ns; ++q) {
+      for (int n = kCeilSx; n <= kCeilM; ++n) sum[n] += w[q]*ceil_stage[q][n];
+      mx = fmax(mx, ceil_stage[q][kCeilRmax]);
+    }
+    for (int n : {kCeilN, kCeilMb, kCeilNear, kCeilNear + 1, kCeilNear + 2, kCeilNnear}) {
+      sum[n] = ceil_stage[ns-1][n];
+    }
+#if MPI_PARALLEL_ENABLED
+    MPI_Allreduce(MPI_IN_PLACE, sum, kCeilLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+    for (int n = kCeilSx; n <= kCeilM; ++n) ceil_cum[n] += sum[n];
+    if (global_variable::my_rank == 0) {
+      const Real near = sum[kCeilNear] + sum[kCeilNear + 1] + sum[kCeilNear + 2];
+      std::cout << std::setprecision(6) << "ATMCEIL cycle=" << cycle << " time=" << time
+                << " n=" << sum[kCeilN] << " M_reset=" << sum[kCeilMb]
+                << " max_rho_reset=" << mx << " dM=" << sum[kCeilM] << " dS=("
+                << sum[kCeilSx] << "," << sum[kCeilSx+1] << "," << sum[kCeilSx+2]
+                << ") dE=" << sum[kCeilEn] << " near=(" << sum[kCeilNear] << ","
+                << sum[kCeilNear+1] << "," << sum[kCeilNear+2] << ") n_near="
+                << sum[kCeilNnear] << " cum_dM=" << ceil_cum[kCeilM] << " cum_dS=("
+                << ceil_cum[kCeilSx] << "," << ceil_cum[kCeilSx+1] << ","
+                << ceil_cum[kCeilSx+2] << ") cum_dE=" << ceil_cum[kCeilEn] << std::endl;
+      if (near > ceil_alarm) {
+        std::cout << "ATMCEIL_ALARM cycle=" << cycle << " time=" << time
+                  << " near-band mass " << near << " > atm_ceiling_alarm_mass "
+                  << ceil_alarm << " (gas within 1e3 of the threshold: lower dfloor for "
+                  << "this run, never widen the band)" << std::endl;
+      }
+    }
+  }
+
   //! Drain this C2P call's zone tallies into the stage slot; on the last stage combine the
   //! stages with their propagation weights w_s = prod_{j>s} gam0_j (as
   //! CFC::AccreteExcisedMass), reduce over ranks and print one ATMZONE line (rank 0) and,
@@ -1466,6 +1541,36 @@ class PrimitiveSolverHydro {
                 << " (a density-independent enthalpy at the floor temperature)" << std::endl;
       std::exit(EXIT_FAILURE);
     }
+    // <mhd> atm_ceiling (see ceil_on): keys read only when atm_ceiling is present
+    ceil_on = pin->DoesParameterExist(block, "atm_ceiling") &&
+              pin->GetBoolean(block, "atm_ceiling");
+    if (ceil_on) {
+      if (!std::is_same_v<Primitive::IdealGas, EOSPolicy>) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> atm_ceiling needs the ideal-gas EOS"
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      ceil_f = pin->GetOrAddReal(block, "atm_ceiling_factor", 100.0);
+      ceil_K = pin->GetOrAddReal(block, "atm_ceiling_K", 0.0);
+      ceil_vmax = pin->GetOrAddReal(block, "atm_ceiling_vmax", 0.9);
+      ceil_alarm = pin->GetOrAddReal(block, "atm_ceiling_alarm_mass", 1.0e-15);
+      ceil_gam = pin->GetReal(block, "gamma");
+      if (!(ceil_f >= 1.0) || ceil_K < 0.0 || !(ceil_vmax > 0.0 && ceil_vmax < 1.0)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<" << block << "> atm_ceiling needs factor >= 1, K >= 0"
+                  << " and 0 < vmax < 1" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      Kokkos::realloc(ceil_acc, kCeilLen);
+      Kokkos::deep_copy(ceil_acc, 0.0);
+      if (global_variable::my_rank == 0) {
+        std::cout << "<" << block << "> atm_ceiling: rho < " << ceil_f << " x dfloor = "
+                  << ceil_f*pin->GetReal(block, "dfloor") << " -> grid rest (vmax "
+                  << ceil_vmax << "), rho = D/W, P = max(P(rho, tfloor), " << ceil_K
+                  << " rho^" << ceil_gam << "); alarm mass " << ceil_alarm << std::endl;
+      }
+    }
     zone_on = pin->GetOrAddBoolean(block, "atmosphere_zone", false);
     zone_book = zone_on || pin->GetOrAddBoolean(block, "atmosphere_zone_book", false);
     ml_on = pin->GetOrAddBoolean(block, "mass_ledger", false);
@@ -2330,6 +2435,11 @@ class PrimitiveSolverHydro {
     const Real ctf_ = eos_.GetTemperatureFloor();
     const Real cnatm_ = eos_.GetDensityFloor(), cnthr_ = eos_.GetThreshold();
     const Real cwmax_ = eos_.GetMaxLorentzFactor();
+    // atmosphere ceiling (see ceil_on): the band in the solver's density units (dfloor/mb)
+    const bool ceil_ = ceil_on && !floors_only;
+    const Real cthr_ = ceil_f*eos_.GetDensityFloor();
+    const Real cK_ = ceil_K, cvmax_ = ceil_vmax, cgam_ = ceil_gam;
+    auto &cacc_ = ceil_acc;
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
@@ -2558,6 +2668,8 @@ class PrimitiveSolverHydro {
           }
         }
         bool de_write = false;
+        bool ceil_d = false;   // atm_ceiling reset this cell with D untouched by the C2P
+        Real ceil_d0 = 0.0;    // ... and this is its stored (densitized) D, restored bitwise
         // ---- cold recovery (see crec_on): a good inversion with T < tfloor, rho not floored
         bool crec = false;
         if (crec_ && !(excise && !smoothing && excision_floor_(m,k,j,i))) {
@@ -2659,6 +2771,55 @@ class PrimitiveSolverHydro {
               if (rho0 >= ((zmode == 1) ? zthr_ : t3rho_))
                 Kokkos::atomic_add(&zacc_(zb + kZoneViol), 1.0);
             }
+          }
+        }
+
+        // ---- atmosphere ceiling (see ceil_on): after the zone, before D-ent
+        if (ceil_ && !zml && !(excise && !smoothing && excision_floor_(m,k,j,i))) {
+          const bool interior = (i >= is && i <= ie_ && j >= js && j <= je_ &&
+                                 k >= ks && k <= ke_);
+          const Real n0 = prim_pt[PRH];
+          const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3*sdetg;
+          if (n0 < cthr_) {
+            crec = false;   // the ceiling resets the cell (and books it) instead
+            Real cpre[NCONS];
+            for (int n = 0; n < NCONS; ++n) cpre[n] = cons_pt[n];
+            const Real al = adm.alpha(m, k, j, i);
+            const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
+                                adm.beta_u(m, 2, k, j, i)};
+            ZoneGridRest(prim_pt, bu, al, g3d, cvmax_);
+            const Real uu[3] = {prim_pt[PVX], prim_pt[PVY], prim_pt[PVZ]};
+            Real ud[3];
+            Primitive::LowerVector(ud, uu, g3d);
+            const Real Wc = sqrt(1.0 + Primitive::Contract(uu, ud));
+            prim_pt[PRH] = cpre[CDN]/(mb*Wc);
+            Real Pc = eos_.GetPressure(prim_pt[PRH], eos_.GetTemperatureFloor(),
+                                       &prim_pt[PYF]);
+            if (cK_ > 0.0) Pc = fmax(Pc, cK_*pow(prim_pt[PRH]*mb, cgam_));
+            prim_pt[PPR] = Pc;
+            prim_pt[PTM] = eos_.GetTemperatureFromP(prim_pt[PRH], Pc, &prim_pt[PYF]);
+            ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
+            cons_pt[CDN] = cpre[CDN];   // the stored mass and scalar densities stay bitwise
+            for (int n = 0; n < nscal; n++) cons_pt[CYD + n] = cpre[CYD + n];
+            de_write = true;
+            ceil_d = !result.cons_floor && !result.cons_adjusted;
+            ceil_d0 = cons(m, IDN, k, j, i);
+            if (interior) {
+              Kokkos::atomic_add(&cacc_(kCeilN), 1.0);
+              Kokkos::atomic_add(&cacc_(kCeilSx), (cpre[CSX] - cons_pt[CSX])*dv);
+              Kokkos::atomic_add(&cacc_(kCeilSx + 1), (cpre[CSY] - cons_pt[CSY])*dv);
+              Kokkos::atomic_add(&cacc_(kCeilSx + 2), (cpre[CSZ] - cons_pt[CSZ])*dv);
+              Kokkos::atomic_add(&cacc_(kCeilEn), (cpre[CTA] + cpre[CDN] - cons_pt[CTA]
+                                                   - cons_pt[CDN])*dv);
+              Kokkos::atomic_add(&cacc_(kCeilM), (cpre[CDN] - cons_pt[CDN])*dv);
+              Kokkos::atomic_add(&cacc_(kCeilMb), cpre[CDN]*dv);
+              Kokkos::atomic_max(&cacc_(kCeilRmax), n0*mb);
+            }
+          } else if (interior && n0 < 1.0e3*cthr_) {
+            // the alarm census: gas within 1e3 of the threshold, not reset
+            const int b = (n0 >= 10.0*cthr_) + (n0 >= 100.0*cthr_);
+            Kokkos::atomic_add(&cacc_(kCeilNear + b), cons_pt[CDN]*dv);
+            Kokkos::atomic_add(&cacc_(kCeilNnear), 1.0);
           }
         }
 
@@ -2993,6 +3154,9 @@ class PrimitiveSolverHydro {
           // conditioning's resync: the tracer slot only (D, S, tau bitwise unchanged)
           cons(m, nhyd + de_idx_, k, j, i) = cons_pt[CYD + de_idx_]*sdetg;
         }
+        // atm_ceiling: the stored D as it was (the write-back's D/sqrt(g)*sqrt(g) may differ
+        // in the last bit), so the reset changes no rest mass at all
+        if (ceil_d) cons(m, IDN, k, j, i) = ceil_d0;
         if (crec_ && cint) {
           // BH-frame Killing energy of the final state (as the zone's ekill): bound if < 0
           const Real uu[3] = {prim_pt[PVX], prim_pt[PVY], prim_pt[PVZ]};

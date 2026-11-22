@@ -309,6 +309,7 @@ class CFC {
 
   // InitializeMetric()'s X^i/psi fixed-point-iteration controls.
   int cfc_init_iter_max_;
+  int cfc_init_mg_max_vcycles_;   // <cfc> init_mg_max_vcycles (R-275 item 6; default 40)
   Real cfc_init_tol_;
   bool cfc_init_verbose_;
   // Under-relaxation for InitializeMetric()'s outer Picard loop (1.0 = none).
@@ -522,6 +523,7 @@ class CFC {
   // Driver::InitBoundaryValuesAndPrimitives() at the end so ghost cells stay
   // consistent with the newly-solved metric.
   void InitializeMetric(Driver *pdriver);
+  void SetInitSolves(bool on);   // R-275 item 6
 
   // Regrid counterpart to InitializeMetric(), called once per regrid event from
   // Driver::InitBoundaryValuesAndPrimitives (is_amr_regrid-gated), mirroring

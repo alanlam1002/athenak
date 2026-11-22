@@ -1244,7 +1244,8 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
   //   iterate while (def > target || n < min_vcycles_), where target = max(eps_, rtol_*ref);
   //   inside, after each V-cycle, a stall (legacy/rms: def/olddef > 0.9; max: mg_stall_cycles_
   //   cycles in a row without cutting the best defect by 10%) exits only when eps_ == 0
-  //   ("iterate until stalling"), and otherwise warns; the 40-cycle cap is fatal.
+  //   ("iterate until stalling"), and otherwise warns; the 40-cycle cap is fatal
+  //   (R-275 item 6: inside CFC::InitializeMetric the cap is max_vcycles_ and only warns).
   // mg_min_vcycles therefore acts at the loop head only: it forces cycles a converged warm
   // start would skip, and cannot override a stall exit (eps_ == 0) or the cap.
   int n = 0, nstall = 0, ncyc = 0;   // ncyc: V-cycles run, incl. one ended by a stall
@@ -1284,7 +1285,20 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
       }
     }
     ++n;
-    if (n >= 40) {
+    if (n >= max_vcycles_) {
+      if (init_solve_) {
+        // R-275 item 6: an initialisation solve at its cap is not a failure of the run
+        // (Driver::Initialize restores nlim around CFC::InitializeMetric, driver.cpp:384-386,
+        // so the run always continued); say so instead of printing a FATAL
+        if (global_variable::my_rank == 0) {
+          std::cout << "### WARNING in MultigridDriver::SolveIterative (" << mg_log_name_
+                    << "): initialisation solve reached " << n << " cycles (defect " << def
+                    << ", threshold " << eps_;
+          if (rtol_ > 0.0) std::cout << ", effective target " << target;
+          std::cout << ")" << std::endl;
+        }
+        break;
+      }
       if (global_variable::my_rank == 0) {
         std::cout << "### FATAL ERROR in MultigridDriver::SolveIterative" << std::endl
                   << "Failed to converge after " << n << " iterations (defect = "
@@ -1304,6 +1318,10 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
                                           std::to_string(def0)) << ")" << std::endl;
     }
     pdriver->nlim = pmy_mesh_->ncycle;   // a failed solve, as the 40-cycle cap
+    // R-275 item 6: at initialisation the nlim stop above is undone (driver.cpp:384-386);
+    // a non-finite metric solve there is a real failure, so stop. The defect norm is a
+    // global reduction, so every rank takes this branch.
+    if (init_solve_) { std::exit(EXIT_FAILURE); }
   }
   last_nvcycle_ = n;
   last_def_ = def;

@@ -1,8 +1,8 @@
-# PRODUCTION BINARY (user 2026-11-22, R-271 addendum): GPU, proj/tde 925698c2 (= 91e2d361's merge + cfc_opt A/R + K-020 guard,
-#   plus <mhd> atm_ceiling), home_builds/athenak_tde/athena_tde_prod_gpu_925698c2 (sha256 769ee982; copy of
-#   build_gpu_pe2626_ptde_ceil/src/athena). With the ceiling keys absent it is bitwise with the previous production binary
-#   ed74767a on GPU (c283 GX0 vs c281 G0, C-253). The atm_ceiling keys below NEED proj/tde >= 925698c2: an older binary
-#   ignores them silently (no ceiling).
+# PRODUCTION BINARY (user 2026-11-22, "merge wip/r273 into proj/tde and rebuild the production binary"): GPU, proj/tde
+#   49890a15 (= 925698c2 + R-273 items 3, 7b, 9, 4 + the restart-header fix), home_builds/athenak_tde/
+#   athena_tde_prod_gpu_49890a15 (sha256 c28a1887; copy of build_gpu_pe2626_ptde_prod49/src/athena). On this deck it is
+#   bitwise with the previous production binary 925698c2 (769ee982) on GPU: c290 job 9117881, 40 cycles, 2 hst + 45 dumps,
+#   0 differ, MGLOG identical. The atm_ceiling keys below NEED proj/tde >= 925698c2: an older binary ignores them silently.
 # proj/tde production deck rp18 (P18): c134_pilots/P18_r82/parfile.par + the R-223 production settings (C-187)
 # D2 (R-140 item 2, user-approved 2026-10-26): the +-64 vs +-128 box check. P128 = c110_2x2/CD.par (rp10, comoving,
 # production DE, L4-equivalent, base8 6ea832af, GPU IPC off) with the box doubled to +-128: root nx unchanged (128),

@@ -336,7 +336,8 @@ class Multigrid {
   void ComputeCorrection();
   void CalculateMatrixPack(Real dt);
   void SetFromRootGrid(bool folddata);
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  // compute_defect = false reuses def_ from the previous call (cfc_opt item D)
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -489,6 +490,11 @@ class MultigridDriver {
   // restart_state (outputs/restart_state.hpp): the finest level's u (the next solve's
   // warm start), MG ghosts included, to/from a(m, ns + v, ...) padded to ngh >= its ngh_
   int NumVars() const { return nvar_; }
+  // R-273 item 3: the finest-state save/load may skip a stale block count only while the
+  // owner (CFC) runs with residual_scale f = 0 (no solve, so no ReallocateForAMR since the
+  // last regrid; C-230). With f > 0 a count mismatch means a regrid the multigrid did not
+  // see: FATAL. Set by CFC::SetResidualScale every stage; default false (counts must match).
+  void SetStaleStateAllowed(bool a) { stale_state_ok_ = a; }
   void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
   // zero the finest level's solution (the next solve's initial guess): the regrid
   // re-solve's cold start for solvers without a seed (C-102)
@@ -646,7 +652,8 @@ class MultigridDriver {
   void DoTaskListOneStage();
 
   virtual void SolveCoarsestGrid();
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  // compute_defect = false reuses def_ from the previous call (cfc_opt item D); default as before
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   Real CalculateSourceNorm(MGNormType nrm, int n);
   void CalculateMatrix(Real dt);
   // Reads <block>/mg_rtol_ref, mg_log and mg_stall_cycles (R-058); defaults keep today's
@@ -792,6 +799,19 @@ class MultigridDriver {
   std::vector<Real> root_u_buf_, root_uold_buf_;
   int root_buf_nc_;
   bool root_flat_buf_stale_;
+  bool stale_state_ok_ = false;   // see SetStaleStateAllowed
+  // cfc_opt item D (cfc 1203e091, ported to proj/tde without cfc's mgprof hooks): the zero-guess
+  // source norms ||F(u=0)|| of every channel, computed once per solve by ComputeSourceNorms (one
+  // save/zero/defect/restore of u) and read by TotalSourceNorm and LogSolve, which formerly redid
+  // that evaluation per channel and per norm. Valid only inside one SolveIterative call (cleared
+  // at its start; both consumers run only there). src_l2mode_ is filled only when norm_mode_ is
+  // neither max nor rms (TotalSourceNorm, legacy).
+  bool src_norms_valid_ = false;
+  std::vector<Real> src_max_, src_l2rms_, src_l2mode_;
+  void ComputeSourceNorms();
+  // ATHENAK_MG_SRCNORM_CHECK=1 (environment, read once; off by default): also run the former
+  // per-call path and require every value to be == (MGSRCNORM ... OK lines, or FATAL).
+  int srcnorm_check_ = -1;
   void BuildRootFlatBuffers();
   void SyncRootToHost();
   void SyncRootToDevice();

@@ -216,6 +216,7 @@ void ParameterInput::LoadFromFile(IOWrapper &input, bool single_file_per_rank) {
   constexpr int kBufSize = 4096;
   char buf[kBufSize];
   IOWrapperSizeT header = 0, ret, loc;
+  std::string tail;   // the last 8 bytes read (see the <par_end> search)
 
   // search for <par_end> (reading from restart files) or EOF (reading from input file).
   do {
@@ -234,17 +235,22 @@ void ParameterInput::LoadFromFile(IOWrapper &input, bool single_file_per_rank) {
 #endif
     par.write(buf, ret); // add the buffer into the stream
     header += ret;
-    std::string sbuf = par.str(); // create string for search
-    loc = sbuf.find("<par_end>", 0); // search from the top of the stream
-    if (loc != std::string::npos) { // found <par_end>
+    // search the new chunk plus the previous chunk's last 8 bytes (a tag split across
+    // chunks); the former copy-and-search of the whole stream per 4 KB chunk was quadratic
+    // in the header length. loc is the tag's offset in the whole stream, as before.
+    const std::string chunk = tail + std::string(buf, ret);
+    const std::size_t at = chunk.find("<par_end>");
+    if (at != std::string::npos) { // found <par_end>
+      loc = (header - ret - tail.size()) + at;
       header = loc + 10; // store the header length
       break;
     }
-    // 1 MB (was 40 KB): restarts carry run-time state in the parameter copy (MCLOSE's
-    // cumulative items, with <mhd> mass_closure_full ~200 keys; R-115)
-    if (header > kBufSize*256) {
+    tail = chunk.substr(chunk.size() > 8 ? chunk.size() - 8 : 0);
+    // 64 MB (was 1 MB, 40 KB before that): restarts carry run-time state in the parameter copy
+    // (MCLOSE's cumulative items, R-115; C-233's MeshBlock residence list, ~20 B per block)
+    if (header > kBufSize*16384) {
       std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
-                << std::endl << "<par_end> is not found in the first 1 MByte."
+                << std::endl << "<par_end> is not found in the first 64 MByte."
                 << std::endl << "Probably the file is broken or the wrong file is "
                 << "specified" << std::endl;
       std::exit(EXIT_FAILURE);
@@ -781,8 +787,14 @@ void ParameterInput::ParameterDump(std::ostream& os) {
 
       len = itb->max_len_parname - param_name.length() + 1;
       param_name.append(len,' ');                         // pad name  to align vertically
-      len = itb->max_len_parvalue - param_value.length() + 1;
-      param_value.append(len,' ');                        // pad value to align vertically
+      // pad value to align vertically, but never to a width above kPadCap: one long value
+      // (C-233's <problem> amr_residence_state, ~20 B per listed MeshBlock) padded every line
+      // of its block to its own length, a 34 MB header for 27k blocks (c286c). Values up to
+      // kPadCap align exactly as before; longer ones get one space. Only the text layout.
+      constexpr std::size_t kPadCap = 256;
+      const std::size_t w = std::min(itb->max_len_parvalue, kPadCap);
+      len = (param_value.length() < w) ? w - param_value.length() + 1 : 1;
+      param_value.append(len,' ');
 
       os<< param_name << "= " << param_value << itl->param_comment <<  std::endl;
     }

@@ -23,20 +23,41 @@
 // Hysteresis: want_ref uses the thresholds above, want_deref relaxed ones (densities times
 // amr_deref_factor < 1, N_H and N_J divided by it, so want_deref >= want_ref). Flag +1 if level <
 // want_ref; -1 if level > want_deref AND the block has sat at its level for >=
-// amr_min_residence cycles (tracked per rank by logical location; a block that migrated
-// ranks restarts its count, which only delays a de-refinement); else 0.
+// amr_min_residence cycles; else 0. Residence (C-233): the first check cycle at which each
+// (lx1, lx2, lx3, level) existed, kept for EVERY block of the mesh on every rank (each rank
+// replays the same global block list, so the map is identical on all ranks and a block that
+// migrates ranks keeps its count; before C-233 it was per rank and migration restarted it),
+// and saved in the restart (<problem> amr_residence_state, TDEDebrisSaveResidence): a
+// restart continues the counts, so its flags are the continuous run's. A restart without the
+// key (older files), or whose block list differs from the one saved (an R1 embed), starts
+// every count at its first check, as before.
 // Cells at/below rho_F never request refinement (this replaces tde_track's rho_max
 // corruption guard); non-finite cells are skipped, with a one-time warning.
+// Binding-aware policy (R-257 item 3(ii), user-approved 2026-11-12; <problem> amr_bind_policy,
+// default false = bitwise the criterion above). Per cell with rho > rho_F (scaled as above
+// for de-refinement), the Killing energy E = alpha W - (beta'^i - xidot^i) u_i - 1 (BH frame;
+// beta' the stored shift, which carries xidot = padm->frame_vel_u; u_i = gamma_ij u~^j, u~ the
+// primitive velocity; tde_dmde.cells' definition) and r = |x - x_BH(t)| replace the ladder,
+// width and Jeans wants of that cell:
+//   unbound, E > amr_bind_eunb, and r > amr_bind_r_unb: amr_bind_lev_unb1 for r < amr_bind_r_unb2,
+//     else amr_bind_lev_unb2 (no width rule); unbound with r <= amr_bind_r_unb: unchanged;
+//   bound, r < amr_bind_r_zone: amr_level_stream;
+//   bound, r >= amr_bind_r_zone: max(width rule with N = amr_bind_width_cells capped at
+//     amr_level_stream, amr_bind_lev_min).
+// The core criterion (block max rho > rho_A) and the BH box are unchanged.
 // amr_dryrun = true: the mesh follows tde_track, and tde_debris only computes and logs
 // what it would request (sizing on real runs). Diagnostics every amr_diag_ncycle cycles.
 //========================================================================================
 
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
 #include <map>
 #include <sstream>
+#include <string>
 #include <vector>
 
 namespace {
@@ -53,12 +74,97 @@ struct TDEDebrisParams {
   bool dryrun;
   int diag_ncycle;
   Real gamma;                 // ideal-gas Gamma for the Jeans length
+  bool bind;                  // amr_bind_policy (R-257 item 3(ii))
+  Real bind_eunb, bind_r_unb, bind_r_unb2, bind_r_zone, bind_width_cells;
+  int bind_lev_unb1, bind_lev_unb2, bind_lev_min;
 };
 TDEDebrisParams tde_deb;
+
+// residence (C-233): key (lx1, lx2, lx3, level) -> the first check cycle it existed
+std::map<std::array<int, 4>, int> tde_deb_first_seen;
+// a restart's saved residence, applied at the first check (the mesh is complete then)
+std::string tde_deb_rst_state;
+
+// order-dependent hash of the mesh's block list (gid order), to match a saved state to its mesh
+uint64_t TDEDebrisTreeHash(const Mesh *pm) {
+  uint64_t h = 1469598103934665603ULL;   // FNV-1a over the 4 ints of each block
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const int v[4] = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    for (int q = 0; q < 4; ++q) {
+      uint64_t x = static_cast<uint32_t>(v[q]);
+      for (int b = 0; b < 4; ++b) { h ^= (x >> (8*b)) & 0xffULL; h *= 1099511628211ULL; }
+    }
+  }
+  return h;
+}
+
+// apply a staged restart state to tde_deb_first_seen (first check after the restart)
+void TDEDebrisApplyResidence(const Mesh *pm) {
+  std::stringstream ss(tde_deb_rst_state);
+  tde_deb_rst_state.clear();
+  std::string tok;
+  long ncyc = -1, nmb = -1, minres = -1;
+  unsigned long long hash = 0;
+  std::getline(ss, tok, ';');
+  if (std::sscanf(tok.c_str(), "v1 %ld %ld %ld %llx", &ncyc, &nmb, &minres, &hash) != 4) {
+    if (global_variable::my_rank == 0)
+      std::cout << "### WARNING tde_debris: amr_residence_state unreadable; every residence "
+                << "starts now (not bitwise continuous)" << std::endl;
+    return;
+  }
+  if (nmb != pm->nmb_total || hash != TDEDebrisTreeHash(pm)) {
+    if (global_variable::my_rank == 0)
+      std::cout << "tde_debris: amr_residence_state was saved for another block list (" << nmb
+                << " blocks vs " << pm->nmb_total << "; an R1 embed?): every residence "
+                << "starts now" << std::endl;
+    return;
+  }
+  // listed: young blocks (c0) and blocks created by the last regrid (c0 = -1: not yet seen);
+  // unlisted: resident >= minres cycles at the save
+  std::map<std::array<int, 4>, int> listed;
+  while (std::getline(ss, tok, ';')) {
+    int k[5];
+    if (std::sscanf(tok.c_str(), "%d,%d,%d,%d,%d", &k[0], &k[1], &k[2], &k[3], &k[4]) == 5)
+      listed[{k[0], k[1], k[2], k[3]}] = k[4];
+  }
+  tde_deb_first_seen.clear();
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    auto it = listed.find(key);
+    if (it == listed.end()) {
+      tde_deb_first_seen[key] = static_cast<int>(ncyc - minres);
+    } else if (it->second >= 0) {
+      tde_deb_first_seen[key] = it->second;
+    }
+  }
+  if (global_variable::my_rank == 0)
+    std::cout << "tde_debris: residence restored for " << pm->nmb_total << " blocks ("
+              << listed.size() << " listed) from cycle " << ncyc << std::endl;
+}
 
 // criterion ids for the diagnostics (want_ref attribution, ties in this order)
 enum TDEDebCrit {kDebCore = 0, kDebLadder = 1, kDebWidth = 2, kDebJeans = 3, kDebBH = 4,
                  kDebNone = 5, kDebNCrit = 6};
+
+// the BH-frame Killing energy per unit rest mass, E = -u_t - 1 = alpha W - (beta'^i - xidot^i)
+// u_i - 1 (tde_dmde.cells; the stored shift beta' carries xidot = padm->frame_vel_u)
+template <typename AdmT, typename WT>
+KOKKOS_INLINE_FUNCTION
+Real TDEBindEnergy(const AdmT &adm, const WT &w0_, const int m, const int k, const int j,
+                   const int i, const Real f0, const Real f1, const Real f2) {
+  const Real ux = w0_(m,IVX,k,j,i), uy = w0_(m,IVY,k,j,i), uz = w0_(m,IVZ,k,j,i);
+  const Real gxx = adm.g_dd(m,0,0,k,j,i), gxy = adm.g_dd(m,0,1,k,j,i);
+  const Real gxz = adm.g_dd(m,0,2,k,j,i), gyy = adm.g_dd(m,1,1,k,j,i);
+  const Real gyz = adm.g_dd(m,1,2,k,j,i), gzz = adm.g_dd(m,2,2,k,j,i);
+  const Real lx = gxx*ux + gxy*uy + gxz*uz;
+  const Real ly = gxy*ux + gyy*uy + gyz*uz;
+  const Real lz = gxz*ux + gyz*uy + gzz*uz;
+  const Real w = sqrt(1.0 + lx*ux + ly*uy + lz*uz);
+  return adm.alpha(m,k,j,i)*w - ((adm.beta_u(m,0,k,j,i) - f0)*lx
+         + (adm.beta_u(m,1,k,j,i) - f1)*ly + (adm.beta_u(m,2,k,j,i) - f2)*lz) - 1.0;
+}
 
 // per-cell target levels (-1: none) for one set of thresholds (scale s = 1 refine,
 // s = amr_deref_factor de-refine). gate = all 6 face neighbours above rho_F.
@@ -90,8 +196,34 @@ void TDEDebrisCellWant(const Real rho, const Real prs, const Real grad, const bo
 }
 
 // per-block reductions: [0] max rho, then {ladder, width, jeans} want for refine (1..3)
-// and de-refine (4..6), [7] number of non-finite cells
+// and de-refine (4..6), [7] number of non-finite cells; with amr_bind_policy also
+// [8..10] the refine pass's cell counts: unbound coarsened, bound in the zone, bound beyond
 constexpr int kDebNRed = 8;
+constexpr int kDebNRedBind = 11;
+
+// the binding-aware policy's level for one cell (-1: not a policy cell, keep the
+// ladder/width/Jeans wants). sc = 1 refine, amr_deref_factor de-refine (N/sc as above).
+KOKKOS_INLINE_FUNCTION
+int TDEBindCellWant(const Real e, const Real r, const Real rho, const Real grad,
+                    const bool gate, const Real nb, const Real dx_root, const int lstream,
+                    const Real eunb, const Real r_unb, const Real r_unb2, const Real r_zone,
+                    const int lu1, const int lu2, const int lmin, int &cls) {
+  cls = -1;
+  if (e > eunb) {
+    if (!(r > r_unb)) return -1;
+    cls = 0;
+    return (r < r_unb2) ? lu1 : lu2;
+  }
+  if (r < r_zone) { cls = 1; return lstream; }
+  cls = 2;
+  int l = lmin;
+  if (nb > 0.0 && gate && grad > 0.0) {
+    int lw = static_cast<int>(ceil(log2(nb*dx_root*grad/rho)));
+    lw = (lw < lstream) ? lw : lstream;
+    l = (lw > l) ? lw : l;
+  }
+  return l;
+}
 
 void TDEDebrisBlockWants(MeshBlockPack *pmbp, const TDEDebrisParams &p,
                          HostArray2D<Real> &out) {
@@ -110,14 +242,47 @@ void TDEDebrisBlockWants(MeshBlockPack *pmbp, const TDEDebrisParams &p,
   const bool ladder = p.ladder;
   const int lcore = p.lev_core, lfloor = p.lev_floor, lstream = p.lev_stream;
   const Real nh = p.width_cells, nj = p.jeans_cells, gam = p.gamma;
+  // binding-aware policy (off: nred = kDebNRed and the lambda below is the original)
+  const bool bind = p.bind;
+  const int nred = bind ? kDebNRedBind : kDebNRed;
+  const Real eunb = p.bind_eunb, r_unb = p.bind_r_unb, r_unb2 = p.bind_r_unb2;
+  const Real r_zone = p.bind_r_zone, nb = p.bind_width_cells;
+  const int lu1 = p.bind_lev_unb1, lu2 = p.bind_lev_unb2, lmin = p.bind_lev_min;
+  Real xb[3] = {0.0, 0.0, 0.0}, fv[3] = {0.0, 0.0, 0.0};
+  if (bind) {
+    pmbp->pcfc->BHPosition(pmesh->time, xb);
+    for (int a = 0; a < 3; ++a) fv[a] = pmbp->padm->frame_vel_u[a];
+  }
+  const Real bx = xb[0], by = xb[1], bz = xb[2], f0 = fv[0], f1 = fv[1], f2 = fv[2];
+  auto &adm = pmbp->padm->adm;
 
-  DvceArray2D<Real> red("tde_debris_red", nmb, kDebNRed);
+  DvceArray2D<Real> red("tde_debris_red", nmb, nred);
   par_for_outer("TDEDebrisBlockWants", DevExeSpace(), 0, 0, 0, nmb-1,
   KOKKOS_LAMBDA(TeamMember_t tmember, const int m) {
     const Real dx = size.d_view(m).dx1, dy = size.d_view(m).dx2, dz = size.d_view(m).dx3;
-    for (int q = 0; q < kDebNRed; ++q) {
+    for (int q = 0; q < nred; ++q) {
       Real team_max = (q == 0) ? std::numeric_limits<Real>::lowest() : -1.0;
       Real team_sum = 0.0;
+      if (q >= kDebNRed) {   // amr_bind_policy cell counts (refine thresholds)
+        const int want_cls = q - kDebNRed;
+        Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
+        [=](const int idx, Real &lsum) {
+          const int k = idx/nji + ks, j = (idx%nji)/nx1 + js, i = idx%nx1 + is;
+          const Real rho = w0_(m,IDN,k,j,i);
+          if (!(rho > rho_f) || !Kokkos::isfinite(rho)) return;
+          const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+          const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+          const Real r = sqrt(SQR(x - bx) + SQR(y - by) + SQR(z - bz));
+          const Real e = TDEBindEnergy(adm, w0_, m, k, j, i, f0, f1, f2);
+          int cls;
+          TDEBindCellWant(e, r, rho, 0.0, false, 0.0, dx_root, lstream, eunb, r_unb, r_unb2,
+                          r_zone, lu1, lu2, lmin, cls);
+          if (cls == want_cls) lsum += 1.0;
+        }, Kokkos::Sum<Real>(team_sum));
+        Kokkos::single(Kokkos::PerTeam(tmember), [&]() { red(m, q) = team_sum; });
+        continue;
+      }
       if (q == kDebNRed - 1) {
         Kokkos::parallel_reduce(Kokkos::TeamThreadRange(tmember, nkji),
         [=](const int idx, Real &lsum) {
@@ -150,6 +315,20 @@ void TDEDebrisBlockWants(MeshBlockPack *pmbp, const TDEDebrisParams &p,
           if (!Kokkos::isfinite(grad)) grad = 0.0;
         }
         int la, lw, lj;
+        if (bind) {
+          const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+          const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+          const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+          const Real r = sqrt(SQR(x - bx) + SQR(y - by) + SQR(z - bz));
+          const Real e = TDEBindEnergy(adm, w0_, m, k, j, i, f0, f1, f2);
+          int cls;
+          const int lb = TDEBindCellWant(e, r, rho, grad, gate, nb/sc, dx_root, lstream, eunb,
+                                         r_unb, r_unb2, r_zone, lu1, lu2, lmin, cls);
+          if (cls >= 0) {   // a policy cell: its level replaces ladder/width/Jeans
+            lmax = fmax(lmax, ((q - 1)%3 == 0) ? static_cast<Real>(lb) : -1.0);
+            return;
+          }
+        }
         // de-refinement: the density thresholds are scaled DOWN (sc < 1, more cells qualify:
         // want_deref >= want_ref), but the resolution tests need MORE cells, N/sc, so that
         // the coarser level still holds >= N cells. sc*N (before R-140 item 9) gave
@@ -165,9 +344,9 @@ void TDEDebrisBlockWants(MeshBlockPack *pmbp, const TDEDebrisParams &p,
     }
   });
   auto red_h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), red);
-  out = HostArray2D<Real>("tde_debris_red_h", nmb, kDebNRed);
+  out = HostArray2D<Real>("tde_debris_red_h", nmb, nred);
   for (int m = 0; m < nmb; ++m)
-    for (int q = 0; q < kDebNRed; ++q) out(m, q) = red_h(m, q);
+    for (int q = 0; q < nred; ++q) out(m, q) = red_h(m, q);
 }
 
 //! \fn void TDERefineDebris(MeshBlockPack *pmbp)
@@ -189,10 +368,17 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
   const Real r2_bh = SQR(tde_ref.rad_bh), r2_bh_fine = SQR(tde_ref.rad_bh_fine);
   const Real rho_a = p.core_frac*p.rho_ref;
 
-  // residence: first cycle each (lx1, lx2, lx3, level) was seen on this rank
-  static std::map<std::array<int, 4>, int> first_seen;
+  // residence (C-233): the first check cycle at which each block existed, for every block of
+  // the mesh (identical on all ranks); a staged restart state is applied first
+  if (!tde_deb_rst_state.empty()) TDEDebrisApplyResidence(pmesh);
   static bool warned_nan = false;
   std::map<std::array<int, 4>, int> seen_now;
+  for (int g = 0; g < pmesh->nmb_total; ++g) {
+    const LogicalLocation &lg = pmesh->lloc_eachmb[g];
+    const std::array<int, 4> kg = {lg.lx1, lg.lx2, lg.lx3, lg.level};
+    auto ig = tde_deb_first_seen.find(kg);
+    seen_now[kg] = (ig == tde_deb_first_seen.end()) ? pmesh->ncycle : ig->second;
+  }
 
   // wants are clipped to the mesh's max level only when applied; a dry run reports
   // what deeper levels would need (sizing on runs with fewer levels)
@@ -206,15 +392,13 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
   std::vector<Real> d_crit(kDebNCrit*(nl + 1), 0.0), d_lev(nl, 0.0), d_proj(nl, 0.0);
   Real d_flag[3] = {0.0, 0.0, 0.0};   // -1, 0, +1
   Real n_nan = 0.0;
+  Real d_bind[3] = {0.0, 0.0, 0.0};   // amr_bind_policy cells: unbound coarsened, zone, beyond
 
   for (int m = 0; m < nmb; ++m) {
     const LogicalLocation &ll = pmesh->lloc_eachmb[m + mbs];
     const int level = ll.level - pmesh->root_level;
-    std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
-    auto it = first_seen.find(key);
-    const int c0 = (it == first_seen.end()) ? pmesh->ncycle : it->second;
-    seen_now[key] = c0;
-    const int residence = pmesh->ncycle - c0;
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    const int residence = pmesh->ncycle - seen_now[key];
 
     // BH box distance (tde_track's AABB form)
     auto dist2 = [&](const Real px, const Real py, const Real pz) {
@@ -229,6 +413,7 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
     if (r2_bh_fine > 0.0 && d2 < r2_bh_fine) want_bh = std::max(want_bh, tde_ref.lev_bh_fine);
 
     n_nan += red(m, kDebNRed - 1);
+    if (p.bind) for (int c = 0; c < 3; ++c) d_bind[c] += red(m, kDebNRed + c);
     const Real bmax = red(m, 0);
     const int core_r = (bmax > rho_a) ? p.lev_core : -1;
     const int core_d = (bmax > p.deref_factor*rho_a) ? p.lev_core : -1;
@@ -265,7 +450,7 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
       d_proj[lt] += std::pow(8.0, -(level - lt));
     }
   }
-  first_seen.swap(seen_now);
+  tde_deb_first_seen.swap(seen_now);
 
   if (apply) {
     refine_flag.template modify<HostMemSpace>();
@@ -289,6 +474,9 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
     MPI_Allreduce(MPI_IN_PLACE, d_proj.data(), nl, MPI_ATHENA_REAL, MPI_SUM,
                   MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, d_flag, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    if (p.bind) {
+      MPI_Allreduce(MPI_IN_PLACE, d_bind, 3, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    }
 #endif
     if (global_variable::my_rank == 0) {
       static const char *cn[kDebNCrit] = {"core", "ladder", "width", "jeans", "bh", "none"};
@@ -308,12 +496,59 @@ void TDERefineDebrisImpl(MeshBlockPack *pmbp, bool apply) {
           os << static_cast<long>(d_crit[c*(nl + 1) + l]) << (l < nl ? "," : "]");
         }
       }
+      if (p.bind) {
+        os << " | bind cells unbound-coarse/zone/beyond: " << static_cast<long>(d_bind[0])
+           << "/" << static_cast<long>(d_bind[1]) << "/" << static_cast<long>(d_bind[2]);
+      }
       std::cout << os.str() << std::endl;
     }
   }
 }
 
 }  // namespace
+
+//! \fn void TDEDebrisSaveResidence(Mesh *pm, ParameterInput *pin)
+//! \brief restart writer hook (C-233): <problem> amr_residence_state = "v1 ncycle nmb_total
+//! min_residence hash;" + one "lx1,lx2,lx3,level,c0;" per block that matters: resident fewer
+//! than min_residence cycles (c0), or created by this cycle's regrid, after the check (c0 = -1).
+//! Every other block is resident >= min_residence. Identical on all ranks.
+void TDEDebrisSaveResidence(Mesh *pm, ParameterInput *pin) {
+  std::ostringstream os;
+  os << "v1 " << pm->ncycle << " " << pm->nmb_total << " " << tde_deb.min_residence << " "
+     << std::hex << TDEDebrisTreeHash(pm) << std::dec << ";";
+  long nlist = 0;
+  for (int g = 0; g < pm->nmb_total; ++g) {
+    const LogicalLocation &ll = pm->lloc_eachmb[g];
+    const std::array<int, 4> key = {ll.lx1, ll.lx2, ll.lx3, ll.level};
+    auto it = tde_deb_first_seen.find(key);
+    int c0;
+    if (it == tde_deb_first_seen.end()) {
+      c0 = -1;
+    } else if (pm->ncycle - it->second < tde_deb.min_residence) {
+      c0 = it->second;
+    } else {
+      continue;
+    }
+    os << ll.lx1 << "," << ll.lx2 << "," << ll.lx3 << "," << ll.level << "," << c0 << ";";
+    ++nlist;
+  }
+  if (os.str().size() > 512*1024 && global_variable::my_rank == 0) {
+    std::cout << "### WARNING tde_debris: amr_residence_state is " << os.str().size()
+              << " bytes (" << nlist << " blocks); the parameter copy is read up to 1 MB"
+              << std::endl;
+  }
+  pin->SetString("problem", "amr_residence_state", os.str());
+}
+
+//! \fn void TDEDebrisStageResidence(ParameterInput *pin, bool restart)
+//! \brief at a restart, stage the saved residence for the first check (C-233)
+void TDEDebrisStageResidence(ParameterInput *pin, bool restart) {
+  tde_deb_rst_state.clear();
+  if (restart && pin->DoesParameterExist("problem", "amr_residence_state")) {
+    tde_deb_rst_state = pin->GetString("problem", "amr_residence_state");
+    if (tde_deb_rst_state.empty()) tde_deb_rst_state = " ";   // unreadable -> warning
+  }
+}
 
 void TDERefineDebris(MeshBlockPack *pmbp) {
   if (tde_deb.dryrun) {

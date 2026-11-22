@@ -1,3 +1,7 @@
+# PRODUCTION BINARY (user 2026-11-21): GPU, proj/tde 91e2d361 (cfc/si-refill/cadence merge + cfc_opt A/R + K-020 guard),
+#   home_builds/athenak_tde/athena_tde_prod_gpu_91e2d361 (sha256 ed74767a; copy of build_gpu_pe2626_ptde_mgA/src/athena).
+#   At this deck's settings (solve_interval = 0, no refill/guard keys) it is bitwise with the previous proj/tde binary
+#   on GPU (c281 G0 vs GO, this deck with tlim 200 / max_nmb_per_rank 700 / dediag_3d; C-244), -9% CPU time.
 # proj/tde production deck rp10 (P10): c134_pilots/P10_r82/parfile.par + the R-223 production settings (C-187)
 # D2 (R-140 item 2, user-approved 2026-10-26): the +-64 vs +-128 box check. P128 = c110_2x2/CD.par (rp10, comoving,
 # production DE, L4-equivalent, base8 6ea832af, GPU IPC off) with the box doubled to +-128: root nx unchanged (128),

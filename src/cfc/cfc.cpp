@@ -378,6 +378,52 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
     }
     fc_floor_follow_ = pin->DoesParameterExist("cfc", "frame_floor_follow") &&
                        pin->GetBoolean("cfc", "frame_floor_follow");   // K-017b
+    // R-252: relative tracking and the lost-star roll-back (cfc.hpp), default off. Read
+    // without GetOrAdd so a deck without them, and its restarts' parameter copy, is unchanged.
+    if (pin->DoesParameterExist("cfc", "frame_track_rel")) {
+      fc_rel_ = pin->GetReal("cfc", "frame_track_rel");
+    }
+    if (fc_rel_ > 0.0) {
+      fc_rel_floor_ = pin->GetReal("cfc", "frame_track_rel_floor");   // required
+      if (pin->DoesParameterExist("cfc", "frame_track_radius_min")) {
+        fc_rmin_ = pin->GetReal("cfc", "frame_track_radius_min");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_lost_lambda")) {
+        fc_lost_lam_ = pin->GetReal("cfc", "frame_lost_lambda");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_lost_time")) {
+        fc_lost_T_ = pin->GetReal("cfc", "frame_lost_time");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_lost_arm_time")) {
+        fc_arm_t_ = pin->GetReal("cfc", "frame_lost_arm_time");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_lost_arm_rfac")) {
+        fc_arm_rfac_ = pin->GetReal("cfc", "frame_lost_arm_rfac");
+      }
+      if (pin->DoesParameterExist("cfc", "frame_track_rel_log")) {
+        fc_rel_log_ = pin->GetInteger("cfc", "frame_track_rel_log");
+      }
+      fc_rdyn_ = fc_rtrk_;
+      if (pin->DoesParameterExist("cfc", "frame_ctrl_rdyn")) {   // restored state
+        fc_rdyn_ = pin->GetReal("cfc", "frame_ctrl_rdyn");
+        fc_lost_t0_ = pin->GetReal("cfc", "frame_ctrl_lost_t0");
+        fc_rlo_ = pin->GetReal("cfc", "frame_ctrl_rlo");
+        fc_armed_ = pin->GetBoolean("cfc", "frame_ctrl_armed");
+      }
+      if (!(fc_rel_ < 1.0) || !(fc_rel_floor_ > 0.0) || !(fc_rmin_ > 0.0) ||
+          !(fc_lost_T_ >= 0.0) || fc_lost_lam_ < 0.0) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                  << std::endl << "<cfc> frame_track_rel needs 0 < frame_track_rel < 1, "
+                  << "frame_track_rel_floor > 0, frame_track_radius_min > 0, "
+                  << "frame_lost_time >= 0, frame_lost_lambda >= 0" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    } else if (pin->DoesParameterExist("cfc", "frame_lost_lambda")) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<cfc> frame_lost_lambda needs frame_track_rel > 0"
+                << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     fc_bound_rho_ = pin->GetOrAddReal("cfc", "frame_bound_rho", 1.0e-4*fc_rho_thr_);
     // R-054 (R-053 §4): bound_centroid must ignore the near-BH atmosphere zone, so both
     // gates must cover it: frame_bound_rho >= the zone's rho_thr (the default 1e-4 x
@@ -487,6 +533,37 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       std::cout << "### FATAL ERROR in CFC: <cfc> residual_scale_t1 must exceed "
                 << "residual_scale_t0" << std::endl;
       std::exit(EXIT_FAILURE);
+    }
+  }
+  // S5 (cfc.hpp): the automatic phase-out; read without GetOrAdd (absent = off, unchanged)
+  if (pin->DoesParameterExist("cfc", "phaseout_time")) {
+    ph_T_ = pin->GetReal("cfc", "phaseout_time");
+    if (pin->DoesParameterExist("cfc", "phaseout_selfgrav_frac")) {
+      ph_sg_frac_ = pin->GetReal("cfc", "phaseout_selfgrav_frac");
+    }
+    if (pin->DoesParameterExist("cfc", "phaseout_guard_time")) {
+      ph_guard_T_ = pin->GetReal("cfc", "phaseout_guard_time");
+    }
+    const bool rel = pin->DoesParameterExist("cfc", "frame_track_rel") &&
+                     pin->GetReal("cfc", "frame_track_rel") > 0.0;
+    const bool lost = pin->DoesParameterExist("cfc", "frame_lost_lambda") &&
+                      pin->GetReal("cfc", "frame_lost_lambda") > 0.0;
+    if (!(ph_T_ > 0.0) || !rel || !lost || rs_on_ || ph_sg_frac_ < 0.0 ||
+        !(ph_guard_T_ >= 0.0)) {
+      std::cout << "### FATAL ERROR in CFC: <cfc> phaseout_time > 0 needs frame_track_rel > 0 "
+                << "and frame_lost_lambda > 0, excludes residual_scale*, and needs "
+                << "phaseout_selfgrav_frac >= 0, phaseout_guard_time >= 0" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    if (pin->DoesParameterExist("cfc", "frame_ctrl_ph_fired")) {   // restored state
+      ph_fired_ = pin->GetBoolean("cfc", "frame_ctrl_ph_fired");
+      ph_guard_t0_ = pin->GetReal("cfc", "frame_ctrl_ph_guard_t0");
+      if (ph_fired_) {
+        rs_on_ = rs_ramp_ = true;
+        rs_t0_ = pin->GetReal("cfc", "frame_ctrl_ph_t0");
+        rs_t1_ = rs_t0_ + ph_T_;
+        rs_f0_ = 1.0; rs_f1_ = 0.0;
+      }
     }
   }
   if (rs_on_) {
@@ -699,6 +776,16 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
 
   // Delta-n-cycle solve cadence; see cfc.hpp. <=0 (default) is a no-op.
   cfc_solve_interval_ = pin->GetOrAddInteger("cfc", "solve_interval", 0);
+  // see cfc.hpp; read only when on, so the parameter block stays unchanged when off
+  if (pin->DoesParameterExist("cfc", "solve_interval_refill_bg")) {
+    si_refill_bg_ = pin->GetBoolean("cfc", "solve_interval_refill_bg");
+  }
+  if (si_refill_bg_ && global_variable::my_rank == 0) {
+    std::cout << "CFC solve_interval_refill_bg: stages without a solve refill the analytic "
+              << "background at the stage time and re-assemble adm from the held residual"
+              << (cfc_solve_interval_ <= 0 ? " (inactive: solve_interval <= 0)" : "")
+              << std::endl;
+  }
 
   // Comoving gauge (uniform shift xidot(t)); see cfc.hpp and DEVELOPMENT.md item 68.
   // All zero (default) leaves every run bit-for-bit unchanged.
@@ -982,8 +1069,38 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   if (cfc_solve_interval_ <= 0) {
     return true;
   }
+  const bool fs = FrameStaticForCadence();
+  if (static_cast<int>(fs) != cad_state_) {
+    cad_state_ = static_cast<int>(fs);
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC solve_interval = " << cfc_solve_interval_ << ": cycle "
+                << pmy_pack->pmesh->ncycle << " t = " << pmy_pack->pmesh->time
+                << (fs ? ": frame static, reduced cadence engaged"
+                       : (si_refill_bg_ ? ": frame moving, reduced cadence with the background refill"
+                                        : ": frame moving, every stage solves")) << std::endl;
+    }
+  }
+  // Merge of wip/si-refill (C-243): with solve_interval_refill_bg the skipped stages refill
+  // the moving background, which removes the lag this guard exists for, so the reduced
+  // cadence also runs while the frame moves. si_refill_bg_ is constant over the run, so
+  // every task of a cycle agrees.
+  if (!fs && !si_refill_bg_) {
+    return true;
+  }
   return (pmy_pack->pmesh->ncycle % cfc_solve_interval_ == 0) &&
          (stage == pdriver->nexp_stages);
+}
+
+bool CFC::FrameStaticForCadence() const {
+  if (frame_ctrl_) {
+    return (fc_mode_ == 2) && (pmy_pack->pmesh->time >= fc_tsw_ + fc_ramp_T_);
+  }
+  if (frame_enabled_) {
+    for (int a = 0; a < 3; ++a) {
+      if (frame_vel0_[a] != 0.0 || frame_accel_[a] != 0.0) return false;
+    }
+  }
+  return true;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1995,7 +2112,9 @@ TaskStatus CFC::BCSPiEtaBetaTask(Driver *pdriver, int stage) {
 // and z4c::Z4c; ADMBCs/ADMBCsCoarse (adm_bcs.cpp) are applied below by
 // ProlongADMTask/BCSADMTask.
 TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     pmy_pack->pmesh->pmr->RestrictCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm,
                                       true);
@@ -2003,15 +2122,21 @@ TaskStatus CFC::RestADMTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::SendADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->PackAndSendCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::RecvADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   return pbval_adm->RecvAndUnpackCC(pmy_pack->padm->u_adm, pmy_pack->padm->coarse_u_adm);
 }
 TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (pmy_pack->pmesh->multilevel) {
     // Step 1: apply physical BCs to the coarse array so the prolongation stencil
     // reads valid data in coarse ghost zones at a physical boundary.
@@ -2031,7 +2156,9 @@ TaskStatus CFC::ProlongADMTask(Driver *pdriver, int stage) {
 //! (no neighbor block). Runs after ProlongADMTask so corner ghost zones between a
 //! coarse neighbor and a physical boundary read valid, already-prolongated data.
 TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage) && !RefillThisStage(pdriver, stage)) {
+    return TaskStatus::complete;
+  }
   if (!(pmy_pack->pmesh->strictly_periodic)) {
     MeshBoundaryValues::ADMBCs(pmy_pack, pmy_pack->padm->u_adm);
   }
@@ -2043,7 +2170,11 @@ TaskStatus CFC::BCSADMTask(Driver *pdriver, int stage) {
 // z4c::Z4c::InitRecv/ClearSend/ClearRecv's own one-line-wrapper shape, just looped
 // over CFC's 5 MeshBoundaryValuesCC instances instead of one.
 TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    // solve_interval_refill_bg: only u_adm is exchanged on a refill stage
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->InitRecv(adm::ADM::nadm); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->InitRecv(4);
   pbval_psi->InitRecv(1);
   pbval_alpha_psi->InitRecv(1);
@@ -2052,7 +2183,10 @@ TaskStatus CFC::InitRecvTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->ClearSend(); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->ClearSend();
   pbval_psi->ClearSend();
   pbval_alpha_psi->ClearSend();
@@ -2061,7 +2195,10 @@ TaskStatus CFC::ClearSendTask(Driver *pdriver, int stage) {
   return TaskStatus::complete;
 }
 TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) { pbval_adm->ClearRecv(); }
+    return TaskStatus::complete;
+  }
   pbval_pietax->ClearRecv();
   pbval_psi->ClearRecv();
   pbval_alpha_psi->ClearRecv();
@@ -2076,7 +2213,12 @@ TaskStatus CFC::ClearRecvTask(Driver *pdriver, int stage) {
 // AssembleVectorSource reads from.
 
 TaskStatus CFC::SolveVecXTask(Driver *pdriver, int stage) {
-  if (!DoSolveThisStage(pdriver, stage)) { return TaskStatus::complete; }
+  if (!DoSolveThisStage(pdriver, stage)) {
+    // solve_interval_refill_bg: CFC's first task of the stage, before MHD_C2P (which waits
+    // on CFC_AssemblePsiG, downstream of this task)
+    if (RefillThisStage(pdriver, stage)) { RefillHeldResidual(StageTime(pdriver, stage)); }
+    return TaskStatus::complete;
+  }
   // Phase 2 M1: the analytic background follows the puncture; refilled once per solve
   // (the solved delta fields are re-solved right after, so nothing needs re-anchoring)
   if (puncture_moving_) { RefillMovingPuncture(StageTime(pdriver, stage)); }
@@ -2238,6 +2380,20 @@ TaskStatus CFC::ReconstructBetaTask(Driver *pdriver, int stage) {
 
 TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
   if (!DoSolveThisStage(pdriver, stage)) {
+    if (RefillThisStage(pdriver, stage)) {
+      // solve_interval_refill_bg: the refilled background + the held residual + xidot(t)
+      AssembleADM(StageTime(pdriver, stage));
+      AccreteExcisedMass(pdriver, stage);   // C-231 item 2 drain, after the assembly as on solve stages
+      if (frame_ctrl_ && stage == pdriver->nexp_stages) {
+        FrameControlStep(StageTime(pdriver, stage));
+      }
+      return TaskStatus::complete;
+    }
+    // C-231 item 2: drain the excision tally on EVERY stage, solve or not. The RK-stage
+    // weights (AccreteExcisedMass, item 60) need each stage's removals in its own slot;
+    // skipped stages used to fall into the next solve stage's drain at weight 1 (the
+    // 1.92x over-count). Same call as on solve stages; solve_interval 0 never gets here.
+    AccreteExcisedMass(pdriver, stage);
     // The solved part of adm.beta_u is reused; keep the gauge part current.
     ApplyFrameShiftUpdate(StageTime(pdriver, stage));
     if (frame_ctrl_ && stage == pdriver->nexp_stages) {
@@ -3291,6 +3447,32 @@ void CFC::RefillMovingPuncture(Real t) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::RefillHeldResidual(Real t)
+//! \brief see cfc.hpp (solve_interval_refill_bg). a_dd holds Ahat0 + the solved part
+//! (ComputeADualFromPotentials; KerrAhatImpl on wip/kerr), so the solved part is carried
+//! over to the new Ahat0 as a_dd - Ahat0_old + Ahat0_new. A puncture at rest has a fixed
+//! background: only the conformal metric is re-assembled.
+
+void CFC::RefillHeldResidual(Real t) {
+  if (puncture_enabled_ && puncture_moving_) {
+    auto ad = u_adual;
+    auto a0 = u_a0dual;
+    const int nmb = pmy_pack->nmb_thispack;
+    const int n3 = ad.extent_int(2), n2 = ad.extent_int(3), n1 = ad.extent_int(4);
+    par_for("cfc_si_refill_unanchor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      for (int c = 0; c < 6; ++c) { ad(m,c,k,j,i) -= a0(m,c,k,j,i); }
+    });
+    RefillMovingPuncture(t);
+    par_for("cfc_si_refill_reanchor", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+      for (int c = 0; c < 6; ++c) { ad(m,c,k,j,i) += a0(m,c,k,j,i); }
+    });
+  }
+  AssemblePsiMetric(true);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Real CFC::ResidualScale(Real t) const
 //! \brief <cfc> residual_scale's f(t): the constant, or the C^1 smoothstep
 //! f0 + (f1 - f0) x^2 (3 - 2x), x = (t - t0)/(t1 - t0) clamped to [0, 1] (exactly f0 at
@@ -3333,6 +3515,7 @@ void CFC::AssemblePsiMetric(bool with_ghosts) {
 }
 
 void CFC::AssembleADM(Real time) {
+  si_refill_ready_ = true;   // the held residual (delta_psi, ..., a_dd, beta_u) is set
   if (kerr_background_) { KerrAssembleADM(time); return; }
   Real xd[3] = {0.0, 0.0, 0.0};
   if (frame_enabled_) { FrameVel(time, xd); }
@@ -3498,6 +3681,110 @@ void CFC::MeasureTracked(Real out[7]) {
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureTrackedRel(Real out[7], Real diag[3])
+//! \brief R-252 relative tracking (cfc.hpp): (1) rho_max,loc = max rho over interior cells
+//! within fc_rdyn_ of x'_tgt (MPI_MAX); (2) if rho_max,loc > frame_track_rel_floor, the
+//! MeasureTracked sums over the cells within fc_rdyn_ with rho > f_rel rho_max,loc, plus
+//! sum(rho dV) and sum(dV) (MPI_Allreduce + MPI_Bcast from rank 0, as MeasureTracked) and
+//! r_enc = max |x' - x'_tgt| over them (MPI_MAX). diag = {rho_max,loc, rho_bar, r_enc}.
+//! Nothing tracked: out[0] = 0 (and diag[1] = diag[2] = 0). Every rank ends with identical
+//! values, so the decisions taken from them are identical on every rank.
+
+void CFC::MeasureTrackedRel(Real out[7], Real diag[3]) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &u0 = pmy_pack->pmhd->u0;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &adm = pmy_pack->padm->adm;
+  const Real r2trk = fc_rdyn_*fc_rdyn_;
+  const Real tx = fc_tgt_[0], ty = fc_tgt_[1], tz = fc_tgt_[2];
+  for (int q = 0; q < 7; ++q) out[q] = 0.0;
+  diag[0] = 0.0; diag[1] = 0.0; diag[2] = 0.0;
+  // (1) the local peak
+  Real rmax = 0.0;
+  Kokkos::parallel_reduce("cfc_frame_rel_max", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &mx) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if ((x - tx)*(x - tx) + (y - ty)*(y - ty) + (z - tz)*(z - tz) >= r2trk) return;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (rho > mx) mx = rho;
+  }, Kokkos::Max<Real>(rmax));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &rmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  diag[0] = rmax;
+  if (!(rmax > fc_rel_floor_)) return;
+  const Real thr = fc_rel_*rmax;
+  // (2) the sums over the relative set, and its extent
+  Real s[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  Kokkos::parallel_reduce("cfc_frame_rel_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1, Real &a2, Real &a3, Real &a4,
+                Real &a5, Real &a6, Real &a7, Real &a8) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > thr)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    if ((x - tx)*(x - tx) + (y - ty)*(y - ty) + (z - tz)*(z - tz) >= r2trk) return;
+    const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    const Real dm = u0(m, IDN, k, j, i)*dv;
+    const Real ux = w0(m, IVX, k, j, i), uy = w0(m, IVY, k, j, i), uz = w0(m, IVZ, k, j, i);
+    const Real usq = adm.g_dd(m,0,0,k,j,i)*ux*ux + adm.g_dd(m,1,1,k,j,i)*uy*uy
+                   + adm.g_dd(m,2,2,k,j,i)*uz*uz
+                   + 2.0*(adm.g_dd(m,0,1,k,j,i)*ux*uy + adm.g_dd(m,0,2,k,j,i)*ux*uz
+                          + adm.g_dd(m,1,2,k,j,i)*uy*uz);
+    const Real aw = adm.alpha(m,k,j,i)/sqrt(1.0 + usq);
+    a0 += dm; a1 += dm*x; a2 += dm*y; a3 += dm*z;
+    a4 += dm*(aw*ux - adm.beta_u(m,0,k,j,i));
+    a5 += dm*(aw*uy - adm.beta_u(m,1,k,j,i));
+    a6 += dm*(aw*uz - adm.beta_u(m,2,k,j,i));
+    a7 += rho*dv; a8 += dv;
+  }, Kokkos::Sum<Real>(s[0]), Kokkos::Sum<Real>(s[1]), Kokkos::Sum<Real>(s[2]),
+     Kokkos::Sum<Real>(s[3]), Kokkos::Sum<Real>(s[4]), Kokkos::Sum<Real>(s[5]),
+     Kokkos::Sum<Real>(s[6]), Kokkos::Sum<Real>(s[7]), Kokkos::Sum<Real>(s[8]));
+  Real renc = 0.0;
+  Kokkos::parallel_reduce("cfc_frame_rel_ext", Kokkos::RangePolicy<>(DevExeSpace(), 0,
+                          nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &mx) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    if (!(w0(m, IDN, k, j, i) > thr)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    const Real d2 = (x - tx)*(x - tx) + (y - ty)*(y - ty) + (z - tz)*(z - tz);
+    if (d2 >= r2trk) return;
+    if (d2 > mx) mx = d2;
+  }, Kokkos::Max<Real>(renc));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, s, 9, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(s, 9, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &renc, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  for (int q = 0; q < 7; ++q) out[q] = s[q];
+  diag[1] = (s[8] > 0.0) ? s[7]/s[8] : 0.0;
+  diag[2] = sqrt(renc);
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn void CFC::FrameControlStep(Real t_new)
 //! \brief once per step, at the last RK stage after AssembleADM (state at t_new =
 //! t + dt): advance xi with the step's xidot, measure the tracked gas, set the next
@@ -3508,7 +3795,55 @@ void CFC::FrameControlStep(Real t_new) {
   for (int a = 0; a < 3; ++a) { fc_xi_[a] += fc_xd_[a]*dt; }
   fc_t_ = t_new;
   Real s[7];
-  if (fc_mode_ == 0) {
+  if (fc_mode_ == 0 && fc_rel_ > 0.0) {   // R-252: relative tracking + lost-star switch
+    Real dg[3];
+    MeasureTrackedRel(s, dg);
+    Real r = 0.0, lam = 0.0;
+    if (s[0] > 0.0) {
+      Real xb[3];
+      BHPosition(t_new, xb);
+      for (int a = 0; a < 3; ++a) { const Real d = s[1 + a]/s[0] - xb[a]; r += d*d; }
+      r = sqrt(r);
+      const Real rho_tid = 3.0*puncture_mass_/(4.0*M_PI*r*r*r);
+      lam = dg[1]/rho_tid;
+      fc_rdyn_ = fmax(fc_rmin_, 2.0*dg[2]);   // the next step's radius
+    }
+    fc_rel_diag_[0] = dg[0]; fc_rel_diag_[1] = dg[1]; fc_rel_diag_[2] = dg[2];
+    fc_rel_diag_[3] = r; fc_rel_diag_[4] = lam;
+    // arming (cfc.hpp): t >= frame_lost_arm_time and, with frame_lost_arm_rfac > 0, r has
+    // risen to rfac x its smallest value so far (past pericentre); armed latches
+    if (s[0] > 0.0 && (fc_rlo_ < 0.0 || r < fc_rlo_)) fc_rlo_ = r;
+    if (!fc_armed_ && t_new >= fc_arm_t_ &&
+        (!(fc_arm_rfac_ > 0.0) || (s[0] > 0.0 && fc_rlo_ > 0.0 && r >= fc_arm_rfac_*fc_rlo_))) {
+      fc_armed_ = true;
+      if (global_variable::my_rank == 0 && fc_lost_lam_ > 0.0) {
+        std::cout << std::setprecision(10) << "CFC track rel: lost-star switch armed at t = "
+                  << t_new << " (r_BH = " << r << ", smallest so far " << fc_rlo_ << ")"
+                  << std::setprecision(6) << std::endl;
+      }
+    }
+    const bool low = !(s[0] > 0.0) || lam < fc_lost_lam_;
+    const Real t0_prev = fc_lost_t0_;
+    if (fc_lost_lam_ > 0.0) {
+      if (!low || !fc_armed_) {
+        fc_lost_t0_ = -1.0;
+      } else if (fc_lost_t0_ < 0.0) {
+        fc_lost_t0_ = t_new;
+      }
+    }
+    if (global_variable::my_rank == 0 &&
+        ((fc_rel_log_ > 0 && fc_rel_n_ % fc_rel_log_ == 0) || (t0_prev < 0.0) != (fc_lost_t0_ < 0.0))) {
+      std::cout << std::setprecision(8) << "CFC track rel: t = " << t_new << " rho_max,loc = "
+                << dg[0] << " M_trk = " << s[0] << " rho_bar = " << dg[1] << " r_enc = " << dg[2]
+                << " R_next = " << fc_rdyn_ << " r_BH = " << r << " Lambda = " << lam
+                << " lost_t0 = " << fc_lost_t0_ << std::setprecision(6) << std::endl;
+    }
+    ++fc_rel_n_;
+    if (fc_lost_lam_ > 0.0 && fc_lost_t0_ >= 0.0 && t_new - fc_lost_t0_ >= fc_lost_T_) {
+      FrameSwitch(t_new, 2, "tracked core lost: Lambda < frame_lost_lambda for "
+                            "frame_lost_time");
+    }
+  } else if (fc_mode_ == 0) {
     MeasureTracked(s);
     // R-050 B2 automatic switch (off unless frame_switch_mass_frac > 0)
     if (fc_switch_frac_ > 0.0 && fc_m0_ > 0.0 && s[0] < fc_switch_frac_*fc_m0_) {
@@ -3548,6 +3883,32 @@ void CFC::FrameControlStep(Real t_new) {
       fc_meas_[3] = sf[0];
     }
     ApplyFrameShiftUpdate(t_new);
+    // S5 (cfc.hpp): armed once the lost-star ramp is complete; the optional self-gravity
+    // guard; on firing, the residual_scale ramp f: 1 -> 0 over [t_new, t_new + T_ph]
+    if (ph_T_ > 0.0 && !ph_fired_ && t_new >= fc_tsw_ + fc_ramp_T_) {
+      bool go = true;
+      if (ph_sg_frac_ > 0.0) {
+        MeasureSelfGravShare(&ph_sg_share_);
+        if (ph_sg_share_ < ph_sg_frac_) {
+          if (ph_guard_t0_ < 0.0) ph_guard_t0_ = t_new;
+        } else {
+          ph_guard_t0_ = -1.0;
+        }
+        go = (ph_guard_t0_ >= 0.0 && t_new - ph_guard_t0_ >= ph_guard_T_);
+      }
+      if (go) {
+        ph_fired_ = true;
+        rs_on_ = rs_ramp_ = true;
+        rs_t0_ = t_new; rs_t1_ = t_new + ph_T_; rs_f0_ = 1.0; rs_f1_ = 0.0;
+        if (rs_log_ == 0) rs_log_ = 10;
+        if (global_variable::my_rank == 0) {
+          std::cout << std::setprecision(10) << "CFC phase-out (S5): fired at t = " << t_new
+                    << ": residual_scale f 1 -> 0 over [" << rs_t0_ << ", " << rs_t1_
+                    << "]; self-gravity share " << ph_sg_share_ << std::setprecision(6)
+                    << std::endl;
+        }
+      }
+    }
     return;
   }
   if (fc_mode_ == 1) {                 // bound_centroid: same law on the bound gas,
@@ -3822,6 +4183,60 @@ void CFC::SaveFrameState(ParameterInput *pin) const {
       pin->SetReal("cfc", "frame_ctrl_fvel" + std::to_string(a + 1), fc_fvel_[a]);
     }
   }
+  if (fc_rel_ > 0.0) {   // R-252 state (only when on: default restarts are unchanged)
+    pin->SetReal("cfc", "frame_ctrl_rdyn", fc_rdyn_);
+    pin->SetReal("cfc", "frame_ctrl_lost_t0", fc_lost_t0_);
+    pin->SetReal("cfc", "frame_ctrl_rlo", fc_rlo_);
+    pin->SetBoolean("cfc", "frame_ctrl_armed", fc_armed_);
+  }
+  if (ph_T_ > 0.0) {   // S5 state (only when on)
+    pin->SetBoolean("cfc", "frame_ctrl_ph_fired", ph_fired_);
+    pin->SetReal("cfc", "frame_ctrl_ph_t0", ph_fired_ ? rs_t0_ : -1.0);
+    pin->SetReal("cfc", "frame_ctrl_ph_guard_t0", ph_guard_t0_);
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::MeasureSelfGravShare(Real *share)
+//! \brief S5 guard (cfc.hpp): over interior cells with rho > frame_track_rel_floor and
+//! r_BH >= 6, the share sum(rho dV; rho > 3 M_BH/(4 pi r_BH^3)) / sum(rho dV) (coordinate
+//! dV; MPI_Allreduce SUM then MPI_Bcast from rank 0: identical on every rank). 0 if empty.
+
+void CFC::MeasureSelfGravShare(Real *share) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto &size = pmy_pack->pmb->mb_size;
+  auto &w0 = pmy_pack->pmhd->w0;
+  Real xb[3];
+  BHPosition(fc_t_, xb);
+  const Real bx = xb[0], by = xb[1], bz = xb[2];
+  const Real rfl = fc_rel_floor_, k3 = 3.0*puncture_mass_/(4.0*M_PI);
+  Real s[2] = {0.0, 0.0};
+  Kokkos::parallel_reduce("cfc_ph_selfgrav", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, Real &a0, Real &a1) {
+    const int m = idx/nkji;
+    const int k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho > rfl)) return;
+    const Real x = CellCenterX(i - is, nx1, size.d_view(m).x1min, size.d_view(m).x1max);
+    const Real y = CellCenterX(j - js, nx2, size.d_view(m).x2min, size.d_view(m).x2max);
+    const Real z = CellCenterX(k - ks, nx3, size.d_view(m).x3min, size.d_view(m).x3max);
+    const Real r = sqrt((x - bx)*(x - bx) + (y - by)*(y - by) + (z - bz)*(z - bz));
+    if (r < 6.0) return;
+    const Real dm = rho*size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3;
+    a1 += dm;
+    if (rho > k3/(r*r*r)) a0 += dm;
+  }, Kokkos::Sum<Real>(s[0]), Kokkos::Sum<Real>(s[1]));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, s, 2, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Bcast(s, 2, MPI_ATHENA_REAL, 0, MPI_COMM_WORLD);
+#endif
+  *share = (s[1] > 0.0) ? s[0]/s[1] : 0.0;
 }
 
 //----------------------------------------------------------------------------------------

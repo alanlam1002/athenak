@@ -1008,6 +1008,8 @@ TaskStatus DynGRMHDPS<EOSPolicy, ErrorPolicy>::ConToPrim(Driver *pdrive, int sta
                  pmy_pack->pmhd->w0, temperature, 0, n1m1, 0, n2m1, 0, n3m1, false);
   eos.DrainZone(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
                 pmy_pack->pmesh->ncycle);
+  eos.DrainCeil(stage, pdrive->nexp_stages, pdrive->gam0, pmy_pack->pmesh->time,
+                pmy_pack->pmesh->ncycle);   // <mhd> atm_ceiling ledger (R-270)
   eos.ShockCounters(stage, pdrive->nexp_stages, pmy_pack->pmesh->ncycle);   // R-112 item 1
   eos.UpdateShockFlags();   // dual_energy_flag_exchange: the owner decides (R-069)
   eos.MassLedgerPost(stage, pdrive->nexp_stages, pdrive->gam0, pdrive->gam1, pdrive->beta,

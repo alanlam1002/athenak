@@ -1,7 +1,8 @@
-# PRODUCTION BINARY (user 2026-11-21): GPU, proj/tde 91e2d361 (cfc/si-refill/cadence merge + cfc_opt A/R + K-020 guard),
-#   home_builds/athenak_tde/athena_tde_prod_gpu_91e2d361 (sha256 ed74767a; copy of build_gpu_pe2626_ptde_mgA/src/athena).
-#   At this deck's settings (solve_interval = 0, no refill/guard keys) it is bitwise with the previous proj/tde binary
-#   on GPU (c281 G0 vs GO, this deck with tlim 200 / max_nmb_per_rank 700 / dediag_3d; C-244), -9% CPU time.
+# PRODUCTION BINARY (user 2026-11-22, R-271 addendum): GPU, proj/tde 925698c2 (= 91e2d361's merge + cfc_opt A/R + K-020 guard,
+#   plus <mhd> atm_ceiling), home_builds/athenak_tde/athena_tde_prod_gpu_925698c2 (sha256 769ee982; copy of
+#   build_gpu_pe2626_ptde_ceil/src/athena). With the ceiling keys absent it is bitwise with the previous production binary
+#   ed74767a on GPU (c283 GX0 vs c281 G0, C-253). The atm_ceiling keys below NEED proj/tde >= 925698c2: an older binary
+#   ignores them silently (no ceiling).
 # proj/tde production deck rp10 (P10): c134_pilots/P10_r82/parfile.par + the R-223 production settings (C-187)
 # D2 (R-140 item 2, user-approved 2026-10-26): the +-64 vs +-128 box check. P128 = c110_2x2/CD.par (rp10, comoving,
 # production DE, L4-equivalent, base8 6ea832af, GPU IPC off) with the box doubled to +-128: root nx unchanged (128),
@@ -189,6 +190,12 @@ dexcise     = 1.0e-24   # = <mhd> dfloor
 texcise     = 1.0e-22   # = <mhd> tfloor
 
 <mhd>
+atm_ceiling = true               # R-270/R-271 (user 2026-11-22; tests C-253..C-255): cells with rho < 100 dfloor
+atm_ceiling_factor = 100.0       #   (absolute band) reset to a cold atmosphere at grid rest; D kept bitwise; ATMCEIL ledger
+atm_ceiling_K = 1.2346626297e-2  #   P = max(P(rho, tfloor), K rho^Gamma), K = the star's adiabat K0 (B.1)
+atm_ceiling_vmax = 0.9           #   grid-rest velocity cap (as atmosphere_zone_vmax)
+atm_ceiling_alarm_mass = 1.0e-11 #   ATMCEIL_ALARM when the mass in [1, 1e3) x the threshold exceeds this (~1.3e-7 M*;
+                                 #   post-disruption atmosphere alone is ~4e-14 there, C-255)
 mass_closure = true          # R-114 MCLOSE: itemized rest-mass closure per segment (needs proj/tde >= 4e3bbf20)
 mass_closure_mstar = 7.5e-5   # M* in code units (R-114: 1e-10 M* = 7.5e-15)
 mass_closure_tol = 1.0e-10    # pass: |R| <= tol M* per segment

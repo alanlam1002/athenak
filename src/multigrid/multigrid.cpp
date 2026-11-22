@@ -703,7 +703,7 @@ void Multigrid::SetFromRootGrid(bool folddata) {
 //! \fn Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n)
 //! \brief calculate the residual norm
 
-Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
+Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect) {
   int ll=nlevel_-1-current_level_;
   int is, ie, js, je, ks, ke;
   is=js=ks=ngh_;
@@ -712,7 +712,7 @@ Real Multigrid::CalculateDefectNorm(MGNormType nrm, int n) {
   Real dy = rdy_ * static_cast<Real>(1 << ll);
   Real dz = rdz_ * static_cast<Real>(1 << ll);
   Real dV = dx * dy * dz;
-  CalculateDefectPack();
+  if (compute_defect) CalculateDefectPack();   // cfc_opt item D: false reuses def_
 
   Real norm = 0.0;
 

@@ -971,12 +971,77 @@ Real MultigridDriver::TotalDefectNorm() {
 
 Real MultigridDriver::TotalSourceNorm() {
   MGNormType nrm = (norm_mode_ == MGNormScaling::max) ? MGNormType::max : MGNormType::l2;
+  // cfc_opt item D: per-channel values from the once-per-solve cache (ComputeSourceNorms),
+  // the same reductions on the same zero-guess defect as the former CalculateSourceNorm calls
+  if (!src_norms_valid_) ComputeSourceNorms();
   Real f = 0.0;
   for (int v = 0; v < nvar_; ++v) {
-    Real d = CalculateSourceNorm(nrm, v);
+    Real d = (norm_mode_ == MGNormScaling::max) ? src_max_[v]
+           : (norm_mode_ == MGNormScaling::rms) ? src_l2rms_[v] : src_l2mode_[v];
+    if (srcnorm_check_ > 0) {
+      Real dold = CalculateSourceNorm(nrm, v);
+      if (!(dold == d) && !(MGNonFinite(dold) && MGNonFinite(d))) {
+        std::cout << "### FATAL ERROR MGSRCNORM check (TotalSourceNorm) " << mg_log_name_
+                  << " cyc " << pmy_mesh_->ncycle << " ch " << v << std::scientific
+                  << std::setprecision(17) << ": cached " << d << " former " << dold
+                  << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
     f = (norm_mode_ == MGNormScaling::legacy) ? f + d : MGMaxNF(f, d);
   }
+  if (srcnorm_check_ > 0 && global_variable::my_rank == 0) {
+    std::cout << "MGSRCNORM " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle
+              << " TotalSourceNorm OK" << std::endl;
+  }
   return f;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void MultigridDriver::ComputeSourceNorms()
+//! \brief cfc_opt item D (cfc 1203e091): ||F(u=0)|| of every channel in max, in L2 under rms,
+//! and (only when norm_mode_ is neither max nor rms) in L2 under norm_mode_, from ONE
+//! save/zero/defect/restore of u. Per channel the same reduction and 1-value MPI_Allreduce as
+//! the former CalculateSourceNorm(nrm, v), on a defect computed once (compute_defect = false
+//! after the first call). u is restored and def_ recomputed from it, so u and def_ leave as they
+//! entered; norm_mode_ is restored. Collective.
+
+void MultigridDriver::ComputeSourceNorms() {
+  if (srcnorm_check_ < 0) {
+    const char *c = std::getenv("ATHENAK_MG_SRCNORM_CHECK");
+    srcnorm_check_ = (c != nullptr && std::atoi(c) != 0) ? 1 : 0;
+  }
+  src_max_.assign(nvar_, 0.0);
+  src_l2rms_.assign(nvar_, 0.0);
+  src_l2mode_.assign(nvar_, 0.0);
+  DvceArray5D<Real> usave;
+  if (mglevels_ != nullptr) {
+    auto u = mglevels_->GetCurrentData();
+    usave = DvceArray5D<Real>(Kokkos::view_alloc("mg_usave", Kokkos::WithoutInitializing),
+                              u.layout());
+    Kokkos::deep_copy(usave, u);
+    Kokkos::deep_copy(u, 0.0);
+  }
+  const MGNormScaling keep = norm_mode_;
+  for (int v = 0; v < nvar_; ++v) {
+    src_max_[v] = CalculateDefectNorm(MGNormType::max, v, v == 0);
+  }
+  norm_mode_ = MGNormScaling::rms;
+  for (int v = 0; v < nvar_; ++v) {
+    src_l2rms_[v] = CalculateDefectNorm(MGNormType::l2, v, false);
+  }
+  norm_mode_ = keep;
+  if (keep != MGNormScaling::max && keep != MGNormScaling::rms) {
+    for (int v = 0; v < nvar_; ++v) {
+      src_l2mode_[v] = CalculateDefectNorm(MGNormType::l2, v, false);
+    }
+  }
+  if (mglevels_ != nullptr) {
+    Kokkos::deep_copy(mglevels_->GetCurrentData(), usave);
+    mglevels_->CalculateDefectPack();
+    Kokkos::fence();
+  }
+  src_norms_valid_ = true;
 }
 
 //----------------------------------------------------------------------------------------
@@ -1012,14 +1077,40 @@ void MultigridDriver::LogSolve(int niter, Real def0, Real def, Real ref, Real ta
                                double wall) {
   // L2 in the rms convention whatever mg_norm is: CalculateDefectNorm reads norm_mode_
   // for its volume weight, so switch it for these calls only (the solve is finished).
+  // cfc_opt item D: the source norms from the once-per-solve cache, filled first so that def_
+  // is afterwards the defect of the final u (the max-location search below reads it); the
+  // final defect computed once (first channel's l2) and reused for every channel and the max
+  if (!src_norms_valid_) ComputeSourceNorms();
   MGNormScaling keep = norm_mode_;
   norm_mode_ = MGNormScaling::rms;
   Real l2 = 0.0, mx = 0.0, fl2 = 0.0, fmx = 0.0;
   for (int v = 0; v < nvar_; ++v) {
-    l2 = MGMaxNF(l2, CalculateDefectNorm(MGNormType::l2, v));
-    mx = MGMaxNF(mx, CalculateDefectNorm(MGNormType::max, v));
-    fl2 = MGMaxNF(fl2, CalculateSourceNorm(MGNormType::l2, v));
-    fmx = MGMaxNF(fmx, CalculateSourceNorm(MGNormType::max, v));
+    const Real dl2 = CalculateDefectNorm(MGNormType::l2, v, v == 0);
+    const Real dmx = CalculateDefectNorm(MGNormType::max, v, false);
+    if (srcnorm_check_ > 0) {
+      const Real ol2 = CalculateDefectNorm(MGNormType::l2, v);
+      const Real omx = CalculateDefectNorm(MGNormType::max, v);
+      const Real os2 = CalculateSourceNorm(MGNormType::l2, v);
+      const Real osm = CalculateSourceNorm(MGNormType::max, v);
+      auto same = [](Real x, Real y) { return x == y || (MGNonFinite(x) && MGNonFinite(y)); };
+      if (!same(ol2, dl2) || !same(omx, dmx) || !same(os2, src_l2rms_[v]) ||
+          !same(osm, src_max_[v])) {
+        std::cout << "### FATAL ERROR MGSRCNORM check (LogSolve) " << mg_log_name_ << " cyc "
+                  << pmy_mesh_->ncycle << " ch " << v << std::scientific
+                  << std::setprecision(17) << ": l2 " << dl2 << "/" << ol2 << " max " << dmx
+                  << "/" << omx << " src_l2 " << src_l2rms_[v] << "/" << os2 << " src_max "
+                  << src_max_[v] << "/" << osm << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+    }
+    l2 = MGMaxNF(l2, dl2);
+    mx = MGMaxNF(mx, dmx);
+    fl2 = MGMaxNF(fl2, src_l2rms_[v]);
+    fmx = MGMaxNF(fmx, src_max_[v]);
+  }
+  if (srcnorm_check_ > 0 && global_variable::my_rank == 0) {
+    std::cout << "MGSRCNORM " << mg_log_name_ << " cyc " << pmy_mesh_->ncycle
+              << " LogSolve OK" << std::endl;
   }
   norm_mode_ = keep;
   std::ostringstream os;
@@ -1124,6 +1215,7 @@ void MultigridDriver::SolveFMGCoarser() {
 //! \brief Solve iteratively until defect norm drops below eps_
 
 void MultigridDriver::SolveIterative(Driver *pdriver) {
+  src_norms_valid_ = false;   // cfc_opt item D: the source-norm cache is per solve
   Real def = TotalDefectNorm();
   MGChk("start", def);
   // R-273 item 7: a non-finite defect is a failed solve (a NaN compares false against the
@@ -1298,10 +1390,10 @@ void MultigridDriver::SolveCoarsestGrid() {
 //! \fn Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n)
 //! \brief calculate the defect norm
 
-Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n) {
+Real MultigridDriver::CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect) {
   Real norm = 0.0;
   if (mglevels_ != nullptr) {
-    Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n);
+    Real mg_norm = mglevels_->CalculateDefectNorm(nrm, n, compute_defect);
     if (nrm == MGNormType::max) {
       norm = MGMaxNF(norm, mg_norm);
     } else {

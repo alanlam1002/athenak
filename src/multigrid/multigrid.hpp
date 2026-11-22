@@ -336,7 +336,8 @@ class Multigrid {
   void ComputeCorrection();
   void CalculateMatrixPack(Real dt);
   void SetFromRootGrid(bool folddata);
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  // compute_defect = false reuses def_ from the previous call (cfc_opt item D)
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -651,7 +652,8 @@ class MultigridDriver {
   void DoTaskListOneStage();
 
   virtual void SolveCoarsestGrid();
-  Real CalculateDefectNorm(MGNormType nrm, int n);
+  // compute_defect = false reuses def_ from the previous call (cfc_opt item D); default as before
+  Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
   Real CalculateSourceNorm(MGNormType nrm, int n);
   void CalculateMatrix(Real dt);
   // Reads <block>/mg_rtol_ref, mg_log and mg_stall_cycles (R-058); defaults keep today's
@@ -798,6 +800,18 @@ class MultigridDriver {
   int root_buf_nc_;
   bool root_flat_buf_stale_;
   bool stale_state_ok_ = false;   // see SetStaleStateAllowed
+  // cfc_opt item D (cfc 1203e091, ported to proj/tde without cfc's mgprof hooks): the zero-guess
+  // source norms ||F(u=0)|| of every channel, computed once per solve by ComputeSourceNorms (one
+  // save/zero/defect/restore of u) and read by TotalSourceNorm and LogSolve, which formerly redid
+  // that evaluation per channel and per norm. Valid only inside one SolveIterative call (cleared
+  // at its start; both consumers run only there). src_l2mode_ is filled only when norm_mode_ is
+  // neither max nor rms (TotalSourceNorm, legacy).
+  bool src_norms_valid_ = false;
+  std::vector<Real> src_max_, src_l2rms_, src_l2mode_;
+  void ComputeSourceNorms();
+  // ATHENAK_MG_SRCNORM_CHECK=1 (environment, read once; off by default): also run the former
+  // per-call path and require every value to be == (MGSRCNORM ... OK lines, or FATAL).
+  int srcnorm_check_ = -1;
   void BuildRootFlatBuffers();
   void SyncRootToHost();
   void SyncRootToDevice();

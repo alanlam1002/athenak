@@ -412,7 +412,10 @@ class PrimitiveSolverHydro {
   Real ceil_f = 100.0, ceil_K = 0.0, ceil_vmax = 0.9, ceil_gam = 5.0/3.0;
   Real ceil_alarm = 1.0e-15;
   static constexpr int kCeilN = 0, kCeilSx = 1, kCeilEn = 4, kCeilM = 5, kCeilMb = 6;
-  static constexpr int kCeilRmax = 7, kCeilNear = 8, kCeilNnear = 11, kCeilLen = 12;
+  static constexpr int kCeilRmax = 7, kCeilNear = 8, kCeilNnear = 11;
+  // K-025 (RK-047 (b)(i)): cells whose grid-rest reset hit the vmax cap (|beta'|/alpha >
+  // atm_ceiling_vmax), by r_BH = |x - padm->bc_center| in [0,1) [1,2) [2,4) [4,8) [8,inf)
+  static constexpr int kCeilCap = 12, kCeilNcap = 5, kCeilLen = 17;
   DvceArray1D<Real> ceil_acc;
   Real ceil_stage[4][kCeilLen];
   Real ceil_cum[kCeilLen] = {};
@@ -443,6 +446,7 @@ class PrimitiveSolverHydro {
     for (int n : {kCeilN, kCeilMb, kCeilNear, kCeilNear + 1, kCeilNear + 2, kCeilNnear}) {
       sum[n] = ceil_stage[ns-1][n];
     }
+    for (int n = kCeilCap; n < kCeilCap + kCeilNcap; ++n) sum[n] = ceil_stage[ns-1][n];
 #if MPI_PARALLEL_ENABLED
     MPI_Allreduce(MPI_IN_PLACE, sum, kCeilLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
@@ -458,7 +462,10 @@ class PrimitiveSolverHydro {
                 << sum[kCeilNear+1] << "," << sum[kCeilNear+2] << ") n_near="
                 << sum[kCeilNnear] << " cum_dM=" << ceil_cum[kCeilM] << " cum_dS=("
                 << ceil_cum[kCeilSx] << "," << ceil_cum[kCeilSx+1] << ","
-                << ceil_cum[kCeilSx+2] << ") cum_dE=" << ceil_cum[kCeilEn] << std::endl;
+                << ceil_cum[kCeilSx+2] << ") cum_dE=" << ceil_cum[kCeilEn]
+                << " n_cap_rBH[0,1,2,4,8+]=(" << sum[kCeilCap] << "," << sum[kCeilCap+1] << ","
+                << sum[kCeilCap+2] << "," << sum[kCeilCap+3] << "," << sum[kCeilCap+4] << ")"
+                << std::endl;
       if (near > ceil_alarm) {
         std::cout << "ATMCEIL_ALARM cycle=" << cycle << " time=" << time
                   << " near-band mass " << near << " > atm_ceiling_alarm_mass "
@@ -2992,7 +2999,7 @@ class PrimitiveSolverHydro {
             const Real al = adm.alpha(m, k, j, i);
             const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
                                 adm.beta_u(m, 2, k, j, i)};
-            ZoneGridRest(prim_pt, bu, al, g3d, cvmax_);
+            const Real cf = ZoneGridRest(prim_pt, bu, al, g3d, cvmax_);
             const Real uu[3] = {prim_pt[PVX], prim_pt[PVY], prim_pt[PVZ]};
             Real ud[3];
             Primitive::LowerVector(ud, uu, g3d);
@@ -3019,6 +3026,18 @@ class PrimitiveSolverHydro {
               Kokkos::atomic_add(&cacc_(kCeilM), (cpre[CDN] - cons_pt[CDN])*dv);
               Kokkos::atomic_add(&cacc_(kCeilMb), cpre[CDN]*dv);
               Kokkos::atomic_max(&cacc_(kCeilRmax), n0*mb);
+              if (cf < 1.0) {   // K-025: the vmax cap acted; bin by r_BH
+                const Real xc = CellCenterX(i - is, indcs.nx1, size.d_view(m).x1min,
+                                            size.d_view(m).x1max) - fgx_;
+                const Real yc = CellCenterX(j - js, indcs.nx2, size.d_view(m).x2min,
+                                            size.d_view(m).x2max) - fgy_;
+                const Real zc = CellCenterX(k - ks, indcs.nx3, size.d_view(m).x3min,
+                                            size.d_view(m).x3max) - fgz_;
+                const Real rb = sqrt(xc*xc + yc*yc + zc*zc);
+                const int b = (rb < 1.0) ? 0 : (rb < 2.0) ? 1 : (rb < 4.0) ? 2 :
+                              (rb < 8.0) ? 3 : 4;
+                Kokkos::atomic_add(&cacc_(kCeilCap + b), 1.0);
+              }
             }
           } else if (interior && n0 < 1.0e3*cthr_) {
             // the alarm census: gas within 1e3 of the threshold, not reset

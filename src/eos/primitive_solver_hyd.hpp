@@ -251,6 +251,15 @@ class PrimitiveSolverHydro {
   // allocated either; CFC's regrid refresh keeps the owner-flag path (cfc.cpp)
   bool de_noshk = false;
   Real de_q1 = 3.0e-4, de_q2 = 3.0e-3, de_qdel = 0.1;
+  // <mhd> dual_energy_hysteresis = h (R-262 §2 / R-273 item 6; conditioning only; default 0 =
+  // off, read only if present): the tracer/energy choice at eta1 gets a band. A cell whose
+  // previous C2P used the tracer pressure (branches 11/12/13) stays on it while q_tr < eta1(1+h);
+  // one that did not returns to it only at q_tr < eta1(1-h). The previous branch is an input to
+  // a pressure decision, so it rides in its own non-evolved u0 slot (the last one, after the
+  // shock-flag slot if that is on; mhd.cpp), exchanged with the conserved variables like DY and
+  // stored in restarts (dyngr.flag): the same in a ghost and its owner. Written by every C2P
+  // (1 = tracer pressure used, 0 = otherwise or not dense).
+  Real de_hyst = 0.0;
   // <mhd> dual_energy_variable = eint (D-int; R-223 addendum, R-225 item 2; needs dual_energy_mode =
   // conditioning): the partner is the specific internal energy, Y = eps (the scalar slot holds
   // D eps = sqrt(gamma) W rho eps = E), advected with the mass flux (dual_energy_flux = mass) and given
@@ -1732,6 +1741,15 @@ class PrimitiveSolverHydro {
           de_q2 = pin->GetReal(block, "dual_energy_q_eta2");
         if (pin->DoesParameterExist(block, "dual_energy_q_delta"))
           de_qdel = pin->GetReal(block, "dual_energy_q_delta");
+        if (pin->DoesParameterExist(block, "dual_energy_hysteresis")) {
+          de_hyst = pin->GetReal(block, "dual_energy_hysteresis");
+          if (!(de_hyst >= 0.0 && de_hyst < 1.0)) {
+            std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                      << std::endl << "<" << block << "> dual_energy_hysteresis must be in "
+                      << "[0, 1)" << std::endl;
+            std::exit(EXIT_FAILURE);
+          }
+        }
         if (!(de_q1 > 0.0) || !(de_q2 >= de_q1) || !(de_qdel >= 0.0 && de_qdel < 1.0)) {
           std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
                     << std::endl << "<" << block << "> dual_energy_mode = conditioning needs "
@@ -2342,6 +2360,15 @@ class PrimitiveSolverHydro {
     const bool de_cond_ = de_cond;
     const bool de_xg_ = de_xguard && excise && !smoothing;
     const Real de_q1_ = de_q1, de_q2_ = de_q2, de_qdel_ = de_qdel;
+    // dual_energy_hysteresis (see de_hyst): its slot is u0's last one
+    const bool hyst_ = de_on_ && de_cond && de_hyst > 0.0;
+    const Real q1lo_ = de_q1*(1.0 - de_hyst), q1hi_ = de_q1*(1.0 + de_hyst);
+    const int ihyst_ = cons.extent_int(1) - 1;
+    if (hyst_ && ihyst_ < pmy_pack->pmhd->nmhd + pmy_pack->pmhd->nscalars) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "dual_energy_hysteresis needs its u0 slot (mhd.cpp allocates it)" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
     const bool de_eint_ = de_eint;
     const bool ddon_ = de_on_ && de_diag_on;
     const int dstg_ = de_stage;
@@ -2873,6 +2900,9 @@ class PrimitiveSolverHydro {
               P_t = inv ? K_tr*pow(rho_t, de_gamma_) : 0.0;
             }
             if (inv && tau0 > 0.0) qtr = D*P_t/((de_gamma_ - 1.0)*rho_t)/tau0;
+            // eta1 for this cell: exactly de_q1_ without hysteresis (bitwise); with it, the
+            // band edge set by the owner's previous branch (exchanged slot, > 0.5 = tracer)
+            const Real q1e = !hyst_ ? de_q1_ : ((cons(m, ihyst_, k, j, i) > 0.5) ? q1hi_ : q1lo_);
             if (bad || !(tau0 > 0.0)) {
               dec = inv ? 1 : 3;
               dbr = inv ? 13 : 16;
@@ -2885,16 +2915,17 @@ class PrimitiveSolverHydro {
               if (!inv) {
                 dec = (qen >= de_q2_) ? 2 : 3;
                 dbr = (qen >= de_q2_) ? 14 : 15;
-              } else if (qtr >= de_q1_ && K_en < (1.0 - de_qdel_)*K_tr) {
+              } else if (qtr >= q1e && K_en < (1.0 - de_qdel_)*K_tr) {
                 dec = 1; dbr = 12;
               } else if (qen >= de_q2_) {
                 dec = 2; dbr = 14;
-              } else if (qtr < de_q1_) {
+              } else if (qtr < q1e) {
                 dec = 1; dbr = 11;
               } else {
                 dec = 3; dbr = 15;
               }
             }
+            if (hyst_) cons(m, ihyst_, k, j, i) = (dec == 1) ? 1.0 : 0.0;
             if (dec == 1) {
               // the tracer's pressure; the stored state stays as it is (dkeep = 1)
               for (int n = 0; n < NCONS; ++n) { cons_pt[n] = cons_pt_old[n]; }
@@ -2922,6 +2953,7 @@ class PrimitiveSolverHydro {
               dkeep = 2;
             }
           } else if (!(dense && bad)) {
+            if (hyst_) cons(m, ihyst_, k, j, i) = 0.0;
             // not dense (or B != 0): K from the energy solution, as the legacy branch 0/4
             const Real rho_ = prim_pt[PRH]*mb;
             const Real yk = !(rho_ > 0.0) ? 0.0 : (de_eint_ ?
@@ -2932,6 +2964,7 @@ class PrimitiveSolverHydro {
             dkeep = 2;
             dbr = dense ? 17 : 0;
           } else {
+            if (hyst_) cons(m, ihyst_, k, j, i) = 0.0;
             dbr = 17;
           }
           if (interior && dense) { nden_r += 1.0; }

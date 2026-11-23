@@ -111,7 +111,7 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   bondi.r_crit = pin->GetReal("problem", "r_crit");
 
   // Get ideal gas EOS data
-  if (pmbp->pdyngr == nullptr) {
+  if (pmbp->pmhd == nullptr) {
     bondi.gm = pmbp->phydro->peos->eos_data.gamma;
   } else {
     bondi.gm = pmbp->pmhd->peos->eos_data.gamma;
@@ -158,7 +158,7 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   int ks = indcs.ks;
   int nmb = pmbp->nmb_thispack;
   DvceArray5D<Real> w0_;
-  if (pmbp->pdyngr != nullptr) {
+  if (pmbp->pmhd != nullptr) {
     w0_ = pmbp->pmhd->w0;
   } else {
     w0_ = pmbp->phydro->w0;
@@ -214,7 +214,17 @@ void ProblemGenerator::BondiAccretion(ParameterInput *pin, const bool restart) {
   }
 
   // Convert primitives to conserved
-  if (pmbp->padm == nullptr) {
+  if (pmbp->pmhd != nullptr && pmbp->pdyngr == nullptr) {
+    // bhstar: plain GRMHD (<mhd>, no dyngr), B = 0 (numerics-013 D-e hot control)
+    auto &b0 = pmbp->pmhd->b0;
+    auto &bcc_ = pmbp->pmhd->bcc0;
+    Kokkos::deep_copy(DevExeSpace(), b0.x1f, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), b0.x2f, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), b0.x3f, 0.0);
+    Kokkos::deep_copy(DevExeSpace(), bcc_, 0.0);
+    auto &u_ = (bondi.reset_ic) ? pmbp->pmhd->u1 : pmbp->pmhd->u0;
+    pmbp->pmhd->peos->PrimToCons(w0_, bcc_, u_, 0, (n1-1), 0, (n2-1), 0, (n3-1));
+  } else if (pmbp->padm == nullptr) {
     auto &u0_ = pmbp->phydro->u0;
     auto &u1_ = pmbp->phydro->u1;
     if (bondi.reset_ic) {
@@ -537,10 +547,12 @@ void FixedBondiInflow(Mesh *pm) {
   auto &mb_bcs = pm->pmb_pack->pmb->mb_bcs;
   auto bondi_ = bondi;
   bool use_dyngr = pm->pmb_pack->pdyngr != nullptr;
+  bool use_mhd = (pm->pmb_pack->pmhd != nullptr) && !use_dyngr;  // bhstar: plain <mhd>
+  mhd::MHD *pmhd_ = pm->pmb_pack->pmhd;
 
   int nmb = pm->pmb_pack->nmb_thispack;
   DvceArray5D<Real> u0_, w0_;
-  if (use_dyngr) {
+  if (use_dyngr || use_mhd) {
     u0_ = pm->pmb_pack->pmhd->u0;
     w0_ = pm->pmb_pack->pmhd->w0;
   } else {
@@ -549,7 +561,13 @@ void FixedBondiInflow(Mesh *pm) {
   }
 
   Real gm1 = 1.0;
-  if (!use_dyngr) {
+  if (use_mhd) {
+    pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                            is-ng, is-1, 0, (n2-1), 0, (n3-1));
+    pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                            ie+1, ie+ng, 0, (n2-1), 0, (n3-1));
+    gm1 = bondi_.gm - 1.0;
+  } else if (!use_dyngr) {
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,is-ng,is-1,0,(n2-1),0,(n3-1));
     pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,ie+1,ie+ng,0,(n2-1),0,(n3-1));
     gm1 = bondi_.gm - 1.0;
@@ -596,11 +614,25 @@ void FixedBondiInflow(Mesh *pm) {
     pm->pmb_pack->pdyngr->PrimToConInit(is-ng,is-1,0,(n2-1),0,(n3-1));
     pm->pmb_pack->pdyngr->PrimToConInit(ie+1,ie+ng,0,(n2-1),0,(n3-1));
   } else {
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    if (use_mhd) {
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              is-ng,is-1,0,(n2-1),0,(n3-1));
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    } else {
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,is-ng,is-1,0,(n2-1),0,(n3-1));
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,ie+1,ie+ng,0,(n2-1),0,(n3-1));
+    }
 
-    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
-    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
+    if (use_mhd) {
+      pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                              0,(n1-1),js-ng,js-1,0,(n3-1));
+      pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                              0,(n1-1),je+1,je+ng,0,(n3-1));
+    } else {
+      pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),js-ng,js-1,0,(n3-1));
+      pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),je+1,je+ng,0,(n3-1));
+    }
   }
 
   par_for("fixed_x2", DevExeSpace(),0,(nmb-1),0,(n3-1),0,(ng-1),0,(n1-1),
@@ -644,11 +676,25 @@ void FixedBondiInflow(Mesh *pm) {
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),js-ng,js-1,0,(n3-1));
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),je+1,je+ng,0,(n3-1));
   } else {
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+    if (use_mhd) {
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              0,(n1-1),js-ng,js-1,0,(n3-1));
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              0,(n1-1),je+1,je+ng,0,(n3-1));
+    } else {
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),js-ng,js-1,0,(n3-1));
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),je+1,je+ng,0,(n3-1));
+    }
 
-    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-    pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    if (use_mhd) {
+      pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                              0,(n1-1),0,(n2-1),ks-ng,ks-1);
+      pmhd_->peos->ConsToPrim(u0_, pmhd_->b0, w0_, pmhd_->bcc0, false,
+                              0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    } else {
+      pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+      pm->pmb_pack->phydro->peos->ConsToPrim(u0_,w0_,false,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    }
   }
   par_for("fixed_ix3", DevExeSpace(),0,(nmb-1),0,(ng-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
@@ -691,8 +737,15 @@ void FixedBondiInflow(Mesh *pm) {
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ks-ng,ks-1);
     pm->pmb_pack->pdyngr->PrimToConInit(0,(n1-1),0,(n2-1),ke+1,ke+ng);
   } else {
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
-    pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    if (use_mhd) {
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              0,(n1-1),0,(n2-1),ks-ng,ks-1);
+      pmhd_->peos->PrimToCons(w0_, pmhd_->bcc0, u0_,
+                              0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    } else {
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ks-ng,ks-1);
+      pm->pmb_pack->phydro->peos->PrimToCons(w0_,u0_,0,(n1-1),0,(n2-1),ke+1,ke+ng);
+    }
   }
 
   return;

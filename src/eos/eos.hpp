@@ -387,6 +387,17 @@ class IdealGRMHD : public EquationOfState {
   void PrimToCons(const DvceArray5D<Real> &prim, const DvceArray5D<Real> &bcc,
                   DvceArray5D<Real> &cons, const int il, const int iu,
                   const int jl, const int ju, const int kl, const int ku) override;
+
+  // bhstar diagnostic (numerics-013 D-a): dump the first c2p events (density floor,
+  // velocity ceiling or failure) at or after cycle c2p_dump_cycle_ (-1 = off), once per rank
+  static constexpr int kDumpRec = 32;    // records kept per rank
+  static constexpr int kDumpNF  = 40;    // reals per record
+  int c2p_dump_cycle_ = -1;
+  bool c2p_dumped_ = false;
+  int c2p_ncall_ = 0, c2p_lastcycle_ = -1;
+  DvceArray1D<Real> c2p_dump_;
+  DvceArray1D<int>  c2p_dump_n_;
+  void PrintC2PDump(int nrec, int il, int iu, int jl, int ju, int kl, int ku);
 };
 
 //----------------------------------------------------------------------------------------

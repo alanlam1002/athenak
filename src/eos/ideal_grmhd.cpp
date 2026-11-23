@@ -8,6 +8,8 @@
 
 #include <float.h>
 
+#include <cstdio>
+
 #include "athena.hpp"
 #include "mhd/mhd.hpp"
 #include "eos.hpp"
@@ -16,6 +18,8 @@
 #include "coordinates/coordinates.hpp"
 #include "coordinates/cartesian_ks.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "globals.hpp"
+#include "mesh/mesh.hpp"
 
 //----------------------------------------------------------------------------------------
 // ctor: also calls EOS base class constructor
@@ -27,6 +31,12 @@ IdealGRMHD::IdealGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
   eos_data.iso_cs = 0.0;
   eos_data.gamma_max = pin->GetOrAddReal("mhd","gamma_max",(FLT_MAX));  // gamma ceiling
   eos_data.sigma_max = pin->GetOrAddReal("mhd","sigma_max",(FLT_MAX));  // sigma ceiling
+  // bhstar diagnostic (numerics-013 D-a); -1 = off
+  c2p_dump_cycle_ = pin->GetOrAddInteger("mhd","c2p_dump_cycle",-1);
+  if (c2p_dump_cycle_ >= 0) {
+    Kokkos::realloc(c2p_dump_, kDumpRec*kDumpNF);
+    Kokkos::realloc(c2p_dump_n_, 1);
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -56,6 +66,22 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
   auto &excision_flux_ = pmy_pack->pcoord->excision_flux;
   auto &dexcise_ = pmy_pack->pcoord->coord_data.dexcise;
   auto &pexcise_ = pmy_pack->pcoord->coord_data.pexcise;
+
+  // bhstar diagnostic (numerics-013 D-a): record the first density-floor / velocity-ceiling /
+  // failure events at or after cycle c2p_dump_cycle_ (energy-floor-only events are not
+  // recorded: in the cold free fall they occur in most cells every call)
+  const int ncyc = pmy_pack->pmesh->ncycle;
+  if (ncyc != c2p_lastcycle_) {c2p_ncall_ = 0; c2p_lastcycle_ = ncyc;}
+  c2p_ncall_++;
+  const bool do_dump = (!only_testfloors) && (c2p_dump_cycle_ >= 0) && (!c2p_dumped_)
+                       && (ncyc >= c2p_dump_cycle_);
+  if (do_dump) Kokkos::deep_copy(c2p_dump_n_, 0);
+  auto dump_ = c2p_dump_;
+  auto dump_n_ = c2p_dump_n_;
+  auto &gid_ = pmy_pack->pmb->mb_gid;
+  auto &lev_ = pmy_pack->pmb->mb_lev;
+  const int ie_ = indcs.ie, je_ = indcs.je, ke_ = indcs.ke;
+  const int ncall_ = c2p_ncall_;
 
   const int ni   = (iu - il + 1);
   const int nji  = (ju - jl + 1)*ni;
@@ -143,6 +169,25 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
       SingleC2P_IdealSRMHD(u_sr, eos, s2, b2, rpar, w,
                            dfloor_used, efloor_used, c2p_failure, iter_used);
 
+      if (do_dump && (dfloor_used || c2p_failure)) {
+        int slot = Kokkos::atomic_fetch_add(&dump_n_(0), 1);
+        if (slot < kDumpRec) {
+          Real *r = &dump_(slot*kDumpNF);
+          r[0] = ncyc; r[1] = ncall_; r[2] = gid_.d_view(m); r[3] = lev_.d_view(m);
+          r[4] = i; r[5] = j; r[6] = k;
+          r[7] = (i < is || i > ie_ || j < js || j > je_ || k < ks || k > ke_) ? 1.0 : 0.0;
+          r[8] = x1v; r[9] = x2v; r[10] = x3v;
+          r[11] = u.d; r[12] = u.mx; r[13] = u.my; r[14] = u.mz; r[15] = u.e;  // GR cons
+          r[16] = u.bx; r[17] = u.by; r[18] = u.bz;
+          r[19] = u_sr.d; r[20] = u_sr.e; r[21] = s2; r[22] = b2; r[23] = rpar;
+          r[24] = iter_used; r[25] = dfloor_used; r[26] = efloor_used; r[27] = c2p_failure;
+          r[28] = prim(m,IDN,k,j,i); r[29] = prim(m,IVX,k,j,i); r[30] = prim(m,IVY,k,j,i);
+          r[31] = prim(m,IVZ,k,j,i); r[32] = prim(m,IEN,k,j,i);   // previous primitives
+          r[33] = w.d; r[34] = w.vx; r[35] = w.vy; r[36] = w.vz; r[37] = w.e;  // result
+          r[38] = 0.0; r[39] = 0.0;
+        }
+      }
+
       // apply velocity ceiling if necessary
       Real tmp = glower[1][1]*SQR(w.vx)
                + glower[2][2]*SQR(w.vy)
@@ -213,6 +258,14 @@ void IdealGRMHD::ConsToPrim(DvceArray5D<Real> &cons, const DvceFaceFld4D<Real> &
     }
   }, Kokkos::Sum<int>(nfloord_), Kokkos::Sum<int>(nfloore_), Kokkos::Sum<int>(nceilv_),
      Kokkos::Sum<int>(nfail_), Kokkos::Max<int>(maxit_));
+
+  if (do_dump) {
+    auto hn = Kokkos::create_mirror_view_and_copy(HostMemSpace(), c2p_dump_n_);
+    if (hn(0) > 0) {
+      PrintC2PDump(hn(0), il, iu, jl, ju, kl, ku);
+      c2p_dumped_ = true;
+    }
+  }
 
   // store appropriate counters
   if (only_testfloors) {
@@ -295,4 +348,24 @@ void IdealGRMHD::PrimToCons(const DvceArray5D<Real> &prim, const DvceArray5D<Rea
   });
 
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void IdealGRMHD::PrintC2PDump()
+//! \brief bhstar diagnostic (numerics-013 D-a): print the recorded c2p events of this rank
+
+void IdealGRMHD::PrintC2PDump(int nrec, int il, int iu, int jl, int ju, int kl, int ku) {
+  auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), c2p_dump_);
+  int n = (nrec < kDumpRec) ? nrec : kDumpRec;
+  std::printf("C2PDUMP rank %d: %d events (%d recorded) in call %d of cycle %d, "
+              "range i %d-%d j %d-%d k %d-%d\n", global_variable::my_rank, nrec, n,
+              c2p_ncall_, pmy_pack->pmesh->ncycle, il, iu, jl, ju, kl, ku);
+  std::printf("C2PDUMP cols: cycle call gid lev i j k ghost x y z D Sx Sy Sz tau+D Bx By Bz "
+              "Dsr Esr s2 b2 rpar iter dfl efl fail rho0 vx0 vy0 vz0 e0 rho vx vy vz e\n");
+  for (int q = 0; q < n; ++q) {
+    std::printf("C2PDUMP %d", global_variable::my_rank);
+    for (int f = 0; f < 38; ++f) std::printf(" %.17g", h(q*kDumpNF + f));
+    std::printf("\n");
+  }
+  std::fflush(stdout);
 }

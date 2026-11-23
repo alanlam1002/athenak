@@ -193,7 +193,15 @@ void CFC::KerrSetup(ParameterInput *pin) {
     if (!cd.bh_excise || cd.excision_scheme != ExcisionScheme::lapse) {
       KerrFatal("a > 0 needs <coord> excise = true and excision_scheme = lapse (D4).");
     }
-    cd.excision_rfloor = 0.75*kerr_r_ah_min_;
+    // <cfc> kerr_mask_c (K-026, RK-048; read only if present, default 0.75 = unchanged):
+    // r_D4 = kerr_mask_c * r_AH,min. K-009: the mask stays inside the horizon for c < 1;
+    // the 1-cell margin needs c <= 1 - h/r_AH,min (not checked here).
+    Real mask_c = 0.75;
+    if (pin->DoesParameterExist("cfc", "kerr_mask_c")) {
+      mask_c = pin->GetReal("cfc", "kerr_mask_c");
+      if (!(mask_c > 0.0 && mask_c < 1.0)) { KerrFatal("<cfc> kerr_mask_c must lie in (0, 1)."); }
+    }
+    cd.excision_rfloor = mask_c*kerr_r_ah_min_;
     cd.excision_lapse_off = true;
     // also into pin: a regrid rebuilds Coordinates from pin (coordinates.cpp reads these),
     // which otherwise reverted the mask to the lapse test after the first regrid (K-005)

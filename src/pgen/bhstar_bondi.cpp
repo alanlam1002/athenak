@@ -218,6 +218,10 @@ void ProblemGenerator::BhstarBondi(ParameterInput *pin, const bool restart) {
     auto &tetcov_c_ = pmbp->prad->tetcov_c;
     auto &norm_to_tet_ = pmbp->prad->norm_to_tet;
     int nang = pmbp->prad->prgeo->nangles;
+    // excised cells (r_ks <= rexcise) get zero intensity: there the tetrad floors r at 1
+    // while the fluid state floors it at 0.5, and n0_f can be ~0 (huge 1/n0_f^4)
+    const bool excise = pmbp->pcoord->coord_data.bh_excise;
+    auto &exc_mask = pmbp->pcoord->excision_floor;
     par_for("pgen_bhstar_bondi_rad", DevExeSpace(), 0,(nmb-1),0,(n3-1),0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(int m, int k, int j, int i) {
       Real x1v = CellCenterX(i-is, indcs.nx1, size.d_view(m).x1min, size.d_view(m).x1max);
@@ -240,6 +244,7 @@ void ProblemGenerator::BhstarBondi(ParameterInput *pin, const bool restart) {
         urad = p.blob_e*exp(-0.5*(SQR(x1v) + SQR(x2v) + SQR(x3v))/SQR(p.blob_r));
       }
       Real n0 = tet_c_(m,0,0,k,j,i);
+      if (excise && exc_mask(m,k,j,i)) urad = 0.0;
       for (int n=0; n<nang; ++n) {
         Real n0_f = u_tet[0]*nh_c_.d_view(n,0) - u_tet[1]*nh_c_.d_view(n,1)
                   - u_tet[2]*nh_c_.d_view(n,2) - u_tet[3]*nh_c_.d_view(n,3);

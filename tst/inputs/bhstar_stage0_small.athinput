@@ -1,0 +1,105 @@
+# Reduced bhstar Stage 0a for the regression tests tst/test_suite/bhstar (U4, numerics-005).
+# Same physics and code path as inputs/bhstar/stage0a_std.athinput on a small mesh:
+# [-128,128]^3, root 16^3, 8^3 MeshBlocks, SMR to level 4 (dx = 1 on |x| < 4), nlevel 2,
+# shell at r = 20. Checks: energy-budget closure, no skipped coupling cells, no NaN.
+# Thomson scattering only (power_opacity = false): with Kramers opacity the cold free fall
+# is unstable (energy floors -> T ~ 0 -> kappa ~ T^-3.5 diverges); see code-003.
+# M = 1e6 Msun (a = 0), Mdot = 1.50e25 g/s, shell source 0.1 L_Edd, B = 0 under <mhd>.
+
+<comment>
+problem   = bhstar Stage 0a reduced (regression test)
+reference = numerics note v0.5 Sec. 5.3
+
+<job>
+basename = bhstar_s0
+
+<mesh>
+nghost = 2          # plm (fluid and radiation)
+nx1    = 16
+x1min  = -128.0
+x1max  = 128.0
+ix1_bc = user
+ox1_bc = user
+nx2    = 16
+x2min  = -128.0
+x2max  = 128.0
+ix2_bc = user
+ox2_bc = user
+nx3    = 16
+x3min  = -128.0
+x3max  = 128.0
+ix3_bc = user
+ox3_bc = user
+
+<meshblock>
+nx1 = 8
+nx2 = 8
+nx3 = 8
+
+<mesh_refinement>
+refinement = static
+
+<refined_region1>
+level = 4
+x1min = -4.0
+x1max = 4.0
+x2min = -4.0
+x2max = 4.0
+x3min = -4.0
+x3max = 4.0
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = 100
+tlim       = 3.0e4
+ndiag      = 10
+
+<coord>
+general_rel = true
+a           = 0.0
+excise      = true
+dexcise     = 1.0e-12
+pexcise     = 1.0e-24
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.6666666666666667
+dfloor      = 1.0e-12
+pfloor      = 1.0e-24
+
+<radiation>
+nlevel         = 2
+reconstruct    = plm
+kappa_s        = 0.35
+power_opacity  = false
+kappa_a        = 0.0
+kappa_p        = 0.0
+compton        = false
+energy_budget  = true
+
+<rad_srcterms>
+rad_shell     = true
+shell_r       = 20.0
+shell_sigma   = 2.0
+shell_lum_edd = 0.1
+
+<units>
+bhmass_msun = 1.0e6
+density_cgs = 1.0e-11
+mu          = 0.593
+
+<problem>
+pgen_name = bhstar_bondi
+mdot_cgs  = 1.50e25
+t_res     = 7000.0
+user_hist = true
+
+<output1>
+file_type   = hst
+dcycle      = 10
+data_format = %24.16e
+user_hist_only = true

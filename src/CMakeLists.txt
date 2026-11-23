@@ -140,6 +140,7 @@ add_executable(
         pgen/tests/divb_amr.cpp
         pgen/tests/diffusion.cpp
         pgen/tests/gr_bondi.cpp
+        pgen/bhstar_bondi.cpp
         pgen/tests/gr_monopole.cpp
         pgen/tests/linear_wave.cpp
         pgen/tests/lw_implode.cpp
@@ -159,6 +160,7 @@ add_executable(
         pgen/unit_tests/gauss_legendre.cpp
 
         radiation/radiation.cpp
+        radiation/radiation_budget.cpp
         radiation/radiation_fluxes.cpp
         radiation/radiation_newdt.cpp
         radiation/radiation_source.cpp

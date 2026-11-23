@@ -22,6 +22,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh.hpp"
+#include "radiation/radiation_budget.hpp"
 #include "mesh_refinement.hpp"
 #include "refinement_criteria.hpp"
 
@@ -153,6 +154,12 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 
   // Refine/derefine mesh and evolved data, set boundary conditions/timestep on new mesh
   if (nnew != 0 || ndel != 0) { // at least one (de)refinement flagged
+    // optional energy budget (radiation runs): energy change across the regrid,
+    // including cyclic-zoom store/apply (per rank; sums over ranks in the history)
+    radiation::RadBudget *pbud = (pmy_mesh->pmb_pack->prad != nullptr) ?
+                                  pmy_mesh->pmb_pack->prad->pbudget : nullptr;
+    Real e_before = 0.0;
+    if (pbud != nullptr) e_before = pbud->GasEnergy() + pbud->RadEnergy();
     if (pmy_mesh->pzoom != nullptr) pmy_mesh->pzoom->StoreZoomRegion();
     RedistAndRefineMeshBlocks(pin, nnew, ndel);
 
@@ -185,6 +192,9 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
 
     nmb_created += nnew;
     nmb_deleted += ndel;
+    if (pbud != nullptr) {
+      pbud->c[radiation::kBudRegrid] += pbud->GasEnergy() + pbud->RadEnergy() - e_before;
+    }
   }
   return;
 }

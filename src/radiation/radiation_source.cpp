@@ -17,6 +17,7 @@
 #include "mhd/mhd.hpp"
 #include "units/units.hpp"
 #include "radiation.hpp"
+#include "radiation_budget.hpp"
 
 #include "radiation/radiation_tetrad.hpp"
 #include "radiation/radiation_opacities.hpp"
@@ -109,6 +110,17 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   // Extract timestep
   Real dt_ = (pdriver->beta[stage-1])*(pmy_pack->pmesh->dt);
 
+  // optional energy budget (bhstar Stage 0): total before, c2p part, badcell count
+  const bool budget = (pbudget != nullptr);
+  Real e_tot_before = 0.0, eg_c2p_before = 0.0;
+  DvceArray1D<Real> bacc;
+  if (budget) {
+    e_tot_before = pbudget->RadEnergy() + pbudget->GasEnergy();
+    eg_c2p_before = pbudget->GasEnergy();
+    pbudget->ZeroAcc();
+    bacc = pbudget->acc;
+  }
+
   // Call ConsToPrim over active zones prior to source term application
   if (!(fixed_fluid_)) {
     if (is_hydro_enabled_) {
@@ -119,6 +131,8 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       pmy_pack->pmhd->peos->ConsToPrim(u0_,b0_,w0_,bcc0_,false,is,ie,js,je,ks,ke);
     }
   }
+  Real de_c2p = 0.0;
+  if (budget) de_c2p = pbudget->GasEnergy() - eg_c2p_before;
 
   // compute implicit source term
   par_for("radiation_source",DevExeSpace(),0,nmb1,ks,ke,js,je,is,ie,
@@ -221,6 +235,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
       if (!(flag) || !(isfinite(tgasnew))) {
         badcell = true;
         tgasnew = tgas;
+        if (budget) Kokkos::atomic_add(&bacc(2), 1.0);
       }
     } else {
       tgasnew = -coef[0];
@@ -321,6 +336,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
         bool flag = FourthPolyRoot(coef[1], coef[0], tradnew);
         if (!(flag) || !(isfinite(tradnew))) {
           badcell = true;
+          if (budget) Kokkos::atomic_add(&bacc(2), 1.0);
         }
       }
 
@@ -389,6 +405,17 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     }
   });
 
+  if (budget) {
+    Real a[3];
+    pbudget->ReadAcc(a, 3);
+    pbudget->nbadcell += a[2];
+    Real de_tot = pbudget->RadEnergy() + pbudget->GasEnergy() - e_tot_before;
+    pbudget->c[kBudCoupl] += de_tot;
+    pbudget->c[kBudCouplC2P] += de_c2p;
+    // the radiation-gas exchange itself is conservative by construction (the fluid
+    // receives m_old - m_new); what remains is the zeroing of intensities by excision
+    pbudget->c[kBudCouplExc] += de_tot - de_c2p;
+  }
   return TaskStatus::complete;
 }
 

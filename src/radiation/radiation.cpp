@@ -22,6 +22,7 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "units/units.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_budget.hpp"
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
@@ -100,6 +101,11 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   // Source terms (if needed)
   if (pin->DoesBlockExist("rad_srcterms")) {
     psrc = new SourceTerms("rad_srcterms", ppack, pin);
+  }
+
+  // Optional energy-budget accounting (bhstar Stage 0; default off)
+  if (pin->GetOrAddBoolean("radiation","energy_budget",false)) {
+    pbudget = new RadBudget(ppack);
   }
 
   // Setup angular mesh and radiation geometry data
@@ -212,6 +218,7 @@ Radiation::~Radiation() {
   delete pbval_i;
   delete prgeo;
   if (psrc != nullptr) {delete psrc;}
+  if (pbudget != nullptr) {delete pbudget;}
 }
 
 } // namespace radiation

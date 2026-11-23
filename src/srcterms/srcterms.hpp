@@ -34,6 +34,7 @@ class SourceTerms {
   bool ism_cooling;
   bool rel_cooling;
   bool rad_beam;
+  bool rad_shell;
   bool self_gravity;
 
   // new timestep
@@ -56,6 +57,13 @@ class SourceTerms {
   Real dir1, dir2, dir3;  // direction of source
   Real width, spread;     // spatial width of source region, spread in angles
 
+  // data for radiation shell source (bhstar Stage 0): comoving-isotropic injection in a
+  // Gaussian shell in KS radius, total rate shell_q (energy at infinity per coordinate time)
+  Real shell_r, shell_sigma;  // shell radius and Gaussian width (code units)
+  Real shell_q;               // total rate in code units
+  Real shell_norm;            // comoving amplitude per unit time (set by ShellNormalise)
+  bool shell_norm_set = false;
+
   // functions
   void ApplySrcTerms(const DvceArray5D<Real> &w0, const EOS_Data &eos,
                      const Real bdt, DvceArray5D<Real> &u0);
@@ -69,10 +77,13 @@ class SourceTerms {
   void SelfGravity(const DvceArray5D<Real> &w0, const EOS_Data &eos,
                    const Real bdt, DvceArray5D<Real> &u0);
   void BeamSource(DvceArray5D<Real> &i0, const Real bdt);
+  void ShellSource(DvceArray5D<Real> &i0, const Real bdt);
+  void ShellNormalise();
   void NewTimeStep(const DvceArray5D<Real> &w0, const EOS_Data &eos);
 
  private:
   MeshBlockPack *pmy_pack;
+  ParameterInput *pmy_pin;   // kept to store/read shell_norm (restarts)
 };
 
 #endif  // SRCTERMS_SRCTERMS_HPP_

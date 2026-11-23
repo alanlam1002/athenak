@@ -23,6 +23,7 @@ class Coordinates;
 class SourceTerms;
 class GeodesicGrid;
 class Driver;
+namespace radiation { class RadBudget; }
 
 //----------------------------------------------------------------------------------------
 //! \struct RadiationTaskIDs
@@ -108,6 +109,9 @@ class Radiation {
   // radiation source term (i.e., beam)
   SourceTerms *psrc = nullptr;
 
+  // optional energy-budget accounting (<radiation>/energy_budget, bhstar Stage 0)
+  RadBudget *pbudget = nullptr;
+
   // Angular mesh
   bool rotate_geo;                    // rotate geodesic mesh
   bool angular_fluxes;                // flag to enable/disable angular fluxes
@@ -163,6 +167,10 @@ class Radiation {
   TaskStatus ApplyPhysicalBCs(Driver* pdrive, int stage);
   TaskStatus Prolongate(Driver* pdrive, int stage);
   TaskStatus NewTimeStep(Driver *d, int stage);
+  // (M)HD tasks wrapped with energy-budget measurements (used only if pbudget != nullptr)
+  TaskStatus MHDRKUpdateBudget(Driver *d, int stage);
+  TaskStatus MHDSrcTermsBudget(Driver *d, int stage);
+  TaskStatus MHDConToPrimBudget(Driver *d, int stage);
   // ...in "after_stagen_tl" task list
   TaskStatus ClearSend(Driver *d, int stage);
   TaskStatus ClearRecv(Driver *d, int stage);

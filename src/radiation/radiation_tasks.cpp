@@ -23,6 +23,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "radiation/radiation.hpp"
+#include "radiation/radiation_budget.hpp"
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
@@ -51,8 +52,13 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.mhd_flux  = tl["stagen"]->AddTask(&mhd::MHD::Fluxes, pmhd, id.rad_src);
     id.mhd_sendf = tl["stagen"]->AddTask(&mhd::MHD::SendFlux, pmhd, id.mhd_flux);
     id.mhd_recvf = tl["stagen"]->AddTask(&mhd::MHD::RecvFlux, pmhd, id.mhd_sendf);
-    id.mhd_rkupdt= tl["stagen"]->AddTask(&mhd::MHD::RKUpdate, pmhd, id.mhd_recvf);
-    id.mhd_src   = tl["stagen"]->AddTask(&mhd::MHD::MHDSrcTerms, pmhd, id.mhd_rkupdt);
+    if (pbudget != nullptr) {  // same tasks, wrapped with energy measurements
+      id.mhd_rkupdt= tl["stagen"]->AddTask(&Radiation::MHDRKUpdateBudget,this,id.mhd_recvf);
+      id.mhd_src   = tl["stagen"]->AddTask(&Radiation::MHDSrcTermsBudget,this,id.mhd_rkupdt);
+    } else {
+      id.mhd_rkupdt= tl["stagen"]->AddTask(&mhd::MHD::RKUpdate, pmhd, id.mhd_recvf);
+      id.mhd_src   = tl["stagen"]->AddTask(&mhd::MHD::MHDSrcTerms, pmhd, id.mhd_rkupdt);
+    }
     id.mhd_efld  = tl["stagen"]->AddTask(&mhd::MHD::CornerE, pmhd, id.mhd_src);
     id.mhd_sende = tl["stagen"]->AddTask(&mhd::MHD::SendE, pmhd, id.mhd_efld);
     id.mhd_recve = tl["stagen"]->AddTask(&mhd::MHD::RecvE, pmhd, id.mhd_sende);
@@ -70,7 +76,11 @@ void Radiation::AssembleRadTasks(std::map<std::string, std::shared_ptr<TaskList>
     id.rad_prol  = tl["stagen"]->AddTask(&Radiation::Prolongate, this, id.mhd_recvb);
     id.mhd_prol  = tl["stagen"]->AddTask(&mhd::MHD::Prolongate, pmhd, id.rad_prol);
     id.bcs       = tl["stagen"]->AddTask(&Radiation::ApplyPhysicalBCs,this,id.mhd_prol);
-    id.mhd_c2p   = tl["stagen"]->AddTask(&mhd::MHD::ConToPrim, pmhd, id.bcs);
+    if (pbudget != nullptr) {
+      id.mhd_c2p   = tl["stagen"]->AddTask(&Radiation::MHDConToPrimBudget, this, id.bcs);
+    } else {
+      id.mhd_c2p   = tl["stagen"]->AddTask(&mhd::MHD::ConToPrim, pmhd, id.bcs);
+    }
 
     // assemble "after_stagen" task list
     id.rad_csend = tl["after_stagen"]->AddTask(&Radiation::ClearSend, this, none);
@@ -176,6 +186,7 @@ TaskStatus Radiation::InitRecv(Driver *pdrive, int stage) {
 //  \brief  copy u0 --> u1 in first stage
 
 TaskStatus Radiation::CopyCons(Driver *pdrive, int stage) {
+  if (pbudget != nullptr) pbudget->StageBase(stage);
   if (stage == 1) {
     // radiation
     Kokkos::deep_copy(DevExeSpace(), i1, i0);
@@ -230,12 +241,19 @@ TaskStatus Radiation::RecvFlux(Driver *pdrive, int stage) {
 TaskStatus Radiation::RadSrcTerms(Driver *pdrive, int stage) {
   Real beta_dt = (pdrive->beta[stage-1])*(pmy_pack->pmesh->dt);
 
+  Real e_before = 0.0;
+  if (pbudget != nullptr) e_before = pbudget->RadEnergy() + pbudget->GasEnergy();
+
   // Add physics source terms (must be computed from primitives)
   if (psrc != nullptr) psrc->ApplySrcTerms(i0, beta_dt);
 
   // Add user source terms
   if (pmy_pack->pmesh->pgen->user_srcs) {
     (pmy_pack->pmesh->pgen->user_srcs_func)(pmy_pack->pmesh, beta_dt);
+  }
+
+  if (pbudget != nullptr) {
+    pbudget->c[kBudInj] += pbudget->RadEnergy() + pbudget->GasEnergy() - e_before;
   }
 
   return TaskStatus::complete;
@@ -294,7 +312,12 @@ TaskStatus Radiation::ApplyPhysicalBCs(Driver *pdrive, int stage) {
 
   // TODO(@mhguo): this is temporary, need to move to a general mask function later
   if (pmy_pack->pmesh->pzoom != nullptr) {
+    Real e_before = 0.0;
+    if (pbudget != nullptr) e_before = pbudget->RadEnergy() + pbudget->GasEnergy();
     pmy_pack->pmesh->pzoom->ApplyMask();
+    if (pbudget != nullptr) {
+      pbudget->c[kBudMask] += pbudget->RadEnergy() + pbudget->GasEnergy() - e_before;
+    }
   }
 
   // user BCs
@@ -368,6 +391,37 @@ TaskStatus Radiation::ClearRecv(Driver *pdrive, int stage) {
   }
 
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn TaskStatus Radiation::MHDRKUpdateBudget / MHDSrcTermsBudget / MHDConToPrimBudget
+//! \brief The (M)HD tasks of the radiation-MHD task list, wrapped with energy-budget
+//! measurements. Used only when <radiation>/energy_budget = true. The RK update forms
+//! u = gam0*u + gam1*u_base - beta_dt*div(F), so its own contribution is
+//! E_after - (gam0*E_before + gam1*E_base).
+
+TaskStatus Radiation::MHDRKUpdateBudget(Driver *pdrive, int stage) {
+  Real gam0 = pdrive->gam0[stage-1], gam1 = pdrive->gam1[stage-1];
+  Real beta_dt = (pdrive->beta[stage-1])*(pmy_pack->pmesh->dt);
+  Real e_before = pbudget->GasEnergy();
+  TaskStatus ts = pmy_pack->pmhd->RKUpdate(pdrive, stage);
+  pbudget->c[kBudGasUpd] += pbudget->GasEnergy() - (gam0*e_before + gam1*pbudget->eg_base);
+  pbudget->c[kBudGasFlux] += pbudget->GasFaceFlux(beta_dt);
+  return ts;
+}
+
+TaskStatus Radiation::MHDSrcTermsBudget(Driver *pdrive, int stage) {
+  Real e_before = pbudget->GasEnergy();
+  TaskStatus ts = pmy_pack->pmhd->MHDSrcTerms(pdrive, stage);
+  pbudget->c[kBudGasSrc] += pbudget->GasEnergy() - e_before;
+  return ts;
+}
+
+TaskStatus Radiation::MHDConToPrimBudget(Driver *pdrive, int stage) {
+  Real e_before = pbudget->GasEnergy();
+  TaskStatus ts = pmy_pack->pmhd->ConToPrim(pdrive, stage);
+  pbudget->c[kBudC2P] += pbudget->GasEnergy() - e_before;
+  return ts;
 }
 
 } // namespace radiation

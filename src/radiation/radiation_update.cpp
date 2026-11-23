@@ -19,6 +19,7 @@
 #include "geodesic-grid/geodesic_grid.hpp"
 #include "srcterms/srcterms.hpp"
 #include "radiation.hpp"
+#include "radiation_budget.hpp"
 
 namespace radiation {
 //----------------------------------------------------------------------------------------
@@ -59,6 +60,18 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
   auto &rad_mask_ = pmy_pack->pcoord->excision_floor;
   Real &n_0_floor_ = n_0_floor;
 
+  // optional energy budget: combine counters with this stage's RK weights, measure
+  const bool budget = (pbudget != nullptr);
+  Real er_before = 0.0;
+  DvceArray1D<Real> bacc;
+  if (budget) {
+    pbudget->Combine(gam0, gam1);
+    er_before = pbudget->RadEnergy();
+    pbudget->ZeroAcc();
+    bacc = pbudget->acc;
+  }
+  auto &w_ = prgeo->solid_angles;
+
   par_for("r_update",DevExeSpace(),0,nmb1,0,nang1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(int m, int n, int k, int j, int i) {
     // spatial fluxes
@@ -78,16 +91,38 @@ TaskStatus Radiation::RKUpdate(Driver *pdriver, int stage) {
     Real n0  = tt(m,0,0,k,j,i);
     Real n_0 = tc(m,0,0,k,j,i)*nh_c_.d_view(n,0) + tc(m,1,0,k,j,i)*nh_c_.d_view(n,1) +
                tc(m,2,0,k,j,i)*nh_c_.d_view(n,2) + tc(m,3,0,k,j,i)*nh_c_.d_view(n,3);
+    Real i_old = i0_(m,n,k,j,i);
     i0_(m,n,k,j,i) = n0*n_0*fmax((i0_(m,n,k,j,i)/(n0*n_0)), 0.0);
+    // energy budget: dE = -w*di0*dV (atomics: nonzero only where the floor acts)
+    if (budget && (i0_(m,n,k,j,i) != i_old)) {
+      Real dv = mbsize.d_view(m).dx1*mbsize.d_view(m).dx2*mbsize.d_view(m).dx3;
+      Kokkos::atomic_add(&bacc(0), -w_.d_view(n)*(i0_(m,n,k,j,i) - i_old)*dv);
+    }
 
     // handle excision
     // NOTE(@pdmullen): excision criterion are not finalized.  The below zeroes all
     // intensities within rks <= 1.0 and zeroes intensities within angles where n_0
     // is about zero.  This needs future attention.
     if (excise) {
-      if (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_) { i0_(m,n,k,j,i) = 0.0; }
+      if (rad_mask_(m,k,j,i) || fabs(n_0) < n_0_floor_) {
+        if (budget && (i0_(m,n,k,j,i) != 0.0)) {
+          Real dv = mbsize.d_view(m).dx1*mbsize.d_view(m).dx2*mbsize.d_view(m).dx3;
+          Kokkos::atomic_add(&bacc(1), w_.d_view(n)*i0_(m,n,k,j,i)*dv);
+        }
+        i0_(m,n,k,j,i) = 0.0;
+      }
     }
   });
+
+  if (budget) {
+    Real a[2];
+    pbudget->ReadAcc(a, 2);
+    pbudget->c[kBudRadFloor] += a[0];
+    pbudget->c[kBudRadExc] += a[1];
+    pbudget->c[kBudRadFlux] += pbudget->RadFaceFlux(beta_dt);
+    pbudget->c[kBudRadUpd] += pbudget->RadEnergy()
+                              - (gam0*er_before + gam1*pbudget->er_base);
+  }
   return TaskStatus::complete;
 }
 } // namespace radiation

@@ -928,6 +928,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     AlfvenWave(pin, is_restart);
   } else if (pgen_fun_name.compare("gr_bondi") == 0) {
     BondiAccretion(pin, is_restart);
+  } else if (pgen_fun_name.compare("bhstar_bondi") == 0) {
+    BhstarBondi(pin, is_restart);
   } else if (pgen_fun_name.compare("cshock") == 0) {
     CShock(pin, is_restart);
   } else if (pgen_fun_name.compare("divb_amr") == 0) {

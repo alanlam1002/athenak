@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <iostream>
@@ -705,26 +706,31 @@ void MGKerrVectorDriver::NfDiag(const char *tag, bool coeffs, bool sol) {
   const int rank = global_variable::my_rank;
   // first non-finite entry of a level array (all cells, ghosts incl.), host copy
   auto scan = [&](const char *what, MGKerrVector *g, int lev, const DvceArray5D<Real> &a) {
-    auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), a);
     const int nx = g->LevelN(lev, 0), ny = g->LevelN(lev, 1), nz = g->LevelN(lev, 2);
     const int ngh = g->GetGhostCells();
-    const int nv = h.extent_int(1);
-    const int mm = std::min(h.extent_int(0), g->NumMB());
-    long cnt = 0;
+    const int nv = a.extent_int(1);
+    const int mm = std::min(a.extent_int(0), g->NumMB());
+    const int ni = nx + 2*ngh, nj = ny + 2*ngh, nk = nz + 2*ngh;
+    const long ntot = static_cast<long>(mm)*nv*nk*nj*ni;
+    long cnt = 0, first = LONG_MAX;
+    Kokkos::parallel_reduce("kmg_nfdiag", Kokkos::RangePolicy<DevExeSpace>(0, ntot),
+    KOKKOS_LAMBDA(const long idx, long &c, long &fi) {
+      long q = idx;
+      const int i = static_cast<int>(q % ni); q /= ni;
+      const int j = static_cast<int>(q % nj); q /= nj;
+      const int k = static_cast<int>(q % nk); q /= nk;
+      const int v = static_cast<int>(q % nv); q /= nv;
+      const int m = static_cast<int>(q);
+      if (kmg::NonFinite(a(m, v, k, j, i))) { c += 1; if (idx < fi) fi = idx; }
+    }, Kokkos::Sum<long>(cnt), Kokkos::Min<long>(first));
     int f[5] = {-1, 0, 0, 0, 0};
-    for (int m = 0; m < mm; ++m) {
-      for (int v = 0; v < nv; ++v) {
-        for (int k = 0; k < nz + 2*ngh; ++k) {
-          for (int j = 0; j < ny + 2*ngh; ++j) {
-            for (int i = 0; i < nx + 2*ngh; ++i) {
-              if (kmg::NonFinite(h(m, v, k, j, i))) {
-                if (cnt == 0) { f[0] = m; f[1] = v; f[2] = k; f[3] = j; f[4] = i; }
-                ++cnt;
-              }
-            }
-          }
-        }
-      }
+    if (cnt > 0) {
+      long q = first;
+      f[4] = static_cast<int>(q % ni); q /= ni;
+      f[3] = static_cast<int>(q % nj); q /= nj;
+      f[2] = static_cast<int>(q % nk); q /= nk;
+      f[1] = static_cast<int>(q % nv); q /= nv;
+      f[0] = static_cast<int>(q);
     }
     if (cnt > 0) {
       const RegionSize &r = g->Extents().h_view(f[0]);

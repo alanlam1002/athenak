@@ -1,0 +1,57 @@
+# AthenaK input file: coordinate-validation smoke input, 2D Z4c + <hydro> variant (D-014).
+# Matter + Z4c on a curvilinear mesh is M5; until then the Coordinates guard must reject
+# it even on the 2D cylindrical_axisym mesh that vacuum 2D Cartoon is allowed on.
+
+<comment>
+problem   = coordinate-system input validation unit test, 2D vacuum z4c
+
+<job>
+basename  = ut_coord_validation_z4c2d_hydro
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 8
+x1min     = 0.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 8
+x2min     = 0.5
+x2max     = 2.5
+ix2_bc    = reflect
+ox2_bc    = reflect
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 8
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.25
+nlim       = 0
+tlim       = 0.0
+
+<z4c>
+diss       = 0.0
+
+<hydro>
+eos         = ideal
+reconstruct = plm
+rsolver     = llf
+gamma       = 1.4
+
+<problem>
+pgen_name  = z4c_cartoon_test

@@ -1,0 +1,472 @@
+//========================================================================================
+// AthenaXXX astrophysical plasma code
+// Copyright(C) 2020 James M. Stone <jmstone@ias.edu> and the Athena code team
+// Licensed under the 3-clause BSD License (the "LICENSE")
+//========================================================================================
+//! \file z4c_cartoon_test.cpp
+//! \brief Unit test of the Z4c Cartoon fill (M1, chat/0003 1.5 + chat/0004 1C).
+//!
+//! An analytic, exactly axisymmetric 3D field is written on the y = 0 plane (u0, every
+//! cell with x > 0, x1/x2 ghosts included). Then
+//!   1. the D-002 axis boundary fills x < 0 on u0          -> err_axis   (exact)
+//!   2. CartoonFill (K1-K4) fills u_cart                    -> err_ghost  (interp order)
+//!                                                            err_corner (x < 0, y != 0)
+//!   3. the D-008 pi-copy is cross-checked against direct
+//!      interpolation at rho for the x < 0 cells            -> err_xcheck (exact)
+//!   4. d_y, d_yy, d_xy, d_yz at y = 0 by the Z4c FD
+//!      operators on u_cart vs analytic derivatives         -> err_dy ... (FD order)
+//! The field has a rotating part (beta^y, Gam^y, A_xy, A_yz, g_xy, g_yz all nonzero on
+//! y = 0), so every entry of the parity table and of the rotation is exercised. g-tilde
+//! and A-tilde satisfy det = 1 and tr = 0 exactly, so K4 (AlgC on the ghost planes) moves
+//! the ghosts by no more than the interpolation error. Analytic derivatives use
+//! hyper-dual numbers (exact first and mixed second derivatives).
+//!
+//! The exact checks (1, 3) are gates: the pgen exits nonzero if they fail, so a run with
+//! a deliberately wrong parity entry (<problem> wrong_parity = <z4c variable name>) must
+//! fail. Z4cCartesianPos is also checked against the analytic midpoints (R6).
+//! Convergence orders are judged by the pytest driver from the CARTOON_RESULT
+//! lines.
+//! <problem> ntime > 0 also times K1-K4 against CalcRHS.
+//!
+//! Physical (x, y, z) = mesh (x1, x3 plane, x2); component indices (0, 2, 1).
+
+#include <array>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include "athena.hpp"
+#include "globals.hpp"
+#include "parameter_input.hpp"
+#include "mesh/mesh.hpp"
+#include "pgen/pgen.hpp"
+#include "utils/finite_diff.hpp"
+#include "z4c/z4c.hpp"
+#include "z4c/z4c_pos.hpp"
+
+namespace {
+
+using z4c::Z4c;
+using z4c::Z4cCartesianPos;
+constexpr Z4c::CartoonMode kAx = Z4c::CartoonMode::axisym;
+
+//----------------------------------------------------------------------------------------
+// hyper-dual numbers: v + a e1 + b e2 + ab e1 e2, e1^2 = e2^2 = 0
+struct HD {
+  Real v, a, b, ab;
+  KOKKOS_INLINE_FUNCTION HD() : v(0), a(0), b(0), ab(0) {}
+  KOKKOS_INLINE_FUNCTION HD(Real v_) : v(v_), a(0), b(0), ab(0) {}  // NOLINT
+  KOKKOS_INLINE_FUNCTION HD(Real v_, Real a_, Real b_, Real ab_)
+      : v(v_), a(a_), b(b_), ab(ab_) {}
+};
+KOKKOS_INLINE_FUNCTION HD operator+(const HD &x, const HD &y) {
+  return HD(x.v+y.v, x.a+y.a, x.b+y.b, x.ab+y.ab);
+}
+KOKKOS_INLINE_FUNCTION HD operator-(const HD &x, const HD &y) {
+  return HD(x.v-y.v, x.a-y.a, x.b-y.b, x.ab-y.ab);
+}
+KOKKOS_INLINE_FUNCTION HD operator-(const HD &x) { return HD(-x.v, -x.a, -x.b, -x.ab); }
+KOKKOS_INLINE_FUNCTION HD operator*(const HD &x, const HD &y) {
+  return HD(x.v*y.v, x.v*y.a + x.a*y.v, x.v*y.b + x.b*y.v,
+            x.v*y.ab + x.a*y.b + x.b*y.a + x.ab*y.v);
+}
+// f(x) for a scalar function with f, f', f'' at x.v
+KOKKOS_INLINE_FUNCTION HD Chain(const HD &x, Real f, Real f1, Real f2) {
+  return HD(f, f1*x.a, f1*x.b, f1*x.ab + f2*x.a*x.b);
+}
+KOKKOS_INLINE_FUNCTION HD operator/(const HD &x, const HD &y) {
+  const Real iv = 1.0/y.v;
+  return x*Chain(y, iv, -iv*iv, 2.0*iv*iv*iv);
+}
+KOKKOS_INLINE_FUNCTION Real Exp(Real x) { return Kokkos::exp(x); }
+KOKKOS_INLINE_FUNCTION HD Exp(const HD &x) {
+  const Real e = Kokkos::exp(x.v);
+  return Chain(x, e, e, e);
+}
+KOKKOS_INLINE_FUNCTION Real Cbrt(Real x) { return Kokkos::cbrt(x); }
+KOKKOS_INLINE_FUNCTION HD Cbrt(const HD &x) {
+  const Real c = Kokkos::cbrt(x.v);
+  return Chain(x, c, c/(3.0*x.v), -2.0*c/(9.0*x.v*x.v));
+}
+KOKKOS_INLINE_FUNCTION Real Val(Real x) { return x; }
+KOKKOS_INLINE_FUNCTION Real Val(const HD &x) { return x.v; }
+
+// physical index (x=0, y=1, z=2) -> mesh component index (x=0, z=1, y=2)
+KOKKOS_INLINE_FUNCTION int MeshComp(int p) { return p == 0 ? 0 : (p == 1 ? 2 : 1); }
+// mesh component pair (a <= b) -> offset within a symmetric-tensor block
+KOKKOS_INLINE_FUNCTION int SymOff(int a, int b) {
+  if (a > b) { int t = a; a = b; b = t; }
+  return a == 0 ? b : (a == 1 ? 2 + b : 5);
+}
+
+//----------------------------------------------------------------------------------------
+// The analytic state at physical (x, y, z), in Z4c variable order (mesh components).
+// Built only from rotation-equivariant fields R = (x, y, 0), phi = (-y, x, 0), zhat with
+// coefficients that are functions of (rho^2, z): exactly axisymmetric and smooth.
+template <typename T>
+KOKKOS_INLINE_FUNCTION
+void AnalyticState(const T &x, const T &y, const T &z, T *u) {
+  const T rho2 = x*x + y*y;
+  const T e1 = Exp(-(rho2 + z*z)*T(1.0/0.36));                  // w = 0.6
+  const T e2 = Exp(-(rho2 + (z - T(0.3))*(z - T(0.3)))*T(1.0/0.49));  // w = 0.7
+  const T R[3] = {x, y, T(0.0)};
+  const T P[3] = {-y, x, T(0.0)};
+  const T Z[3] = {T(0.0), T(0.0), T(1.0)};
+
+  u[Z4c::I_Z4C_CHI]   = T(1.0) - T(0.3)*e1;
+  u[Z4c::I_Z4C_KHAT]  = T(0.2)*e2*(T(1.0) + T(0.5)*z);
+  u[Z4c::I_Z4C_THETA] = T(0.05)*e1*(rho2 - z);
+  u[Z4c::I_Z4C_ALPHA] = T(1.0) - T(0.25)*e2;
+
+  // vectors: b1 R + b2 phi + b3 zhat
+  {
+    const T b1 = T(0.3)*e1, b2 = T(0.4)*e2*(T(1.0) + z), b3 = T(0.2)*e1*(z - rho2);
+    for (int p = 0; p < 3; ++p)
+      u[Z4c::I_Z4C_BETAX + MeshComp(p)] = b1*R[p] + b2*P[p] + b3*Z[p];
+    const T g1 = T(0.1)*e2, g2 = T(-0.2)*e1, g3 = T(0.15)*e2*z;
+    for (int p = 0; p < 3; ++p)
+      u[Z4c::I_Z4C_GAMX + MeshComp(p)] = g1*R[p] + g2*P[p] + g3*Z[p];
+  }
+
+  // symmetric tensors: c0 delta + c1 RR + c2 PP + c3 ZZ + c4 (RP+PR) + c5 (RZ+ZR)
+  //                    + c6 (PZ+ZP)
+  T M[3][3], N[3][3];
+  {
+    const T a0 = T(1.0), a1 = T(0.2)*e1, a2 = T(0.1)*e2, a3 = T(0.15)*e1,
+            a4 = T(0.12)*e2, a5 = T(0.1)*e1*z, a6 = T(0.08)*e2;
+    const T c0 = T(0.05)*e2, c1 = T(0.1)*e1, c2 = T(-0.07)*e2, c3 = T(0.05)*e1,
+            c4 = T(0.09)*e1, c5 = T(0.06)*e2, c6 = T(0.11)*e1;
+    for (int p = 0; p < 3; ++p)
+    for (int q = 0; q < 3; ++q) {
+      const T d = T(p == q ? 1.0 : 0.0);
+      const T RR = R[p]*R[q], PP = P[p]*P[q], ZZ = Z[p]*Z[q];
+      const T RP = R[p]*P[q] + P[p]*R[q], RZ = R[p]*Z[q] + Z[p]*R[q];
+      const T PZ = P[p]*Z[q] + Z[p]*P[q];
+      M[p][q] = a0*d + a1*RR + a2*PP + a3*ZZ + a4*RP + a5*RZ + a6*PZ;
+      N[p][q] = c0*d + c1*RR + c2*PP + c3*ZZ + c4*RP + c5*RZ + c6*PZ;
+    }
+  }
+  // g-tilde = M / det(M)^(1/3)  (det = 1)
+  const T detM = M[0][0]*(M[1][1]*M[2][2] - M[1][2]*M[2][1])
+               - M[0][1]*(M[1][0]*M[2][2] - M[1][2]*M[2][0])
+               + M[0][2]*(M[1][0]*M[2][1] - M[1][1]*M[2][0]);
+  const T s = T(1.0)/Cbrt(detM);
+  T g[3][3], gi[3][3];
+  for (int p = 0; p < 3; ++p)
+  for (int q = 0; q < 3; ++q) g[p][q] = s*M[p][q];
+  // inverse of g (det g = 1 analytically; divide anyway for consistency)
+  const T detg = g[0][0]*(g[1][1]*g[2][2] - g[1][2]*g[2][1])
+               - g[0][1]*(g[1][0]*g[2][2] - g[1][2]*g[2][0])
+               + g[0][2]*(g[1][0]*g[2][1] - g[1][1]*g[2][0]);
+  gi[0][0] = (g[1][1]*g[2][2] - g[1][2]*g[2][1])/detg;
+  gi[0][1] = (g[0][2]*g[2][1] - g[0][1]*g[2][2])/detg;
+  gi[0][2] = (g[0][1]*g[1][2] - g[0][2]*g[1][1])/detg;
+  gi[1][1] = (g[0][0]*g[2][2] - g[0][2]*g[2][0])/detg;
+  gi[1][2] = (g[0][2]*g[1][0] - g[0][0]*g[1][2])/detg;
+  gi[2][2] = (g[0][0]*g[1][1] - g[0][1]*g[1][0])/detg;
+  gi[1][0] = gi[0][1]; gi[2][0] = gi[0][2]; gi[2][1] = gi[1][2];
+  // A-tilde = N - (1/3) g tr(g^-1 N)  (trace free)
+  T tr = T(0.0);
+  for (int p = 0; p < 3; ++p)
+  for (int q = 0; q < 3; ++q) tr = tr + gi[p][q]*N[p][q];
+  for (int p = 0; p < 3; ++p)
+  for (int q = p; q < 3; ++q) {
+    const int o = SymOff(MeshComp(p), MeshComp(q));
+    u[Z4c::I_Z4C_GXX + o] = g[p][q];
+    u[Z4c::I_Z4C_AXX + o] = N[p][q] - T(1.0/3.0)*g[p][q]*tr;
+  }
+}
+
+// one Z4c variable of a 5D array as a 4D accessor for the finite_diff templates
+struct VarN {
+  DvceArray5D<Real> u;
+  int n;
+  KOKKOS_INLINE_FUNCTION Real operator()(int m, int k, int j, int i) const {
+    return u(m,n,k,j,i);
+  }
+};
+
+struct Errs {
+  Real v[Z4c::nz4c];
+};
+
+// max over (selected cells) of |u_cart - analytic| per variable
+// sel: 0 ghost planes x > 0 (all j, i), 1 ghost planes x > 0 interior (is..ie, js..je),
+//      2 ghost planes x < 0, 3 plane 0 (all cells)
+Errs GhostErrors(MeshBlockPack *pmbp, DvceArray5D<Real> uc, int sel) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ng = indcs.ng, is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int n1 = uc.extent_int(4), n2 = uc.extent_int(3);
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = pmbp->pmesh->mb_indcs;
+  Errs e;
+  for (int n = 0; n < Z4c::nz4c; ++n) {
+    Real emax = 0.0;
+    Kokkos::parallel_reduce("cartoon_test_ghost_err",
+      Kokkos::MDRangePolicy<Kokkos::Rank<4>>(DevExeSpace(), {0, 0, 0, 0},
+                                             {nmb, 2*ng+1, n2, n1}),
+    KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i, Real &mx) {
+      const Real dx = size.d_view(m).dx1;
+      Real x, yp, z;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
+                      z);
+      const int l = kc - ng;
+      bool use = false;
+      if (sel == 0) use = (l != 0 && x > 0.0);
+      if (sel == 1) use = (l != 0 && x > 0.0 && i >= is && i <= ie && j >= js && j <= je);
+      if (sel == 2) use = (l != 0 && x < 0.0);
+      if (sel == 3) use = (l == 0);
+      if (!use) return;
+      Real a[Z4c::nz4c];
+      AnalyticState<Real>(x, l*dx, z, a);
+      mx = Kokkos::fmax(mx, Kokkos::fabs(uc(m,n,kc,j,i) - a[n]));
+    }, Kokkos::Max<Real>(emax));
+    e.v[n] = emax;
+  }
+  return e;
+}
+
+// max over the interior of the y = 0 plane of |FD derivative - analytic| per variable
+// which: 0 d_y, 1 d_yy, 2 d_xy, 3 d_yz
+template <int NG>
+Errs DerivErrors(MeshBlockPack *pmbp, DvceArray5D<Real> uc, int which) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = pmbp->pmesh->mb_indcs;
+  Errs e;
+  for (int n = 0; n < Z4c::nz4c; ++n) {
+    Real emax = 0.0;
+    Kokkos::parallel_reduce("cartoon_test_deriv_err",
+      Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, js, is},
+                                             {nmb, je+1, ie+1}),
+    KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+      const Real dx = size.d_view(m).dx1, dz = size.d_view(m).dx2;
+      Real x, yp, z;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
+                      z);
+      const Real idx[3] = {1.0/dx, 1.0/dz, 1.0/dx};
+      VarN q{uc, n};
+      const int k = NG;   // y = 0 plane of u_cart
+      Real fd;
+      // seeds: e1 on the first direction, e2 on y
+      HD X(x), Y(0.0), Z(z);
+      if (which == 0) { fd = Dx<NG>(2, idx, q, m, k, j, i);      Y = HD(0.0, 1, 1, 0); }
+      else if (which == 1) { fd = Dxx<NG>(2, idx, q, m, k, j, i); Y = HD(0.0, 1, 1, 0); }
+      else if (which == 2) { fd = Dxy<NG>(0, 2, idx, q, m, k, j, i);
+                             X = HD(x, 1, 0, 0); Y = HD(0.0, 0, 1, 0); }
+      else { fd = Dxy<NG>(1, 2, idx, q, m, k, j, i);
+             Z = HD(z, 1, 0, 0); Y = HD(0.0, 0, 1, 0); }
+      HD a[Z4c::nz4c];
+      AnalyticState<HD>(X, Y, Z, a);
+      const Real ex = (which == 0) ? a[n].b : a[n].ab;
+      mx = Kokkos::fmax(mx, Kokkos::fabs(fd - ex));
+    }, Kokkos::Max<Real>(emax));
+    e.v[n] = emax;
+  }
+  return e;
+}
+
+Real MaxOf(const Errs &e, int &nmax) {
+  Real mx = -1.0; nmax = 0;
+  for (int n = 0; n < Z4c::nz4c; ++n) if (e.v[n] > mx) { mx = e.v[n]; nmax = n; }
+  return mx;
+}
+
+void Report(const char *key, const Errs &e) {
+  int nmax;
+  Real mx = MaxOf(e, nmax);
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_RESULT %s %.17e %s\n", key, mx, Z4c::Z4c_names[nmax]);
+  }
+}
+
+template <int NG>
+void RunDerivs(MeshBlockPack *pmbp, DvceArray5D<Real> uc) {
+  Report("err_dy",  DerivErrors<NG>(pmbp, uc, 0));
+  Report("err_dyy", DerivErrors<NG>(pmbp, uc, 1));
+  Report("err_dxy", DerivErrors<NG>(pmbp, uc, 2));
+  Report("err_dyz", DerivErrors<NG>(pmbp, uc, 3));
+}
+
+}  // namespace
+
+//----------------------------------------------------------------------------------------
+//! \fn void ProblemGenerator::Z4cCartoonTest()
+
+void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
+  if (restart) return;
+  MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
+  z4c::Z4c *pz4c = pmbp->pz4c;
+  if (pz4c == nullptr || !pz4c->IsCartoon()) {
+    std::cout << "### FATAL ERROR z4c_cartoon_test requires <z4c> on a 2D "
+              << "coord = cylindrical_axisym mesh (2D Cartoon)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  auto &indcs = pmy_mesh_->mb_indcs;
+  const int ng = indcs.ng, is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nmb = pmbp->nmb_thispack;
+  const int npt = pin->GetOrAddInteger("problem", "npt", 2*ng + 1);
+  const Real tol_exact = pin->GetOrAddReal("problem", "tol_exact", 1.0e-12);
+  const std::string wrong = pin->GetOrAddString("problem", "wrong_parity", "none");
+  const int ntime = pin->GetOrAddInteger("problem", "ntime", 0);
+
+  Z4c::CartoonParity par = Z4c::CartoonParityTable();
+  if (wrong != "none") {
+    int nw = -1;
+    for (int n = 0; n < Z4c::nz4c; ++n) if (wrong == Z4c::Z4c_names[n]) nw = n;
+    if (nw < 0) {
+      std::cout << "### FATAL ERROR unknown wrong_parity '" << wrong << "'" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+    par.p[nw] = -par.p[nw];
+    if (global_variable::my_rank == 0) {
+      std::printf("CARTOON_TEST deliberately WRONG parity for %s: %+d\n",
+                  Z4c::Z4c_names[nw], par.p[nw]);
+    }
+  }
+
+  // 1. analytic field on the plane, x > 0 only; x < 0 gets a sentinel
+  auto u0 = pz4c->u0;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = pmbp->pmesh->mb_indcs;
+  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
+  par_for("cartoon_test_init", DevExeSpace(), 0, nmb-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int j, const int i) {
+    Real x, yp, z;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
+                    z);
+    Real a[Z4c::nz4c];
+    AnalyticState<Real>(x, 0.0, z, a);
+    for (int n = 0; n < Z4c::nz4c; ++n) u0(m,n,ks,j,i) = (x > 0.0) ? a[n] : 1.0e30;
+  });
+
+  // 2. axis boundary on u0, then compare the x < 0 cells with the analytic field
+  pz4c->CartoonAxisBC(pmbp, u0, par);
+  Errs eaxis;
+  for (int n = 0; n < Z4c::nz4c; ++n) {
+    Real emax = 0.0;
+    Kokkos::parallel_reduce("cartoon_test_axis_err",
+      Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
+    KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+      Real x, yp, z;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
+                      z);
+      if (x > 0.0) return;
+      Real a[Z4c::nz4c];
+      AnalyticState<Real>(x, 0.0, z, a);
+      mx = Kokkos::fmax(mx, Kokkos::fabs(u0(m,n,ks,j,i) - a[n]));
+    }, Kokkos::Max<Real>(emax));
+    eaxis.v[n] = emax;
+  }
+
+  // 3. fill with the pi-copy for x < 0 (production path), keep a copy, then the direct
+  //    interpolation at rho for x < 0, and compare the two on the x < 0 ghost cells
+  pz4c->CartoonFill(pmbp, npt, par, true);
+  DvceArray5D<Real> udirect("cartoon_udirect", pz4c->u_cart.extent(0),
+                            pz4c->u_cart.extent(1), pz4c->u_cart.extent(2),
+                            pz4c->u_cart.extent(3), pz4c->u_cart.extent(4));
+  Kokkos::deep_copy(udirect, pz4c->u_cart);
+  pz4c->CartoonFill(pmbp, npt, par, false);
+  auto uc = pz4c->u_cart;
+  Real exc = 0.0;
+  Kokkos::parallel_reduce("cartoon_test_xcheck",
+    Kokkos::MDRangePolicy<Kokkos::Rank<5>>(DevExeSpace(), {0, 0, 0, 0, 0},
+                                           {nmb, Z4c::nz4c, 2*ng+1, n2, n1}),
+  KOKKOS_LAMBDA(const int m, const int n, const int kc, const int j, const int i,
+                Real &mx) {
+    Real x, yp, z;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
+                    z);
+    if (x > 0.0 || kc == ng) return;
+    mx = Kokkos::fmax(mx, Kokkos::fabs(uc(m,n,kc,j,i) - udirect(m,n,kc,j,i)));
+  }, Kokkos::Max<Real>(exc));
+
+  // R6: Z4cCartesianPos is (R, 0, z) at the arithmetic midpoints (never the centroids)
+  Real epos = 0.0;
+  Kokkos::parallel_reduce("cartoon_test_pos",
+    Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
+  KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+    Real x, yp, z;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp, z);
+    const Real xm = size.d_view(m).x1min + (i - is + 0.5)*size.d_view(m).dx1;
+    const Real zm = size.d_view(m).x2min + (j - js + 0.5)*size.d_view(m).dx2;
+    mx = Kokkos::fmax(mx, Kokkos::fabs(x - xm) + Kokkos::fabs(yp) + Kokkos::fabs(z - zm));
+  }, Kokkos::Max<Real>(epos));
+
+  // 4. report
+  std::vector<std::array<int, 4>> clamps;
+  pz4c->CartoonClampStats(pmbp, npt, clamps);
+  Real chk = 0.0;
+  Kokkos::parallel_reduce("cartoon_test_checksum",
+    Kokkos::MDRangePolicy<Kokkos::Rank<5>>(DevExeSpace(), {0, 0, 0, 0, 0},
+                                           {nmb, Z4c::nz4c, 2*ng+1, n2, n1}),
+  KOKKOS_LAMBDA(const int m, const int n, const int kc, const int j, const int i,
+                Real &sum) {
+    sum += Kokkos::fabs(uc(m,n,kc,j,i));
+  }, chk);
+
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_RESULT ng %d\nCARTOON_RESULT npt %d\nCARTOON_RESULT nx1 %d\n",
+                ng, npt, pmy_mesh_->mesh_indcs.nx1);
+    std::printf("CARTOON_RESULT dx %.17e\n", size.h_view(0).dx1);
+    std::printf("CARTOON_RESULT checksum %.17e\n", chk);
+    std::printf("CARTOON_RESULT err_xcheck %.17e all\n", exc);
+    std::printf("CARTOON_RESULT err_pos %.17e all\n", epos);
+    for (auto &c : clamps) {
+      std::printf("CARTOON_CLAMP l=%d low=%d high=%d total=%d\n", c[0], c[1], c[2], c[3]);
+    }
+  }
+  Report("err_axis", eaxis);
+  Report("err_plane0", GhostErrors(pmbp, uc, 3));
+  Report("err_ghost", GhostErrors(pmbp, uc, 0));
+  Report("err_ghost_int", GhostErrors(pmbp, uc, 1));
+  Report("err_corner", GhostErrors(pmbp, uc, 2));
+  switch (ng) {
+    case 2: RunDerivs<2>(pmbp, uc); break;
+    case 3: RunDerivs<3>(pmbp, uc); break;
+    case 4: RunDerivs<4>(pmbp, uc); break;
+  }
+
+  // 5. optional timing on the production path: K1-K4 vs CalcRHS (which includes a fill)
+  if (ntime > 0) {
+    Kokkos::Timer timer;
+    Kokkos::fence();
+    timer.reset();
+    for (int r = 0; r < ntime; ++r) pz4c->CartoonFill(pmbp);
+    Kokkos::fence();
+    const Real tfill = timer.seconds()/ntime;
+    timer.reset();
+    for (int r = 0; r < ntime; ++r) {
+      switch (ng) {
+        case 2: pz4c->CalcRHS<2>(nullptr, 0); break;
+        case 3: pz4c->CalcRHS<3>(nullptr, 0); break;
+        case 4: pz4c->CalcRHS<4>(nullptr, 0); break;
+      }
+    }
+    Kokkos::fence();
+    const Real trhs = timer.seconds()/ntime;
+    if (global_variable::my_rank == 0) {
+      std::printf("CARTOON_RESULT t_fill_ms %.6e\nCARTOON_RESULT t_calcrhs_ms %.6e\n",
+                  1e3*tfill, 1e3*trhs);
+      std::printf("CARTOON_RESULT fill_over_rhs_without_fill %.6e\n",
+                  tfill/(trhs - tfill));
+    }
+  }
+
+  // gates: the exact checks
+  int nmax;
+  const Real ea = MaxOf(eaxis, nmax);
+  bool ok = (ea <= tol_exact) && (exc <= tol_exact) && (epos <= tol_exact);
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_TEST %s err_axis=%.3e (%s) err_xcheck=%.3e err_pos=%.3e "
+                "tol=%.1e\n", ok ? "PASS" : "FAIL", ea, Z4c::Z4c_names[nmax], exc, epos,
+                tol_exact);
+  }
+  if (!ok) std::exit(EXIT_FAILURE);
+}

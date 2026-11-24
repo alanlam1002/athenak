@@ -8,6 +8,7 @@
 
 // C standard headers
 #include <math.h> // pow
+#include <cstdlib>
 
 // C++ standard headers
 #include <iostream>
@@ -47,6 +48,14 @@ namespace z4c {
 // the Gamma's that can only be set in the interior of the MeshBlock.
 template <int NGHOST>
 void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
+  if (pmbp->pz4c->IsCartoon()) {
+    // Gamma-tilde^i = -d_j g-tilde^ji below needs y-derivatives of the ADM metric, which
+    // a 2D Cartoon mesh does not have (no Cartoon fill for the ADM arrays yet).
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "ADMToZ4c is not supported with <z4c> cartoon != none yet (Cartoon "
+              << "initial data comes in M2)" << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   // capture variables for the kernel
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
@@ -54,8 +63,11 @@ void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
   int isg = is-indcs.ng; int ieg = ie+indcs.ng;
-  int jsg = js-indcs.ng; int jeg = je+indcs.ng;
-  int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
+  // A direction with one cell (nx = 1) has no ghosts: u0 has extent 1 there.
+  int ng2 = (indcs.nx2 > 1) ? indcs.ng : 0;
+  int ng3 = (indcs.nx3 > 1) ? indcs.ng : 0;
+  int jsg = js-ng2; int jeg = je+ng2;
+  int ksg = ks-ng3; int keg = ke+ng3;
 
   int ncells1 = indcs.nx1 + 2*(indcs.ng);
   int ncells2 = indcs.nx2 + 2*(indcs.ng);
@@ -206,8 +218,11 @@ void Z4c::Z4cToADM(MeshBlockPack *pmbp) {
   int &ks = indcs.ks; int &ke = indcs.ke;
   //For GLOOPS
   int isg = is-indcs.ng; int ieg = ie+indcs.ng;
-  int jsg = js-indcs.ng; int jeg = je+indcs.ng;
-  int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
+  // A direction with one cell (nx = 1) has no ghosts: u0 has extent 1 there.
+  int ng2 = (indcs.nx2 > 1) ? indcs.ng : 0;
+  int ng3 = (indcs.nx3 > 1) ? indcs.ng : 0;
+  int jsg = js-ng2; int jeg = je+ng2;
+  int ksg = ks-ng3; int keg = ke+ng3;
 
   int nmb = pmbp->nmb_thispack;
 

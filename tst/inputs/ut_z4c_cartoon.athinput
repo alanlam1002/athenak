@@ -1,0 +1,57 @@
+# AthenaK input file: Z4c Cartoon fill unit test (M1). See
+# src/pgen/unit_tests/z4c_cartoon_test.cpp. The pgen does all the work and exits nonzero if
+# an exact check fails; convergence is judged by the pytest driver over nghost, npt and
+# resolution (command-line overrides of mesh/nghost, mesh/nx1, mesh/nx2, meshblock/nx1,
+# meshblock/nx2, problem/npt).
+
+<comment>
+problem   = Z4c Cartoon fill unit test
+
+<job>
+basename  = ut_z4c_cartoon
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym   # 2D Cartoon is selected by the coord (D-014)
+nx1       = 32         # R = x >= 0; the axis is x1 = 0
+x1min     = 0.0
+x1max     = 2.0
+ix1_bc    = reflect    # the coord's axis BC; Z4c uses its parity table (D-002)
+ox1_bc    = reflect
+
+nx2       = 32         # z
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+
+nx3       = 1          # phi unused; Z4c's y comes from the Cartoon ghost planes
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 16
+nx2       = 16
+nx3       = 1
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.25
+nlim       = 0
+tlim       = 0.0
+
+<z4c>
+cartoon_ydiss = false  # default; Cartoon itself needs no switch
+
+<problem>
+pgen_name  = z4c_cartoon_test
+npt        = 5         # 2*nghost+1; the driver overrides it
+wrong_parity = none
+ntime      = 0
+tol_exact  = 1.0e-12

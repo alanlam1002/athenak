@@ -37,7 +37,14 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
 
   int nmb = pmy_pack->nmb_thispack;
 
-  auto &z4c = pmy_pack->pz4c->z4c;
+  // Cartoon (D-006): refill the cache from u0 and read the Z4c fields from it. u_cart's
+  // plane k = ng is the mesh plane k = ks (= 0): reads use k, writes use kw = k - koff.
+  // In 3D, koff = 0 and the accessors are the usual u0 slices.
+  const bool cartoon = pmy_pack->pz4c->IsCartoon();
+  if (cartoon) pmy_pack->pz4c->CartoonFill(pmy_pack);
+  const int koff = cartoon ? indcs.ng - ks : 0;
+
+  auto &z4c = cartoon ? pmy_pack->pz4c->z4c_cart : pmy_pack->pz4c->z4c;
   auto &rhs = pmy_pack->pz4c->rhs;
   auto &opt = pmy_pack->pz4c->opt;
 
@@ -133,8 +140,9 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   // ===================================================================================
   // Main RHS calculation
   //
-  par_for("z4c rhs loop",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
+  par_for("z4c rhs loop",DevExeSpace(),0,nmb-1,ks+koff,ke+koff,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const int kw = k - koff;  // mesh (write) index; k reads z4c (u_cart under Cartoon)
     // Define scratch arrays to be used in the following calculations
 
     // Gamma computed from the metric
@@ -204,7 +212,9 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     // Lie derivative of A
     AthenaPointTensor<Real, TensorSymm::SYM2, 3, 2> LA_dd;
 
-    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2, 1/size.d_view(m).dx3};
+    // Cartoon: the ghost planes in the x3 index are spaced dx1 (D-001)
+    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2,
+                  cartoon ? 1/size.d_view(m).dx1 : 1/size.d_view(m).dx3};
 
     // -----------------------------------------------------------------------------------
     // Initialize everything to zero
@@ -447,7 +457,7 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     if(!is_vacuum) {
       for (int a = 0; a < 3; ++a)
       for (int b = 0; b < 3; ++b) {
-        S += oopsi4 * g_uu(a,b) * tmunu.S_dd(m,a,b,k,j,i);
+        S += oopsi4 * g_uu(a,b) * tmunu.S_dd(m,a,b,kw,j,i);
       }
     }
 
@@ -517,7 +527,7 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     //
     // Note that the matter term is *not* included here; this is included explicitly when
     // calculating d_t \Theta.
-    Ht = R + (2./3.)*SQR(K) - AA;// - 16.*M_PI*tmunu.E(m,k,j,i);
+    Ht = R + (2./3.)*SQR(K) - AA;// - 16.*M_PI*tmunu.E(m,kw,j,i);
 
     // -----------------------------------------------------------------------------------
     // Finalize advective (Lie) derivatives
@@ -567,35 +577,35 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     // Assemble RHS
     //
     // Khat, chi, and Theta
-    rhs.vKhat(m,k,j,i) = - Ddalpha + z4c.alpha(m,k,j,i)
+    rhs.vKhat(m,kw,j,i) = - Ddalpha + z4c.alpha(m,k,j,i)
       * (AA + (1./3.)*SQR(K)) +
       LKhat + opt.damp_kappa1*(1 - opt.damp_kappa2)
       * z4c.alpha(m,k,j,i) * z4c.vTheta(m,k,j,i);
     // Matter term
     if(!is_vacuum) {
-      rhs.vKhat(m,k,j,i) += 4.*M_PI * z4c.alpha(m,k,j,i) * (S + tmunu.E(m,k,j,i));
+      rhs.vKhat(m,kw,j,i) += 4.*M_PI * z4c.alpha(m,k,j,i) * (S + tmunu.E(m,kw,j,i));
     }
-    rhs.chi(m,k,j,i) = Lchi - (1./6.) * opt.chi_psi_power *
+    rhs.chi(m,kw,j,i) = Lchi - (1./6.) * opt.chi_psi_power *
       chi_guarded * z4c.alpha(m,k,j,i) * K;
-    rhs.vTheta(m,k,j,i) = LTheta + z4c.alpha(m,k,j,i) * (
+    rhs.vTheta(m,kw,j,i) = LTheta + z4c.alpha(m,k,j,i) * (
         0.5*Ht - (2. + opt.damp_kappa2) * opt.damp_kappa1 * z4c.vTheta(m,k,j,i));
     // Matter term
     if(!is_vacuum) {
-      rhs.vTheta(m,k,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) * tmunu.E(m,k,j,i);
+      rhs.vTheta(m,kw,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) * tmunu.E(m,kw,j,i);
     }
     // If BSSN is enabled, theta is disabled.
-    rhs.vTheta(m,k,j,i) *= opt.use_z4c;
+    rhs.vTheta(m,kw,j,i) *= opt.use_z4c;
     // Gamma's
     for(int a = 0; a < 3; ++a) {
-      rhs.vGam_u(m,a,k,j,i) = 2.*z4c.alpha(m,k,j,i)*DA_u(a) + LGam_u(a);
-      rhs.vGam_u(m,a,k,j,i) -= 2.*z4c.alpha(m,k,j,i) * opt.damp_kappa1 *
+      rhs.vGam_u(m,a,kw,j,i) = 2.*z4c.alpha(m,k,j,i)*DA_u(a) + LGam_u(a);
+      rhs.vGam_u(m,a,kw,j,i) -= 2.*z4c.alpha(m,k,j,i) * opt.damp_kappa1 *
           (z4c.vGam_u(m,a,k,j,i) - Gamma_u(a));
       for(int b = 0; b < 3; ++b) {
-        rhs.vGam_u(m,a,k,j,i) -= 2. * A_uu(a,b) * dalpha_d(b);
+        rhs.vGam_u(m,a,kw,j,i) -= 2. * A_uu(a,b) * dalpha_d(b);
         // Matter term
         if(!is_vacuum) {
-          rhs.vGam_u(m,a,k,j,i) -= 16.*M_PI * z4c.alpha(m,k,j,i)
-                              * g_uu(a,b) * tmunu.S_d(m,b,k,j,i);
+          rhs.vGam_u(m,a,kw,j,i) -= 16.*M_PI * z4c.alpha(m,k,j,i)
+                              * g_uu(a,b) * tmunu.S_d(m,b,kw,j,i);
         }
       }
     }
@@ -603,51 +613,51 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
     // g and A
     for(int a = 0; a < 3; ++a)
     for(int b = a; b < 3; ++b) {
-      rhs.g_dd(m,a,b,k,j,i) = - 2. * z4c.alpha(m,k,j,i) * z4c.vA_dd(m,a,b,k,j,i)
+      rhs.g_dd(m,a,b,kw,j,i) = - 2. * z4c.alpha(m,k,j,i) * z4c.vA_dd(m,a,b,k,j,i)
                       + Lg_dd(a,b);
-      rhs.vA_dd(m,a,b,k,j,i) = oopsi4 *
+      rhs.vA_dd(m,a,b,kw,j,i) = oopsi4 *
           (-Ddalpha_dd(a,b) + z4c.alpha(m,k,j,i) * (R_dd(a,b) + Rphi_dd(a,b)));
-      rhs.vA_dd(m,a,b,k,j,i) -= (1./3.) * z4c.g_dd(m,a,b,k,j,i)
+      rhs.vA_dd(m,a,b,kw,j,i) -= (1./3.) * z4c.g_dd(m,a,b,k,j,i)
                              * (-Ddalpha + z4c.alpha(m,k,j,i)*R);
-      rhs.vA_dd(m,a,b,k,j,i) += z4c.alpha(m,k,j,i) * (K*z4c.vA_dd(m,a,b,k,j,i)
+      rhs.vA_dd(m,a,b,kw,j,i) += z4c.alpha(m,k,j,i) * (K*z4c.vA_dd(m,a,b,k,j,i)
                              - 2.*AA_dd(a,b));
-      rhs.vA_dd(m,a,b,k,j,i) += LA_dd(a,b);
+      rhs.vA_dd(m,a,b,kw,j,i) += LA_dd(a,b);
       // Matter term
       if(!is_vacuum) {
-        rhs.vA_dd(m,a,b,k,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) *
-                (oopsi4*tmunu.S_dd(m,a,b,k,j,i) - (1./3.)*S*z4c.g_dd(m,a,b,k,j,i));
+        rhs.vA_dd(m,a,b,kw,j,i) -= 8.*M_PI * z4c.alpha(m,k,j,i) *
+                (oopsi4*tmunu.S_dd(m,a,b,kw,j,i) - (1./3.)*S*z4c.g_dd(m,a,b,k,j,i));
       }
     }
     // lapse function
     Real const f = opt.lapse_oplog * opt.lapse_harmonicf
                  + opt.lapse_harmonic * z4c.alpha(m,k,j,i);
-    rhs.alpha(m,k,j,i) = opt.lapse_advect * Lalpha
+    rhs.alpha(m,kw,j,i) = opt.lapse_advect * Lalpha
                        - f * z4c.alpha(m,k,j,i) * z4c.vKhat(m,k,j,i);
 
     if (opt.slow_start_lapse) {
       Real W2 = (z4c.chi(m,k,j,i) > opt.chi_min_floor)
                     ? z4c.chi(m,k,j,i) : opt.chi_min_floor;
       Real W = pow(W2, 0.5);
-      rhs.alpha(m,k,j,i) += opt.ssl_damping_amp*(W-z4c.alpha(m,k,j,i))
+      rhs.alpha(m,kw,j,i) += opt.ssl_damping_amp*(W-z4c.alpha(m,k,j,i))
                             *pow(W,opt.ssl_damping_index)*exp(-0.5*pow(time/
                             (opt.ssl_damping_time),2));
     }
 
     // shift vector
     for(int a = 0; a < 3; ++a) {
-      rhs.beta_u(m,a,k,j,i) = opt.shift_ggamma * z4c.vGam_u(m,a,k,j,i)
+      rhs.beta_u(m,a,kw,j,i) = opt.shift_ggamma * z4c.vGam_u(m,a,k,j,i)
                             + opt.shift_advect * Lbeta_u(a);
-      rhs.beta_u(m,a,k,j,i) -= opt.shift_eta * z4c.beta_u(m,a,k,j,i);
+      rhs.beta_u(m,a,kw,j,i) -= opt.shift_eta * z4c.beta_u(m,a,k,j,i);
       // FORCE beta = 0
-      //rhs.beta_u(m,a,k,j,i) = 0;
+      //rhs.beta_u(m,a,kw,j,i) = 0;
     }
 
     // harmonic gauge terms
     for(int a = 0; a < 3; ++a) {
-      rhs.beta_u(m,a,k,j,i) += opt.shift_alpha2ggamma *
+      rhs.beta_u(m,a,kw,j,i) += opt.shift_alpha2ggamma *
                           SQR(z4c.alpha(m,k,j,i)) * z4c.vGam_u(m,a,k,j,i);
       for(int b = 0; b < 3; ++b) {
-        rhs.beta_u(m,a,k,j,i) += opt.shift_hh * z4c.alpha(m,k,j,i) *
+        rhs.beta_u(m,a,kw,j,i) += opt.shift_hh * z4c.alpha(m,k,j,i) *
           chi_guarded * (0.5 * z4c.alpha(m,k,j,i) * dchi_d(b) - dalpha_d(b)) * g_uu(a,b);
       }
     }
@@ -662,20 +672,20 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
       Real &x3max = size.d_view(m).x3max;
       Real x1 = CellCenterX(i - is, nx1, x1min, x1max);
       Real x2 = CellCenterX(j - js, nx2, x2min, x2max);
-      Real x3 = CellCenterX(k - ks, nx3, x3min, x3max);
+      Real x3 = CellCenterX(kw - ks, nx3, x3min, x3max);
 
       Real const r2 = SQR(x1 - dc_c[0]) + SQR(x2 - dc_c[1]) + SQR(x3 - dc_c[2]);
       Real const g  = Kokkos::exp(-r2 * dc_inv_s2);
 
       if (dc_variety == DriftControl::Relaxation) {
         for (int a = 0; a < 3; ++a) {
-          rhs.beta_u(m,a,k,j,i) -= dc_inv_tau[a]
+          rhs.beta_u(m,a,kw,j,i) -= dc_inv_tau[a]
                                  * (z4c.beta_u(m,a,k,j,i) - dc_target[a]) * g;
-          rhs.beta_u(m,a,k,j,i) -= dc_gsupp[a] * z4c.vGam_u(m,a,k,j,i) * g;
+          rhs.beta_u(m,a,kw,j,i) -= dc_gsupp[a] * z4c.vGam_u(m,a,k,j,i) * g;
         }
       } else {
         for (int a = 0; a < 3; ++a) {
-          rhs.beta_u(m,a,k,j,i) -= dc_corr[a] * g;
+          rhs.beta_u(m,a,kw,j,i) -= dc_corr[a] * g;
         }
       }
     }
@@ -685,14 +695,18 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   // Add dissipation for stability
   //
   Real &diss = pmy_pack->pz4c->diss;
-  auto &u0 = pmy_pack->pz4c->u0;
+  // Cartoon: dissipation reads u_cart, and acts in y only if cartoon_ydiss (SACRA-2D has
+  // no y dissipation).
+  auto &u_in = cartoon ? pmy_pack->pz4c->u_cart : pmy_pack->pz4c->u0;
   auto &u_rhs = pmy_pack->pz4c->u_rhs;
+  const int ndiss = (cartoon && !opt.cartoon_ydiss) ? 2 : 3;
   par_for("K-O Dissipation",
   DevExeSpace(),0,nmb-1,0,nz4c-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int n, const int k, const int j, const int i) {
-    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2, 1/size.d_view(m).dx3};
-    for(int a = 0; a < 3; ++a) {
-      u_rhs(m,n,k,j,i) += Diss<NGHOST>(a, idx, u0, m, n, k, j, i)*diss;
+    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2,
+                  cartoon ? 1/size.d_view(m).dx1 : 1/size.d_view(m).dx3};
+    for(int a = 0; a < ndiss; ++a) {
+      u_rhs(m,n,k,j,i) += Diss<NGHOST>(a, idx, u_in, m, n, k+koff, j, i)*diss;
     }
   });
 

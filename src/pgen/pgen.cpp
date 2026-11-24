@@ -980,6 +980,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     AMRConservationTest(pin, is_restart);
   } else if (pgen_fun_name.compare("amr_divb_test") == 0) {
     AMRDivBTest(pin, is_restart);
+  } else if (pgen_fun_name.compare("z4c_cartoon_test") == 0) {
+    Z4cCartoonTest(pin, is_restart);
   } else if (pgen_fun_name.compare("recon_exact_gradient_test") == 0) {
     ReconExactGradientTest(pin, is_restart);
   } else if (pgen_fun_name.compare("recon_exact_cubic_test") == 0) {

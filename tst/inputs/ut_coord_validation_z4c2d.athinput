@@ -1,0 +1,53 @@
+# AthenaK input file: coordinate-validation smoke input, 2D vacuum Z4c variant (D-014).
+# With coord=cylindrical_axisym (the default here) this is 2D Cartoon, the one curvilinear
+# combination the Coordinates guard allows for <z4c>; it runs the Cartoon unit-test pgen
+# to nlim=0. Any other curvilinear coord must stay fatal. x2 in [0.5, 2.5] is a valid
+# theta range, so a spherical_polar override reaches the guard rather than a mesh check.
+
+<comment>
+problem   = coordinate-system input validation unit test, 2D vacuum z4c
+
+<job>
+basename  = ut_coord_validation_z4c2d
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym
+nx1       = 8
+x1min     = 0.0
+x1max     = 2.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+
+nx2       = 8
+x2min     = 0.5
+x2max     = 2.5
+ix2_bc    = reflect
+ox2_bc    = reflect
+
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<mesh_refinement>
+refinement = none
+
+<meshblock>
+nx1       = 8
+nx2       = 8
+nx3       = 1
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.25
+nlim       = 0
+tlim       = 0.0
+
+<z4c>
+diss       = 0.0
+
+<problem>
+pgen_name  = z4c_cartoon_test

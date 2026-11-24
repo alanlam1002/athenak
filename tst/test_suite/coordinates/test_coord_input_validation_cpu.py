@@ -187,3 +187,54 @@ def test_vacuum_z4c_curvilinear_fails(coord):
         assert GUARD_MSG in out, out[-2000:]
     finally:
         testutils.cleanup()
+
+
+# D-014: 2D Cartoon is the one curvilinear coord the guard allows for z4c/adm: vacuum
+# (no <hydro>/<mhd>, no GR) on a 2D cylindrical_axisym mesh. The 2D deck runs the
+# Cartoon unit-test pgen to nlim=0. Everything else stays fatal with the guard's message,
+# including the 1D deck above with cylindrical_axisym (Cartoon needs a 2D mesh there).
+Z4C_2D_INPUT = "inputs/ut_coord_validation_z4c2d.athinput"
+Z4C_2D_HYDRO_INPUT = "inputs/ut_coord_validation_z4c2d_hydro.athinput"
+
+
+def _run_deck(deck, flags):
+    cmd = ["./athena", "-i", deck] + flags
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True)
+    return proc.returncode, proc.stdout
+
+
+def test_vacuum_z4c_cylindrical_axisym_2d_succeeds():
+    try:
+        rc, out = _run_deck(Z4C_2D_INPUT, [])
+        assert rc == 0, out[-2000:]
+        assert "Z4c Cartoon axisym" in out, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+def test_vacuum_z4c_spherical_polar_2d_fails():
+    try:
+        rc, out = _run_deck(Z4C_2D_INPUT, ["mesh/coord=spherical_polar"])
+        assert rc != 0
+        assert GUARD_MSG in out, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+def test_vacuum_z4c_cylindrical_axisym_1d_fails():
+    try:
+        rc, out = _run_z4c(["mesh/coord=cylindrical_axisym"])
+        assert rc != 0
+        assert GUARD_MSG in out, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+def test_z4c_hydro_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(Z4C_2D_HYDRO_INPUT, [])
+        assert rc != 0
+        assert GUARD_MSG in out, out[-2000:]
+    finally:
+        testutils.cleanup()

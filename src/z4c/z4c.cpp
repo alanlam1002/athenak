@@ -26,6 +26,7 @@
 #include "z4c/horizon_dump.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_amr.hpp"
+#include "z4c/z4c_algconstr.hpp"
 #include "coordinates/adm.hpp"
 #include "utils/cart_grid.hpp"
 
@@ -153,6 +154,9 @@ Z4c::Z4c(MeshBlockPack *ppack, ParameterInput *pin) :
 
   opt.excise_chi = pin->GetOrAddReal("z4c", "excise_chi", 0.0625);
 
+  opt.cartoon_ydiss = pin->GetOrAddBoolean("z4c", "cartoon_ydiss", false);
+  opt.cartoon_npt = 2*indcs.ng + 1;
+
   opt.extrap_order = fmax(2,fmin(indcs.ng,fmin(4,
       pin->GetOrAddInteger("z4c", "extrap_order", 2))));
 
@@ -184,6 +188,9 @@ Z4c::Z4c(MeshBlockPack *ppack, ParameterInput *pin) :
   opt.dc_gaussian_center  = DriftControl::CenterFromString(
       pin->GetOrAddString("z4c", "dc_gaussian_center", "fixed"));
   }
+
+  // Cartoon: parse, validate and allocate u_cart (no-op for cartoon = none)
+  CartoonSetup(pin);
 
   // allocate memory for conserved variables on coarse mesh
   if (ppack->pmesh->multilevel) {
@@ -302,10 +309,12 @@ void Z4c::AlgConstr(MeshBlockPack *pmbp) {
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
-  //For GLOOPS
+  //For GLOOPS. A direction with one cell (nx = 1) has no ghosts: u0 has extent 1 there.
   int isg = is-indcs.ng; int ieg = ie+indcs.ng;
-  int jsg = js-indcs.ng; int jeg = je+indcs.ng;
-  int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
+  int ng2 = (indcs.nx2 > 1) ? indcs.ng : 0;
+  int ng3 = (indcs.nx3 > 1) ? indcs.ng : 0;
+  int jsg = js-ng2; int jeg = je+ng2;
+  int ksg = ks-ng3; int keg = ke+ng3;
 
   int nmb = pmbp->nmb_thispack;
 
@@ -313,33 +322,7 @@ void Z4c::AlgConstr(MeshBlockPack *pmbp) {
   par_for("Alg constr loop",DevExeSpace(),
   0,nmb-1,ksg,keg,jsg,jeg,isg,ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real detg = adm::SpatialDet(z4c.g_dd(m,0,0,k,j,i), z4c.g_dd(m,0,1,k,j,i),
-                              z4c.g_dd(m,0,2,k,j,i),z4c.g_dd(m,1,1,k,j,i),
-                              z4c.g_dd(m,1,2,k,j,i), z4c.g_dd(m,2,2,k,j,i));
-    detg = detg > 0. ? detg : 1.;
-    // Real eps = detg - 1.;
-    // Real oopsi4 = (eps < opt.eps_floor) ? (1. - opt.eps_floor/3.) :
-    //             (std::pow(1./detg, 1./3.));
-    Real oopsi4 = std::cbrt(1./detg);
-
-    for(int a = 0; a < 3; ++a)
-    for(int b = a; b < 3; ++b) {
-      z4c.g_dd(m,a,b,k,j,i) *= oopsi4;
-    }
-
-    // compute trace of A
-    // note: here we are assuming that det g = 1, which we enforced above
-    Real A = adm::Trace(1.0,
-              z4c.g_dd(m,0,0,k,j,i), z4c.g_dd(m,0,1,k,j,i), z4c.g_dd(m,0,2,k,j,i),
-              z4c.g_dd(m,1,1,k,j,i), z4c.g_dd(m,1,2,k,j,i), z4c.g_dd(m,2,2,k,j,i),
-              z4c.vA_dd(m,0,0,k,j,i), z4c.vA_dd(m,0,1,k,j,i), z4c.vA_dd(m,0,2,k,j,i),
-              z4c.vA_dd(m,1,1,k,j,i), z4c.vA_dd(m,1,2,k,j,i), z4c.vA_dd(m,2,2,k,j,i));
-
-    // enforce trace of A to be zero
-    for(int a = 0; a < 3; ++a)
-    for(int b = a; b < 3; ++b) {
-      z4c.vA_dd(m,a,b,k,j,i) -= (1.0/3.0) * A * z4c.g_dd(m,a,b,k,j,i);
-    }
+    AlgConstrPoint(z4c, m, k, j, i);
   });
 }
 //----------------------------------------------------------------------------------------

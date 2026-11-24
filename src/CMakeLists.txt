@@ -169,6 +169,7 @@ add_executable(
         pgen/unit_tests/coarse_geometry_test.cpp
         pgen/unit_tests/amr_conservation_test.cpp
     pgen/unit_tests/amr_divb_test.cpp
+        pgen/unit_tests/z4c_cartoon_test.cpp
         pgen/unit_tests/recon_exact_gradient_test.cpp
         pgen/unit_tests/recon_exact_cubic_test.cpp
         pgen/unit_tests/geom_equilibrium_test.cpp
@@ -223,6 +224,7 @@ add_executable(
         z4c/z4c.cpp
         z4c/z4c_adm.cpp
         z4c/z4c_calcrhs.cpp
+        z4c/z4c_cartoon.cpp
         z4c/z4c_newdt.cpp
         z4c/z4c_tasks.cpp
         z4c/z4c_update.cpp

@@ -32,8 +32,11 @@ void Z4c::GaugePreCollapsedLapse(MeshBlockPack *pmbp, ParameterInput *pin) {
   int &js = indcs.js; int &je = indcs.je;
   int &ks = indcs.ks; int &ke = indcs.ke;
   int isg = is-indcs.ng; int ieg = ie+indcs.ng;
-  int jsg = js-indcs.ng; int jeg = je+indcs.ng;
-  int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
+  // A direction with one cell (nx = 1) has no ghosts: u0 has extent 1 there.
+  int ng2 = (indcs.nx2 > 1) ? indcs.ng : 0;
+  int ng3 = (indcs.nx3 > 1) ? indcs.ng : 0;
+  int jsg = js-ng2; int jeg = je+ng2;
+  int ksg = ks-ng3; int keg = ke+ng3;
   int nmb = pmbp->nmb_thispack;
   auto &z4c = pmbp->pz4c->z4c;
   auto &adm = pmbp->padm->adm;

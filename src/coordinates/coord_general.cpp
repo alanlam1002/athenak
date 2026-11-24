@@ -115,4 +115,6 @@ void Mesh::ValidateCoordGeneral() {
   // radiation and z4c/adm need no guard of their own here: the Coordinates constructor
   // (coordinates.cpp) makes GR + curvilinear fatal, and also any <z4c> or <adm> block
   // + curvilinear, including vacuum z4c with no <hydro>/<mhd> and general_rel=false.
+  // Its one exemption is 2D Cartoon (vacuum z4c/adm, cylindrical_axisym, 2D; D-014),
+  // which Z4c then validates itself (z4c/z4c_cartoon.cpp).
 }

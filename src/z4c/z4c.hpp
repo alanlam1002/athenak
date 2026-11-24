@@ -8,6 +8,7 @@
 //! \file z4c.hpp
 //! \brief definitions for Z4c class
 
+#include <array>
 #include <map>
 #include <memory>    // make_unique, unique_ptr
 #include <list>
@@ -57,6 +58,20 @@ class Z4c {
   };
   // Names of Z4c variables
   static char const * const Z4c_names[nz4c];
+
+  // Cartoon (axisymmetry via ghost planes in the missing direction, D-001..D-011).
+  // On a 2D Cartesian mesh the evolved plane is y = 0 with x = x1 >= 0 and z = x2; the
+  // Cartoon direction y is the x3 INDEX. Component indices follow the mesh axes, so the
+  // physical labels map as  x -> 0,  z -> 1,  y -> 2.  E.g. physical beta^y is
+  // I_Z4C_BETAZ and physical g_xz is I_Z4C_GXY. CartoonParity holds the sign of each
+  // variable under the pi rotation about the z axis, (x,y,z) -> (-x,-y,z) (D-002).
+  // The mode follows the coord (D-014): cartesian -> none, cylindrical_axisym (2D) ->
+  // axisym, spherical_polar (1D) -> spherical (M4; fatal until then).
+  enum class CartoonMode {none, axisym, spherical};
+  struct CartoonParity {
+    int p[nz4c];
+  };
+  static CartoonParity CartoonParityTable();
   // Indices of Constraint variables
   enum {
     I_CON_C,
@@ -88,6 +103,10 @@ class Z4c {
   DvceArray5D<Real> coarse_u0; // coarse representation of z4c solution
   DvceArray5D<Real> u_weyl; // weyl scalars
   DvceArray5D<Real> coarse_u_weyl; // coarse representation of weyl scalars
+  // Cartoon working array (D-006): u_cart(m, n, 1+2ng, j, i), local k = ng is the y = 0
+  // plane. A cache refilled from u0 before each consumer; never communicated, restarted,
+  // load balanced or prolongated. Only allocated when cartoon != none.
+  DvceArray5D<Real> u_cart;
 
   struct ADM_vars {
     AthenaTensor<Real, TensorSymm::NONE, 3, 0> psi4;
@@ -120,6 +139,7 @@ class Z4c {
   };
   Z4c_vars z4c;
   Z4c_vars rhs;
+  Z4c_vars z4c_cart;  // same accessors, sliced from u_cart (valid only with Cartoon)
 
   // aliases for the constraints
   struct Constraint_vars {
@@ -179,6 +199,12 @@ class Z4c {
     int extrap_order;
     // Value of chi to specify the excision region for constraint evaluation
     Real excise_chi;
+    // Cartoon: mode (derived from the coord, D-014), Kreiss-Oliger dissipation in the
+    // Cartoon direction (SACRA-2D has none), and the number of Lagrange interpolation
+    // points (2ng+1, chat/0004).
+    CartoonMode cartoon;
+    bool cartoon_ydiss;
+    int cartoon_npt;
 
     // Flag if drift control for COT should be used.
     bool enable_driftcontrol;
@@ -264,6 +290,20 @@ class Z4c {
   void Z4cWeyl(MeshBlockPack *pmbp);
   void WaveExtr(MeshBlockPack *pmbp);
   void AlgConstr(MeshBlockPack *pmbp);
+  // Cartoon fill u0 -> u_cart (K1-K4). The overload with arguments exists for the unit
+  // test (npt scan, deliberately wrong parity, direct-interpolation cross-check at x<0).
+  void CartoonFill(MeshBlockPack *pmbp);
+  void CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
+                   bool direct_negx);
+  // D-002 axis boundary on an arbitrary (fine) array: fill i < is from i >= is with the
+  // parity signs, on MeshBlocks whose inner x1 face is the mesh boundary.
+  void CartoonAxisBC(MeshBlockPack *pmbp, DvceArray5D<Real> u,
+                     const CartoonParity &par);
+  // K2 stencil clamps per ghost plane l: {l, n_low, n_high, n_total}; test/diagnostic
+  // only (host loop; the production kernels do not count).
+  void CartoonClampStats(MeshBlockPack *pmbp, int npt,
+                         std::vector<std::array<int, 4>> &per_l);
+  bool IsCartoon() const { return opt.cartoon != CartoonMode::none; }
 
   Z4c_AMR *pamr;
   std::vector<std::unique_ptr<CompactObjectTracker>> ptracker;
@@ -283,6 +323,8 @@ class Z4c {
   // same for the waveform.
  private:
   MeshBlockPack* pmy_pack;  // ptr to MeshBlockPack containing this Z4c
+  void CartoonSetup(ParameterInput *pin);
+  void CartoonAlloc();
 };
 
 } // namespace z4c

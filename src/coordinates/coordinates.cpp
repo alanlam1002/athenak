@@ -50,11 +50,20 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
   // Test the <z4c>/<adm> blocks themselves rather than is_dynamical_relativistic, which
   // also needs <hydro> or <mhd>: otherwise a vacuum z4c run would slip through.
   bool has_spacetime = pin->DoesBlockExist("z4c") || pin->DoesBlockExist("adm");
-  if ((is_general_relativistic || has_spacetime) &&
+  // D-014: the one exemption is 2D Cartoon, i.e. vacuum <z4c>/<adm> on a 2D
+  // cylindrical_axisym mesh with no fluid and no GR (z4c/z4c_cartoon.cpp). 1D Cartoon
+  // (spherical_polar) is exempted in M4, matter coupling in M5.
+  bool has_fluid = pin->DoesBlockExist("hydro") || pin->DoesBlockExist("mhd");
+  bool cartoon_2d = has_spacetime && !has_fluid && !is_general_relativistic &&
+      ppack->pmesh->coord_general == CoordinateGeneral::cylindrical_axisym &&
+      ppack->pmesh->two_d;
+  if ((is_general_relativistic || has_spacetime) && !cartoon_2d &&
       ppack->pmesh->coord_general != CoordinateGeneral::cartesian) {
     std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
               << "GR and dynamical-GR (z4c/adm) require coord=cartesian; curvilinear "
-              << "coordinates are not supported with general relativity" << std::endl;
+              << "coordinates are not supported with general relativity (the one "
+              << "exception is vacuum z4c/adm on a 2D cylindrical_axisym mesh: 2D "
+              << "Cartoon)" << std::endl;
     std::exit(EXIT_FAILURE);
   }
 

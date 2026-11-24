@@ -150,6 +150,10 @@ void BCHelper(MeshBlockPack *ppack, DualArray2D<Real> u_in, DvceArray5D<Real> u0
 
   int nvar = u0.extent_int(1);  // TODO(@user): 2nd index from L of in array must be NVAR
   int nmb = ppack->nmb_thispack;
+  // Cartoon: the reflecting inner x1 face is the axis, and every variable takes its
+  // pi-rotation parity (D-002) instead of the generic "flip the x1-normal components".
+  const bool cartoon = ppack->pz4c->IsCartoon();
+  const z4c::Z4c::CartoonParity cpar = z4c::Z4c::CartoonParityTable();
 
   // only apply BCs unless periodic or shear_periodic
   if (pm->mesh_bcs[BoundaryFace::inner_x1] != BoundaryFlag::periodic
@@ -159,6 +163,12 @@ void BCHelper(MeshBlockPack *ppack, DualArray2D<Real> u_in, DvceArray5D<Real> u0
       // apply physical boundaries to inner_x1
       switch (mb_bcs.d_view(m,BoundaryFace::inner_x1)) {
         case BoundaryFlag::reflect:
+          if (cartoon) {
+            for (int i=0; i<ng; ++i) {
+              u0(m,n,k,j,is-i-1) = cpar.p[n]*u0(m,n,k,j,is+i);
+            }
+            break;
+          }
           for (int i=0; i<ng; ++i) {
             if (n==z4c::Z4c::I_Z4C_GXY || n==z4c::Z4c::I_Z4C_GXZ ||
                 n==z4c::Z4c::I_Z4C_AXY || n==z4c::Z4c::I_Z4C_AXZ ||

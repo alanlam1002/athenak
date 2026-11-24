@@ -620,6 +620,9 @@ void CFC::KerrSolvePsi(Driver *pdriver, int stage) {
     // fresh start: the pgen's psi_* - 1 on top of psi0 (differencing against psi0 seeds
     // delta psi ~ 1 - psi0 ~ -4 at the hole, which the psi^-7 FAS cannot recover, k004d)
     const bool pg = kerr_pgen_psi_;
+    // K-024 (a3): <cfc> kerr_regrid_seed_guard; det(g) of the prolongated ADM metric can be
+    // negative next to the hole after a regrid (K-024d: psi4 = -4.1 at r = 0.1, dx 1/32)
+    const bool sg = kerr_seed_guard_;
     par_for("cfc_kerr_seed_psi", DevExeSpace(), 0, pmy_pack->nmb_thispack-1, ks, ke, js, je,
             is, ie, KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const Real detg = adm::SpatialDet(adm.g_dd(m, 0, 0, k, j, i),
@@ -630,6 +633,7 @@ void CFC::KerrSolvePsi(Driver *pdriver, int stage) {
                                         adm.g_dd(m, 2, 2, k, j, i));
       dps(m, 0, k, j, i) = Kokkos::pow(detg, 1.0/12.0)
                            - (pg ? 1.0 : psi0(m, 0, k, j, i));
+      if (sg && kmg::NonFinite(dps(m, 0, k, j, i))) { dps(m, 0, k, j, i) = 0.0; }
     });
     kerr_pgen_psi_ = false;
   }

@@ -649,6 +649,14 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   // X^i/psi fixed-point-iteration controls, used by InitializeMetric() only.
   cfc_init_iter_max_ = pin->GetOrAddInteger("cfc", "init_iter_max", 50);
   cfc_init_tol_ = pin->GetOrAddReal("cfc", "init_tol", 1.0e-10);
+  // R-275 item 6: the V-cycle cap of InitializeMetric's multigrid solves. Default 40 = the
+  // evolution cap (bitwise); reaching it at initialisation is a WARNING (multigrid_driver.cpp)
+  cfc_init_mg_max_vcycles_ = pin->GetOrAddInteger("cfc", "init_mg_max_vcycles", 40);
+  if (cfc_init_mg_max_vcycles_ < 1 || cfc_init_mg_max_vcycles_ > 1000) {
+    std::cout << "### FATAL ERROR in CFC: <cfc> init_mg_max_vcycles must be in [1, 1000]"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   cfc_init_verbose_ = pin->GetOrAddBoolean("cfc", "init_verbose", false);
   cfc_init_omega_ = pin->GetOrAddReal("cfc", "init_omega", 1.0);
   // Default true: the psi^5 formulation converges dramatically faster (2-3 outer
@@ -1207,6 +1215,7 @@ void CFC::RunXPsiSolvePass(Driver *pdriver) {
 
 void CFC::InitializeMetric(Driver *pdriver) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
+  SetInitSolves(true);   // R-275 item 6: the initialisation cap and messages, until the end
   if (rs_on_) { SetResidualScale(pmy_pack->pmesh->time, 0, false); }
   int &is = indcs.is; int &ie = indcs.ie;
   int &js = indcs.js; int &je = indcs.je;
@@ -1265,7 +1274,22 @@ void CFC::InitializeMetric(Driver *pdriver) {
   pdriver->InitBoundaryValuesAndPrimitives(pmy_pack->pmesh);
   // Phase 2 M2: xidot(0) from the star (fresh starts only; restarts restore the state)
   if (frame_ctrl_ && !fc_init_) { InitFrameControl(pdriver); }
+  SetInitSolves(false);
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SetInitSolves(bool on)
+//! \brief R-275 item 6: switch the four CFC multigrid drivers to / from the initialisation
+//! V-cycle cap (<cfc> init_mg_max_vcycles) and its WARNING-at-cap message.
+
+void CFC::SetInitSolves(bool on) {
+  for (MultigridDriver *d : {static_cast<MultigridDriver*>(pmgd_psi),
+                             static_cast<MultigridDriver*>(pmgd_alpha),
+                             static_cast<MultigridDriver*>(pmgd_pietax),
+                             static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+    if (d != nullptr) d->SetInitSolve(on, cfc_init_mg_max_vcycles_);
+  }
 }
 
 //----------------------------------------------------------------------------------------

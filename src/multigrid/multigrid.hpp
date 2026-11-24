@@ -495,6 +495,11 @@ class MultigridDriver {
   // last regrid; C-230). With f > 0 a count mismatch means a regrid the multigrid did not
   // see: FATAL. Set by CFC::SetResidualScale every stage; default false (counts must match).
   void SetStaleStateAllowed(bool a) { stale_state_ok_ = a; }
+  // R-275 item 6: CFC::InitializeMetric's solves (on = true) use their own V-cycle cap
+  // (<cfc> init_mg_max_vcycles, default 40 = the evolution cap, bitwise); reaching it there is
+  // a WARNING, not the evolution's FATAL, and a non-finite defect there stops the run.
+  // Off restores the evolution cap of 40.
+  void SetInitSolve(bool on, int cap) { init_solve_ = on; max_vcycles_ = on ? cap : 40; }
   void SaveFinestState(DvceArray5D<Real> &dst, int ns, int ngh);
   // zero the finest level's solution (the next solve's initial guess): the regrid
   // re-solve's cold start for solvers without a seed (C-102)
@@ -711,6 +716,8 @@ class MultigridDriver {
   // least this many V-cycles even when the warm start's defect is already <= the target
   // (R-201: with 0, such a solve does none and the metric lags the matter)
   int min_vcycles_ = 0;
+  int max_vcycles_ = 40;      // SolveIterative's V-cycle cap (R-275 item 6: see SetInitSolve)
+  bool init_solve_ = false;   // inside CFC::InitializeMetric (see SetInitSolve)
   int last_nvcycle_ = 0;
   Real last_def0_ = 0.0, last_def_ = 0.0;
   int64_t nsolve_ = 0;

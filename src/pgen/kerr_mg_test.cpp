@@ -330,6 +330,15 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
                   bd[0], bd[1], bd[2], drv.boundary_octets_, tprep);
     }
     EdgeCensus(pmbp);
+    {
+      long fc[3];
+      drv.FarEdgeCounts(fc);
+      const long f0 = SumL(fc[0]), f1 = SumL(fc[1]);
+      if (Root()) {
+        std::printf("KMG FAREDGES bc_edges %s far_block %ld interior %ld far_root %ld\n",
+                    drv.far_edges_ ? "far_field" : "rule_r", f0, f1, fc[2]);
+      }
+    }
   }
   if (cs.mode != 0) {
     const int np = pin->GetOrAddInteger(B, "chk_npts", 20000);
@@ -413,6 +422,8 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
     drv.edge_fill_ = (f[1] == "bilinear") ? cfc::kmg::EdgeFill::bilinear
                    : ((f[1] == "off") ? cfc::kmg::EdgeFill::off
                                       : cfc::kmg::EdgeFill::rule_r);
+    // RK-049 (2): "exact" = Rule R, then V* on the interior unsafe edges
+    drv.exact_iedges_ = (f[1] == "exact");
     drv.mp_self_ = (f.size() > 2) ? (f[2] != "rhs") : self0;
     drv.edge_poison_ = false;
     drv.count_nonfinite_ = false;
@@ -719,6 +730,15 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
                   tprep);
     }
     EdgeCensus(pmbp);
+    {
+      long fc[3];
+      drv.FarEdgeCounts(fc);
+      const long f0 = SumL(fc[0]), f1 = SumL(fc[1]);
+      if (Root()) {
+        std::printf("KMG FAREDGES bc_edges %s far_block %ld interior %ld far_root %ld\n",
+                    drv.far_edges_ ? "far_field" : "rule_r", f0, f1, fc[2]);
+      }
+    }
   }
   {
     const Real cn = pin->GetOrAddReal(B, "chk_near", 0.0);
@@ -762,6 +782,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     drv.edge_fill_ = (ef == "bilinear") ? cfc::kmg::EdgeFill::bilinear
                    : ((ef == "off") ? cfc::kmg::EdgeFill::off
                                     : cfc::kmg::EdgeFill::rule_r);
+    // RK-049 (2): "exact" = Rule R, then u* on the interior unsafe edges
+    drv.exact_iedges_ = (ef == "exact");
     drv.edge_poison_ = false;
     drv.count_nonfinite_ = false;
     drv.ResetSolution();

@@ -133,6 +133,14 @@ void MGKerrVector::Hook(int lev, bool poison_ok) {
   }
   kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, d->edge_fill_,
                      d->edge_poison_ && poison_ok);
+  // RK-049 (1): kelvin at the edge-ghost centres beside the kelvin faces (after Rule R,
+  // which keeps the interior coarse/fine edges)
+  if (d->far_edges_ && d->kelvin_) {
+    kmg::KelvinEdgeFill(u, blk_, ff_.d_view, nmmb_, ngh_, nx, ny, nz, d->mpo_, d->mom_);
+  }
+  if (d->exact_iedges_) {
+    kmg::ExactEdgeFillV(u, blk_, ie_.d_view, nmmb_, ngh_, nx, ny, nz, d->vm_);
+  }
 }
 
 void MGKerrVector::SaveGhosts(int lev) {
@@ -348,6 +356,14 @@ MGKerrVectorDriver::MGKerrVectorDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   } else {
     Fatal(block + "/hook_scope must be 'operator' or 'persist'.");
   }
+  {
+    const std::string be = pin->GetOrAddString(block, "bc_edges", "rule_r");
+    if (be == "far_field") {
+      far_edges_ = true;
+    } else if (be != "rule_r") {
+      Fatal(block + "/bc_edges must be 'rule_r' or 'far_field'.");
+    }
+  }
   std::string us = pin->GetOrAddString(block, "uold_edge_sync", "free");
   if (us == "none") {
     uold_edge_sync_ = kmg::kSyncNone;
@@ -475,6 +491,10 @@ void MGKerrVectorDriver::Prepare() {
   root_kf_.template sync<DevExeSpace>();
   lv->SetMasks(blk_mask_, blk_phys_, blk_kf_);
   rt->SetMasks(root_mask_, root_phys_, root_kf_);
+  kmg::BuildFarEdgeMasks(blk_mask_, blk_phys_, blk_kf_, nmb, blk_ff_, blk_ie_);
+  kmg::BuildFarEdgeMasks(root_mask_, root_phys_, root_kf_, 1, root_ff_, root_ie_);
+  lv->SetFarMasks(blk_ff_, blk_ie_);
+  rt->SetFarMasks(root_ff_, root_ie_);
   kmg::BuildSyncMask(blk_mask_, blk_phys_, nmb, uold_edge_sync_, false, blk_sync_);
   kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);
   lv->SetSyncMask(blk_sync_);
@@ -606,6 +626,17 @@ bool MGKerrVectorDriver::CopyCoeffsFrom(MGKerrVectorDriver *d) {
   for (int q = 0; q < 3; ++q) { bad_dinv_[q] = d->bad_dinv_[q]; }
   boundary_octets_ = d->boundary_octets_;
   return true;
+}
+
+void MGKerrVectorDriver::FarEdgeCounts(long c[3]) const {
+  c[0] = c[1] = c[2] = 0;
+  for (int m = 0; m < static_cast<int>(blk_ff_.h_view.extent(0)); ++m) {
+    c[0] += Kokkos::popcount(static_cast<unsigned>(blk_ff_.h_view(m)));
+    c[1] += Kokkos::popcount(static_cast<unsigned>(blk_ie_.h_view(m)));
+  }
+  if (root_ff_.h_view.extent(0) > 0) {
+    c[2] = Kokkos::popcount(static_cast<unsigned>(root_ff_.h_view(0)));
+  }
 }
 
 void MGKerrVectorDriver::ComputeMoments() {

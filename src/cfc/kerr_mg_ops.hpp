@@ -573,6 +573,44 @@ void CountEdges(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int 
 //! level array u (nmmb x nvar x (nz+2ngh) x (ny+2ngh) x (nx+2ngh)); device.
 void ApplyEdgeFill(const DvceArray5D<Real> &u, const DvceArray1D<int> &mask, int nmmb,
                    int nvar, int ngh, int nx, int ny, int nz, EdgeFill mode, bool poison);
+//! RK-049 (1), <block> bc_edges = far_field (default rule_r: none of this runs).
+//! ff(m) = the edges q of mask(m) with a far-field face beside them (bit f of faces(m),
+//! f = 2 axis + side: kelvin for the vector drivers, robin for the scalar ones); every
+//! such edge ghost lies outside the domain. ie(m) = mask(m) & ~phys(m), the interior
+//! (coarse/fine) unsafe edges, which keep Rule R (or the test's exact fill).
+void BuildFarEdgeMasks(const DualArray1D<int> &mask, const DualArray1D<int> &phys,
+                       const DualArray1D<int> &faces, int nmb, DualArray1D<int> &ff,
+                       DualArray1D<int> &ie);
+//! robin far field on the ff edges (first ghost layer, interior range along the edge,
+//! after ApplyEdgeFill): g = u_anc (r_anc/r_g)^order about rc, as the framework's robin
+//! faces (multigrid_tasks.cpp:208ff), with the anchor the nearest in-domain cell: the
+//! block's corner cell when both faces beside the edge are far-field faces, else the face
+//! ghost across the non-physical face (filled by the framework)
+void RobinEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                   const DvceArray1D<int> &ff, const DvceArray1D<int> &faces, int nmmb,
+                   int nvar, int ngh, int nx, int ny, int nz, const Real rc[3],
+                   Real order);
+//! RK-049 (2) test only: u* (variable 0) on the edges in msk (first ghost layer)
+void ExactEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                   const DvceArray1D<int> &msk, int nmmb, int ngh, int nx, int ny, int nz,
+                   const Manuf &mf);
+//! the centre of the first-layer edge ghost of edge q at index t along it (block extent b)
+KOKKOS_INLINE_FUNCTION
+void EdgeGhost(const RegionSize &r, int q, int t, int ngh, const int n[3], int I[3],
+               Real X[3]) {
+  int e, a, b, sa, sb;
+  EdgeAxes(q, e, a, b, sa, sb);
+  I[e] = ngh + t;
+  I[a] = (sa > 0) ? ngh + n[a] : ngh - 1;
+  I[b] = (sb > 0) ? ngh + n[b] : ngh - 1;
+  const Real mn[3] = {r.x1min, r.x2min, r.x3min};
+  const Real mx[3] = {r.x1max, r.x2max, r.x3max};
+  for (int d = 0; d < 3; ++d) {
+    X[d] = mn[d] + (static_cast<Real>(I[d] - ngh) + 0.5)*(mx[d] - mn[d])
+                   /static_cast<Real>(n[d]);
+  }
+}
+
 //! uold edge sync (block/uold_edge_sync): the framework stores uold = u (StoreOldData)
 //! BEFORE CalculateFASRHSPack runs the edge hook, and ComputeCorrection forms u - uold on
 //! the ghosts too, which trilinear prolongation reads (multigrid.cpp:1040-1068, :1197).

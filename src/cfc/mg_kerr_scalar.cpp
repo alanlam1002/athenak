@@ -160,6 +160,20 @@ void MGKerrScalar::EdgeHook(int lev, bool poison_ok) {
   }
   kmg::ApplyEdgeFill(u_[lev].d_view, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz,
                      d->edge_fill_, d->edge_poison_ && poison_ok);
+  PostEdgeFill(lev);
+}
+
+void MGKerrScalar::PostEdgeFill(int lev) {
+  const MGKerrScalarDriver *d = Drv();
+  if (!d->far_edges_ && !d->exact_iedges_) return;
+  const int nx = LevelN(lev, 0), ny = LevelN(lev, 1), nz = LevelN(lev, 2);
+  if (d->far_edges_) {
+    kmg::RobinEdgeFill(u_[lev].d_view, blk_, ff_.d_view, rfaces_.d_view, nmmb_, nvar_,
+                       ngh_, nx, ny, nz, d->RobinCentre(), d->RobinOrder());
+  }
+  if (d->exact_iedges_) {
+    kmg::ExactEdgeFill(u_[lev].d_view, blk_, ie_.d_view, nmmb_, ngh_, nx, ny, nz, d->mf_);
+  }
 }
 
 void MGKerrScalar::SaveGhosts(int lev) {
@@ -214,6 +228,7 @@ void MGKerrScalar::SmoothPack(int color) {
         u(m, 0, k, j, i) = kmg::FloorPsi(kind, u(m, 0, k, j, i) + omega*r/dg, p0, pfl);
       });
       kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, fill, false);
+      PostEdgeFill(lev);
     }
   } else {
     auto scr = scratch_;
@@ -236,6 +251,7 @@ void MGKerrScalar::SmoothPack(int color) {
       u(m, 0, k, j, i) = scr(m, 0, k, j, i);
     });
     kmg::ApplyEdgeFill(u, mask_.d_view, nmmb_, nvar_, ngh_, nx, ny, nz, fill, false);
+    PostEdgeFill(lev);
   }
   RestoreGhosts(lev);
 }
@@ -386,6 +402,14 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   } else {
     Fatal(block + "/hook_scope must be 'operator' or 'persist'.");
   }
+  {
+    const std::string be = pin->GetOrAddString(block, "bc_edges", "rule_r");
+    if (be == "far_field") {
+      far_edges_ = true;
+    } else if (be != "rule_r") {
+      Fatal(block + "/bc_edges must be 'rule_r' or 'far_field'.");
+    }
+  }
   count_nonfinite_ = pin->GetOrAddBoolean(block, "count_nonfinite", false);
 
   robin_order_ = pin->GetOrAddInteger(block, "mg_robin_order", 1);
@@ -422,6 +446,17 @@ MGKerrScalarDriver::MGKerrScalarDriver(MeshBlockPack *pmbp, ParameterInput *pin,
   mglevels_->pbval->ComputePerLevelIndices();
 }
 
+void MGKerrScalarDriver::FarEdgeCounts(long c[3]) const {
+  c[0] = c[1] = c[2] = 0;
+  for (int m = 0; m < static_cast<int>(blk_ff_.h_view.extent(0)); ++m) {
+    c[0] += Kokkos::popcount(static_cast<unsigned>(blk_ff_.h_view(m)));
+    c[1] += Kokkos::popcount(static_cast<unsigned>(blk_ie_.h_view(m)));
+  }
+  if (root_ff_.h_view.extent(0) > 0) {
+    c[2] = Kokkos::popcount(static_cast<unsigned>(root_ff_.h_view(0)));
+  }
+}
+
 MGKerrScalarDriver::~MGKerrScalarDriver() {
   delete mgroot_;
   delete mglevels_;
@@ -437,6 +472,37 @@ void MGKerrScalarDriver::Prepare() {
   kmg::ComputeRootEdgeMask(mg_mesh_bcs_, root_mask_, root_phys_);
   lv->SetEdgeMasks(blk_mask_, blk_phys_);
   rt->SetEdgeMasks(root_mask_, root_phys_);
+  {
+    // RK-049: robin faces (blocks: a physical, non-periodic face with a robin mesh bc)
+    const int nmb = pmy_pack_->nmb_thispack;
+    Kokkos::realloc(blk_rf_, nmb);
+    Kokkos::realloc(root_rf_, 1);
+    auto &bcs = pmy_pack_->pmb->mb_bcs;
+    int rbits = 0;
+    for (int f = 0; f < 6; ++f) {
+      if (mg_mesh_bcs_[f] == BoundaryFlag::mg_robin) { rbits |= (1 << f); }
+    }
+    for (int m = 0; m < nmb; ++m) {
+      int bits = 0;
+      for (int f = 0; f < 6; ++f) {
+        const BoundaryFlag b = bcs.h_view(m, f);
+        if (b != BoundaryFlag::block && b != BoundaryFlag::periodic &&
+            ((rbits >> f) & 1)) {
+          bits |= (1 << f);
+        }
+      }
+      blk_rf_.h_view(m) = bits;
+    }
+    root_rf_.h_view(0) = rbits;
+    blk_rf_.template modify<HostExeSpace>();
+    blk_rf_.template sync<DevExeSpace>();
+    root_rf_.template modify<HostExeSpace>();
+    root_rf_.template sync<DevExeSpace>();
+    kmg::BuildFarEdgeMasks(blk_mask_, blk_phys_, blk_rf_, nmb, blk_ff_, blk_ie_);
+    kmg::BuildFarEdgeMasks(root_mask_, root_phys_, root_rf_, 1, root_ff_, root_ie_);
+    lv->SetFarMasks(blk_rf_, blk_ff_, blk_ie_);
+    rt->SetFarMasks(root_rf_, root_ff_, root_ie_);
+  }
   kmg::BuildSyncMask(blk_mask_, blk_phys_, pmy_pack_->nmb_thispack, uold_edge_sync_, false,
                      blk_sync_);
   kmg::BuildSyncMask(root_mask_, root_phys_, 1, uold_edge_sync_, true, root_sync_);

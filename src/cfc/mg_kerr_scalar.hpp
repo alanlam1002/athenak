@@ -65,6 +65,16 @@ class MGKerrScalar : public Multigrid {
     mask_ = mask;
     phys_ = phys;
   }
+  //! RK-049: robin faces (bit f), the far-field edges and the interior unsafe edges
+  void SetFarMasks(const DualArray1D<int> &faces, const DualArray1D<int> &ff,
+                   const DualArray1D<int> &ie) {
+    rfaces_ = faces;
+    ff_ = ff;
+    ie_ = ie;
+  }
+  //! after every ApplyEdgeFill of the hook: the RK-049 far-field (bc_edges = far_field)
+  //! and exact (test) edge fills; nothing when both are off
+  void PostEdgeFill(int lev);
   //! all levels' coefficients from (cs, mf)
   void FillAllLevels(const kmg::CoefSource &cs, const kmg::Manuf &mf);
   //! W3b: the background channels on levels lev_lo..lev_hi (all by default; see
@@ -105,7 +115,7 @@ class MGKerrScalar : public Multigrid {
  private:
   MGKerrScalarDriver *Drv() const;
   DualArray1D<int> sync_;     // uold edge sync mask (kmg::BuildSyncMask)
-  DualArray1D<int> mask_, phys_;
+  DualArray1D<int> mask_, phys_, rfaces_, ff_, ie_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
   DvceArray5D<Real> gsave_;   // hook_scope = operator: u's ghosts (finest-level shape)
@@ -161,6 +171,16 @@ class MGKerrScalarDriver : public MultigridDriver {
 
   // settings (public for the test harness)
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
+  //! RK-049 (1) <block> bc_edges = rule_r (default) | far_field: the unsafe edge ghosts
+  //! beside a robin face take the robin fall-off from the nearest in-domain cell after
+  //! the edge fill (block levels and root; the octets' edges are the framework's,
+  //! SetBoundariesOctets). Off = no extra kernel, bitwise.
+  bool far_edges_ = false;
+  //! RK-049 (2) test only (kerr_mg_test token "exact"): u* on the interior unsafe edges
+  bool exact_iedges_ = false;
+  void FarEdgeCounts(long c[3]) const;
+  const Real *RobinCentre() const { return robin_center_; }
+  Real RobinOrder() const { return static_cast<Real>(robin_order_); }
   bool edge_poison_ = false;
   int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
   bool hook_operator_ = true;   // block/hook_scope = operator (default) | persist
@@ -230,6 +250,7 @@ class MGKerrScalarDriver : public MultigridDriver {
   void TransferCoeffToRoot();
   DualArray1D<int> blk_sync_, root_sync_;
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_;
+  DualArray1D<int> blk_rf_, root_rf_, blk_ff_, blk_ie_, root_ff_, root_ie_;
 };
 
 }  // namespace cfc

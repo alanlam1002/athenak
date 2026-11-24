@@ -151,6 +151,47 @@ void KelvinFaceFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &b
   });
 }
 
+void KelvinEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                    const DvceArray1D<int> &ff, int nmmb, int ngh, int nx, int ny, int nz,
+                    const Real x0[3], const VMoments &mom) {
+  auto bd = blk.d_view;
+  const int nmax = std::max(nx, std::max(ny, nz));
+  const Real ox = x0[0], oy = x0[1], oz = x0[2];
+  par_for("kmg::KelvinEdgeFill", DevExeSpace(), 0, nmmb-1, 0, 11, 0, nmax-1,
+  KOKKOS_LAMBDA(const int m, const int q, const int t) {
+    if (!((ff(m) >> q) & 1)) return;
+    const int n[3] = {nx, ny, nz};
+    if (t >= n[q >> 2]) return;
+    int I[3];
+    Real X[3];
+    EdgeGhost(bd(m), q, t, ngh, n, I, X);
+    Real V[3];
+    KelvinV(mom, X[0] - ox, X[1] - oy, X[2] - oz, V);
+    for (int c = 0; c < 3; ++c) { u(m, c, I[2], I[1], I[0]) = V[c]; }
+  });
+}
+
+void ExactEdgeFillV(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                    const DvceArray1D<int> &msk, int nmmb, int ngh, int nx, int ny, int nz,
+                    const VManuf &vm) {
+  auto bd = blk.d_view;
+  const int nmax = std::max(nx, std::max(ny, nz));
+  par_for("kmg::ExactEdgeFillV", DevExeSpace(), 0, nmmb-1, 0, 11, 0, nmax-1,
+  KOKKOS_LAMBDA(const int m, const int q, const int t) {
+    if (!((msk(m) >> q) & 1)) return;
+    const int n[3] = {nx, ny, nz};
+    if (t >= n[q >> 2]) return;
+    int I[3];
+    Real X[3];
+    EdgeGhost(bd(m), q, t, ngh, n, I, X);
+    for (int c = 0; c < 3; ++c) {
+      Real uu, du[3], ddu[6];
+      ManufEval(vm.c[c], X[0], X[1], X[2], uu, du, ddu);
+      u(m, c, I[2], I[1], I[0]) = uu;
+    }
+  });
+}
+
 void LocalMoments(const DvceArray5D<Real> &u, const DvceArray5D<Real> &src,
                   const DvceArray5D<Real> &coeff, const DualArray1D<RegionSize> &blk,
                   int nmmb, int ngh, int nx, int ny, int nz, bool self, const Real x0[3],

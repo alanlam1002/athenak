@@ -57,6 +57,14 @@ class MGKerrVector : public Multigrid {
     phys_ = phys;
     kfaces_ = kfaces;
   }
+  //! RK-049: the far-field edges (bc_edges = far_field) and the interior unsafe edges
+  //! (the exact-edge test); kmg::BuildFarEdgeMasks
+  void SetFarMasks(const DualArray1D<int> &ff, const DualArray1D<int> &ie) {
+    ff_ = ff;
+    ie_ = ie;
+  }
+  const DualArray1D<int> &FarMask() const { return ff_; }
+  const DualArray1D<int> &IEdgeMask() const { return ie_; }
   //! the coefficients on every level; returns the cells with det(-dS/dV_c) <= 0
   long FillAllLevels(const kmg::CoefSource &cs);
   void BuildExtents();
@@ -83,7 +91,7 @@ class MGKerrVector : public Multigrid {
  private:
   MGKerrVectorDriver *Drv() const;
   DualArray1D<int> sync_;     // uold edge sync mask (kmg::BuildSyncMask)
-  DualArray1D<int> mask_, phys_, kfaces_;
+  DualArray1D<int> mask_, phys_, kfaces_, ff_, ie_;
   DualArray1D<RegionSize> blk_;
   DvceArray5D<Real> scratch_;
   DvceArray5D<Real> gsave_;   // hook_scope = operator: u's ghosts (finest-level shape)
@@ -131,6 +139,14 @@ class MGKerrVectorDriver : public MultigridDriver {
 
   // settings (public for the test harness)
   kmg::EdgeFill edge_fill_ = kmg::EdgeFill::rule_r;
+  //! RK-049 (1) <block> bc_edges = rule_r (default) | far_field: the unsafe edge ghosts
+  //! beside a kelvin face take V_K at their centres after the edge fill (block levels and
+  //! root; octets have no hook). Off = no extra kernel, bitwise.
+  bool far_edges_ = false;
+  //! RK-049 (2) test only (kerr_mg_test token "exact"): V* on the interior unsafe edges
+  bool exact_iedges_ = false;
+  //! far-field / interior unsafe edges on this rank's blocks, and on the root
+  void FarEdgeCounts(long c[3]) const;
   bool edge_poison_ = false;
   int uold_edge_sync_ = kmg::kSyncFree;   // block/uold_edge_sync = none | free | all
   bool hook_operator_ = true;   // block/hook_scope = operator (default) | persist
@@ -197,6 +213,7 @@ class MGKerrVectorDriver : public MultigridDriver {
   std::vector<const Real*> key_ptr_;
   DualArray1D<int> blk_sync_, root_sync_;
   DualArray1D<int> blk_mask_, blk_phys_, root_mask_, root_phys_, blk_kf_, root_kf_;
+  DualArray1D<int> blk_ff_, blk_ie_, root_ff_, root_ie_;
 };
 
 }  // namespace cfc

@@ -136,6 +136,89 @@ void ApplyEdgeFill(const DvceArray5D<Real> &u, const DvceArray1D<int> &mask, int
   });
 }
 
+void BuildFarEdgeMasks(const DualArray1D<int> &mask, const DualArray1D<int> &phys,
+                       const DualArray1D<int> &faces, int nmb, DualArray1D<int> &ff,
+                       DualArray1D<int> &ie) {
+  Kokkos::realloc(ff, nmb);
+  Kokkos::realloc(ie, nmb);
+  for (int m = 0; m < nmb; ++m) {
+    int bits = 0;
+    for (int q = 0; q < 12; ++q) {
+      if (!((mask.h_view(m) >> q) & 1)) continue;
+      int e, a, b, sa, sb;
+      EdgeAxes(q, e, a, b, sa, sb);
+      const int fa = 2*a + (sa > 0 ? 1 : 0), fb = 2*b + (sb > 0 ? 1 : 0);
+      if (((faces.h_view(m) >> fa) & 1) || ((faces.h_view(m) >> fb) & 1)) {
+        bits |= (1 << q);
+      }
+    }
+    ff.h_view(m) = bits;
+    ie.h_view(m) = mask.h_view(m) & ~phys.h_view(m);
+  }
+  ff.template modify<HostExeSpace>();
+  ff.template sync<DevExeSpace>();
+  ie.template modify<HostExeSpace>();
+  ie.template sync<DevExeSpace>();
+}
+
+void RobinEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                   const DvceArray1D<int> &ff, const DvceArray1D<int> &faces, int nmmb,
+                   int nvar, int ngh, int nx, int ny, int nz, const Real rc[3],
+                   Real order) {
+  auto bd = blk.d_view;
+  const int nmax = (nx > ny) ? ((nx > nz) ? nx : nz) : ((ny > nz) ? ny : nz);
+  const Real cx = rc[0], cy = rc[1], cz = rc[2];
+  par_for("kmg::RobinEdgeFill", DevExeSpace(), 0, nmmb-1, 0, nvar-1, 0, 11, 0, nmax-1,
+  KOKKOS_LAMBDA(const int m, const int v, const int q, const int t) {
+    if (!((ff(m) >> q) & 1)) return;
+    int e, a, b, sa, sb;
+    EdgeAxes(q, e, a, b, sa, sb);
+    const int n[3] = {nx, ny, nz};
+    if (t >= n[e]) return;
+    int I[3];
+    Real X[3];
+    EdgeGhost(bd(m), q, t, ngh, n, I, X);
+    const bool pa = (faces(m) >> (2*a + (sa > 0 ? 1 : 0))) & 1;
+    const bool pb = (faces(m) >> (2*b + (sb > 0 ? 1 : 0))) & 1;
+    // anchor: step back into the domain across every far-field face
+    int J[3] = {I[0], I[1], I[2]};
+    if (pa) J[a] -= sa;
+    if (pb) J[b] -= sb;
+    const Real mn[3] = {bd(m).x1min, bd(m).x2min, bd(m).x3min};
+    const Real mx[3] = {bd(m).x1max, bd(m).x2max, bd(m).x3max};
+    Real ra2 = 0.0, rg2 = 0.0;
+    const Real c[3] = {cx, cy, cz};
+    for (int d = 0; d < 3; ++d) {
+      const Real xa = mn[d] + (static_cast<Real>(J[d] - ngh) + 0.5)*(mx[d] - mn[d])
+                              /static_cast<Real>(n[d]);
+      ra2 += (xa - c[d])*(xa - c[d]);
+      rg2 += (X[d] - c[d])*(X[d] - c[d]);
+    }
+    const Real ra = Kokkos::sqrt(ra2), rg = Kokkos::sqrt(rg2);
+    u(m, v, I[2], I[1], I[0]) = u(m, v, J[2], J[1], J[0])
+                              * Kokkos::pow(ra/(rg + 1.0e-30), order);
+  });
+}
+
+void ExactEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                   const DvceArray1D<int> &msk, int nmmb, int ngh, int nx, int ny, int nz,
+                   const Manuf &mf) {
+  auto bd = blk.d_view;
+  const int nmax = (nx > ny) ? ((nx > nz) ? nx : nz) : ((ny > nz) ? ny : nz);
+  par_for("kmg::ExactEdgeFill", DevExeSpace(), 0, nmmb-1, 0, 11, 0, nmax-1,
+  KOKKOS_LAMBDA(const int m, const int q, const int t) {
+    if (!((msk(m) >> q) & 1)) return;
+    const int n[3] = {nx, ny, nz};
+    if (t >= n[q >> 2]) return;
+    int I[3];
+    Real X[3];
+    EdgeGhost(bd(m), q, t, ngh, n, I, X);
+    Real uu, du[3], ddu[6];
+    ManufEval(mf, X[0], X[1], X[2], uu, du, ddu);
+    u(m, 0, I[2], I[1], I[0]) = uu;
+  });
+}
+
 void BuildSyncMask(const DualArray1D<int> &mask, const DualArray1D<int> &phys, int nmb,
                    int mode, bool root, DualArray1D<int> &sync) {
   Kokkos::realloc(sync, nmb);

@@ -416,6 +416,15 @@ void FillManufVecSrc(const DvceArray5D<Real> &src, const DualArray1D<RegionSize>
 void KelvinFaceFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
                     const DvceArray1D<int> &faces, int nmmb, int ngh, int nx, int ny,
                     int nz, const Real x0[3], const VMoments &mom);
+//! RK-049 (1), bc_edges = far_field: V = V_K(edge-ghost centre) on the ff edges (first
+//! ghost layer, interior range along the edge), the same kelvin expansion as the faces
+void KelvinEdgeFill(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                    const DvceArray1D<int> &ff, int nmmb, int ngh, int nx, int ny, int nz,
+                    const Real x0[3], const VMoments &mom);
+//! RK-049 (2) test only: V* on the edges in msk (first ghost layer)
+void ExactEdgeFillV(const DvceArray5D<Real> &u, const DualArray1D<RegionSize> &blk,
+                    const DvceArray1D<int> &msk, int nmmb, int ngh, int nx, int ny, int nz,
+                    const VManuf &vm);
 //! this rank's moments (unreduced) of q over the interior cells of a finest level:
 //! self = false: q = src; self = true: q = src + (S - S_f)/h^2
 void LocalMoments(const DvceArray5D<Real> &u, const DvceArray5D<Real> &src,

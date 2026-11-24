@@ -21,6 +21,7 @@
 //! BuildShiftSource's cross terms 2[Ahat^ij d_j dap6 + (Ahat - Ahat0)^ij grad_ap6_0_j] are
 //! eq:cbeta's.
 
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <iostream>
@@ -51,6 +52,73 @@ namespace {
 [[noreturn]] void KerrFatal(const std::string &msg) {
   std::cout << "### FATAL ERROR in CFC (kerr_background): " << msg << std::endl;
   std::exit(EXIT_FAILURE);
+}
+
+//! K-024 (b) (RK-046 §2): <cfc> kerr_nonfinite_check (default false). When true, the Kerr
+//! metric path is scanned for non-finite values (a bit test, kmg::NonFinite, never through
+//! an fmax reduction that would drop a NaN) after the background fill, before and after each
+//! of the four solves and after psi^4; the first one found is reported (rank, block, cell,
+//! position and r about x_BH) and the run stops with a FATAL. Read-only: bitwise on finite
+//! runs. One CFC per process, so a file-scope flag (no change to the shared cfc.hpp).
+bool g_nf_check = false;
+
+//! count the non-finite f(m, v, k, j, i) over the pack's interior (+ ghosts) cells, nv
+//! variables; on any hit (summed over ranks) report and stop
+template <typename F>
+void NfScan(const char *what, MeshBlockPack *pp, int nv, bool ghosts, const Real xbh[3],
+            const F &f) {
+  if (!g_nf_check) return;
+  auto &indcs = pp->pmesh->mb_indcs;
+  const int ng = ghosts ? indcs.ng : 0;
+  const int is = indcs.is - ng, js = indcs.js - ng, ks = indcs.ks - ng;
+  const int ni = indcs.nx1 + 2*ng, nj = indcs.nx2 + 2*ng, nk = indcs.nx3 + 2*ng;
+  const int nmb = pp->nmb_thispack;
+  const long ntot = static_cast<long>(nmb)*nv*nk*nj*ni;
+  long cnt = 0, first = LONG_MAX;
+  Kokkos::parallel_reduce("cfc_kerr_nfscan", Kokkos::RangePolicy<DevExeSpace>(0, ntot),
+  KOKKOS_LAMBDA(const long idx, long &c, long &fi) {
+    long r = idx;
+    const int i = is + static_cast<int>(r % ni); r /= ni;
+    const int j = js + static_cast<int>(r % nj); r /= nj;
+    const int k = ks + static_cast<int>(r % nk); r /= nk;
+    const int v = static_cast<int>(r % nv); r /= nv;
+    const int m = static_cast<int>(r);
+    if (kmg::NonFinite(f(m, v, k, j, i))) {
+      c += 1;
+      if (idx < fi) fi = idx;
+    }
+  }, Kokkos::Sum<long>(cnt), Kokkos::Min<long>(first));
+  long tot = cnt;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &tot, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (cnt > 0) {
+    long r = first;
+    const int i = is + static_cast<int>(r % ni); r /= ni;
+    const int j = js + static_cast<int>(r % nj); r /= nj;
+    const int k = ks + static_cast<int>(r % nk); r /= nk;
+    const int v = static_cast<int>(r % nv); r /= nv;
+    const int m = static_cast<int>(r);
+    const RegionSize &b = pp->pmb->mb_size.h_view(m);
+    const Real x = b.x1min + (i - indcs.is + 0.5)*b.dx1;
+    const Real y = b.x2min + (j - indcs.js + 0.5)*b.dx2;
+    const Real z = b.x3min + (k - indcs.ks + 0.5)*b.dx3;
+    const Real rr = std::sqrt((x - xbh[0])*(x - xbh[0]) + (y - xbh[1])*(y - xbh[1])
+                              + (z - xbh[2])*(z - xbh[2]));
+    std::printf("KERR NONFINITE %s rank= %d count= %ld first: gid= %d lev= %d m= %d v= %d "
+                "k,j,i= %d %d %d x= %.6f %.6f %.6f r= %.6e dx= %.6e cycle= %d\n", what,
+                global_variable::my_rank, cnt, pp->gids + m,
+                pp->pmb->mb_lev.h_view(m), m, v, k, j, i, x, y, z, rr, b.dx1,
+                pp->pmesh->ncycle);
+    std::fflush(stdout);
+  }
+  if (tot > 0) {
+#if MPI_PARALLEL_ENABLED
+    MPI_Barrier(MPI_COMM_WORLD);
+#endif
+    KerrFatal(std::string("non-finite values in ") + what + " (" + std::to_string(tot)
+              + " cells, all ranks; <cfc> kerr_nonfinite_check, K-024).");
+  }
 }
 
 KOKKOS_INLINE_FUNCTION int KSym(int a, int b) {
@@ -232,6 +300,7 @@ void CFC::KerrSetup(ParameterInput *pin) {
     }
   }
   kerr_log_ = pin->GetOrAddInteger("cfc", "kerr_log", 0);
+  g_nf_check = pin->GetOrAddBoolean("cfc", "kerr_nonfinite_check", false);
 
   // ---- storage
   const int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
@@ -371,6 +440,11 @@ void CFC::KerrRefill(const Real xbh[3]) {
     bg_xbh_[a] = xbh[a];
   }
   kbg_valid_ = true;
+  {
+    auto b = kbg_;
+    NfScan("kbg (background, ghosts incl.)", pmy_pack, kKbgN, true, xbh,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return b(m, v, k, j, i); });
+  }
   Kokkos::fence();
   kerr_fill_sec_ += tm.seconds();
   ++kerr_fill_n_;
@@ -461,12 +535,25 @@ void CFC::KerrSolveX(Driver *pdriver, int stage) {
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
     kshib_x_->Solve(pdriver, stage, pkx_->cs_, u_p_src, mg_nghost_, u_p_x);
   } else {
+    {
+      auto q = u_p_src;
+      NfScan("X source u_p_src", pmy_pack, 3, false, kbg_xbh_,
+             KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return q(m, v, k, j, i); });
+    }
     pkx_->LoadSource(u_p_src, mg_nghost_, -1.0);   // the driver solves -DL V = s
     {
       MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
       pkx_->Solve(pdriver, stage);
     }
     pkx_->RetrieveSolution(u_p_x);
+    if (g_nf_check && (pkx_->bad_dinv_[0] + pkx_->bad_dinv_[1] + pkx_->bad_dinv_[2] > 0)) {
+      std::printf("KERR NF X bad_dinv blocks/root/octets = %ld/%ld/%ld rank= %d\n",
+                  pkx_->bad_dinv_[0], pkx_->bad_dinv_[1], pkx_->bad_dinv_[2],
+                  global_variable::my_rank);
+    }
+    auto q = u_p_x;
+    NfScan("X solution u_p_x", pmy_pack, 3, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return q(m, v, k, j, i); });
   }
   if (kerr_log_ > 0 && global_variable::my_rank == 0 && stage <= 1 &&
       pmy_pack->pmesh->ncycle % kerr_log_ == 0) {
@@ -549,11 +636,27 @@ void CFC::KerrSolvePsi(Driver *pdriver, int stage) {
     pkpsi_->SeedInitialGuess(delta_psi, indcs.ng);
     kerr_psi_warm_ = true;
   }
+  if (g_nf_check) {
+    auto ut = u_tilde;
+    auto da = kerr_da2_;
+    auto dp = delta_psi;
+    NfScan("psi source u_tilde", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return ut(m, v, k, j, i); });
+    NfScan("psi source kerr_da2", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return da(m, v, k, j, i); });
+    NfScan("psi guess delta_psi", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return dp(m, v, k, j, i); });
+  }
   {
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
     pkpsi_->Solve(pdriver, stage);
   }
   pkpsi_->RetrieveSolution(delta_psi);
+  {
+    auto dp = delta_psi;
+    NfScan("psi solution delta_psi", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return dp(m, v, k, j, i); });
+  }
   ApplyPsiFloor();
   KerrAssemblePsiMetric(false);
 }
@@ -595,11 +698,24 @@ void CFC::KerrSolveLapse(Driver *pdriver, int stage) {
     pkchi_->SeedInitialGuess(delta_alpha_psi, indcs.ng);
     kerr_chi_warm_ = true;
   }
+  if (g_nf_check) {
+    auto q = u_plus_2s;
+    auto da = delta_alpha_psi;
+    NfScan("chi source u_plus_2s", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return q(m, v, k, j, i); });
+    NfScan("chi guess delta_alpha_psi", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return da(m, v, k, j, i); });
+  }
   {
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
     pkchi_->Solve(pdriver, stage);
   }
   pkchi_->RetrieveSolution(delta_alpha_psi);
+  {
+    auto da = delta_alpha_psi;
+    NfScan("chi solution delta_alpha_psi", pmy_pack, 1, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return da(m, v, k, j, i); });
+  }
   ApplyAlphaFloor();
 }
 
@@ -612,12 +728,20 @@ void CFC::KerrSolveShift(Driver *pdriver, int stage) {
     MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
     kshib_beta_->Solve(pdriver, stage, pkbeta_->cs_, u_p_src, mg_nghost_, u_p_beta);
   } else {
+    {
+      auto q = u_p_src;
+      NfScan("beta source u_p_src", pmy_pack, 3, false, kbg_xbh_,
+             KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return q(m, v, k, j, i); });
+    }
     pkbeta_->LoadSource(u_p_src, mg_nghost_, -1.0);
     {
       MGScopedTimer pt(MultigridDriver::phase_on, MultigridDriver::phase_solve_sec);
       pkbeta_->Solve(pdriver, stage);
     }
     pkbeta_->RetrieveSolution(u_p_beta);
+    auto q = u_p_beta;
+    NfScan("beta solution u_p_beta", pmy_pack, 3, false, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return q(m, v, k, j, i); });
   }
   if (mg_log_vcycles_) LogVcycles(stage);
 }
@@ -657,6 +781,11 @@ void CFC::KerrAssemblePsiMetric(bool with_ghosts) {
       }
     }
   });
+  if (g_nf_check) {
+    auto p4 = adm.psi4;
+    NfScan("psi4 (assembled)", pmy_pack, 1, with_ghosts, kbg_xbh_,
+           KOKKOS_LAMBDA(int m, int v, int k, int j, int i) { return p4(m, k, j, i); });
+  }
 }
 
 //! K_ij = psi^-2 gt_ia gt_jb Ahat^ab, alpha = chi/psi (alpha_floor), beta' = beta0 + b +

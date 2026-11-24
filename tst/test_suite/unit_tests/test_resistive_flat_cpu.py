@@ -340,6 +340,42 @@ def test_restart_d4_offset():
         assert proc.returncode != 0 and msg in proc.stdout, proc.stdout[-2000:]
 
 
+def _rlog_max(path, setname, t):
+    """Largest 'max' field of rlog set `setname` over the rows of the first output time
+    >= t, i.e. the step that crosses t (rlog row: set time cycle magn_bin max counts...).
+    Returns (time, max), or (None, None) if there is no such row."""
+    rows = []
+    with open(path) as f:
+        for line in f:
+            p = line.split()
+            if len(p) > 4 and p[0] == setname and float(p[1]) >= t*(1.0 - 1.0e-12):
+                rows.append((float(p[1]), float(p[4])))
+    if not rows:
+        return None, None
+    t0 = min(r[0] for r in rows)
+    return t0, max(r[1] for r in rows if r[0] == t0)
+
+
+def test_restart_d4_offset_inplane():
+    """07 v2.11 §4.1 item E-1: as test_restart_d4_offset, but with problem/bz_ot = 0.5
+    (in-plane E), so the restarted offset dE_c is non-trivial.
+    (a) at the restart time t = 0.125, max |dE_c|/|B| (rlog set 'doff') >= 1e-6;
+    (b) the restarted run's final state is bitwise identical to the continuous run."""
+    keys = ["<output1>", "file_type = rst", "dt = 0.125",
+            "<mhd>", "resistive_d4 = offset", "resistive_hist_dt = 0.125",
+            "<problem>", "bz_ot = 0.5"]
+    flags = _OT + ["meshblock/nx1=32", "meshblock/nx2=32", "mhd/resistive_sigma=100"]
+    _run("rt_offz", keys, flags)
+    # the rst output and the rlog row are both written by the step that crosses t = 0.125
+    trow, doff = _rlog_max("rt_offz.rlog.txt", "doff", 0.125)
+    assert doff is not None, "no doff rlog row at or after t = 0.125"
+    assert trow < 0.25, "first doff row after the restart time is at t = %g" % trow
+    assert doff >= 1.0e-6, "E-1(a): offset trivial at the restart, max |dE_c|/|B| = %g" % doff
+    os.makedirs("rt_offzr", exist_ok=True)
+    _run("rt_offz", restart=os.path.abspath("rst/rt_offz.00001.rst"), cwd="rt_offzr")
+    assert _state("rt_offz") == _state("rt_offzr/rt_offz")
+
+
 # GR1 (07 step 2): constant sheared/boosted flat metric, alpha = 0.8, beta = (0.3, -0.2,
 # 0.1), gamma = M^T M with M lower triangular (all off-diagonal gamma_ij nonzero)
 _GR1 = ["gr1 = true", "alpha0 = 0.8", "beta1 = 0.3", "beta2 = -0.2", "beta3 = 0.1",

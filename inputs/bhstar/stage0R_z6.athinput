@@ -1,0 +1,152 @@
+# bhstar Stage 0R with cyclic zoom (Z_max = 6), run S0R-z6. numerics-011 / numerics-013, note Sec. 5.4.
+# As stage0R_h70 plus cyclic zoom; trun_fac_<z> with f = 10 (zoom_schedule.py, review R1-05):
+# one Lambda-cycle ~ 8.85e4 t_g, tlim = two Lambda-cycles.
+# Run with the -fp-model=precise build (numerics-011 item 4).
+
+<comment>
+problem   = bhstar Stage 0a cyclic zoom
+reference = numerics note v0.5 Sec. 5.3
+
+<job>
+basename = s0R_z6
+
+<mesh>
+nghost = 2          # plm (fluid and radiation)
+nx1    = 32
+x1min  = -4096.0
+x1max  = 4096.0
+ix1_bc = user
+ox1_bc = user
+nx2    = 32
+x2min  = -4096.0
+x2max  = 4096.0
+ix2_bc = user
+ox2_bc = user
+nx3    = 32
+x3min  = -4096.0
+x3max  = 4096.0
+ix3_bc = user
+ox3_bc = user
+
+<meshblock>
+nx1 = 16
+nx2 = 16
+nx3 = 16
+
+<mesh_refinement>
+refinement = adaptive
+prolong_primitives = true   # prolongate primitives at coarse/fine boundaries (code-006)
+max_nmb_per_rank = 120   # preallocated per rank; 960 runs out of memory with radiation (5.3 GiB per array)
+ncycle_check = 1
+refinement_interval = 1
+num_levels = 11
+
+# finest level 10 (dx = 0.25 r_g) on |x_i| < 4; coarser levels nest by 2:1
+<refined_region1>
+level = 10
+x1min = -4.0
+x1max = 4.0
+x2min = -4.0
+x2max = 4.0
+x3min = -4.0
+x3max = 4.0
+
+# cyclic zoom; trun_fac_<z> from docs/numerics/stage0/zoom_schedule.py (mdot 9.4, f = 10, k_run 3)
+<amr_criterion1>
+method     = cyclic_zoom
+nlevels    = 7          # Z_max + 1, Z_max = 6
+r_0        = 4.0
+zone       = 0
+f_exc      = 0.4
+r_exc_max  = 1.0e6
+trun_pow   = 0.0
+trun_fac_0 = 598.0
+trun_fac_1 = 846.0
+trun_fac_2 = 1196.0
+trun_fac_3 = 1810.0
+trun_fac_4 = 5120.0
+trun_fac_5 = 14482.0
+trun_fac_6 = 40960.0
+
+<cyclic_zoom>
+verbose = true
+
+<time>
+evolution  = dynamic
+integrator = rk2
+cfl_number = 0.3
+nlim       = -1
+tlim       = 1.77e5     # two Lambda-cycles (2 x 8.85e4 t_g)
+ndiag      = 10
+
+<coord>
+general_rel = true
+a           = 0.0
+excise      = true
+dexcise     = 1.0e-12
+pexcise     = 1.0e-24
+
+<mhd>
+eos         = ideal
+reconstruct = plm
+rsolver     = hlle
+gamma       = 1.6666666666666667
+dfloor      = 1.0e-12    # code units; rho >= 2e-4 in the box (2e-15 g/cc at the corners)
+pfloor      = 1.0e-24    # p >= 2e-13 in the box (T_res = 7000 K)
+
+<radiation>
+nlevel         = 3
+reconstruct    = plm
+kappa_s        = 0.35
+power_opacity  = false   # Thomson only (Stage 0R, numerics-011 item 1)
+kappa_a        = 0.0
+kappa_p        = 0.0
+compton        = false
+fixed_fluid    = true    # frozen prescribed free fall (DEC-20261123-numerics-stage0R-frozen-fluid)
+affect_fluid   = false
+energy_budget  = true
+
+<rad_srcterms>
+rad_shell     = true
+shell_r       = 70.0
+shell_sigma   = 7.0
+shell_lum_edd = 0.1
+
+<units>
+bhmass_msun = 1.0e6
+density_cgs = 1.0e-11
+mu          = 0.593
+
+<problem>
+pgen_name = bhstar_bondi
+mdot_cgs  = 1.50e25
+t_res     = 7000.0
+user_hist = true
+
+<output1>
+file_type   = hst
+dt          = 1.0
+data_format = %24.16e
+user_hist_only = true
+
+<output2>
+file_type = log
+dcycle    = 100
+
+<output3>
+file_type = sph
+variable  = mhd_w
+radii     = 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0
+ntheta    = 16
+dt        = 100.0
+
+<output4>
+file_type = sph
+variable  = rad_coord
+radii     = 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0, 2048.0
+ntheta    = 16
+dt        = 100.0
+
+<output5>
+file_type   = rst
+dt          = 2000.0

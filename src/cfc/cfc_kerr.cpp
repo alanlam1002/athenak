@@ -301,6 +301,7 @@ void CFC::KerrSetup(ParameterInput *pin) {
   }
   kerr_log_ = pin->GetOrAddInteger("cfc", "kerr_log", 0);
   g_nf_check = pin->GetOrAddBoolean("cfc", "kerr_nonfinite_check", false);
+  kerr_seed_guard_ = pin->GetOrAddBoolean("cfc", "kerr_regrid_seed_guard", false);   // K-024
 
   // ---- storage
   const int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);

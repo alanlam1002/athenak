@@ -849,6 +849,11 @@ class CFC {
   // false; the key is only read if present, so default runs are untouched). When on, the
   // CFC step runs the Kerr path (W4, below).
   bool kerr_background_ = false;
+  // K-024 (a3): <cfc> kerr_regrid_seed_guard (default false = the old behaviour). The regrid
+  // seed delta_psi = psi4^(1/4) - psi0 (ReinitializeMetricForAMR) takes the prolongated ADM
+  // psi4; where that is not a finite positive number the seed is non-finite. On: those cells
+  // seed delta_psi = delta_alpha_psi = 0 (the analytic Kerr background).
+  bool kerr_seed_guard_ = false;
   std::shared_ptr<KerrTable> kerr_table_;
   // D3 (K-004 A1): gt blended to flat between kerr_blend_r1_ and kerr_blend_r2_ (mesh
   // units about the hole; 0 = off), for W1 and the Kerr MG coefficients alike.

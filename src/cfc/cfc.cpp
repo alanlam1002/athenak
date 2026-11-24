@@ -39,6 +39,7 @@
 #include "cfc_puncture.hpp"
 #include "cfc_reconstruct.hpp"
 #include "kerr_background.hpp"
+#include "kerr_mg_ops.hpp"
 #include "mg_kerr_scalar.hpp"
 #include "mg_kerr_vector.hpp"
 #include "kerr_shibata.hpp"
@@ -1797,11 +1798,52 @@ void CFC::ReinitializeMetricForAMR(Driver *pdriver) {
     auto &apsi_s = delta_alpha_psi;
     auto &psi0_s = u_psi0;
     auto &apsi0_s = u_alpha0_psi0;
+    if (std::getenv("KERR_NFDIAG") != nullptr) {   // K-024 (a3): psi4 the seed reads
+      const long ntot = static_cast<long>(nmb)*n3*n2*n1;
+      long cnt = 0, first = LONG_MAX;
+      Kokkos::parallel_reduce("cfc_regrid_seed_diag", Kokkos::RangePolicy<DevExeSpace>(0, ntot),
+      KOKKOS_LAMBDA(const long idx, long &c, long &fi) {
+        long r = idx;
+        const int i = static_cast<int>(r % n1); r /= n1;
+        const int j = static_cast<int>(r % n2); r /= n2;
+        const int k = static_cast<int>(r % n3); r /= n3;
+        const int m = static_cast<int>(r);
+        const Real q = adm_s.psi4(m,k,j,i);
+        if (!(q > 0.0) || kmg::NonFinite(q) || kmg::NonFinite(adm_s.alpha(m,k,j,i))) {
+          c += 1;
+          if (idx < fi) fi = idx;
+        }
+      }, Kokkos::Sum<long>(cnt), Kokkos::Min<long>(first));
+      if (cnt > 0) {
+        long r = first;
+        const int i = static_cast<int>(r % n1); r /= n1;
+        const int j = static_cast<int>(r % n2); r /= n2;
+        const int k = static_cast<int>(r % n3); r /= n3;
+        const int m = static_cast<int>(r);
+        Real v_psi4 = 0.0, v_alpha = 0.0;
+        Kokkos::parallel_reduce("cfc_regrid_seed_diag_v", Kokkos::RangePolicy<DevExeSpace>(0, 1),
+        KOKKOS_LAMBDA(const int, Real &a, Real &b) {
+          a = adm_s.psi4(m,k,j,i); b = adm_s.alpha(m,k,j,i);
+        }, v_psi4, v_alpha);
+        auto &sz = pmy_pack->pmb->mb_size.h_view(m);
+        const Real dx = (sz.x1max - sz.x1min)/indcs.nx1;
+        std::printf("KERR NFDIAG regrid_seed bad psi4 rank %d count %ld (of %ld) first gid %d "
+                    "k,j,i %d %d %d x %.6f %.6f %.6f dx %.4e psi4 %.6e alpha %.6e\n",
+                    global_variable::my_rank, cnt, ntot, pmy_pack->gids + m, k, j, i,
+                    sz.x1min + (i - indcs.is + 0.5)*dx, sz.x2min + (j - indcs.js + 0.5)*dx,
+                    sz.x3min + (k - indcs.ks + 0.5)*dx, dx, v_psi4, v_alpha);
+      }
+    }
+    const bool sg = kerr_background_ && kerr_seed_guard_;   // K-024 (a3), default off
     par_for("cfc_regrid_seed", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
       const Real p = Kokkos::pow(adm_s.psi4(m,k,j,i), 0.25);
       psi_s(m,0,k,j,i) = p - psi0_s(m,0,k,j,i);
       apsi_s(m,0,k,j,i) = adm_s.alpha(m,k,j,i)*p - apsi0_s(m,0,k,j,i);
+      if (sg && (kmg::NonFinite(psi_s(m,0,k,j,i)) || kmg::NonFinite(apsi_s(m,0,k,j,i)))) {
+        psi_s(m,0,k,j,i) = 0.0;
+        apsi_s(m,0,k,j,i) = 0.0;
+      }
     });
     Kokkos::deep_copy(DevExeSpace(), u_p_x, 0.0);
     Kokkos::deep_copy(DevExeSpace(), u_p_beta, 0.0);

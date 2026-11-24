@@ -432,6 +432,7 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
     Kokkos::Timer tv;
     std::vector<Real> d = drv.RunCycles(&dv, ncyc);
     const double tsec = tv.seconds();
+    drv.MaybeDumpDefect();   // K-028b: env KERR_DEFDUMP=problem:<dir> (first run only; inert unset)
     Real cmax[3], crms[3];
     long cn[3];
     drv.ErrorVsManufByClass(cmax, crms, cn);

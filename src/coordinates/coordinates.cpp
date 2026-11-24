@@ -47,7 +47,10 @@ Coordinates::Coordinates(ParameterInput *pin, MeshBlockPack *ppack) :
   // requirement -- see the plan's "Not touched" section), so guard against silently
   // combining either with coord_general != cartesian rather than letting the curvilinear
   // geometry factors get used inconsistently with the (Cartesian-only) metric machinery.
-  if ((is_general_relativistic || is_dynamical_relativistic) &&
+  // Test the <z4c>/<adm> blocks themselves rather than is_dynamical_relativistic, which
+  // also needs <hydro> or <mhd>: otherwise a vacuum z4c run would slip through.
+  bool has_spacetime = pin->DoesBlockExist("z4c") || pin->DoesBlockExist("adm");
+  if ((is_general_relativistic || has_spacetime) &&
       ppack->pmesh->coord_general != CoordinateGeneral::cartesian) {
     std::cout << "### FATAL ERROR in "<< __FILE__ <<" at line " << __LINE__ << std::endl
               << "GR and dynamical-GR (z4c/adm) require coord=cartesian; curvilinear "

@@ -112,7 +112,7 @@ void Mesh::ValidateCoordGeneral() {
   // cannot live here because ValidateCoordGeneral() runs during Mesh construction,
   // before any physics module exists to test for.
   //
-  // radiation and z4c need no guard of their own: both require general relativity, and
-  // GR + curvilinear is already fatal in coordinates.cpp, so neither can reach a
-  // curvilinear mesh in the first place.
+  // radiation and z4c/adm need no guard of their own here: the Coordinates constructor
+  // (coordinates.cpp) makes GR + curvilinear fatal, and also any <z4c> or <adm> block
+  // + curvilinear, including vacuum z4c with no <hydro>/<mhd> and general_rel=false.
 }

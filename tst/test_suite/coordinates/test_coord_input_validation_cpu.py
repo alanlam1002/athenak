@@ -8,6 +8,8 @@ ERROR checks in Mesh::ValidateCoordGeneral() (or the pre-existing coord-string-p
 check) and exit nonzero, which testutils.run() surfaces as a RuntimeError.
 """
 
+import subprocess
+
 import pytest
 import test_suite.testutils as testutils
 
@@ -148,5 +150,40 @@ def test_origin_reflect_succeeds():
     flags = ["mesh/coord=cylindrical_axisym", "mesh/x1min=0.0", "mesh/ix1_bc=reflect"]
     try:
         _run_ok(flags)
+    finally:
+        testutils.cleanup()
+
+
+# D-009: vacuum z4c (no <hydro>/<mhd>, general_rel=false) on a curvilinear mesh must be
+# fatal. The old guard only tested is_dynamical_relativistic, which also needs a fluid,
+# so this combination slipped through. The fail cases check the guard's own message, so
+# the test cannot pass by dying for an unrelated reason. The deck has the same mesh as
+# ut_coord_validation.athinput (x1min > 0), so ValidateCoordGeneral() passes for every
+# coord and only the z4c guard can fire.
+Z4C_INPUT = "inputs/ut_coord_validation_z4c.athinput"
+GUARD_MSG = "GR and dynamical-GR (z4c/adm) require coord=cartesian"
+
+
+def _run_z4c(flags):
+    cmd = ["./athena", "-i", Z4C_INPUT] + flags
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                          text=True)
+    return proc.returncode, proc.stdout
+
+
+def test_vacuum_z4c_cartesian_succeeds():
+    try:
+        rc, out = _run_z4c([])
+        assert rc == 0, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+@pytest.mark.parametrize("coord", ["cylindrical", "spherical_polar"])
+def test_vacuum_z4c_curvilinear_fails(coord):
+    try:
+        rc, out = _run_z4c([f"mesh/coord={coord}"])
+        assert rc != 0
+        assert GUARD_MSG in out, out[-2000:]
     finally:
         testutils.cleanup()

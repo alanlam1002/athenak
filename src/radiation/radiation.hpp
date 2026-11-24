@@ -104,6 +104,7 @@ class Radiation {
   Real kappa_s;             // constant scattering coefficient
   Real kappa_p;             // Planck - Rosseland mean coefficient
   bool power_opacity;       // flag to enable Kramer's law opacity for kappa_a
+  bool saha_kramers_opacity = false;  // bhstar opacity level A (opacity_model)
   bool is_compton_enabled;  // flag to enable/disable compton
 
   // radiation source term (i.e., beam)

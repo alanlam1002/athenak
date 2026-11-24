@@ -73,11 +73,31 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
   // Set radiation coupling parameters including scattering and absorption opacities,
   // radiation constant, and source term behavior.
   if (rad_source) {
-    kappa_s = pin->GetReal("radiation","kappa_s");
-    power_opacity = pin->GetOrAddBoolean("radiation","power_opacity",false);
-    if (!(power_opacity)) {
-      kappa_a = pin->GetReal("radiation","kappa_a");
-      kappa_p = pin->GetReal("radiation","kappa_p");
+    // bhstar: <radiation>/opacity_model = default (constant or power_opacity) or
+    // saha_kramers (opacity level A, numerics-009 branch 3; needs <units>)
+    std::string opacity_model = pin->GetOrAddString("radiation","opacity_model","default");
+    if (opacity_model.compare("saha_kramers") == 0) {
+      saha_kramers_opacity = true;
+      power_opacity = pin->GetOrAddBoolean("radiation","power_opacity",false);
+      if (power_opacity || !(are_units_enabled)) {
+        std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+          << std::endl << "opacity_model = saha_kramers requires <units> and "
+          << "power_opacity = false" << std::endl;
+        std::exit(EXIT_FAILURE);
+      }
+      kappa_s = 0.0; kappa_a = 0.0; kappa_p = 0.0;  // computed per cell
+    } else if (opacity_model.compare("default") == 0) {
+      kappa_s = pin->GetReal("radiation","kappa_s");
+      power_opacity = pin->GetOrAddBoolean("radiation","power_opacity",false);
+      if (!(power_opacity)) {
+        kappa_a = pin->GetReal("radiation","kappa_a");
+        kappa_p = pin->GetReal("radiation","kappa_p");
+      }
+    } else {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+        << std::endl << "<radiation>/opacity_model = " << opacity_model
+        << " unknown (default, saha_kramers)" << std::endl;
+      std::exit(EXIT_FAILURE);
     }
     is_compton_enabled = pin->GetOrAddBoolean("radiation","compton",false);
     if (is_compton_enabled && !(are_units_enabled)) {

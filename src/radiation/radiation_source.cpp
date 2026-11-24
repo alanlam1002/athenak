@@ -91,6 +91,7 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
   Real &kappa_s_ = kappa_s;
   Real &kappa_p_ = kappa_p;
   bool &power_opacity_ = power_opacity;
+  bool &saha_kramers_opacity_ = saha_kramers_opacity;
   auto &nh_c_ = nh_c;
   auto &tt = tet_c;
   auto &tc = tetcov_c;
@@ -175,7 +176,8 @@ TaskStatus Radiation::RadFluidCoupling(Driver *pdriver, int stage) {
     OpacityFunction(wdn, density_scale_,
                     tgas, temperature_scale_,
                     length_scale_, gm1, mean_mol_weight_,
-                    power_opacity_, rosseland_coef_, planck_minus_rosseland_coef_,
+                    power_opacity_, saha_kramers_opacity_,
+                    rosseland_coef_, planck_minus_rosseland_coef_,
                     kappa_a_, kappa_s_, kappa_p_,
                     sigma_a, sigma_s, sigma_p);
     Real dtcsiga = dt_*sigma_a;

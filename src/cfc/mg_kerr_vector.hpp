@@ -206,6 +206,11 @@ class MGKerrVectorDriver : public MultigridDriver {
   //! finest-level defect and source (3 components, interior cells) with the block extents
   //! and levels to <dir>/defdump.<block>.r<rank>.bin (once per process). Unset: inert.
   void MaybeDumpDefect();
+  //! K-024 (a), debug only: env KERR_NFDIAG set -> report non-finite entries (count, first
+  //! level/block/cell/channel and position) of every level's coefficients (ghosts incl.),
+  //! the octets' coefficients, the kelvin moments and, after the solve, every level's u.
+  //! tag names the stage. Unset: inert.
+  void NfDiag(const char *tag, bool coeffs, bool sol);
   bool defdump_done_ = false;
   std::string pin_block_;
 

@@ -519,6 +519,7 @@ void MGKerrVectorDriver::Prepare() {
     StoreKey();
   }
   lap.Mark(st_.sec[kmg::SolveTimers::kBg]);
+  NfDiag("prepare", true, false);
   SetupMultigrid(0.0, false);
   Kokkos::fence();
   lap.Mark(st_.sec[kmg::SolveTimers::kSetup]);
@@ -687,7 +688,9 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
     lap.Mark(st_.sec[kmg::SolveTimers::kMoments]);
     if (zero_coarse_) ZeroHierarchy();
     lap.Mark(st_.sec[kmg::SolveTimers::kZero]);
+    NfDiag("pre-solve", false, true);
     SolveMG(pdriver);
+    NfDiag("post-solve", false, true);
     lap.Mark(st_.sec[kmg::SolveTimers::kSolveMG]);
   }
   min_vcycles_ = minv;
@@ -695,6 +698,103 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   ++st_.calls;
   st_.passes += nout;
   Kokkos::fence();
+}
+
+void MGKerrVectorDriver::NfDiag(const char *tag, bool coeffs, bool sol) {
+  if (std::getenv("KERR_NFDIAG") == nullptr) return;
+  const int rank = global_variable::my_rank;
+  // first non-finite entry of a level array (all cells, ghosts incl.), host copy
+  auto scan = [&](const char *what, MGKerrVector *g, int lev, const DvceArray5D<Real> &a) {
+    auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), a);
+    const int nx = g->LevelN(lev, 0), ny = g->LevelN(lev, 1), nz = g->LevelN(lev, 2);
+    const int ngh = g->GetGhostCells();
+    const int nv = h.extent_int(1);
+    const int mm = std::min(h.extent_int(0), g->NumMB());
+    long cnt = 0;
+    int f[5] = {-1, 0, 0, 0, 0};
+    for (int m = 0; m < mm; ++m) {
+      for (int v = 0; v < nv; ++v) {
+        for (int k = 0; k < nz + 2*ngh; ++k) {
+          for (int j = 0; j < ny + 2*ngh; ++j) {
+            for (int i = 0; i < nx + 2*ngh; ++i) {
+              if (kmg::NonFinite(h(m, v, k, j, i))) {
+                if (cnt == 0) { f[0] = m; f[1] = v; f[2] = k; f[3] = j; f[4] = i; }
+                ++cnt;
+              }
+            }
+          }
+        }
+      }
+    }
+    if (cnt > 0) {
+      const RegionSize &r = g->Extents().h_view(f[0]);
+      const Real dx = (r.x1max - r.x1min)/nx;
+      const Real x = r.x1min + (f[4] - ngh + 0.5)*dx, y = r.x2min + (f[3] - ngh + 0.5)*dx,
+                 z = r.x3min + (f[2] - ngh + 0.5)*dx;
+      const Real rr = std::sqrt((x - cs_.xbh[0])*(x - cs_.xbh[0]) + (y - cs_.xbh[1])*
+                                (y - cs_.xbh[1]) + (z - cs_.xbh[2])*(z - cs_.xbh[2]));
+      std::printf("KERR NFDIAG %s %s %s lev %d/%d rank %d count %ld first m %d ch %d "
+                  "k,j,i %d %d %d (n %d ngh %d) x %.6f %.6f %.6f r %.6e dx %.6e\n",
+                  pin_block_.c_str(), tag, what, lev, g->GetNumberOfLevels(), rank, cnt,
+                  f[0], f[1], f[2], f[3], f[4], nx, ngh, x, y, z, rr, dx);
+    }
+  };
+  auto *lv = static_cast<MGKerrVector*>(mglevels_);
+  auto *rt = static_cast<MGKerrVector*>(mgroot_);
+  if (coeffs) {
+    for (int l = 0; l < lv->GetNumberOfLevels(); ++l) {
+      scan("coeff(blocks)", lv, l, lv->CoeffAtLevel(l).d_view);
+    }
+    for (int l = 0; l < rt->GetNumberOfLevels(); ++l) {
+      scan("coeff(root)", rt, l, rt->CoeffAtLevel(l).d_view);
+    }
+    for (int l = 0; l < nreflevel_; ++l) {
+      long cnt = 0;
+      int fo = -1, fq = 0;
+      for (int o = 0; o < noctets_[l]; ++o) {
+        MGOctet &oct = octets_[l][o];
+        const int nq = oct.coeffsize();
+        for (int q = 0; q < nq; ++q) {
+          if (kmg::NonFinite(oct.coeff[q])) { if (cnt == 0) { fo = o; fq = q; } ++cnt; }
+        }
+      }
+      if (cnt > 0) {
+        const LogicalLocation &loc = octets_[l][fo].loc;
+        std::printf("KERR NFDIAG %s %s coeff(octets) rlev %d rank %d count %ld first octet %d "
+                    "(lx %ld %ld %ld) entry %d\n", pin_block_.c_str(), tag, l, rank, cnt,
+                    fo, static_cast<long>(loc.lx1), static_cast<long>(loc.lx2),
+                    static_cast<long>(loc.lx3), fq);
+      }
+    }
+  }
+  if (sol) {
+    for (int q = 0; q < kmg::kNMom; ++q) {
+      if (kmg::NonFinite(mom_.v[q])) {
+        std::printf("KERR NFDIAG %s %s moments non-finite (first q %d) rank %d\n",
+                    pin_block_.c_str(), tag, q, rank);
+        break;
+      }
+    }
+    for (int l = 0; l < lv->GetNumberOfLevels(); ++l) {
+      scan("u(blocks)", lv, l, lv->UAt(l).d_view);
+      scan("src(blocks)", lv, l, lv->SrcAt(l).d_view);
+    }
+    for (int l = 0; l < rt->GetNumberOfLevels(); ++l) {
+      scan("u(root)", rt, l, rt->UAt(l).d_view);
+    }
+    for (int l = 0; l < nreflevel_; ++l) {
+      long cnt = 0;
+      for (int o = 0; o < noctets_[l]; ++o) {
+        MGOctet &oct = octets_[l][o];
+        for (int q = 0; q < oct.size(); ++q) { if (kmg::NonFinite(oct.u[q])) ++cnt; }
+      }
+      if (cnt > 0) {
+        std::printf("KERR NFDIAG %s %s u(octets) rlev %d rank %d count %ld\n",
+                    pin_block_.c_str(), tag, l, rank, cnt);
+      }
+    }
+  }
+  std::fflush(stdout);
 }
 
 void MGKerrVectorDriver::MaybeDumpDefect() {

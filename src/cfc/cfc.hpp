@@ -560,6 +560,15 @@ class CFC {
   // re-derive the metric from the pgen's static t=0 ID, discarding CFC's own
   // dynamical evolution).
   void ReinitializeMetricForAMR(Driver *pdriver);
+  // K-029: <cfc> kerr_regrid_residual_prolong (default false: returns at once). Called by
+  // MeshRefinement around RedistAndRefineMeshBlocks: pre = true turns padm->u_adm (ghosts
+  // included) into residuals against the analytic Kerr background (kbg_ of the old layout):
+  // psi4 -> dpsi = psi4^(1/4) - psi0, alpha -> dchi = alpha psi - alpha0 psi0,
+  // beta^i -> beta^i - beta0^i, g_ij -> g_ij/psi4 - gt_ij, K_ij -> K_ij - K0_ij; the regrid
+  // then restricts/prolongates/moves residuals. pre = false (after the regrid) refills kbg_
+  // on the new layout and rebuilds the metric from background + residuals, so the new
+  // blocks beside the puncture never see a prolongated singular background (K-024).
+  void KerrRegridResidual(bool pre);
   // R1 embedding at load (restart_state::EmbedFill): set padm->adm in the blocks with
   // newmb(m) = 1 (ghosts included) to the zero-residual metric, i.e. what AssembleADM gives
   // there with delta_psi = delta_alpha_psi = 0, b = 0 and Ahat = Ahat0: psi = psi0,
@@ -854,6 +863,8 @@ class CFC {
   // psi4; where that is not a finite positive number the seed is non-finite. On: those cells
   // seed delta_psi = delta_alpha_psi = 0 (the analytic Kerr background).
   bool kerr_seed_guard_ = false;
+  bool kerr_resid_prolong_ = false;   // K-029 <cfc> kerr_regrid_residual_prolong
+  bool kerr_resid_pending_ = false;   // K-029: u_adm holds residuals (between pre and post)
   std::shared_ptr<KerrTable> kerr_table_;
   // D3 (K-004 A1): gt blended to flat between kerr_blend_r1_ and kerr_blend_r2_ (mesh
   // units about the hole; 0 = off), for W1 and the Kerr MG coefficients alike.

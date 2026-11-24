@@ -302,6 +302,7 @@ void CFC::KerrSetup(ParameterInput *pin) {
   kerr_log_ = pin->GetOrAddInteger("cfc", "kerr_log", 0);
   g_nf_check = pin->GetOrAddBoolean("cfc", "kerr_nonfinite_check", false);
   kerr_seed_guard_ = pin->GetOrAddBoolean("cfc", "kerr_regrid_seed_guard", false);   // K-024
+  kerr_resid_prolong_ = pin->GetOrAddBoolean("cfc", "kerr_regrid_residual_prolong", false);   // K-029
 
   // ---- storage
   const int nmb = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
@@ -841,6 +842,87 @@ void CFC::KerrAssembleADM(Real time) {
   for (int a = 0; a < 3; ++a) { pmy_pack->padm->frame_vel_u[a] = xd[a]; }
   frame_assembled_ = true;
   KerrLogCorrections();
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::KerrRegridResidual(bool pre)
+//! \brief K-029 (RK-052): residual-based ADM transfer across a regrid; see cfc.hpp. Every
+//! cell of every MeshBlock of this pack, ghosts included (the refinement prolongates from
+//! the parent's ghosts too). A cell with a non-finite or non-positive psi4 before the regrid
+//! carries zero residuals (the background). After the regrid psi = psi0 + dpsi is used as
+//! is unless it is not positive, where psi0 is used (counted, printed).
+
+void CFC::KerrRegridResidual(bool pre) {
+  if (!(kerr_background_ && kerr_resid_prolong_)) return;
+  if (!pre && !kerr_resid_pending_) return;
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int n1 = indcs.nx1 + 2*indcs.ng;
+  const int n2 = (indcs.nx2 > 1) ? (indcs.nx2 + 2*indcs.ng) : 1;
+  const int n3 = (indcs.nx3 > 1) ? (indcs.nx3 + 2*indcs.ng) : 1;
+  const int nmb = pmy_pack->nmb_thispack;
+  if (pre) {
+    if (!kbg_valid_ || kbg_.extent_int(0) < nmb) { KerrRefill(bg_xbh_); }
+  } else {
+    Real xbh[3];
+    BHPosition(pmy_pack->pmesh->time, xbh);
+    KerrRefill(xbh);
+  }
+  auto &adm = pmy_pack->padm->adm;
+  auto bg = kbg_;
+  const Real afl = alpha_floor_;
+  long nbad = 0;
+  if (pre) {
+    Kokkos::parallel_reduce("cfc_kerr_regrid_resid_pre",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, n3, n2, n1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, long &nb) {
+      const Real p0 = bg(m, kKbgPsi0, k, j, i);
+      const Real q = adm.psi4(m, k, j, i);
+      const bool ok = (q > 0.0) && !kmg::NonFinite(q);
+      const Real psi = ok ? Kokkos::pow(q, 0.25) : p0;
+      if (!ok) nb += 1;
+      adm.psi4(m, k, j, i) = psi - p0;
+      const Real chi = ok ? adm.alpha(m, k, j, i)*psi : bg(m, kKbgAlpha0, k, j, i)*p0;
+      adm.alpha(m, k, j, i) = chi - bg(m, kKbgAlpha0, k, j, i)*p0;
+      for (int a = 0; a < 3; ++a) { adm.beta_u(m, a, k, j, i) -= bg(m, kKbgBeta0 + a, k, j, i); }
+      for (int a = 0; a < 3; ++a) {
+        for (int b = a; b < 3; ++b) {
+          const int s = KSym(a, b);
+          adm.g_dd(m, a, b, k, j, i) = ok ? adm.g_dd(m, a, b, k, j, i)/q - bg(m, kKbgGt + s, k, j, i)
+                                          : 0.0;
+          adm.vK_dd(m, a, b, k, j, i) -= bg(m, kKbgK0 + s, k, j, i);
+        }
+      }
+    }, Kokkos::Sum<long>(nbad));
+    kerr_resid_pending_ = true;
+  } else {
+    Kokkos::parallel_reduce("cfc_kerr_regrid_resid_post",
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, n3, n2, n1}),
+      KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, long &nb) {
+      const Real p0 = bg(m, kKbgPsi0, k, j, i);
+      Real psi = p0 + adm.psi4(m, k, j, i);
+      if (!(psi > 0.0)) { psi = p0; nb += 1; }
+      const Real p2 = psi*psi, p4 = p2*p2;
+      adm.psi4(m, k, j, i) = p4;
+      const Real al = (bg(m, kKbgAlpha0, k, j, i)*p0 + adm.alpha(m, k, j, i))/psi;
+      adm.alpha(m, k, j, i) = (al < afl) ? afl : al;
+      for (int a = 0; a < 3; ++a) { adm.beta_u(m, a, k, j, i) += bg(m, kKbgBeta0 + a, k, j, i); }
+      for (int a = 0; a < 3; ++a) {
+        for (int b = a; b < 3; ++b) {
+          const int s = KSym(a, b);
+          adm.g_dd(m, a, b, k, j, i) = p4*(bg(m, kKbgGt + s, k, j, i) + adm.g_dd(m, a, b, k, j, i));
+          adm.vK_dd(m, a, b, k, j, i) += bg(m, kKbgK0 + s, k, j, i);
+        }
+      }
+    }, Kokkos::Sum<long>(nbad));
+    kerr_resid_pending_ = false;
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &nbad, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    std::printf("KERR REGRID_RESID %s cycle= %d time= %.10e cells_bg= %ld\n", pre ? "pre" : "post",
+                pmy_pack->pmesh->ncycle, pmy_pack->pmesh->time, nbad);
+  }
 }
 
 //! <cfc> kerr_log = n: once per n-th cycle, max over interior cells of the corrections

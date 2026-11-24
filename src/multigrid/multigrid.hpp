@@ -700,6 +700,11 @@ class MultigridDriver {
   // re-applies PhysicalBoundary after ProlongateFCMG, so physical-face edge ghosts beside a
   // coarser face neighbour reflect the current fine-coarse ghosts, not the previous fill's.
   bool physbc_after_fc_ = false;
+  // K-028 (wip/kerr): <block> mg_octet_cbuf_center (default false). On: SetBoundariesOctets
+  // fills the coarse buffer's centre (this octet's restricted value) BEFORE the physical BC
+  // reflects the buffer, so the buffer cell across a physical face is -centre (zerofixed)
+  // rather than -0 (the centre was filled only later, in ProlongateOctetBoundaries).
+  bool octet_cbuf_center_ = false;
   std::string mg_log_name_ = "mg";
   MGNormScaling ovr_norm_ = MGNormScaling::legacy;   // BeginConvergenceOverride's saved state
   Real ovr_eps_ = -1.0, ovr_rtol_ = 0.0;

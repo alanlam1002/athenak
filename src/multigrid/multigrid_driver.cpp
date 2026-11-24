@@ -964,6 +964,7 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
   physbc_after_fc_ = pin->GetOrAddBoolean(block, "mg_physbc_after_fc", false);   // K-028
+  octet_cbuf_center_ = pin->GetOrAddBoolean(block, "mg_octet_cbuf_center", false);   // K-028
 }
 
 //----------------------------------------------------------------------------------------
@@ -1695,6 +1696,13 @@ void MultigridDriver::SetBoundariesOctets(bool fprolong, bool folddata) {
     }
 
     if (!fprolong) {
+      if (octet_cbuf_center_) {   // K-028: the centre before the buffer's physical BC
+        const int l = mgroot_->ngh_, r = l + 1;
+        for (int v = 0; v < nvar_; ++v)
+          BufRef(cbuf_, 3, v, 1, 1, 1) = 0.125*(oct.U(v,l,l,l)+oct.U(v,l,l,r)
+              +oct.U(v,l,r,l)+oct.U(v,r,l,l)+oct.U(v,r,r,l)+oct.U(v,r,l,r)
+              +oct.U(v,l,r,r)+oct.U(v,r,r,r));
+      }
       ApplyPhysicalBoundariesOctet(oct, true);
       ProlongateOctetBoundariesFluxCons(oct, cbuf_, ncoarse_);
     }

@@ -1,3 +1,8 @@
+# PRODUCTION BINARY (user 2026-11-24, R-278 addendum item 5: merge wip/init-solve, init_mg_max_vcycles = 200 in new decks):
+#   GPU, proj/tde 3c9ce856 (= 49890a15 + wip/init-solve c69af373; src tree identical to c69af373), home_builds/athenak_tde/
+#   athena_tde_prod_gpu_3c9ce856 (sha256 7d2daa3a; copy of build_gpu_pe2626_ptde_init/src/athena, the c293 gate binary).
+#   Default (40) bitwise with 49890a15 on GPU: c293 GD vs c290 new, 2 hst + 45 dumps, 0 differ. init_mg_max_vcycles below
+#   NEEDS proj/tde >= 3c9ce856: an older binary ignores it silently. Previous production binary:
 # PRODUCTION BINARY (user 2026-11-22, "merge wip/r273 into proj/tde and rebuild the production binary"): GPU, proj/tde
 #   49890a15 (= 925698c2 + R-273 items 3, 7b, 9, 4 + the restart-header fix), home_builds/athenak_tde/
 #   athena_tde_prod_gpu_49890a15 (sha256 c28a1887; copy of build_gpu_pe2626_ptde_prod49/src/athena). On this deck it is
@@ -258,6 +263,7 @@ mg_regrid_threshold = 1.0e-7
 mg_log = 1                # MGLOG per solve
 init_verbose = true
 init_omega   = 1.0
+init_mg_max_vcycles = 200  # R-278 item 5 / C-261: InitializeMetric MG cap (default 40); fresh starts only, restarts never call it
 # Same production-validated CFC solver settings as the parent fixture (see its
 # header for the full measurement trail): mg_threshold/mg_poisson_threshold=1e-8,
 # mg_poisson_mporder=2, mg_npresmooth/npostsmooth=2, mg_norm=rms (R3). Unrelated to

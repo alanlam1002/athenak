@@ -963,6 +963,7 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   }
   mg_log_ = pin->GetOrAddInteger(block, "mg_log", 0);
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
+  physbc_after_fc_ = pin->GetOrAddBoolean(block, "mg_physbc_after_fc", false);   // K-028
 }
 
 //----------------------------------------------------------------------------------------

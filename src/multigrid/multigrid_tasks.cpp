@@ -121,6 +121,8 @@ TaskStatus MultigridDriver::ProlongateFCBoundary(Driver *pdrive, int stage) {
   if (nreflevel_ == 0) return TaskStatus::complete;
   DvceArray5D<Real> u = pmg->GetCurrentData();
   pmg->pbval->ProlongateFCMG(u);
+  // K-028: <block> mg_physbc_after_fc -- the junction edge ghosts from the current FC ghosts
+  if (physbc_after_fc_) { (void) PhysicalBoundary(pdrive, stage); }
   return TaskStatus::complete;
 }
 

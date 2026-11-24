@@ -696,6 +696,10 @@ class MultigridDriver {
   bool rtol_source_ = false;
   int mg_log_ = 0;
   int mg_stall_cycles_ = 3;
+  // K-028 (wip/kerr): <block> mg_physbc_after_fc (default false). On: ProlongateFCBoundary
+  // re-applies PhysicalBoundary after ProlongateFCMG, so physical-face edge ghosts beside a
+  // coarser face neighbour reflect the current fine-coarse ghosts, not the previous fill's.
+  bool physbc_after_fc_ = false;
   std::string mg_log_name_ = "mg";
   MGNormScaling ovr_norm_ = MGNormScaling::legacy;   // BeginConvergenceOverride's saved state
   Real ovr_eps_ = -1.0, ovr_rtol_ = 0.0;

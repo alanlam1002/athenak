@@ -158,7 +158,8 @@ ResistiveParams ParseResistiveParams(ParameterInput *pin, const std::string &blo
   if (!(rp.floor_accept_tol > 0.0)) {
     Fatal(__LINE__, "<" + block + "> resistive_floor_accept_tol must be > 0");
   }
-  std::string d4 = pin->GetOrAddString(block, "resistive_d4", "average");
+  // default offset since 07 v2.11 / DECISIONS 25; the other modes are test-only keys
+  std::string d4 = pin->GetOrAddString(block, "resistive_d4", "offset");
   if (d4 == "average") {
     rp.d4 = D4Mode::average;
   } else if (d4 == "keep") {

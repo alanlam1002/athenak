@@ -20,8 +20,10 @@
 //!                            ideal-limit blend; default since 07 v2.9, DECISIONS 23)
 //!   resistive_floor_accept = true       (07 v2.8 §3.2.3(b) floored-root acceptance)
 //!   resistive_floor_accept_tol = 1e-3   (FA condition 2, discarded energy/(tau + D))
-//!   resistive_d4           = average|keep (test-only; keep: no hydro c2p in any solved
-//!                            cell, §3.2.3(d))
+//!   resistive_d4           = offset|average|keep|offset_emc|resplit (default offset:
+//!                            persistent cell offset dE_c, 07 v2.10 §3.2.5, default
+//!                            since DECISIONS 25; the others are test-only; keep: no
+//!                            hydro c2p in any solved cell, §3.2.3(d))
 //!   resistive_fail_reason_cycles = 0    (test-only; log failure reasons for
 //!                            cycles < N to <base>.rfail.txt)
 //!   resistive_newton_tol   = 1e-11
@@ -65,10 +67,11 @@ struct ResistiveParams {
   ImplicitResidual implicit_residual = ImplicitResidual::c2p;
   Real sigma_max = 0.0;   // <mhd> sigma_max: fluid density floor rho >= B^2/sigma_max
   Real hist_dt = -1.0;    // K5-run histogram output interval
-  // 07 v2.8 §3.2.3 fallback keys (FA + blend default, 07 v2.9); d4 is test-only
+  // 07 v2.8 §3.2.3 fallback keys (FA + blend default, 07 v2.9); d4 default offset
+  // (DECISIONS 25)
   bool floor_accept = true;
   Real floor_accept_tol = 1.0e-3;
-  D4Mode d4 = D4Mode::average;
+  D4Mode d4 = D4Mode::offset;
   int fail_reason_cycles = 0;
   // FA/blend or d4 keep on: ResistiveC2P consumes the per-cell flags (D4 keep/eps_D4)
   bool Prototype() const {

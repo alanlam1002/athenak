@@ -75,6 +75,7 @@ class MGKerrVector : public Multigrid {
   }
   DualArray5D<Real> &UAt(int l) { return u_[l]; }
   DualArray5D<Real> &SrcAt(int l) { return src_[l]; }
+  DualArray5D<Real> &DefAt(int l) { return def_[l]; }
   const DualArray1D<RegionSize> &Extents() const { return blk_; }
   const DualArray1D<int> &Mask() const { return mask_; }
   const DualArray1D<int> &Phys() const { return phys_; }
@@ -200,6 +201,12 @@ class MGKerrVectorDriver : public MultigridDriver {
   //! K-005 B2: mom_ (read by the kelvin hook in the first ComputeMoments of the next
   //! solve) through the restart file's parameter copy, <block> restart_mom<q>
   void SaveMomentsToPin(ParameterInput *pin) const;
+  //! K-028 (RK-051 §4 (a)), debug only: env KERR_DEFDUMP=<block>:<dir> -> after the first
+  //! Solve of that block whose final defect is above its threshold, write each rank's
+  //! finest-level defect and source (3 components, interior cells) with the block extents
+  //! and levels to <dir>/defdump.<block>.r<rank>.bin (once per process). Unset: inert.
+  void MaybeDumpDefect();
+  bool defdump_done_ = false;
   std::string pin_block_;
 
  private:

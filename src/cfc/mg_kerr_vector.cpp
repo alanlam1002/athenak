@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -690,9 +691,67 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
     lap.Mark(st_.sec[kmg::SolveTimers::kSolveMG]);
   }
   min_vcycles_ = minv;
+  MaybeDumpDefect();
   ++st_.calls;
   st_.passes += nout;
   Kokkos::fence();
+}
+
+void MGKerrVectorDriver::MaybeDumpDefect() {
+  if (defdump_done_) return;
+  const char *ev = std::getenv("KERR_DEFDUMP");
+  if (ev == nullptr) return;
+  const std::string spec(ev);
+  const auto colon = spec.find(':');
+  if (colon == std::string::npos || spec.substr(0, colon) != pin_block_) return;
+  // the defect of the converged-or-not finest state (collective: every rank computes it)
+  const Real dn = TotalDefectNorm();
+  if (!(dn > eps_)) return;
+  defdump_done_ = true;
+  auto *lv = static_cast<MGKerrVector*>(mglevels_);
+  const int lev = lv->GetNumberOfLevels() - 1;
+  const int nmb = lv->NumMB(), ngh = lv->GetGhostCells();
+  const int nx = lv->LevelN(lev, 0), ny = lv->LevelN(lev, 1), nz = lv->LevelN(lev, 2);
+  auto dh = Kokkos::create_mirror_view_and_copy(HostMemSpace(), lv->DefAt(lev).d_view);
+  auto sh = Kokkos::create_mirror_view_and_copy(HostMemSpace(), lv->SrcAt(lev).d_view);
+  const std::string fn = spec.substr(colon + 1) + "/defdump." + pin_block_ + ".r"
+                       + std::to_string(global_variable::my_rank) + ".bin";
+  FILE *f = std::fopen(fn.c_str(), "wb");
+  if (f == nullptr) { std::cout << "KERR DEFDUMP cannot open " << fn << std::endl; return; }
+  const int hdr[6] = {nmb, nx, ny, nz, ngh, static_cast<int>(sizeof(Real))};
+  std::fwrite(hdr, sizeof(int), 6, f);
+  const double tn[2] = {static_cast<double>(pmy_mesh_->time), static_cast<double>(dn)};
+  std::fwrite(tn, sizeof(double), 2, f);
+  auto &mbs = pmy_pack_->pmb->mb_size;
+  std::vector<Real> buf(static_cast<size_t>(6)*nx*ny*nz);
+  for (int m = 0; m < nmb; ++m) {
+    const RegionSize &r = mbs.h_view(m);
+    const int id[2] = {pmy_pack_->gids + m, pmy_pack_->pmb->mb_lev.h_view(m)};
+    std::fwrite(id, sizeof(int), 2, f);
+    const double ext[6] = {r.x1min, r.x1max, r.x2min, r.x2max, r.x3min, r.x3max};
+    std::fwrite(ext, sizeof(double), 6, f);
+    size_t p = 0;
+    for (int c = 0; c < 3; ++c) {
+      for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+          for (int i = 0; i < nx; ++i) { buf[p++] = dh(m, c, k + ngh, j + ngh, i + ngh); }
+        }
+      }
+    }
+    for (int c = 0; c < 3; ++c) {
+      for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+          for (int i = 0; i < nx; ++i) { buf[p++] = sh(m, c, k + ngh, j + ngh, i + ngh); }
+        }
+      }
+    }
+    std::fwrite(buf.data(), sizeof(Real), buf.size(), f);
+  }
+  std::fclose(f);
+  if (global_variable::my_rank == 0) {
+    std::printf("KERR DEFDUMP %s cycle= %d time= %.10e defect= %.6e -> %s\n",
+                pin_block_.c_str(), pmy_mesh_->ncycle, pmy_mesh_->time, dn, fn.c_str());
+  }
 }
 
 void MGKerrVectorDriver::SaveMomentsToPin(ParameterInput *pin) const {

@@ -25,6 +25,7 @@
 
 class MeshBlockPack;
 class Driver;
+class ParameterInput;
 
 namespace radiation {
 
@@ -51,7 +52,7 @@ constexpr int kNBudgetClosure = 8;
 
 class RadBudget {
  public:
-  explicit RadBudget(MeshBlockPack *pp);
+  RadBudget(MeshBlockPack *pp, ParameterInput *pin);
 
   Real c[kNBudget];        // counters (energy put into the current state by each term)
   Real c_base[kNBudget];   // counters at the start of the step (RK base state)
@@ -67,6 +68,11 @@ class RadBudget {
   Real GasFaceFlux(Real beta_dt);              // energy in through domain faces (gas)
   void ZeroAcc();
   void ReadAcc(Real *a, int n);
+  // restart persistence: global sums of the counters are stored as hex-float strings in
+  // <radiation>/budget_c<X>_hex and budget_nbad_hex (written into the restart's parameter
+  // block); on restart rank 0 resumes the totals and the other ranks start from zero, so the
+  // per-rank sums in the history are continuous across restarts
+  void SaveToPin(ParameterInput *pin);
 
  private:
   MeshBlockPack *pmy_pack;

@@ -105,7 +105,7 @@ Radiation::Radiation(MeshBlockPack *ppack, ParameterInput *pin) :
 
   // Optional energy-budget accounting (bhstar Stage 0; default off)
   if (pin->GetOrAddBoolean("radiation","energy_budget",false)) {
-    pbudget = new RadBudget(ppack);
+    pbudget = new RadBudget(ppack, pin);
   }
 
   // Setup angular mesh and radiation geometry data

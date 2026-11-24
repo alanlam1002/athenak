@@ -6,7 +6,13 @@
 //! \file radiation_budget.cpp
 //! \brief Optional energy-budget accounting for radiation (M)HD, see radiation_budget.hpp
 
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 #include "athena.hpp"
+#include "globals.hpp"
+#include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
 #include "bvals/bvals.hpp"
 #include "geodesic-grid/geodesic_grid.hpp"
@@ -17,9 +23,42 @@
 
 namespace radiation {
 
-RadBudget::RadBudget(MeshBlockPack *pp) :
+RadBudget::RadBudget(MeshBlockPack *pp, ParameterInput *pin) :
     eg_base(0.0), er_base(0.0), nbadcell(0.0), acc("rad_budget_acc", 4), pmy_pack(pp) {
   for (int x=0; x<kNBudget; ++x) {c[x] = 0.0; c_base[x] = 0.0;}
+  // resume the counters on restart (keys present only in restart parameter blocks)
+  if (global_variable::my_rank == 0) {
+    for (int x=0; x<kNBudget; ++x) {
+      std::string key = "budget_c" + std::to_string(x) + "_hex";
+      if (pin->DoesParameterExist("radiation", key)) {
+        c[x] = std::strtod(pin->GetString("radiation", key).c_str(), nullptr);
+      }
+    }
+    if (pin->DoesParameterExist("radiation", "budget_nbad_hex")) {
+      nbadcell = std::strtod(pin->GetString("radiation", "budget_nbad_hex").c_str(), nullptr);
+    }
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void RadBudget::SaveToPin()
+//! \brief store the global counter sums in the parameter block (called by every rank just
+//! before a restart file writes its parameters; collective with MPI)
+
+void RadBudget::SaveToPin(ParameterInput *pin) {
+  Real tot[kNBudget+1];
+  for (int x=0; x<kNBudget; ++x) tot[x] = c[x];
+  tot[kNBudget] = nbadcell;
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, tot, kNBudget+1, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  char buf[64];
+  for (int x=0; x<kNBudget; ++x) {
+    std::snprintf(buf, sizeof(buf), "%a", tot[x]);  // hex float: exact round trip
+    pin->SetString("radiation", "budget_c" + std::to_string(x) + "_hex", std::string(buf));
+  }
+  std::snprintf(buf, sizeof(buf), "%a", tot[kNBudget]);
+  pin->SetString("radiation", "budget_nbad_hex", std::string(buf));
 }
 
 //----------------------------------------------------------------------------------------

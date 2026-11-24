@@ -36,6 +36,7 @@ nx3 = 16
 
 <mesh_refinement>
 refinement = static
+prolong_primitives = true   # owner decision 2026-11-24 (numerics-017, code-006)
 
 # finest level 10 (dx = 0.25 r_g) on |x_i| < 4; coarser levels nest by 2:1
 <refined_region1>

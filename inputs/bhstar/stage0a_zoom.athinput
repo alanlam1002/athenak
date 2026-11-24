@@ -36,6 +36,7 @@ nx3 = 16
 
 <mesh_refinement>
 refinement = adaptive
+prolong_primitives = true   # owner decision 2026-11-24 (numerics-017, code-006)
 max_nmb_per_rank = 120   # preallocated per rank; 960 runs out of memory with radiation (5.3 GiB per array)
 ncycle_check = 1
 refinement_interval = 1

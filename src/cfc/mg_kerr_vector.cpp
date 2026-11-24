@@ -685,6 +685,7 @@ void MGKerrVectorDriver::Solve(Driver *pdriver, int stage, Real dt) {
   const int minv = min_vcycles_;
   for (int n = 0; n < nout; ++n) {
     if (min_first_only_ && n > 0) min_vcycles_ = 0;
+    NfDiag("pre-moments", false, true);   // K-024 (a2): u before the kelvin hook
     ComputeMoments();
     lap.Mark(st_.sec[kmg::SolveTimers::kMoments]);
     if (zero_coarse_) ZeroHierarchy();
@@ -774,6 +775,10 @@ void MGKerrVectorDriver::NfDiag(const char *tag, bool coeffs, bool sol) {
     }
   }
   if (sol) {
+    // K-024 (a2): the multipole origin and the low moments the kelvin faces use
+    std::printf("KERR NFDIAG %s %s mpo %.6e %.6e %.6e mom0-2 %.6e %.6e %.6e rank %d\n",
+                pin_block_.c_str(), tag, mpo_[0], mpo_[1], mpo_[2], mom_.v[0], mom_.v[1],
+                mom_.v[2], rank);
     for (int q = 0; q < kmg::kNMom; ++q) {
       if (kmg::NonFinite(mom_.v[q])) {
         std::printf("KERR NFDIAG %s %s moments non-finite (first q %d) rank %d\n",

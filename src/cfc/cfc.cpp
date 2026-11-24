@@ -10,6 +10,7 @@
 #include <climits>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -2829,6 +2830,16 @@ void CFC::ComputeVectorCentroidX() {
       totals[c] += partial_h(m,c);
     }
   }
+  if (std::getenv("KERR_NFDIAG") != nullptr) {   // K-024 (a2): the first block whose sum is not finite
+    for (int m = 0; m < nmb; ++m) {
+      if (!std::isfinite(partial_h(m,0)) || !std::isfinite(partial_h(m,1))) {
+        std::printf("KERR NFDIAG centroidX local non-finite rank %d m %d gid %d w %.6e x %.6e\n",
+                    global_variable::my_rank, m, pmy_pack->gids + m, partial_h(m,0),
+                    partial_h(m,1));
+        break;
+      }
+    }
+  }
 #if MPI_PARALLEL_ENABLED
   MPI_Allreduce(MPI_IN_PLACE, totals, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
 #endif
@@ -2837,6 +2848,11 @@ void CFC::ComputeVectorCentroidX() {
   r_com_X_[0] = im*totals[1];
   r_com_X_[1] = im*totals[2];
   r_com_X_[2] = im*totals[3];
+  if (std::getenv("KERR_NFDIAG") != nullptr && global_variable::my_rank == 0) {   // K-024 (a2)
+    std::printf("KERR NFDIAG centroidX totals %.6e %.6e %.6e %.6e r_com %.6e %.6e %.6e "
+                "cycle %d\n", totals[0], totals[1], totals[2], totals[3], r_com_X_[0],
+                r_com_X_[1], r_com_X_[2], pmy_pack->pmesh->ncycle);
+  }
 
   ApplyReflectingBoundaryCorrection(r_com_X_);
   return;

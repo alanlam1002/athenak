@@ -170,9 +170,9 @@ void MeshRefinement::AdaptiveMeshRefinement(Driver *pdriver, ParameterInput *pin
     // K-029 (wip/kerr): <cfc> kerr_regrid_residual_prolong -- u_adm as residuals against the
     // analytic Kerr background across the transfer (returns at once when the key is off)
     cfc::CFC *pcfc_k029 = pmy_mesh->pmb_pack->pcfc;
-    if (pcfc_k029 != nullptr) pcfc_k029->KerrRegridResidual(true);
+    if (pcfc_k029 != nullptr) pcfc_k029->KerrRegridResidual(pdriver, true);
     RedistAndRefineMeshBlocks(pin, nnew, ndel);
-    if (pcfc_k029 != nullptr) pcfc_k029->KerrRegridResidual(false);
+    if (pcfc_k029 != nullptr) pcfc_k029->KerrRegridResidual(pdriver, false);
 
     // Mark one mesh-topology update event (AMR and any resulting load balancing).
     pmy_mesh->MarkMeshUpdated();

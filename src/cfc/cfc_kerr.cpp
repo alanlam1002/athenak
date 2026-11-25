@@ -852,7 +852,7 @@ void CFC::KerrAssembleADM(Real time) {
 //! carries zero residuals (the background). After the regrid psi = psi0 + dpsi is used as
 //! is unless it is not positive, where psi0 is used (counted, printed).
 
-void CFC::KerrRegridResidual(bool pre) {
+void CFC::KerrRegridResidual(Driver *pdriver, bool pre) {
   if (!(kerr_background_ && kerr_resid_prolong_)) return;
   if (!pre && !kerr_resid_pending_) return;
   auto &indcs = pmy_pack->pmesh->mb_indcs;
@@ -872,8 +872,10 @@ void CFC::KerrRegridResidual(bool pre) {
   const Real afl = alpha_floor_;
   long nbad = 0;
   if (pre) {
+    const int ks = indcs.ks, js = indcs.js, is = indcs.is;
     Kokkos::parallel_reduce("cfc_kerr_regrid_resid_pre",
-      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, 0, 0, 0}, {nmb, n3, n2, n1}),
+      Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>({0, ks, js, is},
+                                       {nmb, indcs.ke + 1, indcs.je + 1, indcs.ie + 1}),
       KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, long &nb) {
       const Real p0 = bg(m, kKbgPsi0, k, j, i);
       const Real q = adm.psi4(m, k, j, i);
@@ -893,6 +895,15 @@ void CFC::KerrRegridResidual(bool pre) {
         }
       }
     }, Kokkos::Sum<long>(nbad));
+    // the ghosts from the residuals (K-029 fix after G3): the same exchange as
+    // ReinitializeMetricForAMR's first step, on residual data
+    pbval_adm->InitRecv(adm::ADM::nadm);
+    RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
+    while (RecvADMTask(pdriver, 0) != TaskStatus::complete) {}
+    ProlongADMTask(pdriver, 0);
+    BCSADMTask(pdriver, 0);
+    pbval_adm->ClearSend();
+    pbval_adm->ClearRecv();
     kerr_resid_pending_ = true;
   } else {
     Kokkos::parallel_reduce("cfc_kerr_regrid_resid_post",

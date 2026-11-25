@@ -561,14 +561,16 @@ class CFC {
   // dynamical evolution).
   void ReinitializeMetricForAMR(Driver *pdriver);
   // K-029: <cfc> kerr_regrid_residual_prolong (default false: returns at once). Called by
-  // MeshRefinement around RedistAndRefineMeshBlocks: pre = true turns padm->u_adm (ghosts
-  // included) into residuals against the analytic Kerr background (kbg_ of the old layout):
+  // MeshRefinement around RedistAndRefineMeshBlocks: pre = true turns padm->u_adm's interior
+  // into residuals against the analytic Kerr background (kbg_ of the old layout), then fills
+  // the ghosts by the ADM exchange of those residuals (the prolongated full metric in fine-
+  // coarse ghosts beside the puncture is not usable, K-024; G3 failed with ghost residuals):
   // psi4 -> dpsi = psi4^(1/4) - psi0, alpha -> dchi = alpha psi - alpha0 psi0,
   // beta^i -> beta^i - beta0^i, g_ij -> g_ij/psi4 - gt_ij, K_ij -> K_ij - K0_ij; the regrid
   // then restricts/prolongates/moves residuals. pre = false (after the regrid) refills kbg_
   // on the new layout and rebuilds the metric from background + residuals, so the new
   // blocks beside the puncture never see a prolongated singular background (K-024).
-  void KerrRegridResidual(bool pre);
+  void KerrRegridResidual(Driver *pdriver, bool pre);
   // R1 embedding at load (restart_state::EmbedFill): set padm->adm in the blocks with
   // newmb(m) = 1 (ghosts included) to the zero-residual metric, i.e. what AssembleADM gives
   // there with delta_psi = delta_alpha_psi = 0, b = 0 and Ahat = Ahat0: psi = psi0,

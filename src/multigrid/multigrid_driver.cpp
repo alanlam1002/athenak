@@ -965,6 +965,7 @@ void MultigridDriver::ReadConvergenceOptions(ParameterInput *pin,
   mg_stall_cycles_ = pin->GetOrAddInteger(block, "mg_stall_cycles", 3);
   physbc_after_fc_ = pin->GetOrAddBoolean(block, "mg_physbc_after_fc", false);   // K-028
   octet_cbuf_center_ = pin->GetOrAddBoolean(block, "mg_octet_cbuf_center", false);   // K-028
+  correction_refill_ = pin->GetOrAddBoolean(block, "mg_correction_refill", false);   // K-028
 }
 
 //----------------------------------------------------------------------------------------

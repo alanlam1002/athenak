@@ -581,7 +581,7 @@ void Multigrid::RestrictSourcePack() {
 //! \fn void Multigrid::ProlongateAndCorrectPack()
 //! \brief Prolongate the potential using tri-linear interpolation
 
-void Multigrid::ProlongateAndCorrectPack() {
+void Multigrid::ProlongateAndCorrectPack(bool skip_correction) {
   int ll=nlevel_-1-current_level_;
   int is, ie, js, je, ks, ke;
   is=js=ks=ngh_;
@@ -589,7 +589,7 @@ void Multigrid::ProlongateAndCorrectPack() {
   je=js+(indcs_.nx2>>ll)-1;
   ke=ks+(indcs_.nx3>>ll)-1;
 
-  ComputeCorrection();
+  if (!skip_correction) ComputeCorrection();   // K-028: formed earlier with mg_correction_refill
 
   if (on_host_) {
     ProlongateAndCorrect(u_[current_level_+1].h_view, u_[current_level_].h_view,

@@ -82,7 +82,14 @@ TaskStatus MultigridDriver::Restrict(Driver *pdrive, int stage) {
 }
 
 TaskStatus MultigridDriver::Prolongate(Driver *pdrive, int stage) {
-  pmg->ProlongateAndCorrectPack();
+  pmg->ProlongateAndCorrectPack(correction_refill_ && !correction_first_step_);
+  return TaskStatus::complete;
+}
+
+// K-028: <block> mg_correction_refill -- the coarse level's u becomes the correction u - uold
+// before the to-finer boundary fill
+TaskStatus MultigridDriver::ComputeCorrectionTask(Driver *pdrive, int stage) {
+  pmg->ComputeCorrection();
   return TaskStatus::complete;
 }
 
@@ -509,13 +516,19 @@ void MultigridDriver::SetMGTaskListToFiner(int nsmooth, int ngh, int flag) {
   tl.emplace(std::make_pair("mg_to_finer", std::make_shared<TaskList>()));
   TaskID none(0);
 
+  correction_first_step_ = (flag == 1);   // K-028: no fill there, Prolongate forms the correction
   if (flag == 1) {
     // First time on meshblock levels: no boundary comm before prolongation
     id.prolongate = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::Prolongate, "Prolongate"), none);
   } else {
     // Coarse-level boundary comm before prolongation
-    id.fill_coarse0 = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::FillCoarseBoundary, "FillCoarseBoundary"), none);
-    id.ircv0    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::StartReceive, "StartReceive"), none);
+    // K-028 mg_correction_refill: the fill acts on the correction u - uold (formed first)
+    TaskID c0 = none;
+    if (correction_refill_) {
+      c0 = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::ComputeCorrectionTask, "ComputeCorrection"), none);
+    }
+    id.fill_coarse0 = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::FillCoarseBoundary, "FillCoarseBoundary"), c0);
+    id.ircv0    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::StartReceive, "StartReceive"), c0);
     id.send0    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::SendBoundary, "SendBoundary"), id.fill_coarse0);
     id.recv0    = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::RecvBoundary, "RecvBoundary"), id.send0);
     id.physb0   = tl["mg_to_finer"]->AddTask(MGT(&MultigridDriver::PhysicalBoundary, "PhysicalBoundary"), id.recv0);

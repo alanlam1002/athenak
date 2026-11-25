@@ -329,7 +329,7 @@ class Multigrid {
   void RestrictSourcePack();
   void RestrictCoefficients();
   void FMGProlongatePack();
-  void ProlongateAndCorrectPack();
+  void ProlongateAndCorrectPack(bool skip_correction = false);
   virtual void SmoothPack(int color) = 0;
   virtual void CalculateDefectPack() = 0;
   virtual void CalculateFASRHSPack() = 0;
@@ -631,6 +631,7 @@ class MultigridDriver {
   TaskStatus Smooth(Driver *pdrive, int stag);
   TaskStatus Restrict(Driver *pdrive, int stag);
   TaskStatus Prolongate(Driver *pdrive, int stag);
+  TaskStatus ComputeCorrectionTask(Driver *pdrive, int stag);   // K-028 mg_correction_refill
   TaskStatus FMGProlongateTask(Driver *pdrive, int stag);
   TaskStatus ProlongateBoundary(Driver *pdrive, int stag);
   TaskStatus ProlongateBoundaryForProlongation(Driver *pdrive, int stag);
@@ -705,6 +706,13 @@ class MultigridDriver {
   // reflects the buffer, so the buffer cell across a physical face is -centre (zerofixed)
   // rather than -0 (the centre was filled only later, in ProlongateOctetBoundaries).
   bool octet_cbuf_center_ = false;
+  // K-028 (wip/kerr): <block> mg_correction_refill (default false). On: in the block levels'
+  // to-finer step the correction u - uold is formed on the coarse level BEFORE its boundary
+  // fill, and the fill (exchange, PhysicalBoundary, FC ghosts) then acts on the correction, so
+  // the prolongated correction's ghosts are a fill of the correction itself rather than the
+  // difference of two fills made at different times.
+  bool correction_refill_ = false;
+  bool correction_first_step_ = false;
   std::string mg_log_name_ = "mg";
   MGNormScaling ovr_norm_ = MGNormScaling::legacy;   // BeginConvergenceOverride's saved state
   Real ovr_eps_ = -1.0, ovr_rtol_ = 0.0;

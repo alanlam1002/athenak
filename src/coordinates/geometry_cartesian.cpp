@@ -12,6 +12,8 @@
 //! fill, run once at MeshBlockPack construction (and at every SMR regrid), never inside
 //! a hot per-cell kernel.
 
+#include <string>
+
 #include "athena.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"

@@ -112,8 +112,8 @@ def check_m2a_sign_control(ng):
     rc1, out1, bad = run(ng, npt, 32, ["problem/kerr_flip_k_odd=true"])
     rc2, out2, bad2 = run(ng, npt, 64, ["problem/kerr_flip_k_odd=true"])
     assert rc0 == 0 and rc1 == 0 and rc2 == 0, (out0[-2000:], out1[-2000:], out2[-2000:])
-    assert bad["err_M_kerr"] > 1.0e4 * good["err_M_kerr"], (good["err_M_kerr"],
-                                                           bad["err_M_kerr"])
+    assert bad["err_M_kerr"] > 1.0e4 * good["err_M_kerr"], (
+        good["err_M_kerr"], bad["err_M_kerr"])
     assert math.log2(bad["err_M_kerr"] / bad2["err_M_kerr"]) < 0.5, (bad, bad2)
 
 
@@ -121,9 +121,9 @@ M2F_KEYS = ("err_ffg", "err_ffK", "err_ffdg_far", "err_ffdg_axis")
 
 
 def check_m2f_point(ng):
-    """FastFlow Cartoon point evaluation (z4c/fastflow_cartoon.hpp, chat/0013): g, K at the
-    interpolation order 2 ng, d_k g at 2 ng - 1, and near the axis (rho < dx1, where the
-    out-of-plane derivative has a 1/rho) no worse than away from it."""
+    """FastFlow Cartoon point evaluation (z4c/fastflow_cartoon.hpp, chat/0013): g, K at
+    the interpolation order 2 ng, d_k g at 2 ng - 1, and near the axis (rho < dx1,
+    where the out-of-plane derivative has a 1/rho) no worse than away from it."""
     npt = 2 * ng + 1
     rs = []
     for n in NS:

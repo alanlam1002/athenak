@@ -287,12 +287,19 @@ Errs DerivErrors(MeshBlockPack *pmbp, DvceArray5D<Real> uc, int which) {
       Real fd;
       // seeds: e1 on the first direction, e2 on y
       HD X(x), Y(0.0), Z(z);
-      if (which == 0) { fd = Dx<NG>(2, idx, q, m, k, j, i);      Y = HD(0.0, 1, 1, 0); }
-      else if (which == 1) { fd = Dxx<NG>(2, idx, q, m, k, j, i); Y = HD(0.0, 1, 1, 0); }
-      else if (which == 2) { fd = Dxy<NG>(0, 2, idx, q, m, k, j, i);
-                             X = HD(x, 1, 0, 0); Y = HD(0.0, 0, 1, 0); }
-      else { fd = Dxy<NG>(1, 2, idx, q, m, k, j, i);
-             Z = HD(z, 1, 0, 0); Y = HD(0.0, 0, 1, 0); }
+      if (which == 0) {
+        fd = Dx<NG>(2, idx, q, m, k, j, i);
+        Y = HD(0.0, 1, 1, 0);
+      } else if (which == 1) {
+        fd = Dxx<NG>(2, idx, q, m, k, j, i);
+        Y = HD(0.0, 1, 1, 0);
+      } else if (which == 2) {
+        fd = Dxy<NG>(0, 2, idx, q, m, k, j, i);
+        X = HD(x, 1, 0, 0); Y = HD(0.0, 0, 1, 0);
+      } else {
+        fd = Dxy<NG>(1, 2, idx, q, m, k, j, i);
+        Z = HD(z, 1, 0, 0); Y = HD(0.0, 0, 1, 0);
+      }
       HD a[Z4c::nz4c];
       AnalyticState<HD>(X, Y, Z, a);
       const Real ex = (which == 0) ? a[n].b : a[n].ab;
@@ -690,7 +697,9 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
   Z4c::CartoonParity par = Z4c::CartoonParityTable();
   if (wrong != "none") {
     int nw = -1;
-    for (int n = 0; n < Z4c::nz4c; ++n) if (wrong == Z4c::Z4c_names[n]) nw = n;
+    for (int n = 0; n < Z4c::nz4c; ++n) {
+      if (wrong == Z4c::Z4c_names[n]) nw = n;
+    }
     if (nw < 0) {
       std::cout << "### FATAL ERROR unknown wrong_parity '" << wrong << "'" << std::endl;
       std::exit(EXIT_FAILURE);

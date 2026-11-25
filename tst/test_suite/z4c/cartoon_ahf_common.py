@@ -46,7 +46,8 @@ def run(dim, ng, n, chi, coord="les", extra=()):
     _RUN[0] += 1
     d = f"ahf_run_{_RUN[0]}"
     os.makedirs(d, exist_ok=True)
-    flags = [f"mesh/nghost={ng}", f"problem/punc_chi={chi}", f"problem/spin_coord={coord}",
+    flags = [f"mesh/nghost={ng}", f"problem/punc_chi={chi}",
+             f"problem/spin_coord={coord}",
              f"fastflow/initial_radius_0={1.1 * rh(coord, chi)}"]
     if dim == 2:
         deck, base = DECK2, "cahf"
@@ -92,7 +93,8 @@ TOL_CHI = {2: 1e-6, 4: 1e-9}     # |chi_AH - chi| at N = 64 (measured 3.8e-7, 2.
 
 
 def check_les(ng):
-    """les data in 2D Cartoon at N = 32, 64: convergence, sign gate, mirror, constraints."""
+    """les data in 2D Cartoon at N = 32, 64: convergence, sign gate, mirror,
+    constraints."""
     chis = (0.0, 0.5, 0.95, -0.5)
     r = {(n, c): run(2, ng, n, c) for n in (32, 64) for c in chis}
     assert any("2D Cartoon" in h for h in r[(64, 0.5)]["header"]), r[(64, 0.5)]["header"]

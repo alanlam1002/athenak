@@ -27,6 +27,7 @@
 //! gradient across the R=0 reflecting boundary.
 
 #include <cmath>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

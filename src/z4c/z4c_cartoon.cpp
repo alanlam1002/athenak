@@ -385,7 +385,8 @@ void Z4c::CartoonFillADM(MeshBlockPack *pmbp) {
               << "psi4), found " << u_adm.extent_int(1) << std::endl;
     std::exit(EXIT_FAILURE);
   }
-  if (u_adm_cart.extent(0) != u_adm.extent(0) || u_adm_cart.extent(3) != u_adm.extent(3) ||
+  if (u_adm_cart.extent(0) != u_adm.extent(0) ||
+      u_adm_cart.extent(3) != u_adm.extent(3) ||
       u_adm_cart.extent(4) != u_adm.extent(4) ||
       u_adm_cart.extent_int(2) != 1 + 2*ng) {
     Kokkos::realloc(u_adm_cart, u_adm.extent(0), vs.nvar, 1 + 2*ng, u_adm.extent(3),
@@ -440,7 +441,8 @@ void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
   KOKKOS_LAMBDA(const int m, const int l, const int j, const int i) {
     const Real dx = size.d_view(m).dx1;
     Real x, x2p, x3p, x0;
-    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, x2p, x3p);  // mesh (R, z, 0)
+    // mesh (R, z, 0)
+    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, x2p, x3p);
     if (x < 0.0 && !direct_negx) return;
     Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, x2p, x3p);
     const Real y = l*dx;

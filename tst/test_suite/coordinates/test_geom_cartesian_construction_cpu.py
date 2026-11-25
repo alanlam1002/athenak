@@ -6,7 +6,8 @@ accessors reproduce, to machine precision, the same arithmetic the rest of the c
 already computes directly from mb_size.dx1/dx2/dx3 and CellCenterX(). The actual
 comparison happens inside the pgen (src/pgen/unit_tests/geometry_cartesian_test.cpp),
 which exit(EXIT_FAILURE)s on any mismatch -- this wrapper just runs it and checks the
-process return code, following the established convention (see test_gauss_legendre_cpu.py).
+process return code, following the established convention (see
+test_gauss_legendre_cpu.py).
 """
 
 import test_suite.testutils as testutils

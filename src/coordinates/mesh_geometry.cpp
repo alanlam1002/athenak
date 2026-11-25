@@ -8,6 +8,7 @@
 //! construction/regrid time -- never inside a hot per-cell loop, see mesh_geometry.hpp)
 //! to exactly one geometry factory function based on Mesh::coord_general.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <string>

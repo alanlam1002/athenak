@@ -33,6 +33,7 @@
 //! A non-uniform density profile is essential: prolongating a constant is exact for any
 //! weighting, so a uniform IC would silently test nothing.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>

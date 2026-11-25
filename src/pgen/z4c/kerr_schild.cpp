@@ -99,8 +99,9 @@ void KerrSchild(MeshBlockPack *pmbp, ParameterInput *pin) {
   int n2 = indcs.nx2 + 2*ng;
   int n3 = indcs.nx3 + 2*ng;
   // Z4c position mode (D-017); none when there is no <z4c>
-  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr) ? pmbp->pz4c->opt.cartoon
-                                                              : z4c::Z4c::CartoonMode::none;
+  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr)
+                                          ? pmbp->pz4c->opt.cartoon
+                                          : z4c::Z4c::CartoonMode::none;
   par_for("pgen_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
     // position in mesh component order (D-017)

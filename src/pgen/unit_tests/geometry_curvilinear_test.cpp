@@ -11,8 +11,10 @@
 //! hand-computable grid. Dispatches on Mesh::coord_general so the same pgen name
 //! drives all three systems' tests via three separate input files.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

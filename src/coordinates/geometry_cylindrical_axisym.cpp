@@ -42,6 +42,7 @@
 //!   virtual -- Task C1 consumes these).
 
 #include <cmath>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

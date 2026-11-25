@@ -81,7 +81,9 @@ bool CartoonFastFlowPoint(const DvceArray5D<Real> &u_adm, const int gind[6],
   if (!iw.point_exist) return false;
   const Real dx1 = size.d_view(iw.ii0).dx1;
 
-  const int sidx[3][3] = {{0, 1, 2}, {1, 3, 4}, {2, 4, 5}};
+  const int sidx[3][3] = {
+    {0, 1, 2}, {1, 3, 4}, {2, 4, 5}
+  };
   Real G[3][3], K[3][3], D[3][3][3];
   for (int a = 0; a < 3; ++a) {
     for (int b = 0; b < 3; ++b) {
@@ -130,8 +132,12 @@ bool CartoonFastFlowPoint(const DvceArray5D<Real> &u_adm, const int gind[6],
   // rotation R = [[c, -s], [s, c]] in (x1, x3)); L maps mesh to physical components.
   const Real c = (rho > 0.0) ? X1/rho : 1.0;
   const Real s = (rho > 0.0) ? X3/rho : 0.0;
-  const Real R[3][3] = {{c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}};
-  const Real L[3][3] = {{1.0, 0.0, 0.0}, {0.0, 0.0, -1.0}, {0.0, 1.0, 0.0}};
+  const Real R[3][3] = {
+    {c, 0.0, -s}, {0.0, 1.0, 0.0}, {s, 0.0, c}
+  };
+  const Real L[3][3] = {
+    {1.0, 0.0, 0.0}, {0.0, 0.0, -1.0}, {0.0, 1.0, 0.0}
+  };
   Real M[3][3];
   for (int a = 0; a < 3; ++a)
     for (int b = 0; b < 3; ++b) {

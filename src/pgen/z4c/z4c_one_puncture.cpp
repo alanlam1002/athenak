@@ -105,8 +105,9 @@ void ADMOnePuncture(MeshBlockPack *pmbp, ParameterInput *pin) {
 
   adm::ADM::ADM_vars &adm = pmbp->padm->adm;
   // Z4c position mode (D-017); none when there is no <z4c>
-  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr) ? pmbp->pz4c->opt.cartoon
-                                                              : z4c::Z4c::CartoonMode::none;
+  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr)
+                                          ? pmbp->pz4c->opt.cartoon
+                                          : z4c::Z4c::CartoonMode::none;
 
   par_for("pgen one puncture",
   DevExeSpace(),0,nmb-1,ksg,keg,jsg,jeg,isg,ieg,

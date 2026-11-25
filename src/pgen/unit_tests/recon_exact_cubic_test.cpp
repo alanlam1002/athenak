@@ -19,6 +19,7 @@
 //! averages and the actual GeomData coefficients, on whichever coordinate system the run
 //! is configured for.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 

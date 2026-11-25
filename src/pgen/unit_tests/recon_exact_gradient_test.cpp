@@ -13,6 +13,7 @@
 //! single pgen covers Cartesian (regression: must stay exact, as it always was) and any
 //! curvilinear system by simply changing the input file's <mesh>/coord.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 

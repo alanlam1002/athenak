@@ -156,7 +156,8 @@ void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
                             Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);*/
   par_for("initialize Gamma",DevExeSpace(),0,nmb-1,ks+koff,ke+koff,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    const int kw = k - koff;  // u0 (write) index; k reads g3u (cache planes under Cartoon)
+    // u0 (write) index; k reads g3u (cache planes under Cartoon)
+    const int kw = k - koff;
     // Usage of Dx: pmbp->pz4c->Dx(blockn, posvar, k,j,i, dir, nghost, dx, quantity);
     Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2,
                   cartoon ? 1/size.d_view(m).dx1 : 1/size.d_view(m).dx3};
@@ -313,7 +314,8 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
   par_for("ADM constraints loop",DevExeSpace(),
   0,nmb-1,ks+koff,ke+koff,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    const int kw = k - koff;  // mesh (write) index; k reads z4c/adm (caches under Cartoon)
+    // mesh (write) index; k reads z4c/adm (caches under Cartoon)
+    const int kw = k - koff;
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> Gamma_u;
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> Gamma_u_z4c;
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> M_u;

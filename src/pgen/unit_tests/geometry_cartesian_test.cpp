@@ -10,8 +10,10 @@
 //! and CellCenterX() -- i.e. that materializing today's implicit Cartesian geometry into
 //! GeomData's factored arrays changes nothing numerically.
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

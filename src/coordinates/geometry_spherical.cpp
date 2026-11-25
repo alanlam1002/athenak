@@ -34,6 +34,7 @@
 //! r-weighted quantities (a2i/a3i/vi/src1/src2) are only ever read at active indices.
 
 #include <cmath>
+#include <string>
 
 #include "athena.hpp"
 #include "parameter_input.hpp"

@@ -38,6 +38,7 @@
 //! KOKKOS_INLINE_FUNCTION accessors, which would dereference a device pointer from this
 //! host code (see the GeomDataHost doc comment in mesh_geometry.hpp).
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 

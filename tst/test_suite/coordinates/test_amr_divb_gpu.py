@@ -1,6 +1,7 @@
 """
-GPU variant of the curvilinear SMR/AMR Phase 2 acceptance gate (face-centered / MHD): div(B) must stay
-at roundoff, and mass must be conserved, across many refine AND derefine cycles.
+GPU variant of the curvilinear SMR/AMR Phase 2 acceptance gate (face-centered / MHD):
+div(B) must stay at roundoff, and mass must be conserved, across many refine AND
+derefine cycles.
 
 The check lives in the pgen (src/pgen/unit_tests/amr_divb_test.cpp), not here, for the
 same reason as the Phase 1 gate: the .hst file carries only ~6 significant digits, far

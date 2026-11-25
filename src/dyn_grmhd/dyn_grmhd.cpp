@@ -639,6 +639,14 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     }
     trace_ahat = (ta == "cfc_lagged");
   }
+  if (pin->DoesParameterExist("dyn_grmhd", "trace_diag_held")) {
+    trace_held = pin->GetBoolean("dyn_grmhd", "trace_diag_held");
+    if (trace_held && !trace_diag) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<dyn_grmhd> trace_diag_held needs trace_diag = true" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
   if (trace_diag) {
     trace_every = pin->GetOrAddInteger("dyn_grmhd", "trace_diag_every", 1);
     trace_rhoc = pin->GetOrAddReal("dyn_grmhd", "trace_diag_rhoc", 3.24e-4);
@@ -664,12 +672,16 @@ DynGRMHD::DynGRMHD(MeshBlockPack *pp, ParameterInput *pin) :
     if (TskChord()) {
       // the actual d_t ln psi: arm (ii)'s residual chord and the background's analytic rate
       // (as killing_full_dtg, dyn_grmhd.cpp above), as a source term only
-      kneed(pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
+      // trace_diag_held (R-282): the diagnostic alone (no keff/ktr/keff_bg) may run with a held
+      // residual and an accreting puncture; the solution modes keep both requirements
+      const bool held = trace_held && !TskSolChord();
+      kneed(held || pin->GetOrAddInteger("cfc", "solve_interval", 0) <= 0,
             "<cfc> solve_interval <= 0 (a metric solve every stage)");
       kneed(!pin->DoesParameterExist("cfc", "residual_scale_t1"),
             "a constant <cfc> residual_scale (no residual_scale_t1 ramp)");
-      kneed(!kflag("puncture_enabled") || kflag("freeze_puncture_mass"),
+      kneed(held || !kflag("puncture_enabled") || kflag("freeze_puncture_mass"),
             "<cfc> freeze_puncture_mass = true with a puncture");
+      kneed(!trace_held || held, "trace_diag_held with no keff/ktr/keff_bg");
       kf_bgmove = kflag("puncture_enabled") && kflag("puncture_moving");
       if (kf_bgmove && ttab.n == 0) {
         BuildTrumpetTable(ttab, pin->GetOrAddReal("dyn_grmhd", "metric_table_wmax", 64.0),

@@ -353,6 +353,9 @@ class CFC {
   bool si_refill_bg_ = false;
   bool si_refill_ready_ = false;     // a solve/assembly has set the held fields
   // true on a stage >= 1 that skips the solves and refills (the option on and ready)
+  // R-282 / C-274 (wip/trace-held): the cadence gate, read-only, for <dyn_grmhd> trace_diag_held's
+  // per-stage solve flag (the rank-0 cadence notice may print from here first; no state change)
+  bool SolveThisStage(Driver *pdriver, int stage) const { return DoSolveThisStage(pdriver, stage); }
   bool RefillThisStage(Driver *pdriver, int stage) const {
     return si_refill_bg_ && si_refill_ready_ && stage >= 1 &&
            !DoSolveThisStage(pdriver, stage);

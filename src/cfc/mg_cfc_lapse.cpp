@@ -415,6 +415,8 @@ MGCFCLapseDriver::MGCFCLapseDriver(MeshBlockPack *pmbp, ParameterInput *pin)
   fshowdef_ = pin->GetOrAddInteger("cfc", "mg_verbose", 0);
   ReadConvergenceOptions(pin, "cfc");   // mg_rtol_ref, mg_log, mg_stall_cycles (R-058)
   min_vcycles_ = pin->GetOrAddInteger("cfc", "mg_min_vcycles", 0);   // shared by all CFC solves
+  // R-280 diagnostic (read only if present, so the parameter text is unchanged otherwise)
+  mg_diag_ = pin->DoesParameterExist("cfc", "mg_diag") ? pin->GetInteger("cfc", "mg_diag") : 0;
   mg_verbose_ = fshowdef_;
   full_multigrid_ = false;
   // See MGCFCConformalFactorDriver's identical comment -- AMR-refined meshes need

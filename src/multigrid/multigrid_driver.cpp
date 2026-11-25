@@ -33,6 +33,7 @@
 #include "../mesh/mesh.hpp"
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
+#include "../coordinates/adm.hpp"
 #include "../globals.hpp"
 #include "../utils/chksum.hpp"
 
@@ -1240,6 +1241,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     }
   }
   last_def0_ = def;
+  if (mg_diag_ > 0) DiagPrint(0, false);   // R-280 diagnostic (read-only)
   // Stop rule (R-213: cfc's loop, R-058, composed with our mg_min_vcycles, R-201):
   //   iterate while (def > target || n < min_vcycles_), where target = max(eps_, rtol_*ref);
   //   inside, after each V-cycle, a stall (legacy/rms: def/olddef > 0.9; max: mg_stall_cycles_
@@ -1257,6 +1259,7 @@ void MultigridDriver::SolveIterative(Driver *pdriver) {
     def = TotalDefectNorm();
     MGChk("vcycle", def);
     if (MGNonFinite(def)) { nonfinite = true; break; }
+    if (mg_diag_ > 0) DiagPrint(ncyc, true);   // R-280 diagnostic (read-only)
     if (fshowdef_ >= 2 && global_variable::my_rank == 0) {
       std::cout << "MG iteration " << n << ": defect = " << def << std::endl;
     }
@@ -3597,4 +3600,38 @@ void MultigridDriver::MGChk(const char *where, Real x, bool task) {
   std::fprintf(chksum::fp, "%d %d %s %d mpole %016llx\n", cycle, stage, name.c_str(), k,
                (unsigned long long)host(mpcoeff_, sizeof(mpcoeff_)/sizeof(Real)));
   std::fflush(chksum::fp);
+}
+
+//----------------------------------------------------------------------------------------
+//! R-280 diagnostic (<cfc> mg_diag > 0): one MGDIAG line per channel after the initial defect
+//! (it 0) and after every V-cycle of SolveIterative: eps = sum m|du| / sum m (du = this
+//! V-cycle's correction on the finest level, m = D dV), eps_str the same over the stream
+//! class, dumax_star = max |du| within 2 R* of the star, the defect's sum d^2 dV within 5 M of
+//! the hole / within 2 R* of the star / elsewhere, and usz = sum m|u| / sum m. Read-only.
+
+void MultigridDriver::DiagPrint(int it, bool have_prev) {
+  if (mglevels_ == nullptr || pmy_pack_ == nullptr || pmy_pack_->pmhd == nullptr) return;
+  Real xh[3] = {0.0, 0.0, 0.0};
+  if (pmy_pack_->padm != nullptr) {
+    for (int a = 0; a < 3; ++a) xh[a] = pmy_pack_->padm->bc_center[a];
+  }
+  Real xs[3];
+  mglevels_->DiagStarCentroid(xs);
+  for (int v = 0; v < nvar_; ++v) {
+    Real o[Multigrid::kDiagN];
+    mglevels_->DiagCycle(diag_uprev_, have_prev, v, xh, xs, o);
+    if (global_variable::my_rank == 0) {
+      const Real dt2 = o[5] + o[6] + o[7];
+      std::cout << std::scientific << std::setprecision(6) << "MGDIAG " << mg_log_name_
+                << " cyc " << pmy_mesh_->ncycle << " t " << pmy_mesh_->time << " it " << it
+                << " v " << v << " eps " << (o[1] > 0.0 ? o[0]/o[1] : 0.0)
+                << " eps_str " << (o[3] > 0.0 ? o[2]/o[3] : 0.0) << " m_str " << o[3]
+                << " dumax_star " << o[4] << " d2_hole " << o[5] << " d2_star " << o[6]
+                << " d2_else " << o[7] << " f_hole " << (dt2 > 0.0 ? o[5]/dt2 : 0.0)
+                << " f_star " << (dt2 > 0.0 ? o[6]/dt2 : 0.0) << " usz "
+                << (o[1] > 0.0 ? o[8]/o[1] : 0.0) << " xs " << xs[0] << " " << xs[1] << " "
+                << xs[2] << " xh " << xh[0] << " " << xh[1] << " " << xh[2] << std::endl;
+    }
+  }
+  mglevels_->DiagSnapshot(diag_uprev_);
 }

@@ -338,6 +338,13 @@ class Multigrid {
   void SetFromRootGrid(bool folddata);
   // compute_defect = false reuses def_ from the previous call (cfc_opt item D)
   Real CalculateDefectNorm(MGNormType nrm, int n, bool compute_defect = true);
+  // R-280 diagnostic (<cfc> mg_diag, default 0; read only if present): see multigrid.cpp.
+  // Read-only reductions on the finest level; they change no solution data.
+  static constexpr int kDiagN = 9;
+  void DiagSnapshot(DvceArray5D<Real> &dst);
+  void DiagCycle(const DvceArray5D<Real> &uprev, bool have_prev, int v, const Real xh[3],
+                 const Real xs[3], Real out[kDiagN]);
+  void DiagStarCentroid(Real xs[3]);
   Real CalculateAverage(MGVariable type);
   Real CalculateTotal(MGVariable type, int n);
   void SubtractAverage(MGVariable type, int n, Real ave);
@@ -716,6 +723,12 @@ class MultigridDriver {
   // least this many V-cycles even when the warm start's defect is already <= the target
   // (R-201: with 0, such a solve does none and the metric lags the matter)
   int min_vcycles_ = 0;
+  // R-280 diagnostic (<cfc> mg_diag, default 0, read only if present): per V-cycle MGDIAG
+  // lines (the mass-weighted last correction and the defect's region shares); no effect on
+  // the solution
+  int mg_diag_ = 0;
+  DvceArray5D<Real> diag_uprev_;
+  void DiagPrint(int it, bool have_prev);
   int max_vcycles_ = 40;      // SolveIterative's V-cycle cap (R-275 item 6: see SetInitSolve)
   bool init_solve_ = false;   // inside CFC::InitializeMetric (see SetInitSolve)
   int last_nvcycle_ = 0;

@@ -29,6 +29,8 @@
 #include "../mesh/nghbr_index.hpp"
 #include "../parameter_input.hpp"
 #include "multigrid.hpp"
+#include "../mhd/mhd.hpp"
+#include "../coordinates/adm.hpp"
 
 //namespace multigrid{ // NOLINT (build/namespace)
 //----------------------------------------------------------------------------------------
@@ -1374,4 +1376,114 @@ void Multigrid::FMGProlongate(ViewType &dst, const ViewType &src,
     ) / 32768.0;
   });
   return;
+}
+
+//----------------------------------------------------------------------------------------
+//! R-280 diagnostic (<cfc> mg_diag): reductions on the finest MG level (the MeshBlocks' own
+//! cells), read-only. out[0] sum m|du|, out[1] sum m, out[2] sum m|du| and out[3] sum m over
+//! the stream class (rho > 1e-6 rho_c outside 2 R* of the star), out[4] max |du| within
+//! 2 R* of the star, out[5..7] sum d^2 dV within 5 M of the hole / within 2 R* of the star /
+//! elsewhere, out[8] sum m|u|. m = D dV (u0 is densitized), du = u - uprev (this V-cycle's
+//! correction), d = the defect left in def_ by the last CalculateDefectNorm. Constants: the
+//! B.1 star (rho_c = 3.24e-4, R* = 0.677).
+
+void Multigrid::DiagSnapshot(DvceArray5D<Real> &dst) {
+  auto &u = u_[nlevel_-1].d_view;
+  if (dst.extent(0) != u.extent(0) || dst.extent(1) != u.extent(1) ||
+      dst.extent(4) != u.extent(4)) {
+    Kokkos::realloc(dst, u.extent(0), u.extent(1), u.extent(2), u.extent(3), u.extent(4));
+  }
+  Kokkos::deep_copy(dst, u);
+}
+
+void Multigrid::DiagStarCentroid(Real xs[3]) {
+  auto &mbi = pmy_pack_->pmesh->mb_indcs;
+  const int is = mbi.is, js = mbi.js, ks = mbi.ks, nx1 = mbi.nx1, nx2 = mbi.nx2,
+            nx3 = mbi.nx3;
+  auto &w0 = pmy_pack_->pmhd->w0;
+  auto &mb_size = pmy_pack_->pmb->mb_size;
+  Real rmax = 0.0;
+  Kokkos::parallel_reduce("MGDiag_rmax", Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>(
+      {0, ks, js, is}, {nmmb_, ks+nx3, js+nx2, is+nx1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mx) {
+      mx = fmax(mx, w0(m, IDN, k, j, i));
+    }, Kokkos::Max<Real>(rmax));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, &rmax, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  const Real thr = 0.3*rmax;   // the relative tracker's definition (frame_track_rel 0.3)
+  Real s0 = 0.0, s1 = 0.0, s2 = 0.0, s3 = 0.0;
+  Kokkos::parallel_reduce("MGDiag_xs", Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>(
+      {0, ks, js, is}, {nmmb_, ks+nx3, js+nx2, is+nx1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &a0, Real &a1,
+                  Real &a2, Real &a3) {
+      const Real r = w0(m, IDN, k, j, i);
+      if (!(r > thr)) return;
+      const Real dv = mb_size.d_view(m).dx1*mb_size.d_view(m).dx2*mb_size.d_view(m).dx3;
+      a0 += r*dv;
+      a1 += r*dv*CellCenterX(i-is, nx1, mb_size.d_view(m).x1min, mb_size.d_view(m).x1max);
+      a2 += r*dv*CellCenterX(j-js, nx2, mb_size.d_view(m).x2min, mb_size.d_view(m).x2max);
+      a3 += r*dv*CellCenterX(k-ks, nx3, mb_size.d_view(m).x3min, mb_size.d_view(m).x3max);
+    }, Kokkos::Sum<Real>(s0), Kokkos::Sum<Real>(s1), Kokkos::Sum<Real>(s2),
+       Kokkos::Sum<Real>(s3));
+  Real s[4] = {s0, s1, s2, s3};
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, s, 4, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+#endif
+  for (int a = 0; a < 3; ++a) xs[a] = (s[0] > 0.0) ? s[a+1]/s[0] : 0.0;
+}
+
+void Multigrid::DiagCycle(const DvceArray5D<Real> &uprev, bool have_prev, int v,
+                          const Real xh[3], const Real xs[3], Real out[kDiagN]) {
+  auto &u = u_[nlevel_-1].d_view;
+  auto &def = def_[nlevel_-1].d_view;
+  const int ngh = ngh_;
+  auto &mbi = pmy_pack_->pmesh->mb_indcs;
+  const int mis = mbi.is, mjs = mbi.js, mks = mbi.ks, nx1 = mbi.nx1, nx2 = mbi.nx2,
+            nx3 = mbi.nx3;
+  auto &u0 = pmy_pack_->pmhd->u0;
+  auto &w0 = pmy_pack_->pmhd->w0;
+  auto &mb_size = pmy_pack_->pmb->mb_size;
+  const Real h0 = xh[0], h1 = xh[1], h2 = xh[2], q0 = xs[0], q1 = xs[1], q2 = xs[2];
+  const Real rs2 = (2.0*0.677)*(2.0*0.677), rh2 = 25.0, rstr = 1.0e-6*3.24e-4;
+  const bool hp = have_prev;
+  Real a[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  Kokkos::parallel_reduce("MGDiag_sums", Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>(
+      {0, ngh, ngh, ngh}, {nmmb_, ngh+nx3, ngh+nx2, ngh+nx1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &s0, Real &s1,
+                  Real &s2, Real &s3, Real &s5, Real &s6, Real &s7, Real &s8) {
+      const int im = i - ngh + mis, jm = j - ngh + mjs, km = k - ngh + mks;
+      const Real x = CellCenterX(i-ngh, nx1, mb_size.d_view(m).x1min, mb_size.d_view(m).x1max);
+      const Real y = CellCenterX(j-ngh, nx2, mb_size.d_view(m).x2min, mb_size.d_view(m).x2max);
+      const Real z = CellCenterX(k-ngh, nx3, mb_size.d_view(m).x3min, mb_size.d_view(m).x3max);
+      const Real dv = mb_size.d_view(m).dx1*mb_size.d_view(m).dx2*mb_size.d_view(m).dx3;
+      const Real ms = u0(m, IDN, km, jm, im)*dv;
+      const Real du = hp ? fabs(u(m, v, k, j, i) - uprev(m, v, k, j, i)) : 0.0;
+      const Real rq2 = (x-q0)*(x-q0) + (y-q1)*(y-q1) + (z-q2)*(z-q2);
+      const Real rh = (x-h0)*(x-h0) + (y-h1)*(y-h1) + (z-h2)*(z-h2);
+      s0 += ms*du; s1 += ms; s8 += ms*fabs(u(m, v, k, j, i));
+      if (rq2 >= rs2 && w0(m, IDN, km, jm, im) > rstr) { s2 += ms*du; s3 += ms; }
+      const Real d2 = def(m, v, k, j, i)*def(m, v, k, j, i)*dv;
+      if (rh < rh2) s5 += d2; else if (rq2 < rs2) s6 += d2; else s7 += d2;
+    }, Kokkos::Sum<Real>(a[0]), Kokkos::Sum<Real>(a[1]), Kokkos::Sum<Real>(a[2]),
+       Kokkos::Sum<Real>(a[3]), Kokkos::Sum<Real>(a[4]), Kokkos::Sum<Real>(a[5]),
+       Kokkos::Sum<Real>(a[6]), Kokkos::Sum<Real>(a[7]));
+  Real dmx = 0.0;
+  Kokkos::parallel_reduce("MGDiag_max", Kokkos::MDRangePolicy<DevExeSpace, Kokkos::Rank<4>>(
+      {0, ngh, ngh, ngh}, {nmmb_, ngh+nx3, ngh+nx2, ngh+nx1}),
+    KOKKOS_LAMBDA(const int m, const int k, const int j, const int i, Real &mx) {
+      if (!hp) return;
+      const Real x = CellCenterX(i-ngh, nx1, mb_size.d_view(m).x1min, mb_size.d_view(m).x1max);
+      const Real y = CellCenterX(j-ngh, nx2, mb_size.d_view(m).x2min, mb_size.d_view(m).x2max);
+      const Real z = CellCenterX(k-ngh, nx3, mb_size.d_view(m).x3min, mb_size.d_view(m).x3max);
+      if ((x-q0)*(x-q0) + (y-q1)*(y-q1) + (z-q2)*(z-q2) >= rs2) return;
+      mx = fmax(mx, fabs(u(m, v, k, j, i) - uprev(m, v, k, j, i)));
+    }, Kokkos::Max<Real>(dmx));
+  Real sum[8] = {a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7]};
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, sum, 8, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, &dmx, 1, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  out[0] = sum[0]; out[1] = sum[1]; out[2] = sum[2]; out[3] = sum[3]; out[4] = dmx;
+  out[5] = sum[4]; out[6] = sum[5]; out[7] = sum[6]; out[8] = sum[7];
 }

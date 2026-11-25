@@ -45,6 +45,14 @@
 //!      both centred on the axis at mesh x2 = bh_zc, outside the domain. ADMToZ4c, then
 //!      ADMConstraints (Cartoon caches) on the exact ADM data:
 //!        err_H_*, err_M_* (max |M_i|), err_Z_* (sqrt max Z) in the interior (FD order)
+//!
+//! M2f (chat/0010, chat/0013) adds the FastFlow Cartoon point evaluation
+//! (z4c/fastflow_cartoon.hpp) on the same rotating field (g = g-tilde, K = A-tilde in
+//! u_adm): at physical points with rho = f dx1 (f = 0.03 ... 10) and several azimuths,
+//! the physical-frame g, K and d_k g against the analytic values and hyper-dual
+//! derivatives:
+//!        err_ffg, err_ffK           (interpolation order 2 ng)
+//!        err_ffdg_far  (rho >= dx1), err_ffdg_axis (rho < dx1)   (order 2 ng - 1)
 
 #include <array>
 #include <cmath>
@@ -64,6 +72,11 @@
 #include "coordinates/cartesian_ks.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_pos.hpp"
+#include "z4c/fastflow_cartoon.hpp"
+
+#if MPI_PARALLEL_ENABLED
+#include <mpi.h>
+#endif
 
 namespace {
 
@@ -543,7 +556,9 @@ void TestConstraints(MeshBlockPack *pmbp, ParameterInput *pin, const int which,
         v = Kokkos::fabs(con.H(m,ks,j,i));
       } else if (q == 1) {
         v = 0.0;
-        for (int a = 0; a < 3; ++a) v = Kokkos::fmax(v, Kokkos::fabs(con.M_d(m,a,ks,j,i)));
+        for (int a = 0; a < 3; ++a) {
+          v = Kokkos::fmax(v, Kokkos::fabs(con.M_d(m,a,ks,j,i)));
+        }
       } else {
         v = con.Z(m,ks,j,i);
       }
@@ -555,6 +570,98 @@ void TestConstraints(MeshBlockPack *pmbp, ParameterInput *pin, const int which,
     std::printf("CARTOON_RESULT err_H_%s %.17e all\n", tag, eh);
     std::printf("CARTOON_RESULT err_M_%s %.17e all\n", tag, em);
     std::printf("CARTOON_RESULT err_Z_%s %.17e all\n", tag, std::sqrt(ez));
+  }
+}
+
+// M2f: FastFlow Cartoon point evaluation against the rotating analytic field
+template <int NG>
+void TestFastFlowPoint(MeshBlockPack *pmbp) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ks = indcs.ks;
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = indcs;
+  auto u_adm = pmbp->padm->u_adm;
+  const int n1 = u_adm.extent_int(4), n2 = u_adm.extent_int(3);
+  using adm::ADM;
+  // u_adm on the whole plane (x1 ghosts included): g = g-tilde, K = A-tilde (mesh comps)
+  par_for("cartoon_test_m2f_fill", DevExeSpace(), 0, nmb-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int j, const int i) {
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z, yp);
+    Real a[Z4c::nz4c];
+    AnalyticState<Real>(x, 0.0, z, a);
+    for (int o = 0; o < 6; ++o) {
+      u_adm(m,ADM::I_ADM_GXX+o,ks,j,i) = a[Z4c::I_Z4C_GXX+o];
+      u_adm(m,ADM::I_ADM_KXX+o,ks,j,i) = a[Z4c::I_Z4C_AXX+o];
+    }
+    u_adm(m,ADM::I_ADM_PSI4,ks,j,i) = 1.0;
+  });
+  const int gind[6] = {ADM::I_ADM_GXX, ADM::I_ADM_GXY, ADM::I_ADM_GXZ,
+                       ADM::I_ADM_GYY, ADM::I_ADM_GYZ, ADM::I_ADM_GZZ};
+  const int Kind[6] = {ADM::I_ADM_KXX, ADM::I_ADM_KXY, ADM::I_ADM_KXZ,
+                       ADM::I_ADM_KYY, ADM::I_ADM_KYZ, ADM::I_ADM_KZZ};
+  const Real dx1 = size.h_view(0).dx1;
+  const Real x3plane = 0.5*(pmbp->pmesh->mesh_size.x3min + pmbp->pmesh->mesh_size.x3max);
+  const Real zlo = pmbp->pmesh->mesh_size.x2min, zhi = pmbp->pmesh->mesh_size.x2max;
+  // points: rho = f dx1, 8 azimuths, 3 heights
+  constexpr int NF = 9, NPHI = 8, NZ = 3;
+  const Real fr[NF] = {0.03, 0.1, 0.3, 0.6, 0.99, 1.0, 1.5, 3.0, 10.0};
+  Real e[4] = {0.0, 0.0, 0.0, 0.0};   // g, K, dg far, dg axis
+  for (int q = 0; q < 4; ++q) {
+    Kokkos::parallel_reduce("cartoon_test_m2f_pt",
+      Kokkos::RangePolicy<>(DevExeSpace(), 0, NF*NPHI*NZ),
+    KOKKOS_LAMBDA(const int n, Real &mx) {
+      const int f = n % NF, ip = (n/NF) % NPHI, iz = n/(NF*NPHI);
+      const Real rho = fr[f]*dx1;
+      const Real ph = 0.37 + 2.0*M_PI*ip/NPHI;
+      const Real X1 = rho*Kokkos::cos(ph), X3 = rho*Kokkos::sin(ph);
+      const Real X2 = zlo + (0.27 + 0.23*iz)*(zhi - zlo);
+      Real gp[6], Kp[6], dgp[18];
+      if (!z4c::CartoonFastFlowPoint<NG>(u_adm, gind, Kind, indcs_, size, nmb, x3plane,
+                                         X1, -X3, X2, gp, Kp, dgp)) return;
+      // analytic: AnalyticState takes (x1, x3, x2) and returns mesh components
+      const int mc[3] = {0, 2, 1};     // physical index -> mesh index
+      const Real sg[3] = {1.0, -1.0, 1.0};   // physical y = -mesh x3
+      const int pa[6] = {0, 0, 0, 1, 1, 2}, pb[6] = {0, 1, 2, 1, 2, 2};
+      Real v = 0.0;
+      if (q < 2) {
+        Real a[Z4c::nz4c];
+        AnalyticState<Real>(X1, X3, X2, a);
+        const int base = (q == 0) ? Z4c::I_Z4C_GXX : Z4c::I_Z4C_AXX;
+        for (int c = 0; c < 6; ++c) {
+          const int i = pa[c], j = pb[c];
+          const Real an = sg[i]*sg[j]*a[base + SymOff(mc[i], mc[j])];
+          v = Kokkos::fmax(v, Kokkos::fabs(((q == 0) ? gp[c] : Kp[c]) - an));
+        }
+      } else {
+        if ((q == 2) != (fr[f] >= 1.0)) return;
+        for (int k = 0; k < 3; ++k) {     // physical derivative direction
+          // d/d(phys k) = sg[k] d/d(mesh mc[k]); AnalyticState args (x1, x3, x2)
+          HD A1(X1), A3(X3), A2(X2);
+          if (mc[k] == 0) A1 = HD(X1, 1, 0, 0);
+          if (mc[k] == 1) A2 = HD(X2, 1, 0, 0);
+          if (mc[k] == 2) A3 = HD(X3, 1, 0, 0);
+          HD a[Z4c::nz4c];
+          AnalyticState<HD>(A1, A3, A2, a);
+          for (int c = 0; c < 6; ++c) {
+            const int i = pa[c], j = pb[c];
+            const Real an = sg[k]*sg[i]*sg[j]*a[Z4c::I_Z4C_GXX + SymOff(mc[i], mc[j])].a;
+            v = Kokkos::fmax(v, Kokkos::fabs(dgp[6*k + c] - an));
+          }
+        }
+      }
+      mx = Kokkos::fmax(mx, v);
+    }, Kokkos::Max<Real>(e[q]));
+  }
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, e, 4, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_RESULT err_ffg %.17e all\n", e[0]);
+    std::printf("CARTOON_RESULT err_ffK %.17e all\n", e[1]);
+    std::printf("CARTOON_RESULT err_ffdg_far %.17e all\n", e[2]);
+    std::printf("CARTOON_RESULT err_ffdg_axis %.17e all\n", e[3]);
   }
 }
 
@@ -651,8 +758,8 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
     mx = Kokkos::fmax(mx, Kokkos::fabs(uc(m,n,kc,j,i) - udirect(m,n,kc,j,i)));
   }, Kokkos::Max<Real>(exc));
 
-  // R6: Z4cCartesianPos returns mesh order (R, z, 0) at the arithmetic midpoints (never the
-  // centroids); D-017
+  // R6: Z4cCartesianPos returns mesh order (R, z, 0) at the arithmetic midpoints (never
+  // the centroids); D-017
   Real epos = 0.0;
   Kokkos::parallel_reduce("cartoon_test_pos",
     Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
@@ -730,6 +837,15 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
     eadm = TestADMToZ4c(pmbp, pin);
     TestConstraints(pmbp, pin, 0, "schw");
     TestConstraints(pmbp, pin, 1, "kerr");
+  }
+
+  // 7. M2f: FastFlow Cartoon point evaluation (near-axis included)
+  if (pin->GetOrAddBoolean("problem", "m2f", true)) {
+    switch (ng) {
+      case 2: TestFastFlowPoint<2>(pmbp); break;
+      case 3: TestFastFlowPoint<3>(pmbp); break;
+      case 4: TestFastFlowPoint<4>(pmbp); break;
+    }
   }
 
   // gates: the exact checks

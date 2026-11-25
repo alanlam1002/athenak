@@ -46,3 +46,11 @@ def test_cartoon_m2a_sign_control_gpu():
         cc.check_m2a_sign_control(4)
     finally:
         testutils.cleanup()
+
+
+@pytest.mark.parametrize("ng", [2, 3, 4])
+def test_cartoon_m2f_point_eval_gpu(ng):
+    try:
+        cc.check_m2f_point(ng)
+    finally:
+        testutils.cleanup()

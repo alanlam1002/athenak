@@ -33,6 +33,7 @@
 #include "z4c.hpp"
 #include "coordinates/cell_locations.hpp"
 #include "utils/inline_interpolator.hpp"
+#include "z4c/fastflow_cartoon.hpp"
 
 //----------------------------------------------------------------------------------------
 //! \fn FastFlow::FastFlow(MeshBlockPack *pmbp, ParameterInput * pin, int n)
@@ -153,6 +154,27 @@ FastFlow::FastFlow(MeshBlockPack *pmbp, ParameterInput *pin, int n):
     exit(EXIT_FAILURE);
   }
 
+  // 2D Cartoon (M2f, chat/0010): same mode rule as Z4c::CartoonSetup (D-014). The center
+  // keys stay in mesh coordinates and must lie on the symmetry axis, mesh x2.
+  cartoon_ = (pmbp->pmesh->coord_general == CoordinateGeneral::cylindrical_axisym);
+  if (cartoon_) {
+    bitant_ = false;
+    if (center[0] != 0.0 || center[2] != 0.0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "fastflow under 2D Cartoon: the center must lie on the "
+                << "symmetry axis (mesh x2): center_x_" << n_str << " = center_z_"
+                << n_str << " = 0 (D-017)" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+    if (use_puncture >= 0 || use_puncture_massweighted_center ||
+        wait_until_punc_are_close) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "fastflow under 2D Cartoon: puncture-tracker centers "
+                << "are not supported yet (M2e); use a fixed center" << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
   // Points for spherical harmonics l >= 1.
   lmpoints = lmax1 * lmax1;
 
@@ -258,6 +280,10 @@ FastFlow::FastFlow(MeshBlockPack *pmbp, ParameterInput *pin, int n):
     if (new_file) {
       fprintf(pofile_summary, "# 1:iter 2:time 3:mass 4:Sx 5:Sy 6:Sz 7:S 8:area "
                                "9:hrms 10:hmean 11:meanradius 12:minradius\n");
+      if (cartoon_) {
+        fprintf(pofile_summary, "# 2D Cartoon: physical (x, y, z) = mesh (x1, -x3, x2); "
+                                "symmetry axis = mesh x2; Sx Sy Sz are physical\n");
+      }
       fflush(pofile_summary);
     }
 
@@ -581,6 +607,15 @@ void FastFlow::MetricInterp() {
   // pointer, and dereference it on the device.
   const bool bitant = bitant_;
 
+  // 2D Cartoon (M2f): the surface lives in the physical frame (x, y, z) =
+  // mesh (x1, -x3, x2) (D-017); its center is on the axis, physical (0, 0, center x2).
+  const bool cartoon = cartoon_;
+  Real pc[3] = {xc, yc, zc};
+  if (cartoon) { pc[0] = xc; pc[1] = -zc; pc[2] = yc; }
+  const Real pcx = pc[0], pcy = pc[1], pcz = pc[2];
+  // x3 coordinate of the plane, inside every MeshBlock's (single-cell) x3 range
+  const Real x3plane = 0.5*(pmbp->pmesh->mesh_size.x3min + pmbp->pmesh->mesh_size.x3max);
+
   par_for("FastFlow_interpolate", DevExeSpace(), 0, nangles-1,
   KOKKOS_LAMBDA(int p) {
     Real theta = polar_pos.d_view(p,0);
@@ -588,9 +623,25 @@ void FastFlow::MetricInterp() {
 
     // Global coordinates of the surface.
     Real pos[3];
-    Real x = xc + rr_(p) * Kokkos::sin(theta) * Kokkos::cos(phi);
-    Real y = yc + rr_(p) * Kokkos::sin(theta) * Kokkos::sin(phi);
-    Real z = zc + rr_(p) * Kokkos::cos(theta);
+    Real x = pcx + rr_(p) * Kokkos::sin(theta) * Kokkos::cos(phi);
+    Real y = pcy + rr_(p) * Kokkos::sin(theta) * Kokkos::sin(phi);
+    Real z = pcz + rr_(p) * Kokkos::cos(theta);
+
+    if (cartoon) {
+      // 2D Cartoon: map to the plane, interpolate, rotate, physical components
+      Real gp[NSPMETRIC], Kp[NEXCURV], dgp[NDRVSSPMETRIC];
+      const bool have = z4c::CartoonFastFlowPoint<NGHOST>(u_adm, gind, Kind, indcs, size,
+                                                          nmb, x3plane, x, y, z, gp, Kp,
+                                                          dgp);
+      havepoint_.d_view(p) = have;
+      if (have) {
+        for (int a = 0; a < NSPMETRIC; ++a) gi_(a,p) = gp[a];
+        for (int b = 0; b < NEXCURV; ++b) Ki_(b,p) = Kp[b];
+        for (int c = 0; c < NDRVSSPMETRIC; ++c) dgi_(c,p) = dgp[c];
+      }
+      return;
+    }
+
     pos[0] = x;
     pos[1] = y;
 

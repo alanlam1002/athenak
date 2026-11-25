@@ -1,0 +1,75 @@
+<comment>
+problem   = FastFlow AH finder on a spinning puncture, 3D Cartesian reference for M2f
+# Same data and finder settings as z4c_cartoon_ahf.athinput on a 3D Cartesian mesh;
+# here physical = mesh, so the spin is along mesh +x3.
+
+<job>
+basename  = sahf3
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 128
+x1min     = -1.0
+x1max     = 1.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+nx2       = 128
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+nx3       = 128
+x3min     = -1.0
+x3max     = 1.0
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<meshblock>
+nx1       = 32
+nx2       = 32
+nx3       = 32
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = 0
+tlim       = 0.0
+
+<z4c>
+diss      = 0.0
+
+<fastflow>
+npunct = 0
+num_horizons = 1
+ntheta = 16             # nphi = 2*ntheta
+lmax = 4
+use_puncture_0 = -1
+initial_radius_0 = 0.55
+center_x_0 = 0.0
+center_y_0 = 0.0
+center_z_0 = 0.0
+flow_iterations_0 = 1000
+flow_alpha_beta_const_0 = 1.0
+hmean_tol_0 = 100.0
+mass_tol_0 = 1e-12
+start_time_0 = 0.0
+stop_time_0 = 100.0
+
+<problem>
+pgen_name = z4c_spinning_puncture
+punc_ADM_mass = 1.0
+punc_chi = 0.5
+spin_coord = les        # les: Liu-Etienne-Shapiro (r_h = (M+sqrt(M^2-a^2))/4); qi: Brandt-Seidel
+punc_center_x1 = 0.0
+punc_center_x2 = 0.0
+punc_center_x3 = 0.0
+spin_lapse = w
+spin_shift = sacra
+ahf_at_init = true
+report_constraints = true  # prints SPIN_PUNC_CON max|H| max|M_i| for 1.5 r_h < r < report_rmax
+report_rmax = 0.8

@@ -96,6 +96,11 @@ class FastFlow {
   // with z < 0 then lie outside the physical domain and must be interpolated from their
   // z-reflected (in-domain) counterpart, with a parity sign applied per tensor component.
   bool bitant_;
+  // True under 2D Cartoon (coord = cylindrical_axisym, D-014). The mesh holds the plane
+  // mesh x3 = 0; FastFlow works in the physical frame (x, y, z) = mesh (x1, -x3, x2)
+  // (D-017), so its polar axis is mesh x2 and Sx, Sy, Sz are physical components.
+  // MetricInterp() maps each surface point to the plane and rotates the data (M2f).
+  bool cartoon_;
   int nhorizon; // Number of horizons
   std::string flow_function;
   int flowflag = 0;

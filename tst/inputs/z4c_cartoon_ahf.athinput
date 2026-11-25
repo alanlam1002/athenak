@@ -1,0 +1,76 @@
+<comment>
+problem   = FastFlow AH finder on a spinning puncture under 2D Cartoon (M2f, chat/0010)
+# Quasi-isotropic Kerr (z4c_spinning_puncture), spin along physical +z = mesh +x2. The
+# finder runs once on the initial data (problem/ahf_at_init, nlim = 0). With M = 1 the
+# horizon is the coordinate sphere r_h = (1 + sqrt(1 - chi^2))/4 (les) or sqrt(1 - chi^2)/2 (qi).
+
+<job>
+basename  = cahf
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym   # 2D Cartoon (D-014); physical (x, y, z) = mesh (x1, -x3, x2)
+nx1       = 64         # R >= 0
+x1min     = 0.0
+x1max     = 1.0
+ix1_bc    = reflect
+ox1_bc    = reflect
+nx2       = 128        # z
+x2min     = -1.0
+x2max     = 1.0
+ix2_bc    = periodic
+ox2_bc    = periodic
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 32
+nx2       = 32
+nx3       = 1
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = 0
+tlim       = 0.0
+
+<z4c>
+diss      = 0.0
+
+<fastflow>
+npunct = 0
+num_horizons = 1
+ntheta = 16             # nphi = 2*ntheta
+lmax = 4
+use_puncture_0 = -1
+initial_radius_0 = 0.55
+center_x_0 = 0.0        # mesh coordinates; under Cartoon the center is on mesh x2
+center_y_0 = 0.0
+center_z_0 = 0.0
+flow_iterations_0 = 1000
+flow_alpha_beta_const_0 = 1.0
+hmean_tol_0 = 100.0
+mass_tol_0 = 1e-12
+start_time_0 = 0.0
+stop_time_0 = 100.0
+
+<problem>
+pgen_name = z4c_spinning_puncture
+punc_ADM_mass = 1.0
+punc_chi = 0.5
+spin_coord = les        # les: Liu-Etienne-Shapiro (r_h = (M+sqrt(M^2-a^2))/4); qi: Brandt-Seidel
+punc_center_x1 = 0.0
+punc_center_x2 = 0.0
+punc_center_x3 = 0.0
+spin_lapse = w
+spin_shift = sacra
+ahf_at_init = true
+report_constraints = true  # prints SPIN_PUNC_CON max|H| max|M_i| for 1.5 r_h < r < report_rmax
+report_rmax = 0.8

@@ -57,6 +57,7 @@ ntime      = 0
 tol_exact  = 1.0e-12
 # M2a: ADMToZ4c + ADM constraints (Schwarzschild, Kerr-Schild on the axis at x2 = bh_zc)
 m2a        = true
+m2f        = true   # M2f: FastFlow Cartoon point evaluation, near-axis included
 bh_spin    = 0.6
 bh_zc      = -4.0
 kerr_flip_k_odd = false  # negative control: inconsistent sign on K's odd-y components

@@ -264,3 +264,30 @@ def test_z4c_boosted_puncture_cylindrical_axisym_2d_fails():
         assert "not supported under 2D Cartoon" in out, out[-2000:]
     finally:
         testutils.cleanup()
+
+
+# M2f: under 2D Cartoon the apparent-horizon center and the spinning puncture must lie on
+# the symmetry axis (mesh x2); anything else is fatal (chat/0010 item 4, chat/0011).
+AHF_2D_INPUT = "inputs/z4c_cartoon_ahf.athinput"
+
+
+def test_fastflow_center_off_axis_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(AHF_2D_INPUT, ["fastflow/center_x_0=0.1", "mesh/nx1=16",
+                                           "mesh/nx2=32", "meshblock/nx1=16",
+                                           "meshblock/nx2=16"])
+        assert rc != 0
+        assert "the center must lie on the symmetry axis" in out, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+def test_spinning_puncture_off_axis_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(AHF_2D_INPUT, ["problem/punc_center_x1=0.2", "mesh/nx1=16",
+                                           "mesh/nx2=32", "meshblock/nx1=16",
+                                           "meshblock/nx2=16"])
+        assert rc != 0
+        assert "the puncture must lie on the symmetry axis" in out, out[-2000:]
+    finally:
+        testutils.cleanup()

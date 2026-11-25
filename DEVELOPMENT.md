@@ -411,6 +411,17 @@ do not re-derive these — they are settled decisions, not open questions.
      `|r|`), since `LeftEdgeX` extrapolates linearly and would otherwise give
      negative face areas/volumes in the ghost zone.
 
+## Known issues (pre-existing, outside the Cartoon scope)
+
+**FastFlow finds no horizon on the reduced boosted-puncture deck (2026-11-25).** A
+reduced copy of `tst/inputs/z4c_boosted.athinput` (64^3, 16^3 MeshBlocks, nlim 4,
+`<fastflow>` unchanged: `use_puncture_0 = 0`, ntheta 10, lmax 8, mass_tol 1e-4) writes
+NaN in every column of every `horizon_summary_0.txt` row, both before and after the
+`fix/ahf_bitant` FastFlow port (cartoon@67fbaf8c), on CPU and PVC. The flow does not
+converge from the tracker-based initial guess on that coarse grid (boost v = 0.866 along
+x1). Not investigated; the static-puncture decks `tst/inputs/z4c_ahf_bitant_*.athinput`
+and the M2f decks are the FastFlow references. Refs: notes repo aurora/0011, chat/0013.
+
 ## Incidents
 
 **2026-08-04, manual-verification `rm -rf` near-miss.** While manually inspecting

@@ -18,6 +18,9 @@ M2a (chat/0009), same runs with the production stencil:
     Cartoon-aware ADM constraints converge to 0 at the FD order; Z (Schwarzschild,
     conformally flat) stays at round-off;
   * negative control: K's odd-y components with the wrong sign must spoil M_i.
+M2f (chat/0010, chat/0013): the FastFlow Cartoon point evaluation at rho = 0.03 ... 10 dx1
+against the analytic field: g, K at order 2 ng, d_k g at 2 ng - 1, the near-axis
+(rho < dx1) derivative error no larger than twice the error away from the axis.
 Measured orders (N = 32 -> 64; CPU and PVC agree to round-off) are in the 1C report;
 the thresholds below sit 0.3-0.6 under them.
 """
@@ -112,3 +115,25 @@ def check_m2a_sign_control(ng):
     assert bad["err_M_kerr"] > 1.0e4 * good["err_M_kerr"], (good["err_M_kerr"],
                                                            bad["err_M_kerr"])
     assert math.log2(bad["err_M_kerr"] / bad2["err_M_kerr"]) < 0.5, (bad, bad2)
+
+
+M2F_KEYS = ("err_ffg", "err_ffK", "err_ffdg_far", "err_ffdg_axis")
+
+
+def check_m2f_point(ng):
+    """FastFlow Cartoon point evaluation (z4c/fastflow_cartoon.hpp, chat/0013): g, K at the
+    interpolation order 2 ng, d_k g at 2 ng - 1, and near the axis (rho < dx1, where the
+    out-of-plane derivative has a 1/rho) no worse than away from it."""
+    npt = 2 * ng + 1
+    rs = []
+    for n in NS:
+        rc, out, res = run(ng, npt, n)
+        assert rc == 0 and "CARTOON_TEST PASS" in out, out[-3000:]
+        rs.append(res)
+    o = {k: math.log2(rs[1][k] / rs[2][k]) for k in M2F_KEYS}
+    for k in ("err_ffg", "err_ffK"):
+        assert o[k] >= 2 * ng - 0.5, (k, o)
+    for k in ("err_ffdg_far", "err_ffdg_axis"):
+        assert o[k] >= 2 * ng - 1 - 0.5, (k, o)
+    # measured axis/far at N = 64: 0.91 (ng 2), 0.92 (3), 0.93 (4)
+    assert rs[2]["err_ffdg_axis"] <= 2.0 * rs[2]["err_ffdg_far"], rs[2]

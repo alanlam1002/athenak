@@ -41,6 +41,7 @@ DEST = {14: '14', 15: '15', 0: '0', 16: '16/17', 17: '16/17'}
 ap = argparse.ArgumentParser()
 ap.add_argument('out'); ap.add_argument('tp', type=float); ap.add_argument('runs', nargs='+')
 ap.add_argument('--every', type=int, default=1); ap.add_argument('--tol', type=float, default=0.0); ap.add_argument('--rstar', type=float, default=0.677)
+ap.add_argument('--nohole', type=float, default=None, help='RH: an isolated remnant (no puncture): psi = alpha = 1, no r_BH cut, remnant = r < RH about x_c')
 a = ap.parse_args()
 
 
@@ -138,11 +139,18 @@ def classify(c, rhoc):
     rho, X, dV = c['rho'], c['X'], c['dV']
     xb = xbh(c['d'], c['t']); c['xb'] = xb
     rbh = np.linalg.norm(X - xb, axis=1); c['rbh'] = rbh
-    psi = 1.0 + 0.5 / np.maximum(rbh, 1e-3)
+    if a.nohole is not None:
+        # --nohole RH (c306, the isolated remnant): no puncture, so psi = alpha = 1 (the remnant's own field is ~1e-5), no
+        # r_BH cut, and the remnant class a fixed sphere of radius RH about x_c (no Hill radius without a hole)
+        psi = np.ones_like(rbh)
+        c['alpha'] = np.ones_like(rbh)
+        out = np.ones(rbh.shape, bool)
+    else:
+        psi = 1.0 + 0.5 / np.maximum(rbh, 1e-3)
+        c['alpha'] = (1.0 - 0.5 / np.maximum(rbh, 1e-3)) / psi
+        out = rbh >= 3.0
     c['sg'] = psi**6
     c['W'] = np.sqrt(1.0 + psi**4 * (c['u']**2).sum(1))
-    c['alpha'] = (1.0 - 0.5 / np.maximum(rbh, 1e-3)) / psi
-    out = rbh >= 3.0
     m = c['sg'] * rho * c['W'] * dV
     c['m'] = m
     d1 = out & (rho >= 0.01 * rhoc)
@@ -150,11 +158,13 @@ def classify(c, rhoc):
         d1 = out & (rho >= 0.01 * np.where(out, rho, 0).max())
     xc = (m[d1, None] * X[d1]).sum(0) / m[d1].sum(); MH = m[d1].sum()
     r = np.linalg.norm(xc - xb); dc = np.linalg.norm(X - xc, axis=1)
-    for _ in range(40):
+    for _ in range(40 if a.nohole is None else 0):
         rH = r * (MH / 3.0)**(1 / 3); MHn = m[out & (dc < rH)].sum()
         if abs(MHn - MH) <= 1e-10 * max(MH, 1e-300):
             break
         MH = MHn
+    if a.nohole is not None:
+        rH = a.nohole; MH = m[out & (dc < rH)].sum()
     c.update(xc=xc, rH=rH, dc=dc, MH=MH)
     sw = rho >= 1e-6 * rhoc
     inh = dc < rH

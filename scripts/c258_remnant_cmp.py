@@ -106,8 +106,8 @@ def de_shares(rundir, t, xc, Vc, rH):
 
 
 def one(arg):
-    lab, fn, tp, rundir, rfix = arg
-    c = T.cells(fn, rcut=3.0)
+    lab, fn, tp, rundir, rfix, rcut = arg
+    c = T.cells(fn, rcut=rcut)
     Mb, xc, _, sel = RM.bound_mass(c)
     X = np.stack([c['x'], c['y'], c['z']])
     V = c['alpha'] * np.stack([c['vx'], c['vy'], c['vz']]) - np.stack([c['betax'], c['betay'], c['betaz']])
@@ -165,13 +165,14 @@ def main():
     ap.add_argument('runs', nargs='+')
     ap.add_argument('--nproc', type=int, default=2)
     ap.add_argument('--rfix', default=None, help='RH,RHSC: fixed radii about x_c instead of the Hill radii (no hole)')
+    ap.add_argument('--rcut', type=float, default=3.0, help='tde_dmde.cells r_BH cut; 0 for an isolated remnant (x_BH = 0 there)')
     a = ap.parse_args()
     rfix = tuple(float(v) for v in a.rfix.split(',')) if a.rfix else None
     args = []
     for s in a.runs:
         lab, rest = s.split('=', 1)
         fn, tp, rd = rest.split(':')
-        args.append((lab, fn, float(tp), rd, rfix))
+        args.append((lab, fn, float(tp), rd, rfix, a.rcut))
     with Pool(a.nproc) as p:
         rows = p.map(one, args)
     keys = []

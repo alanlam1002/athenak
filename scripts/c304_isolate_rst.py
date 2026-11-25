@@ -4,6 +4,9 @@ Copies SRC to DST (the copy is the only file written) and, in DST, sets every ce
 farther than --rcut from the remnant centroid x_c to the floor state at Eulerian rest:
   D = sqrt(gamma) rho_f, S_i = 0, tau = sqrt(gamma) P_f/(Gamma - 1) with rho_f = --rho_floor (default the deck's dfloor),
   P_f = rho_f T_f (T_f = the deck's tfloor), the passive scalars scaled with D (D Y kept at the cell's old Y; Y = 0 if D_old <= 0).
+With <job> restart_state (C-100) the file also holds the evolution state (restart_state_layout in the header): its primitives are
+restored on load INSTEAD of a C2P (driver.cpp Driver::Initialize, restart_state::ApplyStaged), so the cut cells' dyngr.w0 is set to
+the same floor state (rho_f, W v = 0, P_f, the old Y) and dyngr.temp to P_f/rho_f; flags, bcc0 and the CFC warm starts are kept.
 x_c = the mass centroid of rho > --frac rho_max (default 0.3: the frame controller's relative tracker, <cfc> frame_track_rel = 0.3 in L32T.par;
 1e-3 (tier 3's dense gas) takes in the debris and shifts x_c by 0.85 M at t_p + 1000). The ADM/CFC fields and everything else are untouched; the
 run's deck then turns the puncture off (<cfc> puncture_enabled = false) and the per-step CFC solve recomputes the metric.
@@ -32,6 +35,16 @@ P_f = rho_f*tfloor
 nmb, root = t['nmb'], t['root']
 x1min, x2min, x3min, x1max, x2max, x3max = t['size'][:6]
 nx, ng = 16, 4; no = nx + 2*ng; nmhd = 5 + a.nscal; ncc = no**3; bsz = (no + 1)*no*no*3
+nadm = 17
+lay = re.search(r'^restart_state_layout\s*=\s*(\S+)', par, re.M)
+goff = {}
+if lay and lay.group(1) != 'none':
+    o = 0
+    for g in lay.group(1).split(','):
+        nm, n = g.rsplit(':', 1); goff[nm] = (o, int(n)); o += int(n)
+st0 = nmhd*ncc + bsz + nadm*ncc            # the restart_state block in the record (restart.cpp data_size order)
+assert t['dsize']//8 == st0 + sum(v[1] for v in goff.values())*ncc, 'record layout mismatch'
+print('restart_state groups:', goff)
 ll, lev = t['ll'], t['ll'][:, 3]
 w = np.array([x1max - x1min, x2max - x2min, x3max - x3min]); lo = np.array([x1min, x2min, x3min])
 ic = np.arange(no) - ng + 0.5            # all cells incl. ghosts
@@ -92,6 +105,17 @@ for b in range(nmb):
     for n in (1, 2, 3): cons[n] = np.where(out, 0.0, cons[n])
     cons[4] = np.where(out, sg*P_f/(GAM - 1.0), cons[4])
     dst[b, :nmhd*ncc] = cons.reshape(-1)
+    if 'dyngr.w0' in goff:
+        o, n = goff['dyngr.w0']
+        w0 = np.array(rec[st0 + o*ncc:st0 + (o + n)*ncc]).reshape(n, no, no, no)
+        w0[0] = np.where(out, rho_f, w0[0])
+        for q in (1, 2, 3): w0[q] = np.where(out, 0.0, w0[q])
+        w0[4] = np.where(out, P_f, w0[4])            # scalars (w0[5:]) keep the old Y, as the cons above
+        dst[b, st0 + o*ncc:st0 + (o + n)*ncc] = w0.reshape(-1)
+    if 'dyngr.temp' in goff:
+        o, n = goff['dyngr.temp']
+        tm = np.array(rec[st0 + o*ncc:st0 + (o + 1)*ncc]).reshape(no, no, no)
+        dst[b, st0 + o*ncc:st0 + (o + 1)*ncc] = np.where(out, P_f/rho_f, tm).reshape(-1)
 if not a.dry:
     dst.flush(); del dst
 print(f'mass kept (r <= rcut) {Mkeep/MSTAR:.5f} M*, removed {Mcut/MSTAR:.5f} M*; blocks modified {ncut_blk} of {nmb}')

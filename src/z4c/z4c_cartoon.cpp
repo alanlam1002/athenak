@@ -17,7 +17,9 @@
 //! x1, x2, x3 (so "y" is mesh x3 = physical -y). The fill is a rotation about mesh x2
 //! and is symmetric in +-x3, so it is the same in either labelling.
 //!
-//! The fill (chat/0004 GPU design), run immediately before each consumer (D-007):
+//! The fill (chat/0004 GPU design), run immediately before each consumer (D-007). K1-K3
+//! act on any variable set given by a CartoonVarSet descriptor (M2a): the Z4c set
+//! (u0 -> u_cart, then K4) and the ADM set (u_adm -> u_adm_cart, no K4).
 //!   K1  copy the y = 0 plane from u0 (x1/x2 ghosts included)
 //!   K2  per (m, l = 1..ng, j, i) with x_i > 0: Lagrange-interpolate every variable at
 //!       rho along x1 (npt points, weights computed in registers), rotate, and write both
@@ -40,6 +42,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "mesh/mesh.hpp"
+#include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_algconstr.hpp"
 #include "z4c/z4c_pos.hpp"
@@ -50,6 +53,7 @@ namespace {
 
 // largest supported stencil: npt = 2*ng + 1 with ng <= 4
 constexpr int kMaxNpt = 9;
+constexpr int kMaxVar = Z4c::kCartoonMaxVar;
 
 // Physical label of each Z4c variable on the Cartoon mesh (D-017): physical (x, y, z) =
 // mesh (x1, -x3, x2), so a component with an odd number of x3 indices is minus the
@@ -65,17 +69,17 @@ const char *const kPhysName[Z4c::nz4c] = {
   "beta^x", "beta^z", "-beta^y",
 };
 
-// Rotate one interpolated state T (all nz4c variables at (rho, 0)) to (x, y) with
+// Rotate one interpolated state T (all vs.nvar variables at (rho, 0)) to (x, y) with
 // c = x/rho, s = y/rho:  V' = R V,  G' = R T R^T,  R = [[c, -s], [s, c]] in (x, y).
 // Written for the mesh component order: x = x1 (0), z = x2 (1), y = x3 (2).
 KOKKOS_INLINE_FUNCTION
-void CartoonRotate(const Real *T, const Real c, const Real s, Real *G) {
+void CartoonRotate(const Z4c::CartoonVarSet &vs, const Real *T, const Real c,
+                   const Real s, Real *G) {
   const Real c2 = c*c, s2 = s*s, cs = c*s;
-  for (int n = 0; n < Z4c::nz4c; ++n) G[n] = T[n];   // scalars, z components
-  // symmetric tensors g and A: offsets of the xx entry
-  const int off[2] = {Z4c::I_Z4C_GXX, Z4c::I_Z4C_AXX};
-  for (int t = 0; t < 2; ++t) {
-    const int o = off[t];
+  for (int n = 0; n < vs.nvar; ++n) G[n] = T[n];   // scalars, z components
+  // symmetric tensors: offsets of the xx entry
+  for (int t = 0; t < vs.nsym; ++t) {
+    const int o = vs.sym[t];
     // mesh order within a tensor: 0 xx, 1 "xy"=xz, 2 "xz"=xy, 3 "yy"=zz, 4 "yz"=zy,
     // 5 "zz"=yy (physical labels on the right)
     const Real Txx = T[o+0], Txz = T[o+1], Txy = T[o+2];
@@ -87,10 +91,9 @@ void CartoonRotate(const Real *T, const Real c, const Real s, Real *G) {
     G[o+4] = s*Txz + c*Tzy;                        // yz
     // G[o+3] = T zz unchanged
   }
-  // vectors Gamma-tilde^i and beta^i: (x, z, y) in mesh order
-  const int voff[2] = {Z4c::I_Z4C_GAMX, Z4c::I_Z4C_BETAX};
-  for (int t = 0; t < 2; ++t) {
-    const int o = voff[t];
+  // vectors: (x, z, y) in mesh order
+  for (int t = 0; t < vs.nvec; ++t) {
+    const int o = vs.vec[t];
     const Real Vx = T[o+0], Vy = T[o+2];
     G[o+0] = c*Vx - s*Vy;
     G[o+2] = s*Vx + c*Vy;
@@ -140,6 +143,57 @@ Z4c::CartoonParity Z4c::CartoonParityTable() {
   t.p[I_Z4C_BETAX] = -1;   // beta^x
   t.p[I_Z4C_BETAZ] = -1;   // beta^y
   return t;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Z4c::CartoonZ4cSet(), Z4c::CartoonADMSet()
+//! \brief the variable-set descriptors of the two Cartoon caches (M2a)
+
+Z4c::CartoonVarSet Z4c::CartoonZ4cSet() {
+  CartoonVarSet vs;
+  vs.nvar = nz4c;
+  vs.nsym = 2; vs.sym[0] = I_Z4C_GXX;  vs.sym[1] = I_Z4C_AXX;
+  vs.nvec = 2; vs.vec[0] = I_Z4C_GAMX; vs.vec[1] = I_Z4C_BETAX;
+  return vs;
+}
+
+Z4c::CartoonVarSet Z4c::CartoonADMSet() {
+  // with <z4c>, u_adm holds g_ij, K_ij and psi4 only (alpha, beta^i alias u0)
+  CartoonVarSet vs;
+  vs.nvar = adm::ADM::I_ADM_PSI4 + 1;
+  vs.nsym = 2; vs.sym[0] = adm::ADM::I_ADM_GXX; vs.sym[1] = adm::ADM::I_ADM_KXX;
+  vs.nvec = 0; vs.vec[0] = 0; vs.vec[1] = 0;
+  return vs;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn Z4c::CartoonParity Z4c::CartoonParityOf(const CartoonVarSet &vs)
+//! \brief D-002 parity derived from a descriptor: the pi rotation (x,y,z) -> (-x,-y,z)
+//! flips mesh components 0 (x) and 2 (y), so a component has the sign of the product of
+//! its index signs. Scalars are even.
+
+Z4c::CartoonParity Z4c::CartoonParityOf(const CartoonVarSet &vs) {
+  const int sv[3] = {-1, +1, -1};                        // mesh x, z, y
+  const int ss[6] = {+1, -1, +1, +1, -1, +1};            // 00 01 02 11 12 22
+  CartoonParity t;
+  for (int n = 0; n < kCartoonMaxVar; ++n) t.p[n] = 1;
+  for (int a = 0; a < vs.nsym; ++a)
+    for (int c = 0; c < 6; ++c) t.p[vs.sym[a] + c] = ss[c];
+  for (int a = 0; a < vs.nvec; ++a)
+    for (int c = 0; c < 3; ++c) t.p[vs.vec[a] + c] = sv[c];
+  return t;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Z4c::CartoonUnsupported(const std::string &what) const
+//! \brief fatal exit under 2D Cartoon for a problem generator that is not axisymmetric
+//! (or not ported yet); a no-op otherwise.
+
+void Z4c::CartoonUnsupported(const std::string &what) const {
+  if (!IsCartoon()) return;
+  std::cout << "### FATAL ERROR in " << __FILE__ << std::endl
+            << what << " is not supported under 2D Cartoon (D-017)" << std::endl;
+  std::exit(EXIT_FAILURE);
 }
 
 //----------------------------------------------------------------------------------------
@@ -218,6 +272,13 @@ void Z4c::CartoonSetup(ParameterInput *pin) {
   // every MeshBlock has uniform dx1 and dx2 by construction; the interpolation relies on
   // it. The Cartoon y spacing is dx1, set internally (D-014).
 
+  {
+    // the descriptor-derived parity must reproduce THE table (D-002)
+    const CartoonParity t = CartoonParityTable(), d = CartoonParityOf(CartoonZ4cSet());
+    for (int n = 0; n < nz4c; ++n) {
+      if (t.p[n] != d.p[n]) fatal("Cartoon parity table and Z4c descriptor disagree");
+    }
+  }
   if (global_variable::my_rank == 0) {
     CartoonParity t = CartoonParityTable();
     std::cout << "Z4c Cartoon axisym: ng = " << pm->mb_indcs.ng
@@ -286,34 +347,90 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Z4c::CartoonFill(pmbp, npt, par, direct_negx)
-//! \brief K1-K4. With direct_negx (test only) the x < 0 cells are filled by K2's direct
-//! interpolation at rho with c = x/rho < 0 instead of the K3 pi-copy.
+//! \brief K1-K4 on the Z4c set. With direct_negx (test only) the x < 0 cells are filled
+//! by K2's direct interpolation at rho with c = x/rho < 0 instead of the K3 pi-copy.
 
 void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
                       bool direct_negx) {
-  auto &indcs = pmbp->pmesh->mb_indcs;
-  const int ng = indcs.ng, ks = indcs.ks;
+  const int ng = pmbp->pmesh->mb_indcs.ng;
   if (u_cart.extent(0) != u0.extent(0) || u_cart.extent(3) != u0.extent(3) ||
       u_cart.extent(4) != u0.extent(4) ||
       u_cart.extent_int(2) != 1 + 2*ng) {
     CartoonAlloc();
   }
+  CartoonFillSet(pmbp, CartoonZ4cSet(), u0, u_cart, npt, par, direct_negx);
+
+  // K4: algebraic constraints on the ghost planes (D-007)
+  const int nmb = pmbp->nmb_thispack;
+  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
+  auto zc = z4c_cart;
+  par_for("cartoon_K4", DevExeSpace(), 0, nmb-1, 0, 2*ng, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i) {
+    if (kc == ng) return;
+    AlgConstrPoint(zc, m, kc, j, i);
+  });
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Z4c::CartoonFillADM(MeshBlockPack *pmbp)
+//! \brief u_adm (g_ij, K_ij, psi4) -> u_adm_cart with the production stencil (M2a).
+
+void Z4c::CartoonFillADM(MeshBlockPack *pmbp) {
+  const int ng = pmbp->pmesh->mb_indcs.ng;
+  const CartoonVarSet vs = CartoonADMSet();
+  auto &u_adm = pmbp->padm->u_adm;
+  if (u_adm.extent_int(1) != vs.nvar) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Cartoon ADM fill expects u_adm with " << vs.nvar << " variables (g, K, "
+              << "psi4), found " << u_adm.extent_int(1) << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  if (u_adm_cart.extent(0) != u_adm.extent(0) || u_adm_cart.extent(3) != u_adm.extent(3) ||
+      u_adm_cart.extent(4) != u_adm.extent(4) ||
+      u_adm_cart.extent_int(2) != 1 + 2*ng) {
+    Kokkos::realloc(u_adm_cart, u_adm.extent(0), vs.nvar, 1 + 2*ng, u_adm.extent(3),
+                    u_adm.extent(4));
+    adm_cart.psi4.InitWithShallowSlice (u_adm_cart, adm::ADM::I_ADM_PSI4);
+    adm_cart.g_dd.InitWithShallowSlice (u_adm_cart, adm::ADM::I_ADM_GXX,
+                                        adm::ADM::I_ADM_GZZ);
+    adm_cart.vK_dd.InitWithShallowSlice(u_adm_cart, adm::ADM::I_ADM_KXX,
+                                        adm::ADM::I_ADM_KZZ);
+  }
+  CartoonFillSet(pmbp, vs, u_adm, u_adm_cart, opt.cartoon_npt, CartoonParityOf(vs),
+                 false);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Z4c::CartoonFillSet(pmbp, vs, src, dst, npt, par, direct_negx)
+//! \brief K1-K3 for the variable set vs: src(m, n, ks, j, i) -> dst(m, n, kc, j, i).
+
+void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
+                         DvceArray5D<Real> src, DvceArray5D<Real> dst, int npt,
+                         const CartoonParity &par, bool direct_negx) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ng = indcs.ng, ks = indcs.ks;
   if (npt < 2 || npt > kMaxNpt) {
     std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
               << "Cartoon npt = " << npt << " outside [2, " << kMaxNpt << "]"
               << std::endl;
     std::exit(EXIT_FAILURE);
   }
+  if (vs.nvar > kMaxVar) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Cartoon variable set larger than " << kMaxVar << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
   const int nmb = pmbp->nmb_thispack;
-  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
-  auto u0_ = u0;
-  auto uc = u_cart;
+  const int n1 = src.extent_int(4), n2 = src.extent_int(3);
+  const int nvar = vs.nvar;
+  auto u0_ = src;
+  auto uc = dst;
   auto &size = pmbp->pmb->mb_size;
   const RegionIndcs indcs_ = indcs;
   const CartoonMode mode = opt.cartoon;
 
   // K1: the y = 0 plane
-  par_for("cartoon_K1", DevExeSpace(), 0, nmb-1, 0, nz4c-1, 0, n2-1, 0, n1-1,
+  par_for("cartoon_K1", DevExeSpace(), 0, nmb-1, 0, nvar-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(const int m, const int n, const int j, const int i) {
     uc(m,n,ng,j,i) = u0_(m,n,ks,j,i);
   });
@@ -332,17 +449,17 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
     const int i0 = StencilStart(rho, x0, dx, npt, n1, f, i0raw);
     Real w[kMaxNpt];
     LagrangeWeights(npt, f - i0, w);
-    Real T[nz4c], G[nz4c];
-    for (int n = 0; n < nz4c; ++n) {
+    Real T[kMaxVar], G[kMaxVar];
+    for (int n = 0; n < nvar; ++n) {
       Real v = 0.0;
       for (int q = 0; q < npt; ++q) v += w[q]*u0_(m,n,ks,j,i0+q);
       T[n] = v;
     }
     const Real c = x/rho, s = y/rho;
-    CartoonRotate(T, c, s, G);
-    for (int n = 0; n < nz4c; ++n) uc(m,n,ng+l,j,i) = G[n];
-    CartoonRotate(T, c, -s, G);
-    for (int n = 0; n < nz4c; ++n) uc(m,n,ng-l,j,i) = G[n];
+    CartoonRotate(vs, T, c, s, G);
+    for (int n = 0; n < nvar; ++n) uc(m,n,ng+l,j,i) = G[n];
+    CartoonRotate(vs, T, c, -s, G);
+    for (int n = 0; n < nvar; ++n) uc(m,n,ng-l,j,i) = G[n];
   });
 
   // K3: x < 0 cells of planes l != 0 by the pi rotation (x,y) -> (-x,-y) (D-008)
@@ -357,19 +474,11 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
       // cell whose midpoint is at -x
       Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, x2p, x3p);
       const int im = static_cast<int>(Kokkos::round((-x - x0)/dx));
-      for (int n = 0; n < nz4c; ++n) {
+      for (int n = 0; n < nvar; ++n) {
         uc(m,n,kc,j,i) = par.p[n]*uc(m,n,2*ng-kc,j,im);
       }
     });
   }
-
-  // K4: algebraic constraints on the ghost planes (D-007)
-  auto zc = z4c_cart;
-  par_for("cartoon_K4", DevExeSpace(), 0, nmb-1, 0, 2*ng, 0, n2-1, 0, n1-1,
-  KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i) {
-    if (kc == ng) return;
-    AlgConstrPoint(zc, m, kc, j, i);
-  });
 }
 
 //----------------------------------------------------------------------------------------

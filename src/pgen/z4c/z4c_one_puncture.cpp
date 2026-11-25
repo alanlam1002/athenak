@@ -45,6 +45,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     exit(EXIT_FAILURE);
   }
 
+  // 2D Cartoon (D-017): the puncture must sit on the symmetry axis, mesh x2
+  if (pmbp->pz4c->IsCartoon() &&
+      (pin->GetOrAddReal("problem", "punc_center_x1", 0.) != 0.0 ||
+       pin->GetOrAddReal("problem", "punc_center_x3", 0.) != 0.0)) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "z4c_one_puncture under 2D Cartoon needs punc_center_x1 = "
+              << "punc_center_x3 = 0 (the puncture on the mesh x2 axis, D-017)"
+              << std::endl;
+    exit(EXIT_FAILURE);
+  }
   ADMOnePuncture(pmbp, pin);
   pmbp->pz4c->GaugePreCollapsedLapse(pmbp, pin);
   switch (indcs.ng) {
@@ -83,7 +93,10 @@ void ADMOnePuncture(MeshBlockPack *pmbp, ParameterInput *pin) {
   // For GLOOPS
   int isg = is-indcs.ng; int ieg = ie+indcs.ng;
   int jsg = js-indcs.ng; int jeg = je+indcs.ng;
-  int ksg = ks-indcs.ng; int keg = ke+indcs.ng;
+  // A direction with one cell (nx = 1, e.g. 2D Cartoon) has no ghosts: u_adm has
+  // extent 1 there.
+  int ng3 = (indcs.nx3 > 1) ? indcs.ng : 0;
+  int ksg = ks-ng3; int keg = ke+ng3;
   int nmb = pmbp->nmb_thispack;
   Real ADM_mass = pin->GetOrAddReal("problem", "punc_ADM_mass", 1.);
   Real center_x1 = pin->GetOrAddReal("problem", "punc_center_x1", 0.);

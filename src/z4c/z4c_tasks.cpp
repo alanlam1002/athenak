@@ -241,9 +241,7 @@ TaskStatus Z4c::UpdateExcisionMasks(Driver *pdrive, int stage) {
 
 TaskStatus Z4c::ADMConstraints_(Driver *pdrive, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
-  // The constraints take y-derivatives of the ADM arrays, which a Cartoon mesh does not
-  // have yet (Cartoon-aware constraints come in M2). Skip rather than read out of bounds.
-  if (IsCartoon()) return TaskStatus::complete;
+  // 2D Cartoon: ADMConstraints reads the y-derivatives from the Cartoon caches (M2a).
   if (stage == pdrive->nexp_stages) {
     switch (indcs.ng) {
       case 2: ADMConstraints<2>(pmy_pack);

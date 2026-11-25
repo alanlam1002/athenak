@@ -252,3 +252,15 @@ def test_z4c_linear_wave_cylindrical_axisym_2d_fails():
         assert "not supported under 2D Cartoon" in out, out[-2000:]
     finally:
         testutils.cleanup()
+
+
+# M2a: ADMToZ4c runs under Cartoon, so every generator that is not axisymmetric carries
+# its own guard. z4c_boosted_puncture (boost along mesh x1) is the one in the default
+# build; the -DPROBLEM generators (kerr_schild, z4c_gauge_wave, ...) use the same call.
+def test_z4c_boosted_puncture_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(Z4C_2D_INPUT, ["problem/pgen_name=z4c_boosted_puncture"])
+        assert rc != 0
+        assert "not supported under 2D Cartoon" in out, out[-2000:]
+    finally:
+        testutils.cleanup()

@@ -50,6 +50,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     exit(EXIT_FAILURE);
   }
 
+  pmbp->pz4c->CartoonUnsupported("z4c_stability (random noise, not axisymmetric)");
   // Prepare Initial Data
 
   // capture variables for the kernel

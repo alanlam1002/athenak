@@ -68,10 +68,24 @@ class Z4c {
   // The mode follows the coord (D-014): cartesian -> none, cylindrical_axisym (2D) ->
   // axisym, spherical_polar (1D) -> spherical (M4; fatal until then).
   enum class CartoonMode {none, axisym, spherical};
+  // A Cartoon fill acts on a variable set described by where its symmetric tensors
+  // (6 components, mesh order xx, xz, xy, zz, zy, yy in physical labels) and vectors
+  // (3 components, mesh order x, z, y) start; every other variable is a scalar (M2a).
+  static constexpr int kCartoonMaxVar = nz4c;
+  struct CartoonVarSet {
+    int nvar;
+    int nsym, sym[2];
+    int nvec, vec[2];
+  };
+  static CartoonVarSet CartoonZ4cSet();  // u0 / u_cart
+  static CartoonVarSet CartoonADMSet();  // u_adm (g, K, psi4) / u_adm_cart
   struct CartoonParity {
-    int p[nz4c];
+    int p[kCartoonMaxVar];
   };
   static CartoonParity CartoonParityTable();
+  // the D-002 parity of any set, derived from its descriptor (the pi rotation flips the
+  // mesh x1 and x3 components); equals CartoonParityTable() for the Z4c set
+  static CartoonParity CartoonParityOf(const CartoonVarSet &vs);
   // Indices of Constraint variables
   enum {
     I_CON_C,
@@ -107,6 +121,9 @@ class Z4c {
   // plane. A cache refilled from u0 before each consumer; never communicated, restarted,
   // load balanced or prolongated. Only allocated when cartoon != none.
   DvceArray5D<Real> u_cart;
+  // The same for the ADM set (g_ij, K_ij, psi4 of u_adm), used by the ADM constraints
+  // (M2a). Allocated on first use.
+  DvceArray5D<Real> u_adm_cart;
 
   struct ADM_vars {
     AthenaTensor<Real, TensorSymm::NONE, 3, 0> psi4;
@@ -114,6 +131,7 @@ class Z4c {
     AthenaTensor<Real, TensorSymm::SYM2, 3, 2> vK_dd;
   };
   ADM_vars adm;
+  ADM_vars adm_cart;  // accessors sliced from u_adm_cart (valid only with Cartoon)
 
   struct ADMhost_vars {
     AthenaHostTensor<Real, TensorSymm::NONE, 3, 0> psi4;
@@ -295,6 +313,14 @@ class Z4c {
   void CartoonFill(MeshBlockPack *pmbp);
   void CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
                    bool direct_negx);
+  // K1-K3 on any variable set: src(m, n, ks, j, i) -> dst(m, n, 1+2ng, j, i), n < nvar
+  void CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
+                      DvceArray5D<Real> src, DvceArray5D<Real> dst, int npt,
+                      const CartoonParity &par, bool direct_negx);
+  // u_adm -> u_adm_cart (no algebraic constraints: the ADM set has none)
+  void CartoonFillADM(MeshBlockPack *pmbp);
+  // Fatal exit for a problem generator that cannot run under 2D Cartoon (no-op in 3D)
+  void CartoonUnsupported(const std::string &what) const;
   // D-002 axis boundary on an arbitrary (fine) array: fill i < is from i >= is with the
   // parity signs, on MeshBlocks whose inner x1 face is the mesh boundary.
   void CartoonAxisBC(MeshBlockPack *pmbp, DvceArray5D<Real> u,

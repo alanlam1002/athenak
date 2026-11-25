@@ -38,6 +38,10 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &indcs         = pmy_mesh_->mb_indcs;
+  if (pmbp->pz4c != nullptr) {
+    // M2e uses a Brill-Lindquist extension of z4c_one_puncture instead (chat/0011)
+    pmbp->pz4c->CartoonUnsupported("two_punctures");
+  }
 
   TwoPunctures_params_set_default();
   std::string set_name = "problem";

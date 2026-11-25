@@ -48,6 +48,9 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     exit(EXIT_FAILURE);
   }
 
+  // the spin is about the third Cartesian argument; the D-017 mapping is not done
+  // (chat/0011: low priority)
+  pmbp->pz4c->CartoonUnsupported("kerr_schild (spin about mesh x3)");
   KerrSchild(pmbp, pin);
   switch (indcs.ng) {
     case 2: pmbp->pz4c->ADMToZ4c<2>(pmbp, pin);

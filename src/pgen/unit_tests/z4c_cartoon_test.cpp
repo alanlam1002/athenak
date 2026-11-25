@@ -30,7 +30,21 @@
 //!
 //! Frame (D-017): physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2.
 //! Every field is built and checked in mesh components; the analytic state is
-//! evaluated on the plane at mesh (x1, x2) = (R, z).
+//! evaluated on the plane at mesh (x1, x2) = (R, z). AnalyticState takes the MESH
+//! coordinates (x1, x3, x2) as its (x, y, z) arguments and returns mesh components: a
+//! field in mesh coordinates, so its handedness does not matter to the fill.
+//!
+//! M2a (chat/0009) adds, after the fill checks:
+//!   A. ADMToZ4c on rotating axisymmetric ADM data built from AnalyticState
+//!      (g = psi^4 g-tilde, K = psi^4 (A-tilde + g-tilde Khat/3)):
+//!        err_adm2z4c  chi, g-tilde, Khat, A-tilde on the whole plane    (exact, gate)
+//!        err_gam      Gamma-tilde^i = -d_j g-tilde^ij in the interior   (FD order)
+//!   B. Schwarzschild, isotropic (psi = 1 + M/2r, K = 0), and
+//!   C. Kerr in Kerr-Schild coordinates, spin bh_spin along physical +z = mesh +x2,
+//!      mapped to mesh components with D-017 (odd number of y indices -> minus sign);
+//!      both centred on the axis at mesh x2 = bh_zc, outside the domain. ADMToZ4c, then
+//!      ADMConstraints (Cartoon caches) on the exact ADM data:
+//!        err_H_*, err_M_* (max |M_i|), err_Z_* (sqrt max Z) in the interior (FD order)
 
 #include <array>
 #include <cmath>
@@ -46,6 +60,8 @@
 #include "mesh/mesh.hpp"
 #include "pgen/pgen.hpp"
 #include "utils/finite_diff.hpp"
+#include "coordinates/adm.hpp"
+#include "coordinates/cartesian_ks.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/z4c_pos.hpp"
 
@@ -296,6 +312,252 @@ void RunDerivs(MeshBlockPack *pmbp, DvceArray5D<Real> uc) {
   Report("err_dyz", DerivErrors<NG>(pmbp, uc, 3));
 }
 
+//----------------------------------------------------------------------------------------
+// M2a helpers
+
+// Inverse conformal metric g-tilde^ab of AnalyticState (same frame and the same metric
+// construction), in mesh components.
+template <typename T>
+KOKKOS_INLINE_FUNCTION
+void AnalyticConfInv(const T &x, const T &y, const T &z, T gm[3][3]) {
+  const T rho2 = x*x + y*y;
+  const T e1 = Exp(-(rho2 + z*z)*T(1.0/0.36));
+  const T e2 = Exp(-(rho2 + (z - T(0.3))*(z - T(0.3)))*T(1.0/0.49));
+  const T R[3] = {x, y, T(0.0)};
+  const T P[3] = {-y, x, T(0.0)};
+  const T Z[3] = {T(0.0), T(0.0), T(1.0)};
+  const T a0 = T(1.0), a1 = T(0.2)*e1, a2 = T(0.1)*e2, a3 = T(0.15)*e1,
+          a4 = T(0.12)*e2, a5 = T(0.1)*e1*z, a6 = T(0.08)*e2;
+  T M[3][3];
+  for (int p = 0; p < 3; ++p)
+  for (int q = 0; q < 3; ++q) {
+    const T d = T(p == q ? 1.0 : 0.0);
+    const T RR = R[p]*R[q], PP = P[p]*P[q], ZZ = Z[p]*Z[q];
+    const T RP = R[p]*P[q] + P[p]*R[q], RZ = R[p]*Z[q] + Z[p]*R[q];
+    const T PZ = P[p]*Z[q] + Z[p]*P[q];
+    M[p][q] = a0*d + a1*RR + a2*PP + a3*ZZ + a4*RP + a5*RZ + a6*PZ;
+  }
+  const T detM = M[0][0]*(M[1][1]*M[2][2] - M[1][2]*M[2][1])
+               - M[0][1]*(M[1][0]*M[2][2] - M[1][2]*M[2][0])
+               + M[0][2]*(M[1][0]*M[2][1] - M[1][1]*M[2][0]);
+  // g-tilde = M det(M)^(-1/3)  =>  g-tilde^-1 = det(M)^(1/3) M^-1
+  const T s = Cbrt(detM)/detM;
+  T gi[3][3];
+  gi[0][0] = s*(M[1][1]*M[2][2] - M[1][2]*M[2][1]);
+  gi[0][1] = s*(M[0][2]*M[2][1] - M[0][1]*M[2][2]);
+  gi[0][2] = s*(M[0][1]*M[1][2] - M[0][2]*M[1][1]);
+  gi[1][1] = s*(M[0][0]*M[2][2] - M[0][2]*M[2][0]);
+  gi[1][2] = s*(M[0][2]*M[1][0] - M[0][0]*M[1][2]);
+  gi[2][2] = s*(M[0][0]*M[1][1] - M[0][1]*M[1][0]);
+  gi[1][0] = gi[0][1]; gi[2][0] = gi[0][2]; gi[2][1] = gi[1][2];
+  for (int p = 0; p < 3; ++p)
+  for (int q = 0; q < 3; ++q) gm[MeshComp(p)][MeshComp(q)] = gi[p][q];
+}
+
+// Exact vacuum ADM data at mesh (x1, x2, x3) in mesh components (D-017): which = 0
+// Schwarzschild isotropic, 1 Kerr-Schild (M = 1, spin a along physical +z = mesh +x2).
+// Black hole on the axis at mesh x2 = zc. Out: g[6], K[6] (mesh order 00 01 02 11 12 22),
+// psi4. flip_k (negative control): K's odd-y components keep the physical sign, an
+// inconsistent D-017 mapping that is no longer a solution.
+KOKKOS_INLINE_FUNCTION
+void ExactVacuum(const int which, const Real a, const Real zc, const Real x1,
+                 const Real x2, const Real x3, const bool flip_k, Real *g, Real *K,
+                 Real &psi4) {
+  const Real x = x1, y = -x3, z = x2 - zc;   // physical, centred
+  if (which == 0) {
+    const Real r = Kokkos::sqrt(x*x + y*y + z*z);
+    const Real psi = 1.0 + 0.5/r;
+    psi4 = psi*psi*psi*psi;
+    for (int n = 0; n < 6; ++n) { g[n] = 0.0; K[n] = 0.0; }
+    g[0] = psi4; g[3] = psi4; g[5] = psi4;
+    return;
+  }
+  Real alp, bx, by, bz, gxx, gxy, gxz, gyy, gyz, gzz, kxx, kxy, kxz, kyy, kyz, kzz;
+  ComputeADMDecomposition(x, y, z, false, a, &alp, &bx, &by, &bz, &psi4,
+                          &gxx, &gxy, &gxz, &gyy, &gyz, &gzz,
+                          &kxx, &kxy, &kxz, &kyy, &kyz, &kzz);
+  // mesh (x1, x2, x3) = physical (x, z, -y): a component gets one minus sign per y index
+  g[0] = gxx; g[1] = gxz; g[2] = -gxy; g[3] = gzz; g[4] = -gyz; g[5] = gyy;
+  K[0] = kxx; K[1] = kxz; K[2] = -kxy; K[3] = kzz; K[4] = -kyz; K[5] = kyy;
+  if (flip_k) { K[2] = -K[2]; K[4] = -K[4]; }
+}
+
+// u0 = 0 except alpha = 1 (alpha, beta alias u0 under <z4c>), so Theta = 0 and the
+// Gamma ghosts are finite
+void ResetZ4c(MeshBlockPack *pmbp) {
+  auto u0 = pmbp->pz4c->u0;
+  Kokkos::deep_copy(u0, 0.0);
+  auto alpha = Kokkos::subview(u0, Kokkos::ALL, static_cast<int>(Z4c::I_Z4C_ALPHA),
+                               Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
+  Kokkos::deep_copy(alpha, 1.0);
+}
+
+template <int NG>
+void RunADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
+  pmbp->pz4c->ADMToZ4c<NG>(pmbp, pin);
+}
+template <int NG>
+void RunADMConstraints(MeshBlockPack *pmbp) {
+  pmbp->pz4c->ADMConstraints<NG>(pmbp);
+}
+void CallADMToZ4c(int ng, MeshBlockPack *pmbp, ParameterInput *pin) {
+  switch (ng) {
+    case 2: RunADMToZ4c<2>(pmbp, pin); break;
+    case 3: RunADMToZ4c<3>(pmbp, pin); break;
+    case 4: RunADMToZ4c<4>(pmbp, pin); break;
+  }
+}
+void CallADMConstraints(int ng, MeshBlockPack *pmbp) {
+  switch (ng) {
+    case 2: RunADMConstraints<2>(pmbp); break;
+    case 3: RunADMConstraints<3>(pmbp); break;
+    case 4: RunADMConstraints<4>(pmbp); break;
+  }
+}
+
+// A: rotating analytic data through ADMToZ4c. Returns err_adm2z4c (exact); reports
+// err_adm2z4c and err_gam.
+Real TestADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ng = indcs.ng, is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks;
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = indcs;
+  auto u_adm = pmbp->padm->u_adm;
+  auto u0 = pmbp->pz4c->u0;
+  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
+  const Real p = pmbp->pz4c->opt.chi_psi_power;
+  using adm::ADM;
+
+  ResetZ4c(pmbp);
+  par_for("cartoon_test_m2a_admA", DevExeSpace(), 0, nmb-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int j, const int i) {
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z, yp);
+    Real a[Z4c::nz4c];
+    AnalyticState<Real>(x, 0.0, z, a);
+    const Real psi4 = Kokkos::pow(a[Z4c::I_Z4C_CHI], 4.0/p);
+    for (int o = 0; o < 6; ++o) {
+      u_adm(m,ADM::I_ADM_GXX+o,ks,j,i) = psi4*a[Z4c::I_Z4C_GXX+o];
+      u_adm(m,ADM::I_ADM_KXX+o,ks,j,i) = psi4*(a[Z4c::I_Z4C_AXX+o] +
+                                         a[Z4c::I_Z4C_GXX+o]*a[Z4c::I_Z4C_KHAT]/3.0);
+    }
+    u_adm(m,ADM::I_ADM_PSI4,ks,j,i) = psi4;
+  });
+  CallADMToZ4c(ng, pmbp, pin);
+
+  // pointwise part: chi, g-tilde, Khat, A-tilde everywhere on the plane
+  Real ept = 0.0;
+  Kokkos::parallel_reduce("cartoon_test_m2a_pt",
+    Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
+  KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z, yp);
+    Real a[Z4c::nz4c];
+    AnalyticState<Real>(x, 0.0, z, a);
+    Real e = Kokkos::fabs(u0(m,Z4c::I_Z4C_CHI,ks,j,i) - a[Z4c::I_Z4C_CHI]);
+    e = Kokkos::fmax(e, Kokkos::fabs(u0(m,Z4c::I_Z4C_KHAT,ks,j,i) - a[Z4c::I_Z4C_KHAT]));
+    for (int o = 0; o < 6; ++o) {
+      e = Kokkos::fmax(e, Kokkos::fabs(u0(m,Z4c::I_Z4C_GXX+o,ks,j,i) -
+                                       a[Z4c::I_Z4C_GXX+o]));
+      e = Kokkos::fmax(e, Kokkos::fabs(u0(m,Z4c::I_Z4C_AXX+o,ks,j,i) -
+                                       a[Z4c::I_Z4C_AXX+o]));
+    }
+    mx = Kokkos::fmax(mx, e);
+  }, Kokkos::Max<Real>(ept));
+
+  // Gamma-tilde^a = -sum_b d_b g-tilde^ab, b over mesh directions x1 (x), x2 (z), x3 (y)
+  Real egam = 0.0;
+  Kokkos::parallel_reduce("cartoon_test_m2a_gam",
+    Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, js, is},
+                                           {nmb, je+1, ie+1}),
+  KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z, yp);
+    Real gam[3] = {0.0, 0.0, 0.0};
+    for (int b = 0; b < 3; ++b) {
+      HD X(x), Y(0.0), Zc(z);
+      if (b == 0) X = HD(x, 1, 0, 0);
+      if (b == 1) Zc = HD(z, 1, 0, 0);
+      if (b == 2) Y = HD(0.0, 1, 0, 0);
+      HD gm[3][3];
+      AnalyticConfInv<HD>(X, Y, Zc, gm);
+      for (int c = 0; c < 3; ++c) gam[c] -= gm[c][b].a;
+    }
+    Real e = 0.0;
+    for (int c = 0; c < 3; ++c) {
+      e = Kokkos::fmax(e, Kokkos::fabs(u0(m,Z4c::I_Z4C_GAMX+c,ks,j,i) - gam[c]));
+    }
+    mx = Kokkos::fmax(mx, e);
+  }, Kokkos::Max<Real>(egam));
+
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_RESULT err_adm2z4c %.17e all\n", ept);
+    std::printf("CARTOON_RESULT err_gam %.17e all\n", egam);
+  }
+  return ept;
+}
+
+// B/C: exact vacuum data -> ADMToZ4c -> ADMConstraints; report H, M_i, Z
+void TestConstraints(MeshBlockPack *pmbp, ParameterInput *pin, const int which,
+                     const char *tag) {
+  auto &indcs = pmbp->pmesh->mb_indcs;
+  const int ng = indcs.ng, is = indcs.is, ie = indcs.ie, js = indcs.js, je = indcs.je;
+  const int ks = indcs.ks;
+  const int nmb = pmbp->nmb_thispack;
+  auto &size = pmbp->pmb->mb_size;
+  const RegionIndcs indcs_ = indcs;
+  auto u_adm = pmbp->padm->u_adm;
+  const int n1 = u_adm.extent_int(4), n2 = u_adm.extent_int(3);
+  const Real spin = pin->GetOrAddReal("problem", "bh_spin", 0.6);
+  const Real zc = pin->GetOrAddReal("problem", "bh_zc", -4.0);
+  const bool flip_k = pin->GetOrAddBoolean("problem", "kerr_flip_k_odd", false);
+  using adm::ADM;
+
+  ResetZ4c(pmbp);
+  par_for("cartoon_test_m2a_vac", DevExeSpace(), 0, nmb-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int j, const int i) {
+    Real x1, x2, x3;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x1, x2, x3);
+    Real g[6], K[6], psi4;
+    ExactVacuum(which, spin, zc, x1, x2, x3, flip_k, g, K, psi4);
+    for (int o = 0; o < 6; ++o) {
+      u_adm(m,ADM::I_ADM_GXX+o,ks,j,i) = g[o];
+      u_adm(m,ADM::I_ADM_KXX+o,ks,j,i) = K[o];
+    }
+    u_adm(m,ADM::I_ADM_PSI4,ks,j,i) = psi4;
+  });
+  CallADMToZ4c(ng, pmbp, pin);
+  CallADMConstraints(ng, pmbp);
+
+  auto con = pmbp->pz4c->con;
+  Real e[3] = {0.0, 0.0, 0.0};   // |H|, |M_i|, Z
+  for (int q = 0; q < 3; ++q) {
+    Kokkos::parallel_reduce("cartoon_test_m2a_con",
+      Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, js, is},
+                                             {nmb, je+1, ie+1}),
+    KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
+      Real v;
+      if (q == 0) {
+        v = Kokkos::fabs(con.H(m,ks,j,i));
+      } else if (q == 1) {
+        v = 0.0;
+        for (int a = 0; a < 3; ++a) v = Kokkos::fmax(v, Kokkos::fabs(con.M_d(m,a,ks,j,i)));
+      } else {
+        v = con.Z(m,ks,j,i);
+      }
+      mx = Kokkos::fmax(mx, v);
+    }, Kokkos::Max<Real>(e[q]));
+  }
+  const Real eh = e[0], em = e[1], ez = e[2];
+  if (global_variable::my_rank == 0) {
+    std::printf("CARTOON_RESULT err_H_%s %.17e all\n", tag, eh);
+    std::printf("CARTOON_RESULT err_M_%s %.17e all\n", tag, em);
+    std::printf("CARTOON_RESULT err_Z_%s %.17e all\n", tag, std::sqrt(ez));
+  }
+}
+
 }  // namespace
 
 //----------------------------------------------------------------------------------------
@@ -462,14 +724,23 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
     }
   }
 
+  // 6. M2a: ADMToZ4c and the ADM constraints under Cartoon (production fill)
+  Real eadm = 0.0;
+  if (pin->GetOrAddBoolean("problem", "m2a", true)) {
+    eadm = TestADMToZ4c(pmbp, pin);
+    TestConstraints(pmbp, pin, 0, "schw");
+    TestConstraints(pmbp, pin, 1, "kerr");
+  }
+
   // gates: the exact checks
   int nmax;
   const Real ea = MaxOf(eaxis, nmax);
-  bool ok = (ea <= tol_exact) && (exc <= tol_exact) && (epos <= tol_exact);
+  bool ok = (ea <= tol_exact) && (exc <= tol_exact) && (epos <= tol_exact) &&
+            (eadm <= tol_exact);
   if (global_variable::my_rank == 0) {
     std::printf("CARTOON_TEST %s err_axis=%.3e (%s) err_xcheck=%.3e err_pos=%.3e "
-                "tol=%.1e\n", ok ? "PASS" : "FAIL", ea, Z4c::Z4c_names[nmax], exc, epos,
-                tol_exact);
+                "err_adm2z4c=%.3e tol=%.1e\n", ok ? "PASS" : "FAIL", ea,
+                Z4c::Z4c_names[nmax], exc, epos, eadm, tol_exact);
   }
   if (!ok) std::exit(EXIT_FAILURE);
 }

@@ -46,16 +46,13 @@ namespace z4c {
 //
 // The Z4c variables will be set on the whole MeshBlock with the exception of
 // the Gamma's that can only be set in the interior of the MeshBlock.
+//
+// 2D Cartoon (M2a): the pointwise part runs on the plane as in 3D. Then the Z4c set is
+// filled into u_cart (K1-K4), g-tilde^ij is inverted on all 1+2ng cache planes, and
+// Gamma-tilde^i = -d_j g-tilde^ji is taken on the y = 0 cache plane with the same FD
+// operator as CalcRHS (y spacing dx1, D-001), written back to u0.
 template <int NGHOST>
 void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
-  if (pmbp->pz4c->IsCartoon()) {
-    // Gamma-tilde^i = -d_j g-tilde^ji below needs y-derivatives of the ADM metric, which
-    // a 2D Cartoon mesh does not have (no Cartoon fill for the ADM arrays yet).
-    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
-              << "ADMToZ4c is not supported with <z4c> cartoon != none yet (Cartoon "
-              << "initial data comes in M2)" << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
   // capture variables for the kernel
   auto &indcs = pmbp->pmesh->mb_indcs;
   auto &size = pmbp->pmb->mb_size;
@@ -112,19 +109,27 @@ void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
   });
   Kokkos::fence();
 
+  // Cartoon: the metric is read from the filled cache (planes 0..2ng; ncells3 = 1+2ng on
+  // a 2D mesh), Gamma is evaluated on cache plane k and written to u0 at kw = k - koff.
+  const bool cartoon = pmbp->pz4c->IsCartoon();
+  if (cartoon) pmbp->pz4c->CartoonFill(pmbp);
+  const int koff = cartoon ? indcs.ng - ks : 0;
+  auto &z4cr = cartoon ? pmbp->pz4c->z4c_cart : pmbp->pz4c->z4c;
+  const int kinvs = cartoon ? 0 : ksg, kinve = cartoon ? 2*indcs.ng : keg;
+
   DvceArray5D<Real> g_uu("g_uu", nmb, 6, ncells3, ncells2, ncells1);
   AthenaTensor<Real, TensorSymm::SYM2, 3, 2> g3u;
   g3u.InitWithShallowSlice(g_uu, 0, 5);
   // GLOOP
   par_for("invert z4c metric",DevExeSpace(),
-  0,nmb-1,ksg,keg,jsg,jeg,isg,ieg,
+  0,nmb-1,kinvs,kinve,jsg,jeg,isg,ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i){
-    Real detg = adm::SpatialDet(z4c.g_dd(m,0,0,k,j,i), z4c.g_dd(m,0,1,k,j,i),
-                                z4c.g_dd(m,0,2,k,j,i), z4c.g_dd(m,1,1,k,j,i),
-                                z4c.g_dd(m,1,2,k,j,i), z4c.g_dd(m,2,2,k,j,i));
+    Real detg = adm::SpatialDet(z4cr.g_dd(m,0,0,k,j,i), z4cr.g_dd(m,0,1,k,j,i),
+                                z4cr.g_dd(m,0,2,k,j,i), z4cr.g_dd(m,1,1,k,j,i),
+                                z4cr.g_dd(m,1,2,k,j,i), z4cr.g_dd(m,2,2,k,j,i));
     adm::SpatialInv(1.0/detg,
-              z4c.g_dd(m,0,0,k,j,i), z4c.g_dd(m,0,1,k,j,i), z4c.g_dd(m,0,2,k,j,i),
-              z4c.g_dd(m,1,1,k,j,i), z4c.g_dd(m,1,2,k,j,i), z4c.g_dd(m,2,2,k,j,i),
+              z4cr.g_dd(m,0,0,k,j,i), z4cr.g_dd(m,0,1,k,j,i), z4cr.g_dd(m,0,2,k,j,i),
+              z4cr.g_dd(m,1,1,k,j,i), z4cr.g_dd(m,1,2,k,j,i), z4cr.g_dd(m,2,2,k,j,i),
               &g3u(m,0,0,k,j,i), &g3u(m,0,1,k,j,i), &g3u(m,0,2,k,j,i),
               &g3u(m,1,1,k,j,i), &g3u(m,1,2,k,j,i), &g3u(m,2,2,k,j,i));
   });
@@ -149,10 +154,12 @@ void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
                             Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);
   sub_DvceArray5D_0D g_22 = Kokkos::subview(g_uu, Kokkos::ALL, 5,
                             Kokkos::ALL, Kokkos::ALL, Kokkos::ALL);*/
-  par_for("initialize Gamma",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
+  par_for("initialize Gamma",DevExeSpace(),0,nmb-1,ks+koff,ke+koff,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const int kw = k - koff;  // u0 (write) index; k reads g3u (cache planes under Cartoon)
     // Usage of Dx: pmbp->pz4c->Dx(blockn, posvar, k,j,i, dir, nghost, dx, quantity);
-    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2, 1/size.d_view(m).dx3};
+    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2,
+                  cartoon ? 1/size.d_view(m).dx1 : 1/size.d_view(m).dx3};
     /*AthenaPointTensor<Real, TensorSymm::SYM2, 3, 2> g_uu;
     AthenaPointTensor<Real, TensorSymm::SYM2, 3, 3> Gamma_udd;
     AthenaPointTensor<Real, TensorSymm::SYM2, 3, 3> dg_ddd;
@@ -193,9 +200,9 @@ void Z4c::ADMToZ4c(MeshBlockPack *pmbp, ParameterInput *pin) {
       z4c.vGam_u(m, a, k, j, i) += g_uu(b, c)*Gamma_udd(a, b, c);
     }*/
     for (int a = 0; a < 3; ++a) {
-      z4c.vGam_u(m, a, k, j, i) = 0.0;
+      z4c.vGam_u(m, a, kw, j, i) = 0.0;
       for (int b = 0; b < 3; ++b) {
-        z4c.vGam_u(m, a, k, j, i) -= Dx<NGHOST>(b, idx, g3u, m, b, a, k, j, i);
+        z4c.vGam_u(m, a, kw, j, i) -= Dx<NGHOST>(b, idx, g3u, m, b, a, k, j, i);
       }
     }
   });
@@ -262,6 +269,10 @@ void Z4c::Z4cToADM(MeshBlockPack *pmbp) {
 //
 // The constraints are set only in the MeshBlock interior, because derivatives
 // of the ADM quantities are needed to compute them.
+//
+// 2D Cartoon (M2a): the Z4c and ADM sets are filled into their caches (u_cart,
+// u_adm_cart) and every field is read there on plane k (y spacing dx1, D-001); the
+// constraints are written at the mesh index kw = k - koff, as in CalcRHS.
 template <int NGHOST>
 void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
   // capture variables for the kernel
@@ -274,8 +285,22 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
 
   int nmb = pmbp->nmb_thispack;
 
-  auto &z4c = pmbp->pz4c->z4c;
-  auto &adm = pmbp->padm->adm;
+  const bool cartoon = pmbp->pz4c->IsCartoon();
+  if (cartoon) {
+    pmbp->pz4c->CartoonFill(pmbp);
+    pmbp->pz4c->CartoonFillADM(pmbp);
+  }
+  const int koff = cartoon ? indcs.ng - ks : 0;
+  auto &z4c = cartoon ? pmbp->pz4c->z4c_cart : pmbp->pz4c->z4c;
+  // the ADM fields read below (psi4, g_ij, K_ij): the mesh arrays, or the Cartoon cache
+  ADM_vars adm;
+  if (cartoon) {
+    adm = pmbp->pz4c->adm_cart;
+  } else {
+    adm.psi4 = pmbp->padm->adm.psi4;
+    adm.g_dd = pmbp->padm->adm.g_dd;
+    adm.vK_dd = pmbp->padm->adm.vK_dd;
+  }
   auto &u_con = pmbp->pz4c->u_con;
 
   // vacuum or with matter?
@@ -286,8 +311,9 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
   Kokkos::deep_copy(u_con, 0.);
   auto &con = pmbp->pz4c->con;
   par_for("ADM constraints loop",DevExeSpace(),
-  0,nmb-1,ks,ke,js,je,is,ie,
+  0,nmb-1,ks+koff,ke+koff,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    const int kw = k - koff;  // mesh (write) index; k reads z4c/adm (caches under Cartoon)
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> Gamma_u;
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> Gamma_u_z4c;
     AthenaPointTensor<Real, TensorSymm::NONE, 3, 1> M_u;
@@ -310,7 +336,9 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
 
     AthenaPointTensor<Real, TensorSymm::SYM22, 3, 4> ddg_dddd;
 
-    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2, 1/size.d_view(m).dx3};
+    // Cartoon: the ghost planes in the x3 index are spaced dx1 (D-001)
+    Real idx[] = {1/size.d_view(m).dx1, 1/size.d_view(m).dx2,
+                  cartoon ? 1/size.d_view(m).dx1 : 1/size.d_view(m).dx3};
 
     // -----------------------------------------------------------------------------------
     // derivatives
@@ -490,9 +518,9 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
     //
     // Hamiltonian constraint
     //
-    con.H(m,k,j,i) = R + SQR(K) - KK;
+    con.H(m,kw,j,i) = R + SQR(K) - KK;
     if(!is_vacuum) {
-      con.H(m,k,j,i) -= 16*M_PI * tmunu.E(m,k,j,i);
+      con.H(m,kw,j,i) -= 16*M_PI * tmunu.E(m,kw,j,i);
     }
     // Momentum constraint (contravariant)
     //
@@ -500,7 +528,7 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
       M_u(a) = 0.0;
       for(int b = 0; b < 3; ++b) {
         if(!is_vacuum) {
-          M_u(a) -= 8*M_PI * g_uu(a,b) * tmunu.S_d(m,b,k,j,i);
+          M_u(a) -= 8*M_PI * g_uu(a,b) * tmunu.S_d(m,b,kw,j,i);
         }
         for(int c = 0; c < 3; ++c) {
           M_u(a) += g_uu(a,b) * DK_udd(c,b,c);
@@ -512,27 +540,27 @@ void Z4c::ADMConstraints(MeshBlockPack *pmbp) {
     // Momentum constraint (covariant)
     for(int a = 0; a < 3; ++a) {
       for(int b = 0; b < 3; ++b) {
-        con.M_d(m,a,k,j,i) += adm.g_dd(m,a,b,k,j,i) * M_u(b);
+        con.M_d(m,a,kw,j,i) += adm.g_dd(m,a,b,k,j,i) * M_u(b);
       }
     }
 
     // Momentum constraint (norm squared)
     for(int a = 0; a < 3; ++a)
     for(int b = 0; b < 3; ++b) {
-      con.M(m,k,j,i) += adm.g_dd(m,a,b,k,j,i) * M_u(a) * M_u(b);
+      con.M(m,kw,j,i) += adm.g_dd(m,a,b,k,j,i) * M_u(a) * M_u(b);
     }
 
     // Constraint violation Z (norm squared)
     for(int a = 0; a < 3; ++a)
     for(int b = 0; b < 3; ++b) {
-      con.Z(m,k,j,i) += 0.25*z4c.g_dd(m,a,b,k,j,i)
+      con.Z(m,kw,j,i) += 0.25*z4c.g_dd(m,a,b,k,j,i)
                         *(z4c.vGam_u(m,a,k,j,i) - Gamma_u_z4c(a))
                         *(z4c.vGam_u(m,b,k,j,i) - Gamma_u_z4c(b));
     }
 
     // Constraint violation monitor C^2
-    con.C(m,k,j,i) = SQR(con.H(m,k,j,i)) + con.M(m,k,j,i) +
-                     SQR(z4c.vTheta(m,k,j,i)) + 4.0*con.Z(m,k,j,i);
+    con.C(m,kw,j,i) = SQR(con.H(m,kw,j,i)) + con.M(m,kw,j,i) +
+                     SQR(z4c.vTheta(m,k,j,i)) + 4.0*con.Z(m,kw,j,i);
 });
 }
 template void Z4c::ADMConstraints<2>(MeshBlockPack *pmbp);

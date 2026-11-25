@@ -11,6 +11,13 @@ CARTOON_RESULT lines:
   * npt = 2*ng-1: the second derivatives d_yy, d_xy lose about one order
     (O(dx^(2ng-3)), chat/0004), which shows the order is set by the stencil width;
   * a deliberately wrong parity entry (beta^y as even) must make the run fail.
+M2a (chat/0009), same runs with the production stencil:
+  * ADMToZ4c on rotating analytic data: the pointwise part is an exact gate in the pgen;
+    Gamma-tilde^i = -d_j g-tilde^ij converges at the FD order 2(ng-1);
+  * H (Schwarzschild, Kerr-Schild with spin, D-017 mapping) and M_i, Z (Kerr) from the
+    Cartoon-aware ADM constraints converge to 0 at the FD order; Z (Schwarzschild,
+    conformally flat) stays at round-off;
+  * negative control: K's odd-y components with the wrong sign must spoil M_i.
 Measured orders (N = 32 -> 64; CPU and PVC agree to round-off) are in the 1C report;
 the thresholds below sit 0.3-0.6 under them.
 """
@@ -72,3 +79,36 @@ def check_wrong_parity_fails(ng):
     rc, out, _ = run(ng, 2 * ng + 1, 32, ["problem/wrong_parity=z4c_betaz"])
     assert rc != 0, out[-3000:]
     assert "CARTOON_TEST FAIL" in out, out[-3000:]
+
+
+M2A_KEYS = ("err_gam", "err_H_schw", "err_H_kerr", "err_M_kerr", "err_Z_kerr")
+
+
+def check_m2a(ng):
+    """ADMToZ4c and ADM constraints under Cartoon (production stencil)."""
+    npt = 2 * ng + 1
+    rs = []
+    for n in NS:
+        rc, out, res = run(ng, npt, n)
+        assert rc == 0, out[-3000:]
+        assert "CARTOON_TEST PASS" in out, out[-3000:]
+        rs.append(res)
+    o = {k: math.log2(rs[1][k] / rs[2][k]) for k in M2A_KEYS}
+    for k in M2A_KEYS:
+        assert o[k] >= 2 * (ng - 1) - 0.3, (k, o)
+    for r in rs:
+        assert r["err_adm2z4c"] <= 1e-12, r
+        assert r["err_Z_schw"] <= 1e-12, r
+
+
+def check_m2a_sign_control(ng):
+    """An inconsistent sign on K's odd-y components is an O(1) error in the data: the
+    momentum constraint stays far above the correct-data value and does not converge."""
+    npt = 2 * ng + 1
+    rc0, out0, good = run(ng, npt, 32)
+    rc1, out1, bad = run(ng, npt, 32, ["problem/kerr_flip_k_odd=true"])
+    rc2, out2, bad2 = run(ng, npt, 64, ["problem/kerr_flip_k_odd=true"])
+    assert rc0 == 0 and rc1 == 0 and rc2 == 0, (out0[-2000:], out1[-2000:], out2[-2000:])
+    assert bad["err_M_kerr"] > 1.0e4 * good["err_M_kerr"], (good["err_M_kerr"],
+                                                           bad["err_M_kerr"])
+    assert math.log2(bad["err_M_kerr"] / bad2["err_M_kerr"]) < 0.5, (bad, bad2)

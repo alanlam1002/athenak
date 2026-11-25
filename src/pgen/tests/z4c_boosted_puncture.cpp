@@ -46,6 +46,8 @@ void ProblemGenerator::Z4cBoostedPuncture(ParameterInput *pin, const bool restar
     exit(EXIT_FAILURE);
   }
 
+  // the boost is along mesh x1, off the Cartoon axis (D-017, chat/0011)
+  pmbp->pz4c->CartoonUnsupported("z4c_boosted_puncture (boost along mesh x1)");
   ADMOnePunctureBoosted(pmbp, pin);
   switch (indcs.ng) {
     case 2: pmbp->pz4c->ADMToZ4c<2>(pmbp, pin);

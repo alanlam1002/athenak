@@ -52,6 +52,7 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
 
   MeshBlockPack *pmbp = pmy_mesh_->pmb_pack;
   auto &indcs = pmy_mesh_->mb_indcs;
+  if (pmbp->pz4c != nullptr) pmbp->pz4c->CartoonUnsupported("z4c_spectre_bbh");
 
   // Load initial data specified by the user options
   const std::string options_block = "problem";

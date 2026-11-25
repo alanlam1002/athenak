@@ -31,3 +31,18 @@ def test_cartoon_wrong_parity_fails_gpu(ng):
         cc.check_wrong_parity_fails(ng)
     finally:
         testutils.cleanup()
+
+
+@pytest.mark.parametrize("ng", [2, 3, 4])
+def test_cartoon_m2a_adm_constraints_gpu(ng):
+    try:
+        cc.check_m2a(ng)
+    finally:
+        testutils.cleanup()
+
+
+def test_cartoon_m2a_sign_control_gpu():
+    try:
+        cc.check_m2a_sign_control(4)
+    finally:
+        testutils.cleanup()

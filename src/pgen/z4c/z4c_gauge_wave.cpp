@@ -47,6 +47,8 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
     exit(EXIT_FAILURE);
   }
 
+  pmbp->pz4c->CartoonUnsupported("z4c_gauge_wave (a plane wave along x1, not "
+                                  "axisymmetric)");
   // Prepare Initial Data
 
   // capture variables for the kernel

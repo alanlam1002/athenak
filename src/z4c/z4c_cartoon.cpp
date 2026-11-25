@@ -12,8 +12,10 @@
 //! the y = 0 plane (D-001, D-006). A field value at (x, y) is the value at
 //! (rho, 0), rho = sqrt(x^2 + y^2), rotated by the angle with c = x/rho, s = y/rho.
 //!
-//! Mesh components follow the mesh axes, so physical (x, y, z) are component indices
-//! (0, 2, 1): physical beta^y is I_Z4C_BETAZ, physical g_xz is I_Z4C_GXY, etc.
+//! Frame (D-017): physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2.
+//! In this file "x, z, y" in comments and the rotation below name the MESH directions
+//! x1, x2, x3 (so "y" is mesh x3 = physical -y). The fill is a rotation about mesh x2
+//! and is symmetric in +-x3, so it is the same in either labelling.
 //!
 //! The fill (chat/0004 GPU design), run immediately before each consumer (D-007):
 //!   K1  copy the y = 0 plane from u0 (x1/x2 ghosts included)
@@ -49,21 +51,23 @@ namespace {
 // largest supported stencil: npt = 2*ng + 1 with ng <= 4
 constexpr int kMaxNpt = 9;
 
-// Physical label of each Z4c variable on the Cartoon mesh (x -> 0, z -> 1, y -> 2).
+// Physical label of each Z4c variable on the Cartoon mesh (D-017): physical (x, y, z) =
+// mesh (x1, -x3, x2), so a component with an odd number of x3 indices is minus the
+// physical one.
 const char *const kPhysName[Z4c::nz4c] = {
   "chi",
-  "g_xx", "g_xz", "g_xy", "g_zz", "g_zy", "g_yy",
+  "g_xx", "g_xz", "-g_xy", "g_zz", "-g_zy", "g_yy",
   "Khat",
-  "A_xx", "A_xz", "A_xy", "A_zz", "A_zy", "A_yy",
-  "Gam^x", "Gam^z", "Gam^y",
+  "A_xx", "A_xz", "-A_xy", "A_zz", "-A_zy", "A_yy",
+  "Gam^x", "Gam^z", "-Gam^y",
   "Theta",
   "alpha",
-  "beta^x", "beta^z", "beta^y",
+  "beta^x", "beta^z", "-beta^y",
 };
 
 // Rotate one interpolated state T (all nz4c variables at (rho, 0)) to (x, y) with
 // c = x/rho, s = y/rho:  V' = R V,  G' = R T R^T,  R = [[c, -s], [s, c]] in (x, y).
-// Written for the mesh component order: physical x = 0, z = 1, y = 2.
+// Written for the mesh component order: x = x1 (0), z = x2 (1), y = x3 (2).
 KOKKOS_INLINE_FUNCTION
 void CartoonRotate(const Real *T, const Real c, const Real s, Real *G) {
   const Real c2 = c*c, s2 = s*s, cs = c*s;
@@ -220,10 +224,12 @@ void Z4c::CartoonSetup(ParameterInput *pin) {
               << ", npt = " << opt.cartoon_npt
               << ", cartoon_ydiss = " << (opt.cartoon_ydiss ? "true" : "false")
               << std::endl
-              << "  axis parity table (D-002; physical (x,y,z) = mesh (x1,x3,x2)):"
+              << "  physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2"
+              << std::endl
+              << "  axis parity table (D-002):"
               << std::endl;
     for (int n = 0; n < nz4c; ++n) {
-      std::printf("    %-10s (%-6s) %s\n", Z4c_names[n], kPhysName[n],
+      std::printf("    %-10s (%-7s) %s\n", Z4c_names[n], kPhysName[n],
                   t.p[n] > 0 ? "+1 even (mirror)" : "-1 odd  (reflect -ve)");
     }
   }
@@ -316,10 +322,10 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
   par_for("cartoon_K2", DevExeSpace(), 0, nmb-1, 1, ng, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(const int m, const int l, const int j, const int i) {
     const Real dx = size.d_view(m).dx1;
-    Real x, yy, zz, x0;
-    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, yy, zz);  // (R, 0, z)
+    Real x, x2p, x3p, x0;
+    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, x2p, x3p);  // mesh (R, z, 0)
     if (x < 0.0 && !direct_negx) return;
-    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, yy, zz);
+    Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, x2p, x3p);
     const Real y = l*dx;
     const Real rho = Kokkos::sqrt(x*x + y*y);
     Real f; int i0raw;
@@ -345,11 +351,11 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
     KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i) {
       if (kc == ng) return;
       const Real dx = size.d_view(m).dx1;
-      Real x, yy, zz, x0;
-      Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, yy, zz);
+      Real x, x2p, x3p, x0;
+      Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, i, x, x2p, x3p);
       if (x >= 0.0) return;
       // cell whose midpoint is at -x
-      Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, yy, zz);
+      Z4cCartesianPos(mode, size.d_view(m), indcs_, ks, j, 0, x0, x2p, x3p);
       const int im = static_cast<int>(Kokkos::round((-x - x0)/dx));
       for (int n = 0; n < nz4c; ++n) {
         uc(m,n,kc,j,i) = par.p[n]*uc(m,n,2*ng-kc,j,im);
@@ -382,15 +388,15 @@ void Z4c::CartoonClampStats(MeshBlockPack *pmbp, int npt,
   per_l.assign(ng, {0, 0, 0, 0});
   for (int m = 0; m < nmb; ++m) {
     const Real dx = size.h_view(m).dx1;
-    Real x0, yy, zz;
-    Z4cCartesianPos(opt.cartoon, size.h_view(m), indcs, indcs.ks, indcs.js, 0, x0, yy,
-                    zz);
+    Real x0, x2p, x3p;
+    Z4cCartesianPos(opt.cartoon, size.h_view(m), indcs, indcs.ks, indcs.js, 0, x0, x2p,
+                    x3p);
     for (int l = 1; l <= ng; ++l) {
       per_l[l-1][0] = l;
       for (int i = 0; i < n1; ++i) {
         Real x;
-        Z4cCartesianPos(opt.cartoon, size.h_view(m), indcs, indcs.ks, indcs.js, i, x, yy,
-                        zz);
+        Z4cCartesianPos(opt.cartoon, size.h_view(m), indcs, indcs.ks, indcs.js, i, x, x2p,
+                        x3p);
         if (x < 0.0) continue;
         const Real rho = std::sqrt(x*x + (l*dx)*(l*dx));
         Real f; int i0raw;

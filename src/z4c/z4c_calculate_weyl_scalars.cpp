@@ -20,6 +20,7 @@
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 
 namespace z4c {
 //----------------------------------------------------------------------------------------
@@ -41,25 +42,15 @@ void Z4c::Z4cWeyl(MeshBlockPack *pmbp) {
   auto &weyl = pmbp->pz4c->weyl;
   auto &u_weyl = pmbp->pz4c->u_weyl;
   Kokkos::deep_copy(u_weyl, 0.);
+  const CartoonMode cmode = pmbp->pz4c->opt.cartoon;
 
   par_for("z4c_weyl_scalar",DevExeSpace(),0,nmb-1,ks,ke,js,je,is,ie,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     // Simplify constants (2 & sqrt 2 factors) featured in re/im[psi4]
     const Real FR4 = 0.25;
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
-    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
-    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
-    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    // position in mesh component order (D-017)
+    Real x1v, x2v, x3v;
+    Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
 
     // Scalars
     Real detg = 0.0;         // det(g)

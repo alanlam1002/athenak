@@ -25,6 +25,7 @@
 #include "z4c/z4c_amr.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 
 void ADMOnePunctureBoosted(MeshBlockPack *pmbp, ParameterInput *pin);
 void BoostedPunctureRefinementCondition(MeshBlockPack* pmbp);
@@ -95,24 +96,16 @@ void ADMOnePunctureBoosted(MeshBlockPack *pmbp, ParameterInput *pin) {
   Real vx3 = pin->GetOrAddReal("problem", "punc_velocity_x3", 0.);
 
   adm::ADM::ADM_vars &adm = pmbp->padm->adm;
+  // Z4c position mode (D-017); none when there is no <z4c>
+  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr) ? pmbp->pz4c->opt.cartoon
+                                                              : z4c::Z4c::CartoonMode::none;
 
   par_for("pgen one puncture",
   DevExeSpace(),0,nmb-1,ksg,keg,jsg,jeg,isg,ieg,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    int nx1 = indcs.nx1;
-    Real x1v = CellCenterX(i-is, nx1, x1min, x1max);
-
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    int nx2 = indcs.nx2;
-    Real x2v = CellCenterX(j-js, nx2, x2min, x2max);
-
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    int nx3 = indcs.nx3;
-    Real x3v = CellCenterX(k-ks, nx3, x3min, x3max);
+    // position in mesh component order (D-017)
+    Real x1v, x2v, x3v;
+    z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
 
     x1v -= center_x1;
     x2v -= center_x2;

@@ -28,7 +28,9 @@
 //! lines.
 //! <problem> ntime > 0 also times K1-K4 against CalcRHS.
 //!
-//! Physical (x, y, z) = mesh (x1, x3 plane, x2); component indices (0, 2, 1).
+//! Frame (D-017): physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2.
+//! Every field is built and checked in mesh components; the analytic state is
+//! evaluated on the plane at mesh (x1, x2) = (R, z).
 
 #include <array>
 #include <cmath>
@@ -211,9 +213,9 @@ Errs GhostErrors(MeshBlockPack *pmbp, DvceArray5D<Real> uc, int sel) {
                                              {nmb, 2*ng+1, n2, n1}),
     KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i, Real &mx) {
       const Real dx = size.d_view(m).dx1;
-      Real x, yp, z;
-      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
-                      z);
+      Real x, z, yp;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z,
+                      yp);
       const int l = kc - ng;
       bool use = false;
       if (sel == 0) use = (l != 0 && x > 0.0);
@@ -247,9 +249,9 @@ Errs DerivErrors(MeshBlockPack *pmbp, DvceArray5D<Real> uc, int which) {
                                              {nmb, je+1, ie+1}),
     KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
       const Real dx = size.d_view(m).dx1, dz = size.d_view(m).dx2;
-      Real x, yp, z;
-      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
-                      z);
+      Real x, z, yp;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z,
+                      yp);
       const Real idx[3] = {1.0/dx, 1.0/dz, 1.0/dx};
       VarN q{uc, n};
       const int k = NG;   // y = 0 plane of u_cart
@@ -338,9 +340,9 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
   const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
   par_for("cartoon_test_init", DevExeSpace(), 0, nmb-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(const int m, const int j, const int i) {
-    Real x, yp, z;
-    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
-                    z);
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z,
+                    yp);
     Real a[Z4c::nz4c];
     AnalyticState<Real>(x, 0.0, z, a);
     for (int n = 0; n < Z4c::nz4c; ++n) u0(m,n,ks,j,i) = (x > 0.0) ? a[n] : 1.0e30;
@@ -354,9 +356,9 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
     Kokkos::parallel_reduce("cartoon_test_axis_err",
       Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
     KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
-      Real x, yp, z;
-      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
-                      z);
+      Real x, z, yp;
+      Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z,
+                      yp);
       if (x > 0.0) return;
       Real a[Z4c::nz4c];
       AnalyticState<Real>(x, 0.0, z, a);
@@ -380,20 +382,21 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
                                            {nmb, Z4c::nz4c, 2*ng+1, n2, n1}),
   KOKKOS_LAMBDA(const int m, const int n, const int kc, const int j, const int i,
                 Real &mx) {
-    Real x, yp, z;
-    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp,
-                    z);
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z,
+                    yp);
     if (x > 0.0 || kc == ng) return;
     mx = Kokkos::fmax(mx, Kokkos::fabs(uc(m,n,kc,j,i) - udirect(m,n,kc,j,i)));
   }, Kokkos::Max<Real>(exc));
 
-  // R6: Z4cCartesianPos is (R, 0, z) at the arithmetic midpoints (never the centroids)
+  // R6: Z4cCartesianPos returns mesh order (R, z, 0) at the arithmetic midpoints (never the
+  // centroids); D-017
   Real epos = 0.0;
   Kokkos::parallel_reduce("cartoon_test_pos",
     Kokkos::MDRangePolicy<Kokkos::Rank<3>>(DevExeSpace(), {0, 0, 0}, {nmb, n2, n1}),
   KOKKOS_LAMBDA(const int m, const int j, const int i, Real &mx) {
-    Real x, yp, z;
-    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, yp, z);
+    Real x, z, yp;
+    Z4cCartesianPos(kAx, size.d_view(m), indcs_, 0, j, i, x, z, yp);
     const Real xm = size.d_view(m).x1min + (i - is + 0.5)*size.d_view(m).dx1;
     const Real zm = size.d_view(m).x2min + (j - js + 0.5)*size.d_view(m).dx2;
     mx = Kokkos::fmax(mx, Kokkos::fabs(x - xm) + Kokkos::fabs(yp) + Kokkos::fabs(z - zm));

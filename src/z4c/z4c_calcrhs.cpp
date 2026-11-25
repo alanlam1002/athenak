@@ -22,6 +22,7 @@
 #include "z4c/driftcontrol/driftcontrol.hpp"
 #include "z4c/tmunu.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 
 namespace z4c {
 
@@ -51,7 +52,7 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
   Real time = pmy_pack->pmesh->time;
 
   // Drift control (optional)
-  int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const CartoonMode cmode = opt.cartoon;
   bool dc_on        = opt.enable_driftcontrol;
   int  dc_variety   = opt.dc_variety;
   Real dc_inv_s2    = 0.0;             // 1/damping_scale^2
@@ -664,15 +665,9 @@ TaskStatus Z4c::CalcRHS(Driver *pdriver, int stage) {
 
     // drift control correction
     if (dc_on) {
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-      Real x1 = CellCenterX(i - is, nx1, x1min, x1max);
-      Real x2 = CellCenterX(j - js, nx2, x2min, x2max);
-      Real x3 = CellCenterX(kw - ks, nx3, x3min, x3max);
+      // position in mesh component order (D-017)
+      Real x1, x2, x3;
+      Z4cCartesianPos(cmode, size.d_view(m), indcs, kw, j, i, x1, x2, x3);
 
       Real const r2 = SQR(x1 - dc_c[0]) + SQR(x2 - dc_c[1]) + SQR(x3 - dc_c[2]);
       Real const g  = Kokkos::exp(-r2 * dc_inv_s2);

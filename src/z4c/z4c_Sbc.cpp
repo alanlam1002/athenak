@@ -15,6 +15,7 @@
 #include "mesh/mesh.hpp"
 #include "z4c/z4c.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 
 namespace z4c {
 
@@ -24,6 +25,7 @@ namespace z4c {
 KOKKOS_INLINE_FUNCTION
 static void Z4cSommerfeld(const Z4c::Z4c_vars& z4c, const Z4c::Z4c_vars& rhs,
     const RegionIndcs &indcs, const DualArray1D<RegionSize> &size,
+    const Z4c::CartoonMode cmode,
     const int m, const int k, const int j, const int i) {
   // -------------------------------------------------------------------------------------
   // Scratch data
@@ -71,16 +73,9 @@ static void Z4cSommerfeld(const Z4c::Z4c_vars& z4c, const Z4c::Z4c_vars& rhs,
   // -------------------------------------------------------------------------------------
   // Compute psuedo-radial vector
   //
-  Real &x1min = size.d_view(m).x1min;
-  Real &x1max = size.d_view(m).x1max;
-  Real &x2min = size.d_view(m).x2min;
-  Real &x2max = size.d_view(m).x2max;
-  Real &x3min = size.d_view(m).x3min;
-  Real &x3max = size.d_view(m).x3max;
-
-  Real x1v = CellCenterX(i-indcs.is, indcs.nx1, x1min, x1max);
-  Real x2v = CellCenterX(j-indcs.js, indcs.nx2, x2min, x2max);
-  Real x3v = CellCenterX(k-indcs.ks, indcs.nx3, x3min, x3max);
+  // position in mesh component order (D-017)
+  Real x1v, x2v, x3v;
+  Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
 
   Real r = sqrt(SQR(x1v) + SQR(x2v) + SQR(x3v));
   s_u(0) = x1v/r;
@@ -141,6 +136,7 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
   auto &z4c_ = z4c;
   auto &rhs_ = rhs;
   bool &user_Sbc = opt.user_Sbc;
+  const CartoonMode cmode = opt.cartoon;
 
   // We only need to apply this condition for outflow boundaries
   if (pm->mesh_bcs[BoundaryFace::inner_x1] == BoundaryFlag::outflow
@@ -158,11 +154,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, j, is);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, j, is);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, j, is);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, j, is);
             }
           break;
         default:
@@ -173,11 +169,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, j, ie);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, j, ie);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, j, ie);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, j, ie);
             }
           break;
         default:
@@ -200,11 +196,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, js, i);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, js, i);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, js, i);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, js, i);
             }
           break;
         default:
@@ -215,11 +211,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, je, i);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, je, i);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, k, je, i);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, k, je, i);
             }
           break;
         default:
@@ -242,11 +238,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, ks, j, i);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, ks, j, i);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, ks, j, i);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, ks, j, i);
             }
           break;
         default:
@@ -257,11 +253,11 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
         case BoundaryFlag::diode:
         case BoundaryFlag::vacuum:
         case BoundaryFlag::outflow:
-            Z4cSommerfeld(z4c_, rhs_, indcs, size, m, ke, j, i);
+            Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, ke, j, i);
           break;
         case BoundaryFlag::user:
             if (user_Sbc) {
-              Z4cSommerfeld(z4c_, rhs_, indcs, size, m, ke, j, i);
+              Z4cSommerfeld(z4c_, rhs_, indcs, size, cmode, m, ke, j, i);
             }
           break;
         default:

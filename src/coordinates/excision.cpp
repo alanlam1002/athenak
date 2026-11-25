@@ -15,6 +15,7 @@
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
 #include "z4c/fastflow.hpp"
+#include "z4c/z4c_pos.hpp"
 
 // inlined spherical Kerr-Schild r evaluated at CKS x1, x2, x3
 KOKKOS_INLINE_FUNCTION
@@ -199,6 +200,7 @@ void Coordinates::UpdateExcisionMasks() {
     auto &flux = excision_flux;
 
     // set up arrays to hold horizon information
+    const z4c::Z4c::CartoonMode cmode = pmy_pack->pz4c->opt.cartoon;
     Real &horizon_factor = coord_data.horizon_factor;
     int hsize = pmy_pack->pz4c->pfastflow.size();
     DualArray2D<Real> hcenter("hcenter", hsize, 3);
@@ -224,17 +226,9 @@ void Coordinates::UpdateExcisionMasks() {
 
     par_for("set_excision_horizon", DevExeSpace(),0,nmb1,0,(n3-1),0,(n2-1),0,(n1-1),
     KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
-      // Set MB specifics
-      Real &x1min = size.d_view(m).x1min;
-      Real &x1max = size.d_view(m).x1max;
-      Real &x2min = size.d_view(m).x2min;
-      Real &x2max = size.d_view(m).x2max;
-      Real &x3min = size.d_view(m).x3min;
-      Real &x3max = size.d_view(m).x3max;
-
-      Real x1 = CellCenterX(i - is, indcs.nx1, x1min, x1max);
-      Real x2 = CellCenterX(j - js, indcs.nx2, x2min, x2max);
-      Real x3 = CellCenterX(k - ks, indcs.nx3, x3min, x3max);
+      // Z4c position in mesh component order (D-017)
+      Real x1, x2, x3;
+      z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1, x2, x3);
 
       bool excise = false;
       for (int h = 0; h < hsize; ++h) {

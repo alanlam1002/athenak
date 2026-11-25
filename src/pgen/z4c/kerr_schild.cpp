@@ -24,6 +24,7 @@
 #include "z4c/z4c_amr.hpp"
 #include "coordinates/adm.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 #include "coordinates/cartesian_ks.hpp"
 
 
@@ -94,19 +95,14 @@ void KerrSchild(MeshBlockPack *pmbp, ParameterInput *pin) {
   int n1 = indcs.nx1 + 2*ng;
   int n2 = indcs.nx2 + 2*ng;
   int n3 = indcs.nx3 + 2*ng;
+  // Z4c position mode (D-017); none when there is no <z4c>
+  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr) ? pmbp->pz4c->opt.cartoon
+                                                              : z4c::Z4c::CartoonMode::none;
   par_for("pgen_adm_vars", DevExeSpace(), 0,nmb-1,0,(n3-1),0,(n2-1),0,(n1-1),
   KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-    Real x1v = CellCenterX(i-is, indcs.nx1, x1min, x1max);
-
-    Real &x2min = size.d_view(m).x2min;
-    Real &x2max = size.d_view(m).x2max;
-    Real x2v = CellCenterX(j-js, indcs.nx2, x2min, x2max);
-
-    Real &x3min = size.d_view(m).x3min;
-    Real &x3max = size.d_view(m).x3max;
-    Real x3v = CellCenterX(k-ks, indcs.nx3, x3min, x3max);
+    // position in mesh component order (D-017)
+    Real x1v, x2v, x3v;
+    z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
 
     ComputeADMDecomposition(x1v, x2v, x3v, minkowski, a,
       &adm.alpha(m,k,j,i),

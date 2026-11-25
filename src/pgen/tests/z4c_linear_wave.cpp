@@ -21,6 +21,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 #include "mesh/mesh.hpp"
 #include "z4c/z4c.hpp"
 #include "driver/driver.hpp"
@@ -53,6 +54,14 @@ void ProblemGenerator::Z4cLinearWave(ParameterInput *pin, const bool restart) {
               << "in input file" << std::endl;
     exit(EXIT_FAILURE);
   }
+
+  if (pmbp->pz4c->IsCartoon()) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "z4c_linear_wave is a plane wave, which is not axisymmetric; it is not "
+              << "supported under 2D Cartoon (D-017)" << std::endl;
+    exit(EXIT_FAILURE);
+  }
+  const z4c::Z4c::CartoonMode cmode = pmbp->pz4c->opt.cartoon;
 
   // Prepare Initial Data
 
@@ -113,20 +122,9 @@ void ProblemGenerator::Z4cLinearWave(ParameterInput *pin, const bool restart) {
 
   par_for("pgen_linwave1", DevExeSpace(), 0, (pmbp->nmb_thispack - 1),
       ks, ke, js, je, is, ie, KOKKOS_LAMBDA(int m, int k, int j, int i) {
-        Real &x1min = size.d_view(m).x1min;
-        Real &x1max = size.d_view(m).x1max;
-        Real &x2min = size.d_view(m).x2min;
-        Real &x2max = size.d_view(m).x2max;
-        Real &x3min = size.d_view(m).x3min;
-        Real &x3max = size.d_view(m).x3max;
-
-        int nx1 = indcs.nx1;
-        int nx2 = indcs.nx2;
-        int nx3 = indcs.nx3;
-
-        Real x1v = CellCenterX(i - is, nx1, x1min, x1max);
-        Real x2v = CellCenterX(j - js, nx2, x2min, x2max);
-        Real x3v = CellCenterX(k - ks, nx3, x3min, x3max);
+        // position in mesh component order (D-017)
+        Real x1v, x2v, x3v;
+        z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
         Real sinkx = sin(2 * M_PI * (kx1 * x1v + kx2 * x2v + kx3 * x3v));
         Real coskx = knorm * M_PI * cos(2 * M_PI * (kx1 * x1v + kx2 * x2v + kx3 * x3v));
 

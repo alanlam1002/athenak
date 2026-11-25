@@ -21,6 +21,7 @@
 #include "globals.hpp"
 #include "parameter_input.hpp"
 #include "coordinates/cell_locations.hpp"
+#include "z4c/z4c_pos.hpp"
 #include "coordinates/adm.hpp"
 #include "mesh/mesh.hpp"
 #include "z4c/z4c.hpp"
@@ -68,16 +69,16 @@ void ProblemGenerator::UserProblem(ParameterInput *pin, const bool restart) {
   std::cout << x1size << std::endl;
 
   // Wave amplitude
+  // Z4c position mode (D-017); none when there is no <z4c>
+  const z4c::Z4c::CartoonMode cmode = (pmbp->pz4c != nullptr) ? pmbp->pz4c->opt.cartoon
+                                                              : z4c::Z4c::CartoonMode::none;
   Real amp = pin->GetOrAddReal("problem", "amp", 0.001);
 
   par_for("pgen_gauge_wave", DevExeSpace(), 0, (pmbp->nmb_thispack - 1),
       ksg, keg, jsg, jeg, isg, ieg, KOKKOS_LAMBDA(int m, int k, int j, int i) {
-    Real &x1min = size.d_view(m).x1min;
-    Real &x1max = size.d_view(m).x1max;
-
-    int nx1 = indcs.nx1;
-
-    Real x1v = CellCenterX(i - is, nx1, x1min, x1max);
+    // position in mesh component order (D-017); only x1 is used
+    Real x1v, x2v, x3v;
+    z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs, k, j, i, x1v, x2v, x3v);
     Real H = amp * sin(2 * M_PI * x1v / x1size);
     Real dH_dt = - amp * 2 * M_PI / x1size *
                     cos(2 * M_PI * x1v / x1size);

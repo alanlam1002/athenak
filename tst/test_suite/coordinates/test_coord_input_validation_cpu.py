@@ -209,6 +209,9 @@ def test_vacuum_z4c_cylindrical_axisym_2d_succeeds():
         rc, out = _run_deck(Z4C_2D_INPUT, [])
         assert rc == 0, out[-2000:]
         assert "Z4c Cartoon axisym" in out, out[-2000:]
+        # D-017 frame label, verbatim
+        assert ("physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2"
+                in out), out[-2000:]
     finally:
         testutils.cleanup()
 
@@ -236,5 +239,16 @@ def test_z4c_hydro_cylindrical_axisym_2d_fails():
         rc, out = _run_deck(Z4C_2D_HYDRO_INPUT, [])
         assert rc != 0
         assert GUARD_MSG in out, out[-2000:]
+    finally:
+        testutils.cleanup()
+
+
+# D-017: non-axisymmetric initial data is fatal under 2D Cartoon. z4c_linear_wave writes
+# the Z4c variables directly (no ADMToZ4c), so it needs its own guard.
+def test_z4c_linear_wave_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(Z4C_2D_INPUT, ["problem/pgen_name=z4c_linear_wave"])
+        assert rc != 0
+        assert "not supported under 2D Cartoon" in out, out[-2000:]
     finally:
         testutils.cleanup()

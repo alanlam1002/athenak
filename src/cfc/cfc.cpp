@@ -694,6 +694,33 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   if (pin->DoesParameterExist("cfc", "solve_interval_refill_bg")) {
     si_refill_bg_ = pin->GetBoolean("cfc", "solve_interval_refill_bg");
   }
+  if (pin->DoesParameterExist("cfc", "solve_interval_extrap")) {
+    si_extrap_ = pin->GetInteger("cfc", "solve_interval_extrap");
+    if (si_extrap_ < 0 || si_extrap_ > 1 || (si_extrap_ > 0 && !si_refill_bg_)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<cfc> solve_interval_extrap = 0 | 1 (linear), and 1 needs "
+                << "solve_interval_refill_bg = true" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  if (si_extrap_ > 0) {
+    int nmbx = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
+    auto &ix = pmy_pack->pmesh->mb_indcs;
+    const int c1 = ix.nx1 + 2*ix.ng, c2 = (ix.nx2 > 1) ? ix.nx2 + 2*ix.ng : 1;
+    const int c3 = (ix.nx3 > 1) ? ix.nx3 + 2*ix.ng : 1;
+    Kokkos::realloc(u_hanc, nmbx, kSiH, c3, c2, c1);
+    Kokkos::realloc(u_hdot, nmbx, kSiH, c3, c2, c1);
+    Kokkos::deep_copy(u_hdot, 0.0);
+    if (pmy_pack->pmesh->multilevel) {
+      const int k1 = ix.cnx1 + 2*ix.ng, k2 = (ix.cnx2 > 1) ? ix.cnx2 + 2*ix.ng : 1;
+      const int k3 = (ix.cnx3 > 1) ? ix.cnx3 + 2*ix.ng : 1;
+      Kokkos::realloc(coarse_u_hdot, nmbx, kSiH, k3, k2, k1);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC solve_interval_extrap = 1: refill stages extrapolate the held residual "
+                << "linearly in time from the last two solves" << std::endl;
+    }
+  }
   if (si_refill_bg_ && global_variable::my_rank == 0) {
     std::cout << "CFC solve_interval_refill_bg: stages without a solve refill the analytic "
               << "background at the stage time and re-assemble adm from the held residual"
@@ -1643,6 +1670,7 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   BCSPiEtaBetaTask(pdriver, 0);
 
   ReconstructShift();
+  SiExtrapOnSolve(StageTime(pdriver, 0), true);   // RL-045: init/regrid re-solve = new anchor
   AssembleADM(StageTime(pdriver, 0));
 
   RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
@@ -2301,6 +2329,7 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
     }
     return TaskStatus::complete;
   }
+  SiExtrapOnSolve(StageTime(pdriver, stage), false);   // RL-045 (no-op unless extrap)
   AssembleADM(StageTime(pdriver, stage));
   AccreteExcisedMass(pdriver, stage);
   if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
@@ -3338,6 +3367,12 @@ void CFC::RefillMovingPuncture(Real t) {
 //! background: only the conformal metric is re-assembled.
 
 void CFC::RefillHeldResidual(Real t) {
+  if (si_extrap_ > 0 && si_hanc_ok_ && si_hdot_ok_) {   // RL-045: H(t) = H_anc + (t - t_anc) Hdot
+    if (puncture_enabled_ && puncture_moving_) { RefillMovingPuncture(t); }
+    SiExtrapApply(t);
+    AssemblePsiMetric(true);
+    return;
+  }
   if (puncture_enabled_ && puncture_moving_) {
     auto ad = u_adual;
     auto a0 = u_a0dual;
@@ -3354,6 +3389,58 @@ void CFC::RefillHeldResidual(Real t) {
     });
   }
   AssemblePsiMetric(true);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SiExtrapOnSolve(Real t, bool keep_rate)
+//! \brief see cfc.hpp (solve_interval_extrap). Called with the solved residual in place,
+//! before AssembleADM. keep_rate (a regrid's re-solve, or the run's first solve): only the
+//! anchor moves; the rate (carried across the regrid by the AMR transfer) is kept.
+
+void CFC::SiExtrapOnSolve(Real t, bool keep_rate) {
+  if (si_extrap_ <= 0) return;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto hn = u_hanc, hd = u_hdot, dp = delta_psi, da = delta_alpha_psi, ub = u_beta;
+  auto ad = u_adual, a0 = u_a0dual;
+  const int n3 = dp.extent_int(2), n2 = dp.extent_int(3), n1 = dp.extent_int(4);
+  const bool rate = !keep_rate && si_hanc_ok_ && t > si_t_anc_;
+  const Real idt = rate ? 1.0/(t - si_t_anc_) : 0.0;
+  par_for("cfc_si_extrap_store", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real h[kSiH];
+    h[0] = dp(m,0,k,j,i); h[1] = da(m,0,k,j,i);
+    for (int c = 0; c < 3; ++c) h[2+c] = ub(m,c,k,j,i);
+    for (int c = 0; c < 6; ++c) h[5+c] = ad(m,c,k,j,i) - a0(m,c,k,j,i);
+    for (int c = 0; c < kSiH; ++c) {
+      if (rate) hd(m,c,k,j,i) = (h[c] - hn(m,c,k,j,i))*idt;
+      hn(m,c,k,j,i) = h[c];
+    }
+  });
+  if (rate) si_hdot_ok_ = true;
+  si_hanc_ok_ = true;
+  si_t_anc_ = t;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SiExtrapApply(Real t)
+//! \brief see cfc.hpp: the live residual fields (all cells, ghosts included, as held) set to
+//! H_anc + (t - t_anc) Hdot; a_dd re-anchored on the refilled Ahat0 (u_a0dual).
+
+void CFC::SiExtrapApply(Real t) {
+  const int nmb = pmy_pack->nmb_thispack;
+  auto hn = u_hanc, hd = u_hdot, dp = delta_psi, da = delta_alpha_psi, ub = u_beta;
+  auto ad = u_adual, a0 = u_a0dual;
+  const int n3 = dp.extent_int(2), n2 = dp.extent_int(3), n1 = dp.extent_int(4);
+  const Real w = t - si_t_anc_;
+  par_for("cfc_si_extrap_apply", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    dp(m,0,k,j,i) = hn(m,0,k,j,i) + w*hd(m,0,k,j,i);
+    da(m,0,k,j,i) = hn(m,1,k,j,i) + w*hd(m,1,k,j,i);
+    for (int c = 0; c < 3; ++c) ub(m,c,k,j,i) = hn(m,2+c,k,j,i) + w*hd(m,2+c,k,j,i);
+    for (int c = 0; c < 6; ++c) {
+      ad(m,c,k,j,i) = a0(m,c,k,j,i) + hn(m,5+c,k,j,i) + w*hd(m,5+c,k,j,i);
+    }
+  });
 }
 
 //----------------------------------------------------------------------------------------

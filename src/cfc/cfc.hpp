@@ -360,6 +360,21 @@ class CFC {
   // the refill itself: background at t, Ahat re-anchored, the conformal metric (ghosts
   // included, from the held, exchanged delta_psi) -- before this stage's C2P
   void RefillHeldResidual(Real t);
+  // <cfc> solve_interval_extrap (RL-045 / K0'; default 0 = the plain hold above; read only
+  // if present; needs solve_interval_refill_bg): 1 = on the refill stages the held residual
+  // H = (delta_psi, delta_alpha_psi, beta_u, a_dd - a0_dd) is extrapolated linearly in time,
+  // H(t) = H_anc + (t - t_anc) Hdot, from the anchor H_anc (the last solve, at t_anc) and the
+  // rate Hdot = (H_anc - H_prev)/(t_anc - t_prev) of the last two regular solves. A regrid's
+  // re-solve (RunLapseShiftAssemblePass) becomes the new anchor and keeps Hdot, which the
+  // AMR transfer carries (u_hdot, prolonged/restricted like padm->u_adm). Until a rate
+  // exists (the run's or segment's first two solves; no restart state) the plain hold.
+  int si_extrap_ = 0;
+  bool si_hanc_ok_ = false, si_hdot_ok_ = false;
+  Real si_t_anc_ = 0.0;
+  static constexpr int kSiH = 11;   // 0 dpsi, 1 dalpha_psi, 2-4 beta_u, 5-10 adual - a0dual
+  DvceArray5D<Real> u_hanc, u_hdot, coarse_u_hdot;
+  void SiExtrapOnSolve(Real t, bool keep_rate);   // after a solve: rate (unless keep_rate), anchor
+  void SiExtrapApply(Real t);                     // a refill stage: H(t) into the live fields
 
   // Comoving gauge (DEVELOPMENT.md item 68): x' = x - xi(t) with the slicing
   // unchanged, i.e. a spatially uniform xidot^i(t) added to the shift that the fluid

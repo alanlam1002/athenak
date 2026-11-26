@@ -1,0 +1,89 @@
+<comment>
+problem   = Evolved spinning puncture, 3D Cartesian reference for M2d T5 (D-026)
+# Same data, gauge and boundaries as z4c_cartoon_spin.athinput on a 3D Cartesian mesh
+# (physical = mesh; spin along mesh +x3). x2 (= y) has an odd cell count over a range
+# widened by dx/2 on each side, so one cell is centred on y = 0 and the x and z cell
+# centres coincide with the 2D Cartoon ones; the bin outputs are that y = 0 slice.
+# Defaults: dx = M/8 on [-8, 8]^3; dx = M/16 needs nx1 = nx3 = 256, nx2 = 257,
+# x2max = -x2min = 8.03125 (and meshblock/nx2 = 257).
+
+<job>
+basename  = sspin3
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 128
+x1min     = -8.0
+x1max     = 8.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+nx2       = 129        # odd: a cell centred on y = 0
+x2min     = -8.0625    # -(8 + dx/2)
+x2max     = 8.0625
+ix2_bc    = outflow
+ox2_bc    = outflow
+nx3       = 128
+x3min     = -8.0
+x3max     = 8.0
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<meshblock>
+nx1       = 32
+nx2       = 129
+nx3       = 32
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = -1
+tlim       = 2.0
+
+<z4c>
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_Gamma     = 1.0
+shift_advect    = 1.0
+shift_eta       = 1.0
+diss            = 0.02
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+constraints_on_output_only = true
+
+<problem>
+pgen_name = z4c_spinning_puncture
+punc_ADM_mass = 1.0
+punc_chi = 0.95
+spin_coord = les
+spin_lapse = w
+spin_shift = zero
+punc_center_x1 = 0.0
+punc_center_x2 = 0.0
+punc_center_x3 = 0.0
+
+<output1>
+file_type  = hst
+dt         = 0.25
+data_format = %.17e
+
+<output2>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = z4c
+dt         = 1.0
+slice_x2   = 0.0
+
+<output3>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = con
+dt         = 1.0
+slice_x2   = 0.0

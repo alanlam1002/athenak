@@ -133,6 +133,8 @@ FastFlow::FastFlow(MeshBlockPack *pmbp, ParameterInput *pin, int n):
   start_time = pin->GetOrAddReal("fastflow", "start_time_" + n_str,
                                                  std::numeric_limits<double>::max());
   stop_time = pin->GetOrAddReal("fastflow", "stop_time_" + n_str, -1.0);
+  find_dt = pin->GetOrAddReal("fastflow", "find_dt_" + n_str, 0.0);
+  next_find_time = pin->GetOrAddReal("fastflow", "next_find_time_" + n_str, start_time);
 
   // Grid and quadrature weights.
   gl_grid = new GaussLegendreGrid(pmbp, ntheta, 1.0); // unit-sphere
@@ -397,8 +399,7 @@ FastFlow::~FastFlow() {
 //! \brief Output summary and shape file, for each horizon.
 void FastFlow::Write(int iter, Real time) {
   if (ioproc) {
-    if ((time < start_time) || (time > stop_time)) return;
-    if (wait_until_punc_are_close && !(PuncAreClose())) return;
+    if (!find_now_) return;  // no search this cycle (time window, punctures, find_dt)
 
     // Summary file
     fprintf(pofile_summary, "%d %g ", iter, time);
@@ -452,8 +453,16 @@ void FastFlow::Write(int iter, Real time) {
 //! \fn void FastFlow::Find(int iter, Real time)
 //! \brief Search for the horizons
 void FastFlow::Find(int iter, Real time) {
+  find_now_ = false;
   if ((time < start_time) || (time > stop_time)) return;
   if (wait_until_punc_are_close && !(PuncAreClose())) return;
+  if (find_dt > 0.0) {
+    // search on the first cycle with time >= next_find_time (round-off tolerant)
+    if (time < next_find_time - 1e-10*find_dt) return;
+    while (next_find_time <= time + 1e-10*find_dt) next_find_time += find_dt;
+    pin->SetReal("fastflow", "next_find_time_" + std::to_string(nh), next_find_time);
+  }
+  find_now_ = true;
   if (verbose && ioproc) {
     fprintf(pofile_verbose, "time=%.4f, cycle=%d\n", time, iter);
   }

@@ -66,3 +66,15 @@ user_hist   = true
 file_type  = hst
 dt         = 0.25
 data_format = %.17e   # full precision (the D-024 volume check is exact)
+
+<output2>
+file_type  = bin      # M2d T1: orders in the causal window (vis/python/cartoon_m2d.py)
+single_precision = false
+variable   = z4c
+dt         = 2.0
+
+<output3>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = con
+dt         = 2.0

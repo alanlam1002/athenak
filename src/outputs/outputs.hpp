@@ -146,6 +146,7 @@ struct OutputParameters {
   bool logscale=true, logscale2=true;
   bool mass_weighted=false;
   bool single_file_per_rank=false; // DBF: parameter for single file per rank
+  bool single_precision=true;       // bin: variables as float (false: as Real)
 };
 
 //----------------------------------------------------------------------------------------

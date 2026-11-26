@@ -74,6 +74,7 @@ class ProblemGenerator {
   void Z4cBoostedPuncture(ParameterInput *pin, const bool restart);
   void Z4cSpinningPuncture(ParameterInput *pin, const bool restart);
   void Z4cGaugePulse(ParameterInput *pin, const bool restart);
+  void Z4cTrumpet(ParameterInput *pin, const bool restart);
   void Z4cLinearWave(ParameterInput *pin, const bool restart);
   void SelfGravity(ParameterInput *pin, const bool restart);
   void BinaryGravity(ParameterInput *pin, const bool restart);

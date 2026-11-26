@@ -1,0 +1,106 @@
+<comment>
+problem   = Evolved spinning puncture under 2D Cartoon (M2d T4, T5; D-023, D-026)
+# Liu-Etienne-Shapiro Kerr data (z4c_spinning_puncture, spin_coord = les), chi = 0.95,
+# M = 1, spin along physical +z = mesh +x2, on the axis. Initial lapse alpha = W,
+# shift zero; moving-puncture gauge (1+log, Gamma-driver) with eta = 1/M (D-023). The
+# outer R face and both z faces are Sommerfeld (M2b). Defaults are the T5 2D run at
+# dx = M/8 (L = 8M); T4 turns the finder on (fastflow/num_horizons = 1) and sets L.
+# Bin outputs: z4c variables and constraints, read by vis/python/cartoon_m2d.py.
+
+<job>
+basename  = cspin
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym   # 2D Cartoon (D-014); physical (x, y, z) = mesh (x1, -x3, x2)
+nx1       = 64         # R in [0, 8]: dx = M/8
+x1min     = 0.0
+x1max     = 8.0
+ix1_bc    = reflect    # the axis
+ox1_bc    = outflow    # Sommerfeld
+nx2       = 128        # z in [-8, 8]
+x2min     = -8.0
+x2max     = 8.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 32
+nx2       = 32
+nx3       = 1
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = -1
+tlim       = 2.0
+
+<z4c>
+lapse_oplog     = 2.0      # 1+log
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_Gamma     = 1.0      # d_t beta = Gamma - eta beta (+ advection)
+shift_advect    = 1.0
+shift_eta       = 1.0      # eta = 1/M (D-023)
+diss            = 0.02
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+cartoon_ydiss   = false
+constraints_on_output_only = true   # D-025
+
+<fastflow>
+npunct = 0
+num_horizons = 0        # T4: 1
+ntheta = 16             # nphi = 2*ntheta (chat/0016)
+lmax = 8
+use_puncture_0 = -1
+initial_radius_0 = 0.4  # r_h = (1 + sqrt(1 - chi^2))/4 = 0.328 at chi = 0.95
+center_x_0 = 0.0        # mesh coordinates; under Cartoon the center is on mesh x2
+center_y_0 = 0.0
+center_z_0 = 0.0
+flow_iterations_0 = 1000
+flow_alpha_beta_const_0 = 1.0
+hmean_tol_0 = 100.0
+mass_tol_0 = 1e-14
+start_time_0 = 0.0
+stop_time_0 = 1000.0
+find_dt_0 = 0.5         # search every 0.5M (a search costs ~1 s on PVC)
+
+<problem>
+pgen_name = z4c_spinning_puncture
+punc_ADM_mass = 1.0
+punc_chi = 0.95
+spin_coord = les
+spin_lapse = w
+spin_shift = zero
+punc_center_x1 = 0.0
+punc_center_x2 = 0.0
+punc_center_x3 = 0.0
+
+<output1>
+file_type  = hst
+dt         = 0.25
+data_format = %.17e
+
+<output2>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = z4c
+dt         = 1.0
+
+<output3>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = con
+dt         = 1.0

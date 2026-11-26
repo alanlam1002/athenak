@@ -30,6 +30,9 @@
 //!   slice_x2    = 0.0       # slice at x2
 //!   slice_x3    = 0.0       # slice at x3
 //!
+//! A bin dump writes its variables as float by default; single_precision = false writes
+//! them as Real (bin_convert.py reads both).
+//!
 //! Each <output[n]> block will result in a new node being created in a linked list of
 //! BaseTypeOutput stored in the Outputs class.  During a simulation, outputs are made
 //! when the simulation time satisfies the criteria implemented in the Driver class.
@@ -274,6 +277,8 @@ Outputs::Outputs(ParameterInput *pin, Mesh *pm) {
       } else if (opar.file_type.compare("bin") == 0) {
         opar.single_file_per_rank = pin->GetOrAddBoolean(opar.block_name,
           "single_file_per_rank", false);
+        opar.single_precision = pin->GetOrAddBoolean(opar.block_name,
+          "single_precision", true);
         pnode = new MeshBinaryOutput(pin,pm,opar);
         pout_list.insert(pout_list.begin(),pnode);
       } else if (opar.file_type.compare("cart") == 0) {

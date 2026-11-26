@@ -1,0 +1,83 @@
+<comment>
+problem   = Stationary trumpet black hole under 2D Cartoon, static gauge (M2d T2)
+# z4c_trumpet (SACRA tbh_get_var): maximal-slicing trumpet, M = 1, on the axis. Static
+# gauge (survey S2, chat/0011): d_t alpha = -alpha (1 - alpha) Khat, no advection,
+# frozen shift. The exact solution is stationary; the user history measures the
+# deviation from it for r > hist_rmin.
+
+<job>
+basename  = ctrump
+
+<mesh>
+nghost    = 2
+coord     = cylindrical_axisym   # 2D Cartoon (D-014)
+nx1       = 128        # R in [0, 16]: dx = M/8
+x1min     = 0.0
+x1max     = 16.0
+ix1_bc    = reflect    # the axis
+ox1_bc    = outflow    # Sommerfeld (M2b)
+nx2       = 256        # z in [-16, 16]
+x2min     = -16.0
+x2max     = 16.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+nx3       = 1
+x3min     = -0.5
+x3max     = 0.5
+ix3_bc    = periodic
+ox3_bc    = periodic
+
+<meshblock>
+nx1       = 64
+nx2       = 64
+nx3       = 1
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = -1
+tlim       = 10.0
+
+<z4c>
+lapse_oplog     = 1.0      # static gauge (S2): d_t alpha = -alpha (1 - alpha) Khat
+lapse_harmonicf = 1.0
+lapse_harmonic  = -1.0
+lapse_advect    = 0.0
+shift_Gamma     = 0.0      # frozen shift
+shift_advect    = 0.0
+shift_eta       = 0.0
+diss            = 0.02
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+constraints_on_output_only = true   # D-025
+
+<problem>
+pgen_name     = z4c_trumpet
+punc_ADM_mass = 1.0
+hist_rmin     = 1.0
+report_constraints = true
+report_rmin   = 1.0
+report_rmax   = 8.0
+user_hist     = true
+
+<output1>
+file_type  = hst
+dt         = 0.5
+data_format = %.17e
+
+<output2>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = z4c
+dt         = 5.0
+
+<output3>
+file_type  = bin
+single_precision = false   # doubles: orders below the float floor
+variable   = con
+dt         = 5.0

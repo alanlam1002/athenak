@@ -84,6 +84,10 @@ class FastFlow {
   // Start and Stop times for each surface
   Real start_time;
   Real stop_time;
+  // Time between searches (find_dt_<n>; 0: every cycle) and the next search time, kept
+  // in the parameters (next_find_time_<n>) so a restart continues the cadence.
+  Real find_dt;
+  Real next_find_time;
 
  private:
   int npunct; // Number of punctures
@@ -101,6 +105,7 @@ class FastFlow {
   // (D-017), so its polar axis is mesh x2 and Sx, Sy, Sz are physical components.
   // MetricInterp() maps each surface point to the plane and rotates the data (M2f).
   bool cartoon_;
+  bool find_now_ = false;  // this cycle's Find() searched; Write() writes only then
   int nhorizon; // Number of horizons
   std::string flow_function;
   int flowflag = 0;

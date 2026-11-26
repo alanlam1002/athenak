@@ -82,6 +82,10 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // 1. Size of the header
   // 2. Current time
   // 3. List of variables in the file
+  // variables are written as float unless single_precision = false (then as Real)
+  const bool single_prec = out_params.single_precision;
+  const std::size_t var_size = single_prec ? sizeof(float) : sizeof(Real);
+
   // 4. Header (input file information)
   {
     std::stringstream msg;
@@ -93,7 +97,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
         << "  time=" << pm->time << std::endl
         << "  cycle=" << pm->ncycle << std::endl
         << "  size of location=" << sizeof(Real) << std::endl
-        << "  size of variable=" << sizeof(float) << std::endl
+        << "  size of variable=" << var_size << std::endl
         << "  number of variables=" << outvars.size() << std::endl
         << "  variables:  ";
     for (size_t n=0; n<outvars.size(); n++) {
@@ -138,7 +142,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // ois, oie, ojs, oje, oks, oke + il1, il2, il3, level +
   // x1min, x1max, x2min, x2max, x3min, x3max + data
   std::size_t data_size = 10*sizeof(int32_t) + 6*sizeof(Real)
-                        + (cells*nout_vars)*sizeof(float);
+                        + (cells*nout_vars)*var_size;
 
   int ns_mbs = pm->gids_eachrank[global_variable::my_rank];
   int nb_mbs = pm->nmb_eachrank[global_variable::my_rank];
@@ -146,6 +150,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   // allocate 1D vector of floats used to convert and output data
   char *data = new char[nb_mbs*data_size];
   float *single_data = new float[cells];
+  Real *real_data = new Real[cells];
 
   // Loop over MeshBlocks
   for (int m=0; m<nout_mbs; ++m) {
@@ -221,14 +226,22 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
       for (int k=oks; k<=oke; k++) {
         for (int j=ojs; j<=oje; j++) {
           for (int i=ois; i<=oie; i++) {
-            tmp_data = static_cast<float>(outarray(n,m,k-oks,j-ojs,i-ois));
-            single_data[cnt] = tmp_data;
+            if (single_prec) {
+              tmp_data = static_cast<float>(outarray(n,m,k-oks,j-ojs,i-ois));
+              single_data[cnt] = tmp_data;
+            } else {
+              real_data[cnt] = outarray(n,m,k-oks,j-ojs,i-ois);
+            }
             cnt++;
           }
         }
       }
-      memcpy(pdata,single_data,cells*sizeof(float));
-      pdata+=cells*sizeof(float);
+      if (single_prec) {
+        memcpy(pdata,single_data,cells*sizeof(float));
+      } else {
+        memcpy(pdata,real_data,cells*sizeof(Real));
+      }
+      pdata+=cells*var_size;
     }
   }
 
@@ -304,6 +317,7 @@ void MeshBinaryOutput::WriteOutputFile(Mesh *pm, ParameterInput *pin) {
   binfile.Close(single_file_per_rank);
   delete [] data;
   delete [] single_data;
+  delete [] real_data;
 
   // increment counters
   out_params.file_number++;

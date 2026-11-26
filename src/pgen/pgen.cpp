@@ -954,6 +954,8 @@ void ProblemGenerator::CallProblemGenerator(ParameterInput *pin, bool is_restart
     Shwave(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_boosted_puncture") == 0) {
     Z4cBoostedPuncture(pin, is_restart);
+  } else if (pgen_fun_name.compare("z4c_trumpet") == 0) {
+    Z4cTrumpet(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_gauge_pulse") == 0) {
     Z4cGaugePulse(pin, is_restart);
   } else if (pgen_fun_name.compare("z4c_spinning_puncture") == 0) {

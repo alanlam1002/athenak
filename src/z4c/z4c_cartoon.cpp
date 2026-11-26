@@ -260,12 +260,14 @@ void Z4c::CartoonSetup(ParameterInput *pin) {
   }
   const BoundaryFace somm_faces[3] = {BoundaryFace::outer_x1, BoundaryFace::inner_x2,
                                       BoundaryFace::outer_x2};
+  // M2b: outflow/diode/vacuum on the outer x1 face and both x2 faces get the
+  // Cartoon-aware Sommerfeld RHS (z4c_Sbc.cpp: radial direction from Z4cCartesianPos,
+  // no x3 terms). A user boundary runs a problem-specific function that nothing has
+  // checked under Cartoon, so it stays fatal.
   for (auto f : somm_faces) {
-    BoundaryFlag b = pm->mesh_bcs[f];
-    if (b == BoundaryFlag::outflow || b == BoundaryFlag::diode ||
-        b == BoundaryFlag::vacuum || b == BoundaryFlag::user) {
-      fatal("2D Cartoon: outflow/diode/vacuum/user outer boundaries trigger the "
-            "Sommerfeld RHS, which is not Cartoon-aware yet (M2)");
+    if (pm->mesh_bcs[f] == BoundaryFlag::user) {
+      fatal("2D Cartoon: user outer boundaries are not supported (M2b allows outflow, "
+            "diode, vacuum and periodic/reflect)");
     }
   }
   // Uniform spacing (R2/R4): AthenaK has no mesh-stretching option (no x1rat/x2rat), so

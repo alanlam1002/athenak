@@ -1,0 +1,65 @@
+<comment>
+problem   = Same gauge pulse on a 3D Cartesian mesh (reference for z4c_cartoon_pulse, M2b)
+# Same data as z4c_cartoon_pulse.athinput; here physical = mesh and the axis is mesh x3,
+# so the pulse centre z0 is along mesh x3. All six faces are outflow (Sommerfeld).
+
+<job>
+basename  = spulse3
+
+<mesh>
+nghost    = 2
+coord     = cartesian
+nx1       = 128
+x1min     = -8.0
+x1max     = 8.0
+ix1_bc    = outflow
+ox1_bc    = outflow
+nx2       = 128
+x2min     = -8.0
+x2max     = 8.0
+ix2_bc    = outflow
+ox2_bc    = outflow
+nx3       = 128
+x3min     = -8.0
+x3max     = 8.0
+ix3_bc    = outflow
+ox3_bc    = outflow
+
+<meshblock>
+nx1       = 32
+nx2       = 32
+nx3       = 32
+
+<mesh_refinement>
+refinement = none
+
+<time>
+evolution  = dynamic
+integrator = rk4
+cfl_number = 0.25
+nlim       = -1
+tlim       = 24.0
+
+<z4c>
+lapse_oplog     = 2.0
+lapse_harmonicf = 1.0
+lapse_harmonic  = 0.0
+lapse_advect    = 1.0
+shift_eta       = 2.0
+shift_advect    = 1.0
+diss            = 0.02
+chi_div_floor   = 1e-05
+damp_kappa1     = 0.02
+damp_kappa2     = 0.0
+
+<problem>
+pgen_name   = z4c_gauge_pulse
+pulse_amp   = 1.0e-3
+pulse_width = 1.0
+pulse_r0    = 0.0
+pulse_z0    = 1.0
+user_hist   = true
+
+<output1>
+file_type  = hst
+dt         = 0.25

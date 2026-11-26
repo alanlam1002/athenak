@@ -291,3 +291,14 @@ def test_spinning_puncture_off_axis_cylindrical_axisym_2d_fails():
         assert "the puncture must lie on the symmetry axis" in out, out[-2000:]
     finally:
         testutils.cleanup()
+
+
+# M2b: outflow/diode/vacuum outer faces get the Cartoon-aware Sommerfeld RHS; a user
+# boundary runs problem-specific code nobody has checked under Cartoon and stays fatal.
+def test_z4c_user_outer_bc_cylindrical_axisym_2d_fails():
+    try:
+        rc, out = _run_deck(Z4C_2D_INPUT, ["mesh/ox1_bc=user"])
+        assert rc != 0
+        assert "user outer boundaries are not supported" in out, out[-2000:]
+    finally:
+        testutils.cleanup()

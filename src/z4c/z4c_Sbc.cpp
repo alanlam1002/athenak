@@ -52,20 +52,24 @@ static void Z4cSommerfeld(const Z4c::Z4c_vars& z4c, const Z4c::Z4c_vars& rhs,
   // First derivatives
   // We force all derivatives to be calculated at second-order, as this was found to
   // be necessary for stability in Athena++.
+  // 2D Cartoon (M2b): the mesh is the plane mesh x3 = 0 with one cell in x3 and no x3
+  // ghosts, and the radial direction s^i below has no x3 component there (s^3 = 0), so
+  // the x3 derivatives are not needed and are not taken (they would read outside u0).
   //
+  const int nd = (cmode == Z4c::CartoonMode::axisym) ? 2 : 3;
   for (int a = 0; a < 3; a++) {
-    dKhat_d(a) = Dx<2>(a, idx, z4c.vKhat, m, k, j, i);
-    dTheta_d(a) = Dx<2>(a, idx, z4c.vTheta, m, k, j, i);
+    dKhat_d(a) = (a < nd) ? Dx<2>(a, idx, z4c.vKhat, m, k, j, i) : 0.0;
+    dTheta_d(a) = (a < nd) ? Dx<2>(a, idx, z4c.vTheta, m, k, j, i) : 0.0;
   }
   for (int a = 0; a < 3; a++) {
     for (int b = 0; b < 3; b++) {
-      dGam_du(b,a) = Dx<2>(b, idx, z4c.vGam_u, m, a, k, j, i);
+      dGam_du(b,a) = (b < nd) ? Dx<2>(b, idx, z4c.vGam_u, m, a, k, j, i) : 0.0;
     }
   }
   for (int a = 0; a < 3; a++) {
     for (int b = a; b < 3; b++) {
       for (int c = 0; c < 3; c++) {
-        dA_ddd(c, a, b) = Dx<2>(c, idx, z4c.vA_dd, m, a, b, k, j, i);
+        dA_ddd(c, a, b) = (c < nd) ? Dx<2>(c, idx, z4c.vA_dd, m, a, b, k, j, i) : 0.0;
       }
     }
   }
@@ -223,6 +227,9 @@ TaskStatus Z4c::Z4cBoundaryRHS(Driver *pdriver, int stage) {
       }
     });
   }
+  // 2D Cartoon: the plane has no x3 boundary (the x3 direction is the Cartoon ghost
+  // planes), so the x3 faces never get a Sommerfeld RHS (M2b).
+  if (IsCartoon()) return TaskStatus::complete;
   if (pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::outflow
       || pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::diode
       || pm->mesh_bcs[BoundaryFace::inner_x3] == BoundaryFlag::vacuum

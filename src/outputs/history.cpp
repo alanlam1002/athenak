@@ -21,6 +21,7 @@
 #include "hydro/hydro.hpp"
 #include "mhd/mhd.hpp"
 #include "z4c/z4c.hpp"
+#include "z4c/z4c_pos.hpp"
 #include "coordinates/adm.hpp"
 #include "outputs.hpp"
 
@@ -196,6 +197,11 @@ void HistoryOutput::LoadZ4cHistoryData(HistoryData *pdata, Mesh *pm) {
   auto &size = pm->pmb_pack->pmb->mb_size;
   int &nhist_ = pdata->nhist;
   auto &opt = pm->pmb_pack->pz4c->opt;
+  // 2D Cartoon (D-024): each plane cell stands for a ring, dV = 2 pi R dR dz (times
+  // sqrt(det g)), R the cell midpoint (Z4cCartesianPos, D-014). 3D is unchanged.
+  const z4c::Z4c::CartoonMode cmode = opt.cartoon;
+  const bool cartoon = pm->pmb_pack->pz4c->IsCartoon();
+  const RegionIndcs indcs_ = pm->pmb_pack->pmesh->mb_indcs;
 
   // loop over all MeshBlocks in this pack
   auto &indcs = pm->pmb_pack->pmesh->mb_indcs;
@@ -220,8 +226,16 @@ void HistoryOutput::LoadZ4cHistoryData(HistoryData *pdata, Mesh *pm) {
                                 adm.g_dd(m,0,2,k,j,i), adm.g_dd(m,1,1,k,j,i),
                                 adm.g_dd(m,1,2,k,j,i), adm.g_dd(m,2,2,k,j,i));
 
-    Real vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3
-               * std::sqrt(std::abs(detg));
+    Real vol;
+    if (cartoon) {
+      Real R, z, x3p;
+      z4c::Z4cCartesianPos(cmode, size.d_view(m), indcs_, k, j, i, R, z, x3p);
+      vol = 2.0*M_PI*R*size.d_view(m).dx1*size.d_view(m).dx2
+            * std::sqrt(std::abs(detg));
+    } else {
+      vol = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3
+            * std::sqrt(std::abs(detg));
+    }
 
     // Excise the punctures based on chi
     array_sum::GlobalSum hvars;

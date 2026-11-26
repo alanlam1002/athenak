@@ -36,11 +36,12 @@ def cleanup():
         shutil.rmtree(d, ignore_errors=True)
 
 
-def _read_hst(d):
+def _read_hst(d, z4c=False):
+    """The pgen's own columns (<basename>.user.hst), or with z4c=True the Z4c history
+    (<basename>.z4c.user.hst); the two files share some labels."""
     cols = {}
-    # the pgen's own columns only (<basename>.user.hst; the Z4c file has other labels)
     for f in sorted(glob.glob(os.path.join(d, "*.hst"))):
-        if ".z4c." in os.path.basename(f):
+        if (".z4c." in os.path.basename(f)) != z4c:
             continue
         lines = open(f).read().splitlines()
         hdr = [ln for ln in lines if ln.startswith("#") and "[1]" in ln]
@@ -73,6 +74,7 @@ def run(dim, ng, n, amp=1e-3, extra=()):
     assert "a-1-norm2" in c and "Khat-norm2" in c, proc.stdout[-3000:]
     for k in ("a-1-norm2", "Khat-norm2", "Thet-norm2", "Gam-norm2"):
         assert all(math.isfinite(x) for x in c[k]), k
+    c["z4c"] = _read_hst(d, z4c=True)
     return c
 
 
@@ -130,3 +132,22 @@ def check_2d_vs_3d(n=32):
         scale = max(b)
         err = max(abs(x - y) for x, y in zip(a, b)) / scale
         assert err <= tol, (k, err)
+
+
+def check_history_volume():
+    """D-024: under Cartoon the Z4c history weights cells by 2 pi R dR dz sqrt(det g).
+    On flat initial data the Volume column is the cylinder volume pi R_max^2 (z_max -
+    z_min) exactly (the midpoint sum of 2 pi R dR is exact), and it equals the pgen's
+    own axisymmetric volume. During the evolution the Z4c Theta norm matches the pgen's
+    reduction up to the sqrt(det g) factor (det g - 1 = O(A))."""
+    c = run(2, 2, 32, extra=["time/tlim=4.0"])
+    z = c["z4c"]
+    assert "Volume" in z and "Theta-norm" in z, list(z)
+    vol = math.pi * 8.0 ** 2 * 16.0
+    assert abs(z["Volume"][0] - vol) <= 1e-12 * vol, (z["Volume"][0], vol)
+    assert abs(c["vol-axi"][0] - vol) <= 1e-12 * vol, (c["vol-axi"][0], vol)
+    n = min(len(z["Theta-norm"]), len(c["Thet-norm2"]))
+    peak = max(c["Thet-norm2"][:n])
+    assert peak > 0.0
+    for a, b in zip(z["Theta-norm"][:n], c["Thet-norm2"][:n]):
+        assert abs(a - b) <= 1e-2 * peak, (a, b, peak)

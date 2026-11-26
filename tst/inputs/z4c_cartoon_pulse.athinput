@@ -64,3 +64,4 @@ user_hist   = true
 <output1>
 file_type  = hst
 dt         = 0.25
+data_format = %.17e   # full precision (the D-024 volume check is exact)

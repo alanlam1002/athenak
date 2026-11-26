@@ -28,3 +28,11 @@ def test_cartoon_m2b_pulse_2d_vs_3d_cpu():
     finally:
         c.cleanup()
         testutils.cleanup()
+
+
+def test_cartoon_history_volume_cpu():
+    try:
+        c.check_history_volume()
+    finally:
+        c.cleanup()
+        testutils.cleanup()

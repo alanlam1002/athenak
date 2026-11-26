@@ -370,6 +370,7 @@ class CFC {
   // exists (the run's or segment's first two solves; no restart state) the plain hold.
   int si_extrap_ = 0;
   bool si_hanc_ok_ = false, si_hdot_ok_ = false;
+  int si_n_apply_ = 0, si_n_rate_ = 0, si_n_anchor_ = 0;   // counts (rank-0 SIEXTRAP lines)
   Real si_t_anc_ = 0.0;
   static constexpr int kSiH = 11;   // 0 dpsi, 1 dalpha_psi, 2-4 beta_u, 5-10 adual - a0dual
   DvceArray5D<Real> u_hanc, u_hdot, coarse_u_hdot;

@@ -3416,9 +3416,16 @@ void CFC::SiExtrapOnSolve(Real t, bool keep_rate) {
       hn(m,c,k,j,i) = h[c];
     }
   });
-  if (rate) si_hdot_ok_ = true;
+  if (rate) { si_hdot_ok_ = true; ++si_n_rate_; } else { ++si_n_anchor_; }
   si_hanc_ok_ = true;
   si_t_anc_ = t;
+  if (global_variable::my_rank == 0 && (si_n_rate_ + si_n_anchor_ <= 3 ||
+      (si_n_rate_ + si_n_anchor_) % 100 == 0)) {
+    std::cout << "SIEXTRAP cycle=" << pmy_pack->pmesh->ncycle << " t=" << t
+              << (rate ? " rate+anchor" : " anchor only (keep rate)") << " rates=" << si_n_rate_
+              << " anchors=" << si_n_anchor_ << " applies=" << si_n_apply_
+              << " hdot_ok=" << si_hdot_ok_ << std::endl;
+  }
 }
 
 //----------------------------------------------------------------------------------------
@@ -3432,6 +3439,7 @@ void CFC::SiExtrapApply(Real t) {
   auto ad = u_adual, a0 = u_a0dual;
   const int n3 = dp.extent_int(2), n2 = dp.extent_int(3), n1 = dp.extent_int(4);
   const Real w = t - si_t_anc_;
+  ++si_n_apply_;
   par_for("cfc_si_extrap_apply", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
     dp(m,0,k,j,i) = hn(m,0,k,j,i) + w*hd(m,0,k,j,i);

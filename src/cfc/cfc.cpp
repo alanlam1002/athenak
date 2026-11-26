@@ -1003,6 +1003,16 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   if (cfc_solve_interval_ <= 0) {
     return true;
   }
+  if (si_refill_bg_) {   // C-284: the run's (or segment's) first cycle solves every stage
+    if (si_cyc0_ < 0) {
+      si_cyc0_ = pmy_pack->pmesh->ncycle;
+      if (global_variable::my_rank == 0) {
+        std::cout << "CFC solve_interval_refill_bg: cycle " << si_cyc0_
+                  << " (the first of this run segment) solves every stage" << std::endl;
+      }
+    }
+    if (pmy_pack->pmesh->ncycle == si_cyc0_) return true;
+  }
   const bool fs = FrameStaticForCadence();
   if (static_cast<int>(fs) != cad_state_) {
     cad_state_ = static_cast<int>(fs);

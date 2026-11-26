@@ -670,6 +670,12 @@ class CFC {
   // state is identical on all ranks). Otherwise every stage solves, as solve_interval 0.
   bool FrameStaticForCadence() const;
   mutable int cad_state_ = -1;   // last reported FrameStaticForCadence (rank-0 notice)
+  // C-284 (user 2026-11-26): with solve_interval_refill_bg, the first cycle this process runs
+  // (a fresh start or a restart) solves every stage: the held residual is not in the restart, and
+  // the old fallback (the whole metric frozen, the moving puncture included, until the first solve)
+  // put a step into the star near pericentre. Latched on the first normal-stage call, so constant
+  // over that cycle for every task.
+  mutable int si_cyc0_ = -1;
 
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's

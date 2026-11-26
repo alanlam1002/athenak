@@ -308,15 +308,18 @@ class Z4c {
   void Z4cWeyl(MeshBlockPack *pmbp);
   void WaveExtr(MeshBlockPack *pmbp);
   void AlgConstr(MeshBlockPack *pmbp);
-  // Cartoon fill u0 -> u_cart (K1-K4). The overload with arguments exists for the unit
+  // Cartoon fill u0 -> u_cart (K12, K3). The overload with arguments exists for the unit
   // test (npt scan, deliberately wrong parity, direct-interpolation cross-check at x<0).
   void CartoonFill(MeshBlockPack *pmbp);
   void CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
                    bool direct_negx);
-  // K1-K3 on any variable set: src(m, n, ks, j, i) -> dst(m, n, 1+2ng, j, i), n < nvar
+  // K12, K3 on any variable set: src(m, n, ks, j, i) -> dst(m, n, 1+2ng, j, i), n < nvar.
+  // algc: apply the algebraic constraints (det g-tilde = 1, tr A-tilde = 0) to the
+  // interpolated ghost-plane values; the set's first two symmetric tensors are then
+  // g-tilde and A-tilde (the Z4c set).
   void CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
                       DvceArray5D<Real> src, DvceArray5D<Real> dst, int npt,
-                      const CartoonParity &par, bool direct_negx);
+                      const CartoonParity &par, bool direct_negx, bool algc);
   // u_adm -> u_adm_cart (no algebraic constraints: the ADM set has none)
   void CartoonFillADM(MeshBlockPack *pmbp);
   // Fatal exit for a problem generator that cannot run under 2D Cartoon (no-op in 3D)
@@ -325,7 +328,7 @@ class Z4c {
   // parity signs, on MeshBlocks whose inner x1 face is the mesh boundary.
   void CartoonAxisBC(MeshBlockPack *pmbp, DvceArray5D<Real> u,
                      const CartoonParity &par);
-  // K2 stencil clamps per ghost plane l: {l, n_low, n_high, n_total}; test/diagnostic
+  // K12 stencil clamps per ghost plane l: {l, n_low, n_high, n_total}; test/diagnostic
   // only (host loop; the production kernels do not count).
   void CartoonClampStats(MeshBlockPack *pmbp, int npt,
                          std::vector<std::array<int, 4>> &per_l);

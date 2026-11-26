@@ -48,7 +48,7 @@ namespace z4c {
 // the Gamma's that can only be set in the interior of the MeshBlock.
 //
 // 2D Cartoon (M2a): the pointwise part runs on the plane as in 3D. Then the Z4c set is
-// filled into u_cart (K1-K4), g-tilde^ij is inverted on all 1+2ng cache planes, and
+// filled into u_cart (K12, K3), g-tilde^ij is inverted on all 1+2ng cache planes, and
 // Gamma-tilde^i = -d_j g-tilde^ji is taken on the y = 0 cache plane with the same FD
 // operator as CalcRHS (y spacing dx1, D-001), written back to u0.
 template <int NGHOST>

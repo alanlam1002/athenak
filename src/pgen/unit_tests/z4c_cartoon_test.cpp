@@ -9,7 +9,7 @@
 //! An analytic, exactly axisymmetric 3D field is written on the y = 0 plane (u0, every
 //! cell with x > 0, x1/x2 ghosts included). Then
 //!   1. the D-002 axis boundary fills x < 0 on u0          -> err_axis   (exact)
-//!   2. CartoonFill (K1-K4) fills u_cart                    -> err_ghost  (interp order)
+//!   2. CartoonFill (K12, K3) fills u_cart                -> err_ghost  (interp order)
 //!                                                            err_corner (x < 0, y != 0)
 //!   3. the D-008 pi-copy is cross-checked against direct
 //!      interpolation at rho for the x < 0 cells            -> err_xcheck (exact)
@@ -17,16 +17,16 @@
 //!      operators on u_cart vs analytic derivatives         -> err_dy ... (FD order)
 //! The field has a rotating part (beta^y, Gam^y, A_xy, A_yz, g_xy, g_yz all nonzero on
 //! y = 0), so every entry of the parity table and of the rotation is exercised. g-tilde
-//! and A-tilde satisfy det = 1 and tr = 0 exactly, so K4 (AlgC on the ghost planes) moves
-//! the ghosts by no more than the interpolation error. Analytic derivatives use
-//! hyper-dual numbers (exact first and mixed second derivatives).
+//! and A-tilde satisfy det = 1 and tr = 0 exactly, so the algebraic constraints on the
+//! ghost planes move the ghosts by no more than the interpolation error. Analytic
+//! derivatives use hyper-dual numbers (exact first and mixed second derivatives).
 //!
 //! The exact checks (1, 3) are gates: the pgen exits nonzero if they fail, so a run with
 //! a deliberately wrong parity entry (<problem> wrong_parity = <z4c variable name>) must
 //! fail. Z4cCartesianPos is also checked against the analytic midpoints (R6).
 //! Convergence orders are judged by the pytest driver from the CARTOON_RESULT
 //! lines.
-//! <problem> ntime > 0 also times K1-K4 against CalcRHS.
+//! <problem> ntime > 0 also times the fill against CalcRHS.
 //!
 //! Frame (D-017): physical (x, y, z) = mesh (x1, -x3, x2); symmetry axis = mesh x2.
 //! Every field is built and checked in mesh components; the analytic state is
@@ -814,7 +814,7 @@ void ProblemGenerator::Z4cCartoonTest(ParameterInput *pin, const bool restart) {
     case 4: RunDerivs<4>(pmbp, uc); break;
   }
 
-  // 5. optional timing on the production path: K1-K4 vs CalcRHS (which includes a fill)
+  // 5. optional timing on the production path: the fill vs CalcRHS (which includes one)
   if (ntime > 0) {
     Kokkos::Timer timer;
     Kokkos::fence();

@@ -17,16 +17,19 @@
 //! x1, x2, x3 (so "y" is mesh x3 = physical -y). The fill is a rotation about mesh x2
 //! and is symmetric in +-x3, so it is the same in either labelling.
 //!
-//! The fill (chat/0004 GPU design), run immediately before each consumer (D-007). K1-K3
-//! act on any variable set given by a CartoonVarSet descriptor (M2a): the Z4c set
-//! (u0 -> u_cart, then K4) and the ADM set (u_adm -> u_adm_cart, no K4).
-//!   K1  copy the y = 0 plane from u0 (x1/x2 ghosts included)
-//!   K2  per (m, l = 1..ng, j, i) with x_i > 0: Lagrange-interpolate every variable at
-//!       rho along x1 (npt points, weights computed in registers), rotate, and write both
-//!       planes +l and -l (s -> -s)
+//! The fill (chat/0004 GPU design), run immediately before each consumer (D-007). It acts
+//! on any variable set given by a CartoonVarSet descriptor (M2a): the Z4c set
+//! (u0 -> u_cart, with the algebraic constraints) and the ADM set (u_adm -> u_adm_cart,
+//! without). Two kernels (M2c, D-015: K1 folded into K2, K4 applied in registers):
+//!   K12 per (m, l = 0..ng, j, i). l = 0 copies the y = 0 plane from u0 (x1/x2 ghosts
+//!       included). l > 0, cells with x_i > 0: Lagrange-interpolate every variable at
+//!       rho along x1 (npt points, weights computed in registers), rotate, apply the
+//!       algebraic constraints (det g = 1, tr A = 0; Z4c set only, D-007), and write
+//!       both planes +l and -l (s -> -s)
 //!   K3  cells with x_i < 0 in planes l != 0: pi-rotation copy
-//!       Q(x, y) = P_Q Q(-x, -y) with the D-002 parity table (D-008)
-//!   K4  algebraic constraints (det g = 1, tr A = 0) on the planes l != 0 (D-007)
+//!       Q(x, y) = P_Q Q(-x, -y) with the D-002 parity table (D-008). The copy keeps
+//!       det g and tr A (every term has an even number of parity-odd factors), so the
+//!       copied values are already constrained.
 //! The plane l = 0 at x < 0 is the D-002 axis boundary on u0 (Z4cBCs, CartoonAxisBC).
 
 #include <algorithm>
@@ -44,7 +47,6 @@
 #include "mesh/mesh.hpp"
 #include "coordinates/adm.hpp"
 #include "z4c/z4c.hpp"
-#include "z4c/z4c_algconstr.hpp"
 #include "z4c/z4c_pos.hpp"
 
 namespace z4c {
@@ -98,6 +100,20 @@ void CartoonRotate(const Z4c::CartoonVarSet &vs, const Real *T, const Real c,
     G[o+0] = c*Vx - s*Vy;
     G[o+2] = s*Vx + c*Vy;
   }
+}
+
+// The algebraic constraints (D-007) on a state held in registers: g-tilde at
+// T[og..og+5], A-tilde at T[oA..oA+5] (mesh order 00 01 02 11 12 22). Same operations
+// as AlgConstrPoint (z4c_algconstr.hpp), which acts on arrays.
+KOKKOS_INLINE_FUNCTION
+void AlgConstrRegs(Real *T, const int og, const int oA) {
+  Real detg = adm::SpatialDet(T[og+0], T[og+1], T[og+2], T[og+3], T[og+4], T[og+5]);
+  detg = detg > 0. ? detg : 1.;
+  Real oopsi4 = std::cbrt(1./detg);
+  for (int c = 0; c < 6; ++c) T[og+c] *= oopsi4;
+  Real A = adm::Trace(1.0, T[og+0], T[og+1], T[og+2], T[og+3], T[og+4], T[og+5],
+                      T[oA+0], T[oA+1], T[oA+2], T[oA+3], T[oA+4], T[oA+5]);
+  for (int c = 0; c < 6; ++c) T[oA+c] -= (1.0/3.0) * A * T[og+c];
 }
 
 // Lagrange weights for nodes 0..npt-1 at fractional position t (product form).
@@ -349,8 +365,9 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp) {
 
 //----------------------------------------------------------------------------------------
 //! \fn void Z4c::CartoonFill(pmbp, npt, par, direct_negx)
-//! \brief K1-K4 on the Z4c set. With direct_negx (test only) the x < 0 cells are filled
-//! by K2's direct interpolation at rho with c = x/rho < 0 instead of the K3 pi-copy.
+//! \brief K12 + K3 on the Z4c set. With direct_negx (test only) the x < 0 cells are
+//! filled by K12's direct interpolation at rho with c = x/rho < 0 instead of the K3
+//! pi-copy.
 
 void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
                       bool direct_negx) {
@@ -360,17 +377,8 @@ void Z4c::CartoonFill(MeshBlockPack *pmbp, int npt, const CartoonParity &par,
       u_cart.extent_int(2) != 1 + 2*ng) {
     CartoonAlloc();
   }
-  CartoonFillSet(pmbp, CartoonZ4cSet(), u0, u_cart, npt, par, direct_negx);
-
-  // K4: algebraic constraints on the ghost planes (D-007)
-  const int nmb = pmbp->nmb_thispack;
-  const int n1 = u0.extent_int(4), n2 = u0.extent_int(3);
-  auto zc = z4c_cart;
-  par_for("cartoon_K4", DevExeSpace(), 0, nmb-1, 0, 2*ng, 0, n2-1, 0, n1-1,
-  KOKKOS_LAMBDA(const int m, const int kc, const int j, const int i) {
-    if (kc == ng) return;
-    AlgConstrPoint(zc, m, kc, j, i);
-  });
+  // with the algebraic constraints on the ghost planes (D-007), applied inside K12
+  CartoonFillSet(pmbp, CartoonZ4cSet(), u0, u_cart, npt, par, direct_negx, true);
 }
 
 //----------------------------------------------------------------------------------------
@@ -400,16 +408,16 @@ void Z4c::CartoonFillADM(MeshBlockPack *pmbp) {
                                         adm::ADM::I_ADM_KZZ);
   }
   CartoonFillSet(pmbp, vs, u_adm, u_adm_cart, opt.cartoon_npt, CartoonParityOf(vs),
-                 false);
+                 false, false);
 }
 
 //----------------------------------------------------------------------------------------
 //! \fn void Z4c::CartoonFillSet(pmbp, vs, src, dst, npt, par, direct_negx)
-//! \brief K1-K3 for the variable set vs: src(m, n, ks, j, i) -> dst(m, n, kc, j, i).
+//! \brief K12 and K3 for the variable set vs: src(m, n, ks, j, i) -> dst(m, n, kc, j, i).
 
 void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
                          DvceArray5D<Real> src, DvceArray5D<Real> dst, int npt,
-                         const CartoonParity &par, bool direct_negx) {
+                         const CartoonParity &par, bool direct_negx, bool algc) {
   auto &indcs = pmbp->pmesh->mb_indcs;
   const int ng = indcs.ng, ks = indcs.ks;
   if (npt < 2 || npt > kMaxNpt) {
@@ -432,15 +440,22 @@ void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
   const RegionIndcs indcs_ = indcs;
   const CartoonMode mode = opt.cartoon;
 
-  // K1: the y = 0 plane
-  par_for("cartoon_K1", DevExeSpace(), 0, nmb-1, 0, nvar-1, 0, n2-1, 0, n1-1,
-  KOKKOS_LAMBDA(const int m, const int n, const int j, const int i) {
-    uc(m,n,ng,j,i) = u0_(m,n,ks,j,i);
-  });
+  if (algc && vs.nsym < 2) {
+    std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+              << "Cartoon fill: algebraic constraints need g-tilde and A-tilde"
+              << std::endl;
+    std::exit(EXIT_FAILURE);
+  }
+  const int og = vs.sym[0], oA = vs.sym[1];
 
-  // K2: interpolate at rho and rotate; one interpolation serves planes +l and -l
-  par_for("cartoon_K2", DevExeSpace(), 0, nmb-1, 1, ng, 0, n2-1, 0, n1-1,
+  // K12: l = 0 copies the y = 0 plane; l > 0 interpolates at rho, rotates, constrains
+  // (algc), and writes planes +l and -l. One interpolation serves both planes.
+  par_for("cartoon_K12", DevExeSpace(), 0, nmb-1, 0, ng, 0, n2-1, 0, n1-1,
   KOKKOS_LAMBDA(const int m, const int l, const int j, const int i) {
+    if (l == 0) {
+      for (int n = 0; n < nvar; ++n) uc(m,n,ng,j,i) = u0_(m,n,ks,j,i);
+      return;
+    }
     const Real dx = size.d_view(m).dx1;
     Real x, x2p, x3p, x0;
     // mesh (R, z, 0)
@@ -461,8 +476,10 @@ void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
     }
     const Real c = x/rho, s = y/rho;
     CartoonRotate(vs, T, c, s, G);
+    if (algc) AlgConstrRegs(G, og, oA);
     for (int n = 0; n < nvar; ++n) uc(m,n,ng+l,j,i) = G[n];
     CartoonRotate(vs, T, c, -s, G);
+    if (algc) AlgConstrRegs(G, og, oA);
     for (int n = 0; n < nvar; ++n) uc(m,n,ng-l,j,i) = G[n];
   });
 
@@ -487,8 +504,8 @@ void Z4c::CartoonFillSet(MeshBlockPack *pmbp, const CartoonVarSet &vs,
 
 //----------------------------------------------------------------------------------------
 //! \fn void Z4c::CartoonClampStats()
-//! \brief Count K2 stencils that had to be clamped (one-sided), per ghost plane l, on the
-//! host. Diagnostic for the unit test only; the production kernels do not count.
+//! \brief Count K12 stencils that had to be clamped (one-sided), per ghost plane l, on
+//! the host. Diagnostic for the unit test only; the production kernels do not count.
 //! per_l[l-1] = {l, n_clamped_low, n_clamped_high, n_total} over (m, j, i) with x > 0.
 
 void Z4c::CartoonClampStats(MeshBlockPack *pmbp, int npt,

@@ -65,12 +65,18 @@ class Driver {
   Real gamma;                      // gamma value for the IMEX_new integrator
   Kokkos::Timer* pwall_clock_;     // timer for tracking the wall clock
   Real wall_time;
+  // the output list (set in Initialize/Execute), so tasks can ask whether an output
+  // is written at the end of the current cycle (D-025)
+  Outputs *pouts_ = nullptr;
 
   // functions
   void ExecuteTaskList(Mesh *pm, std::string tl, int stage);
   void Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool rflag);
   void Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdflag);
   void Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout);
+  // true if Execute() will write any output after the cycle now running (the same
+  // test as in Execute, at time + dt and ncycle + 1). D-025.
+  bool OutputDueAfterThisCycle(const Mesh *pmesh) const;
   void InitBoundaryValuesAndPrimitives(Mesh *pm);
 
  private:

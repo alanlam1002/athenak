@@ -151,3 +151,24 @@ def check_history_volume():
     assert peak > 0.0
     for a, b in zip(z["Theta-norm"][:n], c["Thet-norm2"][:n]):
         assert abs(a - b) <= 1e-2 * peak, (a, b, peak)
+
+
+def _z4c_hst_bytes(d):
+    f = [g for g in glob.glob(os.path.join(d, "*.hst")) if ".z4c." in os.path.basename(g)]
+    assert len(f) == 1, f
+    return open(f[0], "rb").read()
+
+
+def check_constraint_gate(dim):
+    """D-025: with z4c/constraints_on_output_only the ADM-constraint task runs only on
+    cycles that write an output (and before the final outputs). The Z4c history, which
+    reads the constraints at every output time, must be byte-identical to the default
+    run (history at %.17e, several cycles between outputs)."""
+    files = []
+    for on in ("false", "true"):
+        before = set(glob.glob("pulse_run_*"))
+        run(dim, 2, 32, extra=["time/tlim=4.0", f"z4c/constraints_on_output_only={on}"])
+        (d,) = set(glob.glob("pulse_run_*")) - before
+        files.append(_z4c_hst_bytes(d))
+    assert files[0].count(b"\n") >= 10, files[0][:500]
+    assert files[0] == files[1], "Z4c history differs with constraints_on_output_only"

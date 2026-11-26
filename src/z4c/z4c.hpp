@@ -223,6 +223,9 @@ class Z4c {
     CartoonMode cartoon;
     bool cartoon_ydiss;
     int cartoon_npt;
+    // D-025: run the ADM-constraint task only on cycles that write an output (default
+    // false: every cycle, as before)
+    bool constraints_on_output_only;
 
     // Flag if drift control for COT should be used.
     bool enable_driftcontrol;
@@ -286,6 +289,9 @@ class Z4c {
   TaskStatus ConvertZ4cToADM(Driver *d, int stage);
   TaskStatus UpdateExcisionMasks(Driver *d, int stage);
   TaskStatus ADMConstraints_(Driver *d, int stage);
+  // D-025: u_con is stale after a skipped cycle; RefreshConstraints() recomputes it then
+  bool con_stale = false;
+  void RefreshConstraints();
   TaskStatus Z4cBoundaryRHS(Driver *d, int stage);
   TaskStatus RestrictU(Driver *d, int stage);
   TaskStatus RestrictWeyl(Driver *d, int stage);

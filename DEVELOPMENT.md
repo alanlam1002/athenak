@@ -422,6 +422,17 @@ converge from the tracker-based initial guess on that coarse grid (boost v = 0.8
 x1). Not investigated; the static-puncture decks `tst/inputs/z4c_ahf_bitant_*.athinput`
 and the M2f decks are the FastFlow references. Refs: notes repo aurora/0011, chat/0013.
 
+## Running tests on Aurora compute nodes (2026-11-26)
+
+`mpiexec -n 1 --ppn 1 --hosts <node> bash script.sh` binds the launched process to
+ONE core. An OpenMP athena run or a pytest suite started that way runs all its threads
+on that core: in the cartoon M2c jobs the CPU nr/gr/dyngrmhd suites hit a 45-minute
+timeout that `--cpu-bind none` turned into 1-2 minutes each, and OpenMP timings were
+~40x low. Add `--cpu-bind none` to every `mpiexec` that starts CPU/OpenMP work (GPU runs
+are unaffected), or run the CPU part directly in the PBS script on the head node.
+Relative A/B timings taken under the binding are still comparable; absolute ones are
+not. Refs: notes repo aurora/0016, chat/0019.
+
 ## Incidents
 
 **2026-08-04, manual-verification `rm -rf` near-miss.** While manually inspecting

@@ -36,3 +36,12 @@ def test_cartoon_history_volume_cpu():
     finally:
         c.cleanup()
         testutils.cleanup()
+
+
+@pytest.mark.parametrize("dim", [2, 3])
+def test_constraint_gate_cpu(dim):
+    try:
+        c.check_constraint_gate(dim)
+    finally:
+        c.cleanup()
+        testutils.cleanup()

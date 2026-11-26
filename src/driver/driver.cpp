@@ -460,6 +460,7 @@ void Driver::ExecuteTaskList(Mesh *pm, std::string tl, int stage) {
 //  outputting ICs, and computing initial time step
 
 void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool res_flag) {
+  pouts_ = pout;
   //---- Step 1.  Set conserved variables in ghost zones for all physics
   InitBoundaryValuesAndPrimitives(pmesh);
 
@@ -527,6 +528,7 @@ void Driver::Initialize(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool re
 //! performs outputs. Updates counters like (ncycle, time, etc.)
 
 void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdflag) {
+  pouts_ = pout;
   if (global_variable::my_rank == 0) {
     std::cout << "\nSetup complete, executing task list(s)...\n" << std::endl;
   }
@@ -637,11 +639,35 @@ void Driver::Execute(Mesh *pmesh, ParameterInput *pin, Outputs *pout, bool wdfla
 }
 
 //----------------------------------------------------------------------------------------
+//! \fn bool Driver::OutputDueAfterThisCycle()
+//! \brief D-025: whether Execute() writes any output once the current cycle is done. Same
+//! test as the output loop in Execute(), evaluated at time + dt and ncycle + 1.
+
+bool Driver::OutputDueAfterThisCycle(const Mesh *pmesh) const {
+  if (pouts_ == nullptr) return true;
+  const Real tnext = pmesh->time + pmesh->dt;
+  const int cnext = pmesh->ncycle + 1;
+  for (auto &out : pouts_->pout_list) {
+    float time_32 = static_cast<float>(tnext);
+    float next_32 = static_cast<float>(out->out_params.last_time+out->out_params.dt);
+    float tlim_32 = static_cast<float>(tlim);
+    const int dcycle_ = out->out_params.dcycle;
+    if (((out->out_params.dt > 0.0) && ((time_32 >= next_32) && (time_32<tlim_32))) ||
+        ((dcycle_ > 0) && (cnext%dcycle_ == 0)) ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+//----------------------------------------------------------------------------------------
 //! \fn Driver::Finalize()
 //! \brief Tasks to be performed after execution of Driver, such as making final output
 //!  and printing diagnostic messages
 
 void Driver::Finalize(Mesh *pmesh, ParameterInput *pin, Outputs *pout) {
+  // D-025: constraints skipped on the last cycle(s) are computed before the final outputs
+  if (pmesh->pmb_pack->pz4c != nullptr) {pmesh->pmb_pack->pz4c->RefreshConstraints();}
   // cycle through output Types and load data / write files
   //  This design allows for asynchronous outputs to implemented in the future.
   for (auto &out : pout->pout_list) {

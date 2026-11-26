@@ -243,6 +243,15 @@ TaskStatus Z4c::ADMConstraints_(Driver *pdrive, int stage) {
   auto &indcs = pmy_pack->pmesh->mb_indcs;
   // 2D Cartoon: ADMConstraints reads the y-derivatives from the Cartoon caches (M2a).
   if (stage == pdrive->nexp_stages) {
+    // D-025: u_con is read only by outputs (Z4c history, field outputs of con); with
+    // constraints_on_output_only it is computed only when one is due after this cycle.
+    // Weyl/wave extraction, FastFlow, the tracker and AMR do not read it.
+    if (opt.constraints_on_output_only &&
+        !pdrive->OutputDueAfterThisCycle(pmy_pack->pmesh)) {
+      con_stale = true;
+      return TaskStatus::complete;
+    }
+    con_stale = false;
     switch (indcs.ng) {
       case 2: ADMConstraints<2>(pmy_pack);
               break;
@@ -253,6 +262,20 @@ TaskStatus Z4c::ADMConstraints_(Driver *pdrive, int stage) {
     }
   }
   return TaskStatus::complete;
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void Z4c::RefreshConstraints()
+//! \brief D-025: recompute u_con if the last cycle skipped it (before final outputs).
+
+void Z4c::RefreshConstraints() {
+  if (!con_stale) return;
+  switch (pmy_pack->pmesh->mb_indcs.ng) {
+    case 2: ADMConstraints<2>(pmy_pack); break;
+    case 3: ADMConstraints<3>(pmy_pack); break;
+    case 4: ADMConstraints<4>(pmy_pack); break;
+  }
+  con_stale = false;
 }
 
 //----------------------------------------------------------------------------------------

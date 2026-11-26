@@ -155,6 +155,8 @@ Z4c::Z4c(MeshBlockPack *ppack, ParameterInput *pin) :
   opt.excise_chi = pin->GetOrAddReal("z4c", "excise_chi", 0.0625);
 
   opt.cartoon_ydiss = pin->GetOrAddBoolean("z4c", "cartoon_ydiss", false);
+  opt.constraints_on_output_only =
+      pin->GetOrAddBoolean("z4c", "constraints_on_output_only", false);
   opt.cartoon_npt = 2*indcs.ng + 1;
 
   opt.extrap_order = fmax(2,fmin(indcs.ng,fmin(4,

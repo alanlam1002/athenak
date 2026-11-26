@@ -51,6 +51,7 @@ diss            = 0.02
 chi_div_floor   = 1e-05
 damp_kappa1     = 0.02
 damp_kappa2     = 0.0
+constraints_on_output_only = false   # D-025 (the gate test turns it on)
 
 <problem>
 pgen_name   = z4c_gauge_pulse

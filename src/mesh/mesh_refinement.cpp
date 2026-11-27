@@ -122,6 +122,9 @@ MeshRefinement::MeshRefinement(Mesh *pm, ParameterInput *pin) :
   if ((pm->pmb_pack->padm != nullptr) && (pm->pmb_pack->pcfc != nullptr)) {
     ncc_tosend += (pm->pmb_pack->padm->u_adm.extent_int(1));
   }
+  if ((pm->pmb_pack->pcfc != nullptr) && (pm->pmb_pack->pcfc->si_extrap_ > 0)) {
+    ncc_tosend += cfc::CFC::kSiH;   // <cfc> solve_interval_extrap (RL-045): u_hdot
+  }
   int nmb = std::max((pm->pmb_pack->nmb_thispack), (pm->nmb_maxperrank));
   // number of cells per MB, including ghost zones
   int ncells = (pm->mb_indcs.nx1 + 2*pm->mb_indcs.ng);
@@ -561,6 +564,8 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
   // its own solve has refreshed them -- so CFC alone still needs this
   // pre-regrid transfer to avoid feeding garbage into that read.
   bool padm_needs_transfer = (padm != nullptr) && (pcfc != nullptr);
+  // <cfc> solve_interval_extrap (RL-045): the held residual's rate moves with the mesh
+  const bool hdot_needs_transfer = (pcfc != nullptr) && (pcfc->si_extrap_ > 0);
   // derefine (if needed)
   if (ndel > 0) {
     if (phydro != nullptr) {
@@ -578,6 +583,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (padm_needs_transfer) {
       DerefineCCSameRank(padm->u_adm, padm->coarse_u_adm);
+    }
+    if (hdot_needs_transfer) {
+      DerefineCCSameRank(pcfc->u_hdot, pcfc->coarse_u_hdot);
     }
   }
 
@@ -598,6 +606,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     CopyCC(pz4c->u0);
   } else if (padm_needs_transfer) {
     CopyCC(padm->u_adm);
+  }
+  if (hdot_needs_transfer) {
+    CopyCC(pcfc->u_hdot);
   }
   // The C2P's own state -- w0 (its initial guess, and the shock sensor's input) and the
   // temperature -- is not part of the transfer. Without this, a MeshBlock's slot kept
@@ -629,6 +640,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     }
     if (padm_needs_transfer) {
       CopyForRefinementCC(padm->u_adm, padm->coarse_u_adm);
+    }
+    if (hdot_needs_transfer) {
+      CopyForRefinementCC(pcfc->u_hdot, pcfc->coarse_u_hdot);
     }
   }
 
@@ -668,6 +682,9 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     if (padm_needs_transfer) {
       RefineCC(new_to_old, padm->u_adm, padm->coarse_u_adm, true);
     }
+    if (hdot_needs_transfer) {
+      RefineCC(new_to_old, pcfc->u_hdot, pcfc->coarse_u_hdot, true);
+    }
   }
 
   // The C2P state of new MeshBlocks (refined or derefined) and of those received from
@@ -691,6 +708,21 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
                           std::make_pair(fs, fs + nf), Kokkos::ALL, Kokkos::ALL,
                           Kokkos::ALL), 0.0);
       }
+    }
+    Kokkos::fence();
+  }
+
+  // <cfc> solve_interval_extrap (C-288): a refined or derefined MeshBlock's prolonged/restricted
+  // rate is reset (the plain hold until its next regular solve); MeshBlocks that only moved rank
+  // keep their rate exactly. solve_interval_extrap_carry = true keeps the old carry-over.
+  if (hdot_needs_transfer && !pcfc->si_extrap_carry_) {
+    const int me = global_variable::my_rank;
+    const int ngs = new_gids_eachrank[me];
+    for (int m = 0; m < new_nmb_eachrank[me]; ++m) {
+      if (refine_flag.h_view(newtoold[ngs + m]) == 0) continue;
+      Kokkos::deep_copy(DevExeSpace(), Kokkos::subview(pcfc->u_hdot, m, Kokkos::ALL,
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), 0.0);
+      ++pcfc->si_n_zeroed_;
     }
     Kokkos::fence();
   }

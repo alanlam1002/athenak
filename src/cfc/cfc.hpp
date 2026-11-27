@@ -39,6 +39,36 @@ class Driver;
 class MeshBoundaryValuesCC;
 
 namespace cfc {
+// <cfc> si_jump_diag (R-287): the solve-time jump reductions. Fields f: 0 psi, 1 alpha psi,
+// 2 |beta|, 3 |K| = |Ahat_solved|/psi^2; variants v: 0 extrapolated, 1 held. Sums: per (v,f)
+// w|J| in the nested bands rho >= 0.5 / 0.1 / 0.01 si_jump_rhoc, then the band weights w = rho dV,
+// then w|H_new| per f in the widest band (scale). Max: per (v,f) over the widest band and over
+// r_BH < si_jump_rhole. Jumps are >= 0, so a Sum reducer whose += is max works with identity 0.
+constexpr int kSjNF = 4, kSjNV = 2, kSjNB = 3;
+constexpr int kSjNS = kSjNV*kSjNF*kSjNB + kSjNB + kSjNF, kSjNM = kSjNV*kSjNF*2;
+struct SjMax {
+  Real a[kSjNM];
+  KOKKOS_INLINE_FUNCTION SjMax() { for (int i = 0; i < kSjNM; ++i) a[i] = 0.0; }
+  KOKKOS_INLINE_FUNCTION SjMax(const SjMax &r) { for (int i = 0; i < kSjNM; ++i) a[i] = r.a[i]; }
+  KOKKOS_INLINE_FUNCTION SjMax& operator+=(const SjMax &r) {
+    for (int i = 0; i < kSjNM; ++i) a[i] = (r.a[i] > a[i]) ? r.a[i] : a[i];
+    return *this;
+  }
+  KOKKOS_INLINE_FUNCTION void operator+=(const volatile SjMax &r) volatile {
+    for (int i = 0; i < kSjNM; ++i) a[i] = (r.a[i] > a[i]) ? r.a[i] : a[i];
+  }
+};
+}  // namespace cfc
+namespace array_sum { typedef array_type<Real, cfc::kSjNS> SjSum; }
+namespace Kokkos {
+template<> struct reduction_identity<array_sum::SjSum> {
+  KOKKOS_FORCEINLINE_FUNCTION static array_sum::SjSum sum() { return array_sum::SjSum(); }
+};
+template<> struct reduction_identity<cfc::SjMax> {
+  KOKKOS_FORCEINLINE_FUNCTION static cfc::SjMax sum() { return cfc::SjMax(); }
+};
+}  // namespace Kokkos
+namespace cfc {
 
 class CFC {
  public:
@@ -353,6 +383,9 @@ class CFC {
   bool si_refill_bg_ = false;
   bool si_refill_ready_ = false;     // a solve/assembly has set the held fields
   // true on a stage >= 1 that skips the solves and refills (the option on and ready)
+  // R-282 / C-274 (wip/trace-held): the cadence gate, read-only, for <dyn_grmhd> trace_diag_held's
+  // per-stage solve flag (the rank-0 cadence notice may print from here first; no state change)
+  bool SolveThisStage(Driver *pdriver, int stage) const { return DoSolveThisStage(pdriver, stage); }
   bool RefillThisStage(Driver *pdriver, int stage) const {
     return si_refill_bg_ && si_refill_ready_ && stage >= 1 &&
            !DoSolveThisStage(pdriver, stage);
@@ -360,6 +393,35 @@ class CFC {
   // the refill itself: background at t, Ahat re-anchored, the conformal metric (ghosts
   // included, from the held, exchanged delta_psi) -- before this stage's C2P
   void RefillHeldResidual(Real t);
+  // <cfc> solve_interval_extrap (RL-045 / K0'; default 0 = the plain hold above; read only
+  // if present; needs solve_interval_refill_bg): 1 = on the refill stages the held residual
+  // H = (delta_psi, delta_alpha_psi, beta_u, a_dd - a0_dd) is extrapolated linearly in time,
+  // H(t) = H_anc + (t - t_anc) Hdot, from the anchor H_anc (the last solve, at t_anc) and the
+  // rate Hdot = (H_anc - H_prev)/(t_anc - t_prev) of the last two regular solves. A regrid's
+  // re-solve (RunLapseShiftAssemblePass) becomes the new anchor and keeps Hdot, which the
+  // AMR transfer carries (u_hdot, prolonged/restricted like padm->u_adm). Until a rate
+  // exists (the run's or segment's first two solves; no restart state) the plain hold.
+  int si_extrap_ = 0;
+  // C-288 (user 2026-11-27): MeshBlocks a regrid creates (refined or derefined) get Hdot = 0, so they
+  // use the plain hold until their next regular solve rate (anchored on the regrid's re-solve on the
+  // new mesh); a rate prolonged from the parent next to the puncture made |K| jumps of 2e-3..8e-3.
+  // <cfc> solve_interval_extrap_carry = true (read only if present) keeps the old carry-over.
+  bool si_extrap_carry_ = false;
+  int si_n_zeroed_ = 0;   // blocks whose rate a regrid reset (rank-local; SIEXTRAP lines)
+  bool si_hanc_ok_ = false, si_hdot_ok_ = false;
+  int si_n_apply_ = 0, si_n_rate_ = 0, si_n_anchor_ = 0;   // counts (rank-0 SIEXTRAP lines)
+  Real si_t_anc_ = 0.0;
+  static constexpr int kSiH = 11;   // 0 dpsi, 1 dalpha_psi, 2-4 beta_u, 5-10 adual - a0dual
+  DvceArray5D<Real> u_hanc, u_hdot, coarse_u_hdot;
+  void SiExtrapOnSolve(Real t, bool keep_rate);   // after a solve: rate (unless keep_rate), anchor
+  void SiExtrapApply(Real t);                     // a refill stage: H(t) into the live fields
+  // <cfc> si_jump_diag (R-287; default false, read only if present; diagnostic, reads only): at
+  // each regular solve with a rate, before the anchor moves, the jump between the freshly solved
+  // residual and (v=0) the extrapolation H_anc + (t - t_anc) Hdot, (v=1) the hold H_anc; rank-0
+  // SIJUMP lines. si_jump_rhoc (3.24e-4) sets the bands, si_jump_rhole (10) the hole's radius.
+  bool si_jump_ = false;
+  Real si_jump_rhoc_ = 3.24e-4, si_jump_rhole_ = 10.0;
+  void SiJumpDiag(Real t);
 
   // Comoving gauge (DEVELOPMENT.md item 68): x' = x - xi(t) with the slicing
   // unchanged, i.e. a spatially uniform xidot^i(t) added to the shift that the fluid
@@ -654,6 +716,12 @@ class CFC {
   // state is identical on all ranks). Otherwise every stage solves, as solve_interval 0.
   bool FrameStaticForCadence() const;
   mutable int cad_state_ = -1;   // last reported FrameStaticForCadence (rank-0 notice)
+  // C-284 (user 2026-11-26): with solve_interval_refill_bg, the first cycle this process runs
+  // (a fresh start or a restart) solves every stage: the held residual is not in the restart, and
+  // the old fallback (the whole metric frozen, the moving puncture included, until the first solve)
+  // put a step into the star near pericentre. Latched on the first normal-stage call, so constant
+  // over that cycle for every task.
+  mutable int si_cyc0_ = -1;
 
   // Builds Shibata eq. 3.10-3.11's packed source (P_i's RHS S_i at channels 0-2,
   // eta's RHS -S_i.x^i at channel 3) into u_p_src/p_src -- for_shift selects X^i's

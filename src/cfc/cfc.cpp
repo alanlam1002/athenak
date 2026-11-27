@@ -694,6 +694,41 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
   if (pin->DoesParameterExist("cfc", "solve_interval_refill_bg")) {
     si_refill_bg_ = pin->GetBoolean("cfc", "solve_interval_refill_bg");
   }
+  if (pin->DoesParameterExist("cfc", "solve_interval_extrap")) {
+    si_extrap_ = pin->GetInteger("cfc", "solve_interval_extrap");
+    if (si_extrap_ < 0 || si_extrap_ > 1 || (si_extrap_ > 0 && !si_refill_bg_)) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<cfc> solve_interval_extrap = 0 | 1 (linear), and 1 needs "
+                << "solve_interval_refill_bg = true" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  if (pin->DoesParameterExist("cfc", "solve_interval_extrap_carry")) {
+    si_extrap_carry_ = pin->GetBoolean("cfc", "solve_interval_extrap_carry");
+  }
+  if (pin->DoesParameterExist("cfc", "si_jump_diag")) {
+    si_jump_ = pin->GetBoolean("cfc", "si_jump_diag") && si_extrap_ > 0;
+    si_jump_rhoc_ = pin->GetOrAddReal("cfc", "si_jump_rhoc", 3.24e-4);
+    si_jump_rhole_ = pin->GetOrAddReal("cfc", "si_jump_rhole", 10.0);
+  }
+  if (si_extrap_ > 0) {
+    int nmbx = std::max(pmy_pack->nmb_thispack, pmy_pack->pmesh->nmb_maxperrank);
+    auto &ix = pmy_pack->pmesh->mb_indcs;
+    const int c1 = ix.nx1 + 2*ix.ng, c2 = (ix.nx2 > 1) ? ix.nx2 + 2*ix.ng : 1;
+    const int c3 = (ix.nx3 > 1) ? ix.nx3 + 2*ix.ng : 1;
+    Kokkos::realloc(u_hanc, nmbx, kSiH, c3, c2, c1);
+    Kokkos::realloc(u_hdot, nmbx, kSiH, c3, c2, c1);
+    Kokkos::deep_copy(u_hdot, 0.0);
+    if (pmy_pack->pmesh->multilevel) {
+      const int k1 = ix.cnx1 + 2*ix.ng, k2 = (ix.cnx2 > 1) ? ix.cnx2 + 2*ix.ng : 1;
+      const int k3 = (ix.cnx3 > 1) ? ix.cnx3 + 2*ix.ng : 1;
+      Kokkos::realloc(coarse_u_hdot, nmbx, kSiH, k3, k2, k1);
+    }
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC solve_interval_extrap = 1: refill stages extrapolate the held residual "
+                << "linearly in time from the last two solves" << std::endl;
+    }
+  }
   if (si_refill_bg_ && global_variable::my_rank == 0) {
     std::cout << "CFC solve_interval_refill_bg: stages without a solve refill the analytic "
               << "background at the stage time and re-assemble adm from the held residual"
@@ -975,6 +1010,16 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   }
   if (cfc_solve_interval_ <= 0) {
     return true;
+  }
+  if (si_refill_bg_) {   // C-284: the run's (or segment's) first cycle solves every stage
+    if (si_cyc0_ < 0) {
+      si_cyc0_ = pmy_pack->pmesh->ncycle;
+      if (global_variable::my_rank == 0) {
+        std::cout << "CFC solve_interval_refill_bg: cycle " << si_cyc0_
+                  << " (the first of this run segment) solves every stage" << std::endl;
+      }
+    }
+    if (pmy_pack->pmesh->ncycle == si_cyc0_) return true;
   }
   const bool fs = FrameStaticForCadence();
   if (static_cast<int>(fs) != cad_state_) {
@@ -1643,6 +1688,7 @@ void CFC::RunLapseShiftAssemblePass(Driver *pdriver) {
   BCSPiEtaBetaTask(pdriver, 0);
 
   ReconstructShift();
+  SiExtrapOnSolve(StageTime(pdriver, 0), true);   // RL-045: init/regrid re-solve = new anchor
   AssembleADM(StageTime(pdriver, 0));
 
   RestADMTask(pdriver, 0);  SendADMTask(pdriver, 0);
@@ -2301,6 +2347,7 @@ TaskStatus CFC::AssembleFinalTask(Driver *pdriver, int stage) {
     }
     return TaskStatus::complete;
   }
+  SiExtrapOnSolve(StageTime(pdriver, stage), false);   // RL-045 (no-op unless extrap)
   AssembleADM(StageTime(pdriver, stage));
   AccreteExcisedMass(pdriver, stage);
   if (stage == pdriver->nexp_stages) { ComputeADMMass(); }
@@ -3338,6 +3385,12 @@ void CFC::RefillMovingPuncture(Real t) {
 //! background: only the conformal metric is re-assembled.
 
 void CFC::RefillHeldResidual(Real t) {
+  if (si_extrap_ > 0 && si_hanc_ok_ && si_hdot_ok_) {   // RL-045: H(t) = H_anc + (t - t_anc) Hdot
+    if (puncture_enabled_ && puncture_moving_) { RefillMovingPuncture(t); }
+    SiExtrapApply(t);
+    AssemblePsiMetric(true);
+    return;
+  }
   if (puncture_enabled_ && puncture_moving_) {
     auto ad = u_adual;
     auto a0 = u_a0dual;
@@ -3354,6 +3407,174 @@ void CFC::RefillHeldResidual(Real t) {
     });
   }
   AssemblePsiMetric(true);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SiExtrapOnSolve(Real t, bool keep_rate)
+//! \brief see cfc.hpp (solve_interval_extrap). Called with the solved residual in place,
+//! before AssembleADM. keep_rate (a regrid's re-solve, or the run's first solve): only the
+//! anchor moves; the rate (carried across the regrid by the AMR transfer) is kept.
+
+void CFC::SiExtrapOnSolve(Real t, bool keep_rate) {
+  if (si_extrap_ <= 0) return;
+  const int nmb = pmy_pack->nmb_thispack;
+  auto hn = u_hanc, hd = u_hdot, dp = delta_psi, da = delta_alpha_psi, ub = u_beta;
+  auto ad = u_adual, a0 = u_a0dual;
+  const int n3 = dp.extent_int(2), n2 = dp.extent_int(3), n1 = dp.extent_int(4);
+  const bool rate = !keep_rate && si_hanc_ok_ && t > si_t_anc_;
+  const Real idt = rate ? 1.0/(t - si_t_anc_) : 0.0;
+  if (si_jump_ && rate && si_hdot_ok_) SiJumpDiag(t);   // R-287 (reads only)
+  par_for("cfc_si_extrap_store", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    Real h[kSiH];
+    h[0] = dp(m,0,k,j,i); h[1] = da(m,0,k,j,i);
+    for (int c = 0; c < 3; ++c) h[2+c] = ub(m,c,k,j,i);
+    for (int c = 0; c < 6; ++c) h[5+c] = ad(m,c,k,j,i) - a0(m,c,k,j,i);
+    for (int c = 0; c < kSiH; ++c) {
+      if (rate) hd(m,c,k,j,i) = (h[c] - hn(m,c,k,j,i))*idt;
+      hn(m,c,k,j,i) = h[c];
+    }
+  });
+  if (rate) { si_hdot_ok_ = true; ++si_n_rate_; } else { ++si_n_anchor_; }
+  si_hanc_ok_ = true;
+  si_t_anc_ = t;
+  if (global_variable::my_rank == 0 && (si_n_rate_ + si_n_anchor_ <= 3 ||
+      (si_n_rate_ + si_n_anchor_) % 100 == 0)) {
+    std::cout << "SIEXTRAP cycle=" << pmy_pack->pmesh->ncycle << " t=" << t
+              << (rate ? " rate+anchor" : " anchor only (keep rate)") << " rates=" << si_n_rate_
+              << " anchors=" << si_n_anchor_ << " applies=" << si_n_apply_
+              << " rank0_regrid_zeroed=" << si_n_zeroed_
+              << " hdot_ok=" << si_hdot_ok_ << std::endl;
+  }
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SiJumpDiag(Real t)
+//! \brief see cfc.hpp (si_jump_diag). Interior cells; w = rho dV (pmhd->w0 IDN, coordinate dV);
+//! K = Ahat/psi^2 with psi^2 = sqrt(adm.psi4) (Ahat_ij = psi^2 K_ij, CFC::AssembleADM).
+
+void CFC::SiJumpDiag(Real t) {
+  auto &indcs = pmy_pack->pmesh->mb_indcs;
+  const int is = indcs.is, js = indcs.js, ks = indcs.ks;
+  const int nx1 = indcs.nx1, nx2 = indcs.nx2, nx3 = indcs.nx3;
+  const int nmb = pmy_pack->nmb_thispack;
+  const int nkji = nx3*nx2*nx1, nji = nx2*nx1;
+  auto hn = u_hanc, hd = u_hdot, dp = delta_psi, da = delta_alpha_psi, ub = u_beta;
+  auto ad = u_adual, a0 = u_a0dual;
+  auto &w0 = pmy_pack->pmhd->w0;
+  auto &p4 = pmy_pack->padm->adm.psi4;
+  auto &size = pmy_pack->pmb->mb_size;
+  const Real w = t - si_t_anc_;
+  const Real b0 = 0.5*si_jump_rhoc_, b1 = 0.1*si_jump_rhoc_, b2 = 0.01*si_jump_rhoc_;
+  const Real rh2 = si_jump_rhole_*si_jump_rhole_;
+  Real xb[3]; BHPosition(t, xb);
+  const Real cx = xb[0], cy = xb[1], cz = xb[2];
+  array_sum::SjSum ss; SjMax sm;
+  Kokkos::parallel_reduce("si_jump_sum", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, array_sum::SjSum &acc) {
+    const int m = idx/nkji, k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const Real rho = w0(m, IDN, k, j, i);
+    if (!(rho >= b2)) return;
+    const auto &sz = size.d_view(m);
+    const Real wt = rho*sz.dx1*sz.dx2*sz.dx3;
+    const Real ps2 = sqrt(p4(m, k, j, i));
+    Real h[kSiH];
+    h[0] = dp(m,0,k,j,i); h[1] = da(m,0,k,j,i);
+    for (int c = 0; c < 3; ++c) h[2+c] = ub(m,c,k,j,i);
+    for (int c = 0; c < 6; ++c) h[5+c] = ad(m,c,k,j,i) - a0(m,c,k,j,i);
+    Real J[kSjNV][kSjNF], Hs[kSjNF];
+    for (int v = 0; v < kSjNV; ++v) {
+      Real d[kSiH];
+      for (int c = 0; c < kSiH; ++c) d[c] = h[c] - hn(m,c,k,j,i) - ((v == 0) ? w*hd(m,c,k,j,i) : 0.0);
+      J[v][0] = fabs(d[0]); J[v][1] = fabs(d[1]);
+      J[v][2] = sqrt(d[2]*d[2] + d[3]*d[3] + d[4]*d[4]);
+      J[v][3] = sqrt(d[5]*d[5] + d[8]*d[8] + d[10]*d[10] + 2.0*(d[6]*d[6] + d[7]*d[7] + d[9]*d[9]))/ps2;
+    }
+    Hs[0] = fabs(h[0]); Hs[1] = fabs(h[1]); Hs[2] = sqrt(h[2]*h[2] + h[3]*h[3] + h[4]*h[4]);
+    Hs[3] = sqrt(h[5]*h[5] + h[8]*h[8] + h[10]*h[10] + 2.0*(h[6]*h[6] + h[7]*h[7] + h[9]*h[9]))/ps2;
+    const int nb = (rho >= b0) ? 3 : ((rho >= b1) ? 2 : 1);   // bands 3-nb .. 2 (nested)
+    for (int b = 3 - nb; b < 3; ++b) {
+      for (int v = 0; v < kSjNV; ++v)
+        for (int f = 0; f < kSjNF; ++f) acc.the_array[(v*kSjNF + f)*kSjNB + b] += wt*J[v][f];
+      acc.the_array[kSjNV*kSjNF*kSjNB + b] += wt;
+    }
+    for (int f = 0; f < kSjNF; ++f) acc.the_array[kSjNV*kSjNF*kSjNB + kSjNB + f] += wt*Hs[f];
+  }, Kokkos::Sum<array_sum::SjSum>(ss));
+  Kokkos::parallel_reduce("si_jump_max", Kokkos::RangePolicy<>(DevExeSpace(), 0, nmb*nkji),
+  KOKKOS_LAMBDA(const int idx, SjMax &acc) {
+    const int m = idx/nkji, k = (idx - m*nkji)/nji + ks;
+    const int j = (idx - m*nkji - (k - ks)*nji)/nx1 + js;
+    const int i = idx - m*nkji - (k - ks)*nji - (j - js)*nx1 + is;
+    const auto &sz = size.d_view(m);
+    const Real x = CellCenterX(i-is, nx1, sz.x1min, sz.x1max) - cx;
+    const Real y = CellCenterX(j-js, nx2, sz.x2min, sz.x2max) - cy;
+    const Real z = CellCenterX(k-ks, nx3, sz.x3min, sz.x3max) - cz;
+    const bool star = w0(m, IDN, k, j, i) >= b2, hole = (x*x + y*y + z*z) < rh2;
+    if (!star && !hole) return;
+    const Real ps2 = sqrt(p4(m, k, j, i));
+    Real h[kSiH];
+    h[0] = dp(m,0,k,j,i); h[1] = da(m,0,k,j,i);
+    for (int c = 0; c < 3; ++c) h[2+c] = ub(m,c,k,j,i);
+    for (int c = 0; c < 6; ++c) h[5+c] = ad(m,c,k,j,i) - a0(m,c,k,j,i);
+    for (int v = 0; v < kSjNV; ++v) {
+      Real d[kSiH];
+      for (int c = 0; c < kSiH; ++c) d[c] = h[c] - hn(m,c,k,j,i) - ((v == 0) ? w*hd(m,c,k,j,i) : 0.0);
+      Real J[kSjNF] = {fabs(d[0]), fabs(d[1]), sqrt(d[2]*d[2] + d[3]*d[3] + d[4]*d[4]),
+          sqrt(d[5]*d[5] + d[8]*d[8] + d[10]*d[10] + 2.0*(d[6]*d[6] + d[7]*d[7] + d[9]*d[9]))/ps2};
+      for (int f = 0; f < kSjNF; ++f) {
+        const int q = (v*kSjNF + f)*2;
+        if (star && J[f] > acc.a[q]) acc.a[q] = J[f];
+        if (hole && J[f] > acc.a[q + 1]) acc.a[q + 1] = J[f];
+      }
+    }
+  }, Kokkos::Sum<SjMax>(sm));
+#if MPI_PARALLEL_ENABLED
+  MPI_Allreduce(MPI_IN_PLACE, ss.the_array, kSjNS, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+  MPI_Allreduce(MPI_IN_PLACE, sm.a, kSjNM, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+#endif
+  if (global_variable::my_rank != 0) return;
+  const char *fn[kSjNF] = {"psi", "apsi", "beta", "K"};
+  std::printf("SIJUMP cycle=%d t=%.10g T=%.6e", pmy_pack->pmesh->ncycle, t, w);
+  for (int b = 0; b < kSjNB; ++b) std::printf(" w%d=%.6e", b, ss.the_array[kSjNV*kSjNF*kSjNB + b]);
+  for (int f = 0; f < kSjNF; ++f) {
+    const Real wb = ss.the_array[kSjNV*kSjNF*kSjNB + 2];
+    std::printf(" %s:H=%.4e", fn[f], (wb > 0) ? ss.the_array[kSjNV*kSjNF*kSjNB + kSjNB + f]/wb : 0.0);
+    for (int v = 0; v < kSjNV; ++v) {
+      std::printf(",%s=", v ? "hold" : "ext");
+      for (int b = 0; b < kSjNB; ++b) {
+        const Real wb2 = ss.the_array[kSjNV*kSjNF*kSjNB + b];
+        std::printf("%.4e/", (wb2 > 0) ? ss.the_array[(v*kSjNF + f)*kSjNB + b]/wb2 : 0.0);
+      }
+      std::printf("%.4e/%.4e", sm.a[(v*kSjNF + f)*2], sm.a[(v*kSjNF + f)*2 + 1]);
+    }
+  }
+  std::printf("\n");
+  std::fflush(stdout);
+}
+
+//----------------------------------------------------------------------------------------
+//! \fn void CFC::SiExtrapApply(Real t)
+//! \brief see cfc.hpp: the live residual fields (all cells, ghosts included, as held) set to
+//! H_anc + (t - t_anc) Hdot; a_dd re-anchored on the refilled Ahat0 (u_a0dual).
+
+void CFC::SiExtrapApply(Real t) {
+  const int nmb = pmy_pack->nmb_thispack;
+  auto hn = u_hanc, hd = u_hdot, dp = delta_psi, da = delta_alpha_psi, ub = u_beta;
+  auto ad = u_adual, a0 = u_a0dual;
+  const int n3 = dp.extent_int(2), n2 = dp.extent_int(3), n1 = dp.extent_int(4);
+  const Real w = t - si_t_anc_;
+  ++si_n_apply_;
+  par_for("cfc_si_extrap_apply", DevExeSpace(), 0, nmb-1, 0, n3-1, 0, n2-1, 0, n1-1,
+  KOKKOS_LAMBDA(const int m, const int k, const int j, const int i) {
+    dp(m,0,k,j,i) = hn(m,0,k,j,i) + w*hd(m,0,k,j,i);
+    da(m,0,k,j,i) = hn(m,1,k,j,i) + w*hd(m,1,k,j,i);
+    for (int c = 0; c < 3; ++c) ub(m,c,k,j,i) = hn(m,2+c,k,j,i) + w*hd(m,2+c,k,j,i);
+    for (int c = 0; c < 6; ++c) {
+      ad(m,c,k,j,i) = a0(m,c,k,j,i) + hn(m,5+c,k,j,i) + w*hd(m,5+c,k,j,i);
+    }
+  });
 }
 
 //----------------------------------------------------------------------------------------

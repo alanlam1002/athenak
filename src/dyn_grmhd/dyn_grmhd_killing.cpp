@@ -332,6 +332,7 @@ void DynGRMHD::KillingFullStage(Driver *pdriver, int stage) {
   for (int q = 0; q < stage - 1; ++q) tau = pdriver->gam0[q]*tau + pdriver->beta[q];
   kf_tstage = pmy_pack->pmesh->time + tau*pmy_pack->pmesh->dt;
   kill_stage = stage;
+  if (trace_held && pmy_pack->pcfc != nullptr) kf_solve = pmy_pack->pcfc->SolveThisStage(pdriver, stage);
   auto *pmr = pmy_pack->pmesh->pmr;
   const int key[3] = {(pmr != nullptr) ? pmr->nmb_created : 0,
                       (pmr != nullptr) ? pmr->nmb_deleted : 0, pmy_pack->nmb_thispack};
@@ -1137,6 +1138,10 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
   const bool bgm = chord && kf_bgmove;
   const Real cx = pcfc->bg_xbh_[0], cy = pcfc->bg_xbh_[1], cz = pcfc->bg_xbh_[2];
   const Real m_bh = pcfc->puncture_mass_;
+  // trace_diag_held (R-282): the background's change with M_BH since the previous stage's store
+  const Real dmh = (trace_held && dtg) ? m_bh - kf_mprev : 0.0;
+  const bool hdm = dmh != 0.0;
+  kf_dm = dmh;
   auto &td = ttab.d;
   const Real th = ttab.h, tih = ttab.ih;
   const int nt = ttab.n;
@@ -1293,6 +1298,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       const Real psd = (gx[0]*xr[0] + gx[1]*xr[1] + gx[2]*xr[2])/r*dpsi0;
       const Real ps = sqrt(sqrt(p4));
       dp4 += 4.0*ps*ps*ps*psd;
+      if (hdm) dp4 += 4.0*ps*ps*ps*(-(r/m_bh)*dpsi0)*dmh*idtm;   // trace_diag_held: d psi0/d M dM
     }
 
     if (trd) {
@@ -1512,6 +1518,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
       std::printf("TRD cycle=%d stage=%d time=%.12g tstage=%.12g dtm=%.10e valid=%d ahat=%s",
                   pmy_pack->pmesh->ncycle, kill_stage, pmy_pack->pmesh->time, kf_tstage, dtm,
                   dtg ? 1 : 0, trace_ahat ? "cfc_lagged" : "xcfc");
+      if (trace_held) std::printf(" solve=%d dM=%.10e", kf_solve ? 1 : 0, kf_dm);
       for (int b = 0; b < kTrBands; ++b) {
         std::printf(" b%d=", b);
         for (int c = 0; c < kTrRed; ++c) {
@@ -1548,6 +1555,7 @@ void DynGRMHDPS<EOSPolicy, ErrorPolicy>::AddTauSourceK(const DvceArray5D<Real> &
     for (int a = 0; a < 3; ++a) pv(m, 7 + a, k, j, i) = bres(m, a, k, j, i);
   });
   kf_tprev = kf_tstage;
+  if (trace_held) kf_mprev = m_bh;
   kf_have_prev = !kf_bres_stale;
   kf_bres_stale = false;
   auto *pmr = pmy_pack->pmesh->pmr;

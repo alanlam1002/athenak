@@ -50,6 +50,9 @@
 //!                 monopole and no exact solution, for the box-doubling probes)
 //!   runs        : smoother/fill[/self|rhs] (the last: mp_source for that run); smoother
 //!                 gs8 | rb | pbj (damped point-block Jacobi, damping pbj_omega)
+//!   smooth_only : K-028k: > 0: after the V-cycles of each run, that many red-black smoothing
+//!                 pairs on the finest block level only (no coarse correction), the defect
+//!                 every smooth_print (10) pairs (KMG VSMO); the dump/errors follow them
 //!   probe_r     : > 0: V at 7 points (+-r on the axes, r(1,1,1)/sqrt3) from the mp origin
 //!   chk_npts    : the PointMetric2 self-check points (kerr/synthetic)
 //!   the driver's options: mg_outer_bc_vec (kelvin | zerofixed), mp_source, mp_outer,
@@ -406,6 +409,8 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
       for (int d = 0; d < 3; ++d) probes.push_back(drv.mpo_[d] + D[p][d]);
     }
   }
+  const int nso = pin->GetOrAddInteger(B, "smooth_only", 0);
+  const int nsp = std::max(1, pin->GetOrAddInteger(B, "smooth_print", 10));
   std::string runs = pin->GetOrAddString(B, "runs", "gs8/rule_r");
   std::stringstream ss(runs);
   std::string tok;
@@ -432,6 +437,20 @@ void RunVector(ParameterInput *pin, MeshBlockPack *pmbp, Mesh *pm,
     Kokkos::Timer tv;
     std::vector<Real> d = drv.RunCycles(&dv, ncyc);
     const double tsec = tv.seconds();
+    // K-028k: smooth_only sweeps (red-black pairs on the finest block level, no coarse
+    // correction) after the V-cycles; the defect every smooth_print pairs (KMG VSMO)
+    if (nso > 0) {
+      std::vector<Real> ds{d.back()};
+      for (int n = 0; n < nso; n += nsp) {
+        drv.SmoothFinestOnly(&dv, std::min(nsp, nso - n));
+        ds.push_back(drv.TotalDefectNorm());
+      }
+      if (Root()) {
+        std::printf("KMG VSMO %s every %d:", tok.c_str(), nsp);
+        for (Real x : ds) std::printf(" %.6e", x);
+        std::printf("\n");
+      }
+    }
     drv.MaybeDumpDefect();   // K-028b: env KERR_DEFDUMP=problem:<dir> (first run only; inert unset)
     Real cmax[3], crms[3];
     long cn[3];

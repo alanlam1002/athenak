@@ -13,14 +13,18 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "athena.hpp"
 #include "globals.hpp"
 #include "mesh/mesh.hpp"
 #include "parameter_input.hpp"
+#include "driver/driver.hpp"
 #include "multigrid/multigrid.hpp"
+#include "tasklist/task_list.hpp"
 #include "kerr_mg_ops.hpp"
 #include "kerr_mg_vops.hpp"
 #include "mg_kerr_vector.hpp"
@@ -913,6 +917,35 @@ std::vector<Real> MGKerrVectorDriver::RunCycles(Driver *pdriver, int ncyc) {
   }
   Kokkos::fence();
   return d;
+}
+
+void MGKerrVectorDriver::SmoothFinestOnly(Driver *pdriver, int nsweep) {
+  if (nsweep <= 0) return;
+  current_level_ = ntotallevel_ - 1;
+  pmg = mglevels_;
+  auto &tl = pmy_pack_->tl_map;
+  const std::string nm = "mg_smooth_only";
+  tl.erase(nm);
+  tl.emplace(std::make_pair(nm, std::make_shared<TaskList>()));
+  TaskID prev(0);
+  auto fill = [&](TaskID dep) {
+    TaskID fc = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::FillCoarseBoundary, "FillCoarseBoundary"), dep);
+    TaskID ir = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::StartReceive, "StartReceive"), dep);
+    TaskID sd = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::SendBoundary, "SendBoundary"), fc);
+    TaskID dr = ir | sd;   // receives are posted in SendBoundary
+    TaskID rv = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::RecvBoundary, "RecvBoundary"), dr);
+    TaskID pb = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::PhysicalBoundary, "PhysicalBoundary"), rv);
+    return tl[nm]->AddTask(MGT(&MGKerrVectorDriver::ProlongateFCBoundary, "ProlongateFCBoundary"), pb);
+  };
+  prev = fill(prev);
+  prev = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::SmoothRed, "SmoothRed"), prev);
+  prev = fill(prev);
+  prev = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::SmoothBlack, "SmoothBlack"), prev);
+  prev = fill(prev);
+  TaskID cs = tl[nm]->AddTask(MGT(&MGKerrVectorDriver::ClearSend, "ClearSend"), prev);
+  tl[nm]->AddTask(MGT(&MGKerrVectorDriver::ClearRecv, "ClearRecv"), cs);
+  for (int n = 0; n < nsweep; ++n) { pdriver->ExecuteTaskList(pmy_mesh_, nm, 0); }
+  Kokkos::fence();
 }
 
 void MGKerrVectorDriver::FillOctetCoeffs() {

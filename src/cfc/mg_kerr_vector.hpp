@@ -118,6 +118,10 @@ class MGKerrVectorDriver : public MultigridDriver {
   //! the defect norm before and after each of ncyc V-cycles; the moments are recomputed
   //! before every cycle for mp_source = self, once for rhs
   std::vector<Real> RunCycles(Driver *pdriver, int ncyc);
+  //! K-028k (test only): nsweep red-black smoothing pairs on the finest block level, no
+  //! coarse correction; each colour after the to-finer fill sequence (FillCoarse, exchange,
+  //! PhysicalBoundary, ProlongateFC), a last fill after the pair
+  void SmoothFinestOnly(Driver *pdriver, int nsweep);
   //! def = s + S(V*)/h^2 on the finest block level, max over the components, by class;
   //! KerrOpStats::max_s7 holds max |S - S_flat|/h^2 here (0 on a flat metric)
   KerrOpStats OperatorTest(bool exact_edges, bool poison_corners);

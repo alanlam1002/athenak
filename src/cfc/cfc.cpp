@@ -703,6 +703,9 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       std::exit(EXIT_FAILURE);
     }
   }
+  if (pin->DoesParameterExist("cfc", "solve_interval_extrap_carry")) {
+    si_extrap_carry_ = pin->GetBoolean("cfc", "solve_interval_extrap_carry");
+  }
   if (pin->DoesParameterExist("cfc", "si_jump_diag")) {
     si_jump_ = pin->GetBoolean("cfc", "si_jump_diag") && si_extrap_ > 0;
     si_jump_rhoc_ = pin->GetOrAddReal("cfc", "si_jump_rhoc", 3.24e-4);
@@ -3440,6 +3443,7 @@ void CFC::SiExtrapOnSolve(Real t, bool keep_rate) {
     std::cout << "SIEXTRAP cycle=" << pmy_pack->pmesh->ncycle << " t=" << t
               << (rate ? " rate+anchor" : " anchor only (keep rate)") << " rates=" << si_n_rate_
               << " anchors=" << si_n_anchor_ << " applies=" << si_n_apply_
+              << " rank0_regrid_zeroed=" << si_n_zeroed_
               << " hdot_ok=" << si_hdot_ok_ << std::endl;
   }
 }

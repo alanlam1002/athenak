@@ -712,6 +712,21 @@ void MeshRefinement::RedistAndRefineMeshBlocks(ParameterInput *pin, int nnew, in
     Kokkos::fence();
   }
 
+  // <cfc> solve_interval_extrap (C-288): a refined or derefined MeshBlock's prolonged/restricted
+  // rate is reset (the plain hold until its next regular solve); MeshBlocks that only moved rank
+  // keep their rate exactly. solve_interval_extrap_carry = true keeps the old carry-over.
+  if (hdot_needs_transfer && !pcfc->si_extrap_carry_) {
+    const int me = global_variable::my_rank;
+    const int ngs = new_gids_eachrank[me];
+    for (int m = 0; m < new_nmb_eachrank[me]; ++m) {
+      if (refine_flag.h_view(newtoold[ngs + m]) == 0) continue;
+      Kokkos::deep_copy(DevExeSpace(), Kokkos::subview(pcfc->u_hdot, m, Kokkos::ALL,
+                        Kokkos::ALL, Kokkos::ALL, Kokkos::ALL), 0.0);
+      ++pcfc->si_n_zeroed_;
+    }
+    Kokkos::fence();
+  }
+
   // Step 10.
   // General housekeeping
   // Update new number of cycles since refinement

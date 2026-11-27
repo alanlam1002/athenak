@@ -402,6 +402,12 @@ class CFC {
   // AMR transfer carries (u_hdot, prolonged/restricted like padm->u_adm). Until a rate
   // exists (the run's or segment's first two solves; no restart state) the plain hold.
   int si_extrap_ = 0;
+  // C-288 (user 2026-11-27): MeshBlocks a regrid creates (refined or derefined) get Hdot = 0, so they
+  // use the plain hold until their next regular solve rate (anchored on the regrid's re-solve on the
+  // new mesh); a rate prolonged from the parent next to the puncture made |K| jumps of 2e-3..8e-3.
+  // <cfc> solve_interval_extrap_carry = true (read only if present) keeps the old carry-over.
+  bool si_extrap_carry_ = false;
+  int si_n_zeroed_ = 0;   // blocks whose rate a regrid reset (rank-local; SIEXTRAP lines)
   bool si_hanc_ok_ = false, si_hdot_ok_ = false;
   int si_n_apply_ = 0, si_n_rate_ = 0, si_n_anchor_ = 0;   // counts (rank-0 SIEXTRAP lines)
   Real si_t_anc_ = 0.0;

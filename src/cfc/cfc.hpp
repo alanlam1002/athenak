@@ -418,6 +418,11 @@ class CFC {
   bool si_rst_hist_ = false, si_hist_loaded_ = false;
   bool rst_si_hanc_ok_ = false, rst_si_hdot_ok_ = false;
   Real rst_si_t_anc_ = 0.0;
+  // the background's last fill position (bg_xbh_): the end-of-cycle mass update refills the
+  // background at pmesh->time (the step's start; the puncture-mass update at the end of the last stage), which the next
+  // cycle's stage 1 reads; a restart refills it there (C-292 c326) instead of at the restart time
+  Real rst_si_bgx_[3] = {0.0, 0.0, 0.0};
+  bool rst_si_bg_ok_ = false;
   int si_n_apply_ = 0, si_n_rate_ = 0, si_n_anchor_ = 0;   // counts (rank-0 SIEXTRAP lines)
   Real si_t_anc_ = 0.0;
   static constexpr int kSiH = 11;   // 0 dpsi, 1 dalpha_psi, 2-4 beta_u, 5-10 adual - a0dual

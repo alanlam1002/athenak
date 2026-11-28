@@ -719,6 +719,12 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       rst_si_t_anc_ = pin->GetReal("cfc", "restart_si_t_anc");
       rst_si_hanc_ok_ = pin->GetBoolean("cfc", "restart_si_hanc_ok");
       rst_si_hdot_ok_ = pin->GetBoolean("cfc", "restart_si_hdot_ok");
+      if (pin->DoesParameterExist("cfc", "restart_si_bgx1")) {
+        for (int a = 0; a < 3; ++a) {
+          rst_si_bgx_[a] = pin->GetReal("cfc", "restart_si_bgx" + std::to_string(a + 1));
+        }
+        rst_si_bg_ok_ = true;
+      }
     }
   }
   if (pin->DoesParameterExist("cfc", "solve_interval_extrap_carry")) {
@@ -4225,6 +4231,12 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
     si_t_anc_ = rst_si_t_anc_;
     si_hist_loaded_ = true;
     si_refill_ready_ = true;
+    if (puncture_enabled_ && rst_si_bg_ok_) {   // the background exactly as the run left it
+      FillPunctureBackground(pmy_pack, puncture_mass_, rst_si_bgx_, u_psi0, u_alpha0_psi0,
+                             beta0_u, a0_dd, a0_sq, grad_ap6_0);
+      for (int a = 0; a < 3; ++a) { bg_xbh_[a] = rst_si_bgx_[a]; }
+      pmgd_psi->SetPunctureCenter(rst_si_bgx_); pmgd_alpha->SetPunctureCenter(rst_si_bgx_);
+    }
     if (global_variable::my_rank == 0) {
       std::cout << "CFC solve_interval_extrap_restart: history loaded (t_anc = " << si_t_anc_
                 << ", rate " << (si_hdot_ok_ ? "yes" : "no") << "); no all-stage first cycle" << std::endl;
@@ -4243,6 +4255,9 @@ void CFC::SaveRestartScalars(ParameterInput *pin) const {
     pin->SetReal("cfc", "restart_si_t_anc", si_t_anc_);
     pin->SetBoolean("cfc", "restart_si_hanc_ok", si_hanc_ok_);
     pin->SetBoolean("cfc", "restart_si_hdot_ok", si_hdot_ok_);
+    for (int a = 0; a < 3; ++a) {
+      pin->SetReal("cfc", "restart_si_bgx" + std::to_string(a + 1), bg_xbh_[a]);
+    }
   }
 }
 

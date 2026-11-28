@@ -2699,8 +2699,12 @@ void CFC::AccreteExcisedMass(Driver *pdriver, int stage) {
     // Re-derive the analytic background at the new mass.  Cheap: one ghost-inclusive
     // par_for with a root-find per cell, against the ~4.5 finest-grid-equivalent
     // sweeps the per-level coefficient fills already do every stage.
+    // C-294 (user 2026-11-28): at the step's END time. pmesh->time is still the step's start
+    // here (it advances after the task list), so BHPosition(pmesh->time) put the background
+    // back where the hole was at t_n, and the next cycle's stage 1 read it there (v_BH dt
+    // behind the metric assembled at t_n + dt). StageTime(last stage) = t_n + dt for rk1-3.
     Real xbh[3];
-    BHPosition(pmy_pack->pmesh->time, xbh);
+    BHPosition(StageTime(pdriver, stage), xbh);
     FillPunctureBackground(pmy_pack, puncture_mass_, xbh, u_psi0, u_alpha0_psi0, beta0_u,
                            a0_dd, a0_sq, grad_ap6_0);
     for (int a = 0; a < 3; ++a) { bg_xbh_[a] = xbh[a]; }

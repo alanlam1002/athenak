@@ -133,6 +133,18 @@ def main():
     print(f"RECOMMENDED  star_vel_x1 = {s['vx']:.8f}")
     print(f"             star_vel_x2 = {s['vy']:.8f}")
     print(f"             star_vel_x3 = 0.0   star_center = ({a.x0}, 0, 0)")
+    # R-289 (a): <problem> star_vel_mode = coordinate holds the BH-frame coordinate velocity
+    # V = alpha0 v - beta0 at the star's centre (dyngr_tov.cpp:228-262, cfc EnableCoordVel), so
+    # in that mode the deck's star_vel must be V, not the Eulerian v above (C-257: the
+    # Eulerian v there starts the star 1.1% fast). Background = the analytic trumpet.
+    Vx = s['alpha0'] * s['vx'] - s['beta0'][0]
+    Vy = s['alpha0'] * s['vy'] - s['beta0'][1]
+    Vz = -s['beta0'][2] + 0.0
+    print("=" * 78)
+    print("star_vel_mode = coordinate  (deck star_vel = V = alpha0 v - beta0):")
+    print(f"             star_vel_x1 = {Vx:.12g}")
+    print(f"             star_vel_x2 = {Vy:.12g}")
+    print(f"             star_vel_x3 = {Vz:.12g}")
 
 
 if __name__ == "__main__":

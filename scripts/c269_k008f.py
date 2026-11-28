@@ -86,7 +86,9 @@ def one(d):
     xs = np.array([deck(d, f'star_center_x{i}') for i in (1, 2, 3)])
     vdeck = np.array([deck(d, f'star_vel_x{i}') for i in (1, 2, 3)])
     ps, a0, b0 = ic.metric_at(*(xs - xbh))
-    Vt = a0 * vdeck - np.asarray(b0)
+    # star_vel_mode = coordinate (R-289 a): the deck's star_vel is already V_t (tde_parabolic_orbit_ic.py prints it)
+    coord = re.search(r'^star_vel_mode\s*=\s*coordinate', open(f'{d}/parfile.par').read(), re.M) is not None
+    Vt = vdeck if coord else a0 * vdeck - np.asarray(b0)
     # the dense centroid in the slice (for the invariants)
     xcm = np.array([(xc[s] * wD).sum(), (yc[s] * wD).sum(), 0.0]) / wD.sum()
     xr = xcm - xbh

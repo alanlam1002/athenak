@@ -1,3 +1,7 @@
+# R-289 addendum (user 2026-11-27): (a) star_vel_mode = coordinate with star_vel = V = alpha0 v - beta0 (tde_parabolic_orbit_ic.py
+#   --x0 82 --periapsis 18); (b) legacy shock sensor + flag exchange off (C-229, bitwise); (c) the relative tracker + automatic exit
+#   (L32T's c252 keys, R-252 calibration); (d) solve_interval 8 extrapolated (C-286/C-288/C-289). Binary: proj/tde >= 0c28ba54,
+#   home_builds/athenak_tde/athena_tde_sijump_gpu_c93640dc (src == 0c28ba54, sha256 4171a513). The binary line below is superseded.
 # SCIENCE DECK, P18 at dx 1/32 (user 2026-11-25; R-278 addendum items 1, 2, 5 + C-270c): L32Q.par (c285_ceil: c203 L32_P18_r82 +
 #   atm_ceiling + the coarse hole amr_level_bh 3, seed box level 3) + CFC mg_threshold = mg_poisson_threshold = 1e-10 (C-270c) +
 #   atmosphere_zone_shell (R_c 12, 1e-14 rho_c; C-270b/d) + init_mg_max_vcycles 200 (C-261). Reconstruction PPMX (R-278 item 3).
@@ -241,7 +245,8 @@ enforce_maximum = false
 atmosphere_frame_velocity = true
 atmosphere_frame_gate = 6.0
 dual_energy_div = covariant
-dual_energy_flag_exchange = true    # (A), explicit (the code default is also true)
+dual_energy_flag_exchange = false   # R-289 (b) (C-229): no u0 flag slot; with the next key bitwise, ~0.9% of the step
+dual_energy_shock_flags = false     # R-289 (b): no legacy shock sensor (D-ent never reads it; DESHK lines read 0)
 dual_energy_shock_counters = 100    # R-112 item 1 DESHK lines every N cycles (0 = off); R-115 Q3c: on
 atmosphere_zone = true
 atmosphere_zone_unmask = true   # R7 shell fix F1 (C-072; production per the user 2026-10-20; needs proj/tde >= d8635dae)
@@ -291,7 +296,9 @@ psi_floor   = 1.0e-6
 # (DEVELOPMENT.md item 61/62) -- 3.65x speedup, negligible accuracy cost.
 # Independent of TDERefineTracker, which locates the star directly from
 # pmhd->w0's density every check, not from any CFC-solved quantity.
-solve_interval = 0  # C-041 fix: metric solved every RK stage (once-per-step solves heat a comoving star: T3_si0 vs D_a)
+solve_interval = 8  # R-289 (d): one solve per 8 cycles (was 0, C-041), with the residual extrapolated in between (next keys)
+solve_interval_refill_bg = true   # the moving puncture's analytic background refilled on the stages without a solve
+solve_interval_extrap = 1         # linear extrapolation from the last two solves (C-286; jumps C-288); regrid rate reset default (C-289)
 # Names the first non-finite elliptic source/output instead of a silent cascade.
 # One branch when clean. Fires only on solve cycles (every 10th here).
 src_nan_check = 1
@@ -311,6 +318,14 @@ frame_tau_x = 20.0
 frame_tau_a = 2.0
 frame_atm_rho = 1.0e-22
 frame_atm_gate = 6.0
+frame_track_rel = 0.3   # R-289 (c) = L32T (c252, R-252 1(c)): relative tracking
+frame_track_rel_floor = 3.24e-8   # 1e-4 rho_c
+frame_track_rel_log = 10
+frame_lost_lambda = 1.0   # R-252 1(a) calibration (C-215)
+frame_lost_time = 20.0
+frame_ramp_shape = smoothstep   # C^1 ramp
+frame_ramp_time = 50.0
+frame_lost_arm_time = 541.1   # t_p + 50
 <problem>
 isotropic   = true      # required: CFC solves for the isotropic-gauge metric AND
                          # is required by star_vel_x1/2/3 (see dyngr_tov.cpp)
@@ -324,9 +339,10 @@ magindex    = 1
 star_center_x1 = 0.0  # ~1.83x the tidal radius (r_t=16.4) -- release point
 star_center_x2 = 0.0     # puncture always fixed at the origin
 star_center_x3 = 0.0
-star_vel_x1 = -0.13367158   # c134: --x0 82 --periapsis 18 --box 128
-star_vel_x2 = 0.07482869
-star_vel_x3    =  0.0         # scripts/tde_parabolic_orbit_ic.py --x0 30 --periapsis 10
+star_vel_mode = coordinate   # R-289 (a) (C-257): star_vel is the BH-frame coordinate velocity V = alpha0 v - beta0, held through InitializeMetric
+star_vel_x1 = -0.132237598012   # tde_parabolic_orbit_ic.py --x0 82 --periapsis 18 (Eulerian v = -0.13367158)
+star_vel_x2 = 0.0739216803326   # (Eulerian v = 0.07482869)
+star_vel_x3 = 0.0
 user_hist   = true       # enrolls TOVHistory (rho-max, alpha-min)
 amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
                                 # fixture exists to test.

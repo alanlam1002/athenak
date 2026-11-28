@@ -703,6 +703,24 @@ CFC::CFC(MeshBlockPack *pmbp, ParameterInput *pin) :
       std::exit(EXIT_FAILURE);
     }
   }
+  if (pin->DoesParameterExist("cfc", "solve_interval_extrap_restart")) {   // C-292 (see cfc.hpp)
+    si_rst_hist_ = pin->GetBoolean("cfc", "solve_interval_extrap_restart");
+    if (si_rst_hist_ && si_extrap_ <= 0) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__ << std::endl
+                << "<cfc> solve_interval_extrap_restart needs solve_interval_extrap = 1" << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
+  }
+  if (si_rst_hist_) {
+    const bool embed_pending = pin->DoesParameterExist("job", "restart_embed_fill") &&
+                               pin->GetBoolean("job", "restart_embed_fill") &&
+                               !pin->DoesParameterExist("job", "restart_embed_done");
+    if (pin->DoesParameterExist("cfc", "restart_si_hanc_ok") && !embed_pending) {
+      rst_si_t_anc_ = pin->GetReal("cfc", "restart_si_t_anc");
+      rst_si_hanc_ok_ = pin->GetBoolean("cfc", "restart_si_hanc_ok");
+      rst_si_hdot_ok_ = pin->GetBoolean("cfc", "restart_si_hdot_ok");
+    }
+  }
   if (pin->DoesParameterExist("cfc", "solve_interval_extrap_carry")) {
     si_extrap_carry_ = pin->GetBoolean("cfc", "solve_interval_extrap_carry");
   }
@@ -1011,7 +1029,7 @@ bool CFC::DoSolveThisStage(Driver *pdriver, int stage) const {
   if (cfc_solve_interval_ <= 0) {
     return true;
   }
-  if (si_refill_bg_) {   // C-284: the run's (or segment's) first cycle solves every stage
+  if (si_refill_bg_ && !si_hist_loaded_) {   // C-284: the run's (or segment's) first cycle solves every stage (C-292: not with a loaded history)
     if (si_cyc0_ < 0) {
       si_cyc0_ = pmy_pack->pmesh->ncycle;
       if (global_variable::my_rank == 0) {
@@ -4132,14 +4150,17 @@ void CFC::InitFrameControl(Driver *pdriver) {
 
 int CFC::RestartStateVars() const {
   return 2 + pmgd_psi->NumVars() + pmgd_alpha->NumVars() + pmgd_pietax->NumVars()
-           + pmgd_pietabeta->NumVars();
+           + pmgd_pietabeta->NumVars() + (si_rst_hist_ ? 2*kSiH + 9 : 0);
 }
 
 std::string CFC::RestartStateLayout() const {
   return "cfc.dpsi:1,cfc.dap:1,cfc.mg_psi:" + std::to_string(pmgd_psi->NumVars())
          + ",cfc.mg_alpha:" + std::to_string(pmgd_alpha->NumVars())
          + ",cfc.mg_pietax:" + std::to_string(pmgd_pietax->NumVars())
-         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars());
+         + ",cfc.mg_pietabeta:" + std::to_string(pmgd_pietabeta->NumVars())
+         + (si_rst_hist_ ? ",cfc.si_hanc:" + std::to_string(kSiH) + ",cfc.si_hdot:"
+                           + std::to_string(kSiH) + ",cfc.si_beta:3,cfc.si_adual:6"
+                         : std::string());
 }
 
 void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
@@ -4157,6 +4178,18 @@ void CFC::SaveRestartState(DvceArray5D<Real> &dst, int ns) {
                              static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
     d->SaveFinestState(dst, n, ng);
     n += d->NumVars();
+  }
+  if (si_rst_hist_) {   // C-292 (LTS K3-4): the extrapolation's anchor and rate, the live shift and Adual
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n, n + kSiH), all, all, all),
+                      Kokkos::subview(u_hanc, mb, all, all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n + kSiH, n + 2*kSiH), all, all,
+                                      all),
+                      Kokkos::subview(u_hdot, mb, all, all, all, all));
+    const int n2 = n + 2*kSiH;
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n2, n2 + 3), all, all, all),
+                      Kokkos::subview(u_beta, mb, all, all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(dst, all, std::make_pair(n2 + 3, n2 + 9), all, all, all),
+                      Kokkos::subview(u_adual, mb, all, all, all, all));
   }
 }
 
@@ -4176,6 +4209,27 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
     d->LoadFinestState(src, n, ng);
     n += d->NumVars();
   }
+  if (si_rst_hist_ && rst_si_hanc_ok_) {   // C-292 (zero-filled groups of an old restart: flags false, not loaded)
+    Kokkos::deep_copy(Kokkos::subview(u_hanc, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n, n + kSiH), all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(u_hdot, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n + kSiH, n + 2*kSiH), all, all,
+                                      all));
+    const int n2 = n + 2*kSiH;
+    Kokkos::deep_copy(Kokkos::subview(u_beta, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n2, n2 + 3), all, all, all));
+    Kokkos::deep_copy(Kokkos::subview(u_adual, mb, all, all, all, all),
+                      Kokkos::subview(src, all, std::make_pair(n2 + 3, n2 + 9), all, all, all));
+    si_hanc_ok_ = true;
+    si_hdot_ok_ = rst_si_hdot_ok_;
+    si_t_anc_ = rst_si_t_anc_;
+    si_hist_loaded_ = true;
+    si_refill_ready_ = true;
+    if (global_variable::my_rank == 0) {
+      std::cout << "CFC solve_interval_extrap_restart: history loaded (t_anc = " << si_t_anc_
+                << ", rate " << (si_hdot_ok_ ? "yes" : "no") << "); no all-stage first cycle" << std::endl;
+    }
+  }
   // as the restarted run left them: false after a step that accreted, so the next solves
   // re-seed from adm exactly as the continuous run does (C-100, c100_rst7)
   psi_seeded_ = rst_psi_seeded_;
@@ -4185,6 +4239,11 @@ void CFC::LoadRestartState(const DvceArray5D<Real> &src, int ns) {
 void CFC::SaveRestartScalars(ParameterInput *pin) const {
   pin->SetBoolean("cfc", "restart_psi_seeded", psi_seeded_);
   pin->SetBoolean("cfc", "restart_alpha_psi_seeded", alpha_psi_seeded_);
+  if (si_rst_hist_) {   // C-292
+    pin->SetReal("cfc", "restart_si_t_anc", si_t_anc_);
+    pin->SetBoolean("cfc", "restart_si_hanc_ok", si_hanc_ok_);
+    pin->SetBoolean("cfc", "restart_si_hdot_ok", si_hdot_ok_);
+  }
 }
 
 //----------------------------------------------------------------------------------------

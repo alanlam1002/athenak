@@ -409,6 +409,15 @@ class CFC {
   bool si_extrap_carry_ = false;
   int si_n_zeroed_ = 0;   // blocks whose rate a regrid reset (rank-local; SIEXTRAP lines)
   bool si_hanc_ok_ = false, si_hdot_ok_ = false;
+  // <cfc> solve_interval_extrap_restart (R-289/C-292, user 2026-11-28; port of the LTS pair's K3-4,
+  // L-046/L-051; default false, read only if present; needs solve_interval_extrap = 1): the restart
+  // carries the extrapolation's anchor and rate (u_hanc, u_hdot, t_anc, the flags) and the live
+  // u_beta/u_adual, so a restarted run continues bitwise and skips C-284's all-stage first cycle.
+  // Not loaded (the first-cycle rule then applies) from a restart without them, or with an R1 embed
+  // pending (<job> restart_embed_fill without restart_embed_done: the embed re-solves on a new mesh).
+  bool si_rst_hist_ = false, si_hist_loaded_ = false;
+  bool rst_si_hanc_ok_ = false, rst_si_hdot_ok_ = false;
+  Real rst_si_t_anc_ = 0.0;
   int si_n_apply_ = 0, si_n_rate_ = 0, si_n_anchor_ = 0;   // counts (rank-0 SIEXTRAP lines)
   Real si_t_anc_ = 0.0;
   static constexpr int kSiH = 11;   // 0 dpsi, 1 dalpha_psi, 2-4 beta_u, 5-10 adual - a0dual

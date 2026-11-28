@@ -1,7 +1,7 @@
 # R-289 addendum (user 2026-11-27): (a) star_vel_mode = coordinate with star_vel = V = alpha0 v - beta0 (tde_parabolic_orbit_ic.py
 #   --x0 82 --periapsis 18); (b) legacy shock sensor + flag exchange off (C-229, bitwise); (c) the relative tracker + automatic exit
 #   (L32T's c252 keys, R-252 calibration); (d) solve_interval 8 extrapolated (C-286/C-288/C-289). Binary: proj/tde >= 0c28ba54,
-#   home_builds/athenak_tde/athena_tde_sijump_gpu_c93640dc (src == 0c28ba54, sha256 4171a513). The binary line below is superseded.
+#   home_builds/athenak_tde/athena_tde_sirst_gpu_76128b93 (src == proj/tde 31740768, sha256 2d47d5f7). The binary line below is superseded.
 # SCIENCE DECK, P18 at dx 1/32 (user 2026-11-25; R-278 addendum items 1, 2, 5 + C-270c): L32Q.par (c285_ceil: c203 L32_P18_r82 +
 #   atm_ceiling + the coarse hole amr_level_bh 3, seed box level 3) + CFC mg_threshold = mg_poisson_threshold = 1e-10 (C-270c) +
 #   atmosphere_zone_shell (R_c 12, 1e-14 rho_c; C-270b/d) + init_mg_max_vcycles 200 (C-261). Reconstruction PPMX (R-278 item 3).
@@ -299,6 +299,7 @@ psi_floor   = 1.0e-6
 solve_interval = 8  # R-289 (d): one solve per 8 cycles (was 0, C-041), with the residual extrapolated in between (next keys)
 solve_interval_refill_bg = true   # the moving puncture's analytic background refilled on the stages without a solve
 solve_interval_extrap = 1         # linear extrapolation from the last two solves (C-286; jumps C-288); regrid rate reset default (C-289)
+solve_interval_extrap_restart = true   # C-292 item 2 (user 2026-11-28): the restart carries the extrapolation history (proj/tde >= 31740768; c326)
 # Names the first non-finite elliptic source/output instead of a silent cascade.
 # One branch when clean. Fires only on solve cycles (every 10th here).
 src_nan_check = 1

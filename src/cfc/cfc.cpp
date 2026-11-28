@@ -1442,7 +1442,13 @@ void CFC::SetInitSolves(bool on) {
   for (MultigridDriver *d : {static_cast<MultigridDriver*>(pmgd_psi),
                              static_cast<MultigridDriver*>(pmgd_alpha),
                              static_cast<MultigridDriver*>(pmgd_pietax),
-                             static_cast<MultigridDriver*>(pmgd_pietabeta)}) {
+                             static_cast<MultigridDriver*>(pmgd_pietabeta),
+                             // K-031 (wip/kerr): the Kerr path's four drivers take the same
+                             // cap; default 40 = their evolution cap, so bitwise when unset
+                             static_cast<MultigridDriver*>(pkx_),
+                             static_cast<MultigridDriver*>(pkbeta_),
+                             static_cast<MultigridDriver*>(pkpsi_),
+                             static_cast<MultigridDriver*>(pkchi_)}) {
     if (d != nullptr) d->SetInitSolve(on, cfc_init_mg_max_vcycles_);
   }
 }

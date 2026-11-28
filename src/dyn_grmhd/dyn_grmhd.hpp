@@ -333,6 +333,14 @@ class DynGRMHD {
   // solution; trace_diag_ahat = cfc_lagged (R-197 addendum, diagnostic only): CFC's psi and
   // lapse solves take Ahat^2 from Ahat = psi^6 (L beta)/(2 alpha) of the previous stage (kf_prev)
   bool trace_diag = false, trace_ahat = false;
+  // <dyn_grmhd> trace_diag_held (R-282 / C-274; default false, diagnostic only; needs trace_diag and
+  // no keff/ktr/keff_bg): trace_diag with a held CFC residual (<cfc> solve_interval > 0 + the refill)
+  // and an accreting puncture. R's chord then also carries the background's change with M_BH,
+  // 4 psi^3 (d psi0/d M) dM / dtm (the trumpet psi0(r/M): d psi0/d M = -(r/M) d psi0/d r), and the
+  // TRD line gains the stage's solve flag and dM. kf_mprev: M_BH at the previous stage's store.
+  bool trace_held = false;
+  bool kf_solve = true;
+  Real kf_mprev = 0.0, kf_dm = 0.0;
   DvceArray5D<Real> tr_diag;
   DvceArray4D<Real> kbg_ell;   // keff_bg: ln(psi/psi0) on all cells (its FD gradient)
   // <dyn_grmhd> trace_diag_every (default 1): TRD lines, per stage, rho dV-weighted sums of R, |T|

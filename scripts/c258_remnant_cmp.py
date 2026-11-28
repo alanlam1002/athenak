@@ -106,8 +106,8 @@ def de_shares(rundir, t, xc, Vc, rH):
 
 
 def one(arg):
-    lab, fn, tp, rundir = arg
-    c = T.cells(fn, rcut=3.0)
+    lab, fn, tp, rundir, rfix, rcut = arg
+    c = T.cells(fn, rcut=rcut)
     Mb, xc, _, sel = RM.bound_mass(c)
     X = np.stack([c['x'], c['y'], c['z']])
     V = c['alpha'] * np.stack([c['vx'], c['vy'], c['vz']]) - np.stack([c['betax'], c['betay'], c['betaz']])
@@ -118,16 +118,22 @@ def one(arg):
     xbh = np.asarray(c['xbh'], float)
     rbh = float(np.linalg.norm(xc - xbh))
     rH = rbh * (Mb / (3.0 * MBH))**(1.0 / 3.0)
+    if rfix is not None:
+        # --rfix RH,RHSC (c306, the isolated remnant: no hole, so no Hill sphere): fixed radii about x_c in place of r_H and
+        # r_Hsc, applied identically to the run being compared
+        rH = rfix[0]
     inH = r < rH
     mh = dM[inH].sum()
     rh2, mh2 = rH, mh
-    for _ in range(50):
+    for _ in range(0 if rfix is not None else 50):
         r_new = rbh * (mh2 / (3.0 * MBH))**(1.0 / 3.0)
         m_new = dM[r < r_new].sum()
         done = abs(m_new - mh2) <= 1e-12 * max(mh2, 1e-300)
         rh2, mh2 = r_new, m_new
         if done:
             break
+    if rfix is not None:
+        rh2 = rfix[1]; mh2 = dM[r < rh2].sum()
     K = c['P'] / rho**GAM / K0
     o = np.argsort(r[sel])
     cm = np.cumsum(dM[sel][o]) / Mb
@@ -158,12 +164,15 @@ def main():
     ap.add_argument('out')
     ap.add_argument('runs', nargs='+')
     ap.add_argument('--nproc', type=int, default=2)
+    ap.add_argument('--rfix', default=None, help='RH,RHSC: fixed radii about x_c instead of the Hill radii (no hole)')
+    ap.add_argument('--rcut', type=float, default=3.0, help='tde_dmde.cells r_BH cut; 0 for an isolated remnant (x_BH = 0 there)')
     a = ap.parse_args()
+    rfix = tuple(float(v) for v in a.rfix.split(',')) if a.rfix else None
     args = []
     for s in a.runs:
         lab, rest = s.split('=', 1)
         fn, tp, rd = rest.split(':')
-        args.append((lab, fn, float(tp), rd))
+        args.append((lab, fn, float(tp), rd, rfix, a.rcut))
     with Pool(a.nproc) as p:
         rows = p.map(one, args)
     keys = []

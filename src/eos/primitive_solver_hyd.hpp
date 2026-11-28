@@ -389,9 +389,26 @@ class PrimitiveSolverHydro {
   static constexpr int kT3NR = 2048;            // R_90 histogram bins of t3_dr
   Real t3_dr = 1.0/32.0;
   DvceArray1D<Real> t3_hist;
-  Real zone_stage[4][2*kZoneLen];   // per-RK-stage drains (host); [zone | tier 3]
-  Real zone_cum[2*kZoneLen] = {};   // cumulative since (re)start, all ranks
+  Real zone_stage[4][3*kZoneLen];   // per-RK-stage drains (host); [zone | tier 3 | shell]
+  Real zone_cum[3*kZoneLen] = {};   // cumulative since (re)start, all ranks
   int zone_bins_every = 50;         // <mhd> atmosphere_zone_bins_every: cycles per bins line
+  // <mhd> atmosphere_zone_shell (default false, read only if present, so a deck without the
+  // key keeps its parameter text; research R-278 item 2, user-approved 2026-11-24; needs the
+  // zone and tier 3 on): mode 3 of the zone. Every C2P call, a non-excised cell not taken by
+  // the zone (mode 1) or tier 3 (mode 2), with atmosphere_zone_radius <= r_BH <
+  // atmosphere_zone_shell_radius (default 2 x the zone radius), post-C2P rho <
+  // atmosphere_zone_shell_rho, and farther than 3 R_90 from the dense-gas centroid (tier 3's
+  // t3_c / t3_r90, measured once per cycle by UpdateTier3 with an Allreduce), is reset as the
+  // zone does (ZoneTarget's grid rest capped at zone_vmax, T = tfloor) but, as the ceiling,
+  // with rho = D/W so that the stored D and the scalar densities are kept bitwise (no mass
+  // changes). Unlike tier 3 it has no receding condition: it acts on the approach, where the
+  // hot infalling floor gas just outside the zone sets the global dt (C-266, C-270). Inputs
+  // are the cell's own stored state and metric, its position relative to the frame centre and
+  // the cycle's global t3_c / t3_r90: identical in a ghost and its owner. Booked in a third
+  // block of zone_acc (removed S_i and tau + D, the modified count and mass, max rho);
+  // printed as ATMZONE_SH, with ATMZONE_SH_BINS every zone_bins_every cycles.
+  bool sh_on = false;
+  Real sh_r = 0.0, sh_rho = 0.0;
 
   // <mhd> atm_ceiling (default false, read only if present, so a deck without the key keeps
   // its parameter text; research R-270, user-approved 2026-11-21): every C2P call (not the
@@ -487,15 +504,16 @@ class PrimitiveSolverHydro {
       return;
     }
     auto h = Kokkos::create_mirror_view_and_copy(HostMemSpace(), zone_acc);
-    for (int n = 0; n < 2*kZoneLen; ++n) zone_stage[stage-1][n] = h(n);
+    const int nzb = sh_on ? 3 : 2;    // tally blocks: zone, tier 3 (+ shell)
+    for (int n = 0; n < nzb*kZoneLen; ++n) zone_stage[stage-1][n] = h(n);
     Kokkos::deep_copy(zone_acc, 0.0);
     if (stage != ns) return;
     Real w[4];
     w[ns-1] = 1.0;
     for (int q = ns-2; q >= 0; --q) w[q] = gam0[q+1]*w[q+1];
-    Real sum[2*kZoneLen], mx[4] = {0.0, 0.0, 0.0, 0.0};
-    for (int n = 0; n < 2*kZoneLen; ++n) sum[n] = 0.0;
-    for (int bl = 0; bl < 2; ++bl) {
+    Real sum[3*kZoneLen], mx[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+    for (int n = 0; n < nzb*kZoneLen; ++n) sum[n] = 0.0;
+    for (int bl = 0; bl < nzb; ++bl) {
       const int o = bl*kZoneLen;
       for (int q = 0; q < ns; ++q) {
         for (int n = 0; n <= kZoneM; ++n) sum[o + n] += w[q]*zone_stage[q][o + n];
@@ -508,10 +526,10 @@ class PrimitiveSolverHydro {
       sum[o + kZoneNcap] = zone_stage[ns-1][o + kZoneNcap];
     }
 #if MPI_PARALLEL_ENABLED
-    MPI_Allreduce(MPI_IN_PLACE, sum, 2*kZoneLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
-    MPI_Allreduce(MPI_IN_PLACE, mx, 4, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, sum, nzb*kZoneLen, MPI_ATHENA_REAL, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(MPI_IN_PLACE, mx, 2*nzb, MPI_ATHENA_REAL, MPI_MAX, MPI_COMM_WORLD);
 #endif
-    for (int bl = 0; bl < 2; ++bl) {
+    for (int bl = 0; bl < nzb; ++bl) {
       const int o = bl*kZoneLen;
       for (int n = 0; n < kZoneLen; ++n) {
         if (n != kZoneN && n != kZoneNcap && n != kZoneRmod && n != kZoneRreg) {
@@ -546,6 +564,23 @@ class PrimitiveSolverHydro {
                   << ") cum_dE=" << zone_cum[o + kZoneEn] << std::endl;
         if (bins) {
           std::cout << "ATMZONE_T3_BINS cycle=" << cycle << " time=" << time
+                    << " [r][E][L] cumulative modified mass:";
+          for (int n = 0; n < kZoneNB; ++n) std::cout << " " << zone_cum[o + n];
+          std::cout << std::endl;
+        }
+      }
+      if (sh_on) {
+        const int o = 2*kZoneLen;
+        std::cout << "ATMZONE_SH cycle=" << cycle << " time=" << time << " R90=" << t3_r90
+                  << " M_mod=" << sum[o + kZoneM] << " n_mod=" << sum[o + kZoneN]
+                  << " n_cap=" << sum[o + kZoneNcap] << " max_rho_mod=" << mx[4]
+                  << " n_viol=" << sum[o + kZoneViol] << " dS=(" << sum[o + kZoneSx] << ","
+                  << sum[o + kZoneSx+1] << "," << sum[o + kZoneSx+2] << ") dE="
+                  << sum[o + kZoneEn] << " cum_dS=(" << zone_cum[o + kZoneSx] << ","
+                  << zone_cum[o + kZoneSx+1] << "," << zone_cum[o + kZoneSx+2]
+                  << ") cum_dE=" << zone_cum[o + kZoneEn] << std::endl;
+        if (bins) {
+          std::cout << "ATMZONE_SH_BINS cycle=" << cycle << " time=" << time
                     << " [r][E][L] cumulative modified mass:";
           for (int n = 0; n < kZoneNB; ++n) std::cout << " " << zone_cum[o + n];
           std::cout << std::endl;
@@ -1830,8 +1865,28 @@ class PrimitiveSolverHydro {
           t3_ddot = pin->GetReal(block, "tier3_state_ddot");
         }
       }
-      Kokkos::realloc(zone_acc, 2*kZoneLen);
+      sh_on = pin->DoesParameterExist(block, "atmosphere_zone_shell") &&
+              pin->GetBoolean(block, "atmosphere_zone_shell");
+      if (sh_on) {
+        sh_r = pin->GetOrAddReal(block, "atmosphere_zone_shell_radius", 2.0*zone_r);
+        sh_rho = pin->GetReal(block, "atmosphere_zone_shell_rho");
+        if (!t3_on || !(sh_r > zone_r) || !(sh_rho > 0.0)) {
+          std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                    << std::endl << "<" << block << "> atmosphere_zone_shell needs "
+                    << "atmosphere_zone_tier3 = true (its centroid and R_90), "
+                    << "atmosphere_zone_shell_radius > atmosphere_zone_radius and "
+                    << "atmosphere_zone_shell_rho > 0" << std::endl;
+          std::exit(EXIT_FAILURE);
+        }
+      }
+      Kokkos::realloc(zone_acc, (sh_on ? 3 : 2)*kZoneLen);
       Kokkos::deep_copy(zone_acc, 0.0);
+    } else if (pin->DoesParameterExist(block, "atmosphere_zone_shell") &&
+               pin->GetBoolean(block, "atmosphere_zone_shell")) {
+      std::cout << "### FATAL ERROR in " << __FILE__ << " at line " << __LINE__
+                << std::endl << "<" << block << "> atmosphere_zone_shell needs "
+                << "atmosphere_zone = true" << std::endl;
+      std::exit(EXIT_FAILURE);
     }
     // c194 (R-227 (iii)) <mhd> lagrangian_tags = N: scalars 0..N-1 are diagnostic tags (set
     // on a restart from a file without them, DynGRMHD::LagrangianTagInit), advected like
@@ -2655,6 +2710,8 @@ class PrimitiveSolverHydro {
     const bool t3a_ = zon_ && t3_on && t3_active;
     const Real t3rho_ = t3_rho, t3c0_ = t3_c[0], t3c1_ = t3_c[1], t3c2_ = t3_c[2];
     const Real t3ex2_ = 9.0*t3_r90*t3_r90;
+    const bool sh_ = zon_ && sh_on;   // the zone's mode 3 (see sh_on)
+    const Real shr2_ = sh_r*sh_r, shrho_ = sh_rho;
 
     int count_errs=0;
     // Excised-mass tally totals for THIS call, reduced deterministically alongside
@@ -2929,16 +2986,21 @@ class PrimitiveSolverHydro {
                                  k >= ks && k <= ke_);
           const Real rho0 = prim_pt[PRH]*mb;
           if (r2 < zr2_ && interior) Kokkos::atomic_max(&zacc_(kZoneRreg), rho0);
-          // mode 1: the zone (rho reset, mass removed); mode 2: tier 3 (velocity only)
+          // mode 1: the zone (rho reset, mass removed); mode 2: tier 3 (velocity only);
+          // mode 3: the shell (see sh_on; D kept)
           int zmode = (r2 < zr2_ && rho0 < zthr_) ? 1 : 0;
           if (!zmode && t3a_ && r2 >= zr2_ && r2 < 4.0*zr2_ && rho0 < t3rho_) {
             const Real cx = xz + fgx_ - t3c0_, cy = yz + fgy_ - t3c1_, cz = zz + fgz_ - t3c2_;
             if (cx*cx + cy*cy + cz*cz > t3ex2_) zmode = 2;
           }
+          if (!zmode && sh_ && r2 >= zr2_ && r2 < shr2_ && rho0 < shrho_) {
+            const Real cx = xz + fgx_ - t3c0_, cy = yz + fgy_ - t3c1_, cz = zz + fgz_ - t3c2_;
+            if (cx*cx + cy*cy + cz*cz > t3ex2_) zmode = 3;
+          }
           zml = zmode;
           if (zmode) {
             crec = false;   // the zone resets the cell (and books it) instead
-            const int zb = (zmode == 1) ? 0 : kZoneLen;     // tally block
+            const int zb = (zmode - 1)*kZoneLen;     // tally block
             const Real al = adm.alpha(m, k, j, i);
             const Real bu[3] = {adm.beta_u(m, 0, k, j, i), adm.beta_u(m, 1, k, j, i),
                                 adm.beta_u(m, 2, k, j, i)};
@@ -2956,10 +3018,25 @@ class PrimitiveSolverHydro {
             for (int n = 0; n < NCONS; ++n) cpre[n] = cons_pt[n];
             if (zmode == 1) prim_pt[PRH] = fmin(rho0, zrst_)/mb;
             const Real f = ZoneTarget(prim_pt, bu, al, g3d, zvmax_, r2 < zhr2_);
+            if (zmode == 3) {
+              // as the ceiling: rho = D/W at the reset velocity, so D is unchanged
+              const Real us[3] = {prim_pt[PVX], prim_pt[PVY], prim_pt[PVZ]};
+              Real usd[3];
+              Primitive::LowerVector(usd, us, g3d);
+              const Real Ws = sqrt(1.0 + Primitive::Contract(us, usd));
+              prim_pt[PRH] = cpre[CDN]/(mb*Ws);
+            }
             prim_pt[PTM] = eos_.GetTemperatureFloor();
             prim_pt[PPR] = eos_.GetPressure(prim_pt[PRH], prim_pt[PTM], &prim_pt[PYF]);
             ps_.PrimToCon(prim_pt, cons_pt, b3u, g3d);
             de_write = true;
+            if (zmode == 3) {
+              // the stored mass and scalar densities stay bitwise (as the ceiling)
+              cons_pt[CDN] = cpre[CDN];
+              for (int n = 0; n < nscal; n++) cons_pt[CYD + n] = cpre[CYD + n];
+              ceil_d = !result.cons_floor && !result.cons_adjusted;
+              ceil_d0 = cons(m, IDN, k, j, i);
+            }
             if (interior) {
               const Real dv = size.d_view(m).dx1*size.d_view(m).dx2*size.d_view(m).dx3*sdetg;
               // zone: removed mass; tier 3: the modified cell's mass (none is removed)
@@ -2980,7 +3057,7 @@ class PrimitiveSolverHydro {
               Kokkos::atomic_add(&zacc_(zb + kZoneN), 1.0);
               if (f < 1.0) Kokkos::atomic_add(&zacc_(zb + kZoneNcap), 1.0);
               Kokkos::atomic_max(&zacc_(zb + kZoneRmod), rho0);
-              if (rho0 >= ((zmode == 1) ? zthr_ : t3rho_))
+              if (rho0 >= ((zmode == 1) ? zthr_ : ((zmode == 2) ? t3rho_ : shrho_)))
                 Kokkos::atomic_add(&zacc_(zb + kZoneViol), 1.0);
             }
           }

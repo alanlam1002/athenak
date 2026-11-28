@@ -20,6 +20,7 @@
 #include "radiation/radiation.hpp"
 #include "z4c/z4c.hpp"
 #include "coordinates/adm.hpp"
+#include "cfc/cfc.hpp"
 
 #if MPI_PARALLEL_ENABLED
 #include <mpi.h>
@@ -156,6 +157,10 @@ void MeshRefinement::InitRecvAMR(int nleaf) {
   if ((pmy_mesh->pmb_pack->padm != nullptr) &&
       (pmy_mesh->pmb_pack->pcfc != nullptr)) {
     ncc_tosend += (pmy_mesh->pmb_pack->padm->u_adm.extent_int(1));
+  }
+  // <cfc> solve_interval_extrap (RL-045): the held residual's rate u_hdot moves with the mesh
+  if ((pmy_mesh->pmb_pack->pcfc != nullptr) && (pmy_mesh->pmb_pack->pcfc->si_extrap_ > 0)) {
+    ncc_tosend += cfc::CFC::kSiH;
   }
 
   // Step 2. (InitRecvAMR)
@@ -414,6 +419,10 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
       (pmy_mesh->pmb_pack->pcfc != nullptr)) {
     ncc_tosend += (pmy_mesh->pmb_pack->padm->u_adm.extent_int(1));
   }
+  // <cfc> solve_interval_extrap (RL-045): the held residual's rate u_hdot moves with the mesh
+  if ((pmy_mesh->pmb_pack->pcfc != nullptr) && (pmy_mesh->pmb_pack->pcfc->si_extrap_ > 0)) {
+    ncc_tosend += cfc::CFC::kSiH;
+  }
 
   // Step 2. (PackAndSendAMR)
   // loop over old MBs on this rank, initialize send buffer metadata
@@ -562,6 +571,10 @@ void MeshRefinement::PackAndSendAMR(int nleaf) {
   if (padm_needs_transfer) {
     PackAMRBuffersCC(padm->u_adm, padm->coarse_u_adm, ncc_sent, nfc_sent);
     ncc_sent += padm->u_adm.extent_int(1);
+  }
+  if ((pcfc != nullptr) && (pcfc->si_extrap_ > 0)) {   // RL-045: u_hdot
+    PackAMRBuffersCC(pcfc->u_hdot, pcfc->coarse_u_hdot, ncc_sent, nfc_sent);
+    ncc_sent += cfc::CFC::kSiH;
   }
 
   // Step 4. (PackAndSendAMR)
@@ -860,6 +873,10 @@ void MeshRefinement::ClearRecvAndUnpackAMR() {
   if (padm_needs_transfer) {
     UnpackAMRBuffersCC(padm->u_adm, padm->coarse_u_adm, ncc_recv, nfc_recv);
     ncc_recv += padm->u_adm.extent_int(1);
+  }
+  if ((pcfc != nullptr) && (pcfc->si_extrap_ > 0)) {   // RL-045: u_hdot
+    UnpackAMRBuffersCC(pcfc->u_hdot, pcfc->coarse_u_hdot, ncc_recv, nfc_recv);
+    ncc_recv += cfc::CFC::kSiH;
   }
 #endif
   return;

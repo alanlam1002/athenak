@@ -1,7 +1,19 @@
-# PRODUCTION BINARY (user 2026-11-21): GPU, proj/tde 91e2d361 (cfc/si-refill/cadence merge + cfc_opt A/R + K-020 guard),
-#   home_builds/athenak_tde/athena_tde_prod_gpu_91e2d361 (sha256 ed74767a; copy of build_gpu_pe2626_ptde_mgA/src/athena).
-#   At this deck's settings (solve_interval = 0, no refill/guard keys) it is bitwise with the previous proj/tde binary
-#   on GPU (c281 G0 vs GO, this deck with tlim 200 / max_nmb_per_rank 700 / dediag_3d; C-244), -9% CPU time.
+# PRODUCTION SETTINGS (user 2026-11-25, R-278 addendum items 1/2 + C-270c/C-270d): proj/tde 4179dab4 (= 3c9ce856 + wip/zone-shell),
+#   home_builds/athenak_tde/athena_tde_prod_gpu_4179dab4 (sha256 d567caf0; the c305 gate binary, src == wip/zone-shell 89302597;
+#   default off bitwise with c290/new on GPU, c305 GD). Changes in this deck: the coarse hole (amr_level_bh 3 and the puncture seed
+#   box at level 3: dx 1/4 instead of 1/16; C-264/C-267/C-268), CFC mg_threshold = mg_poisson_threshold = 1e-10 (C-270c: removes
+#   the coarse hole's core heating; ~+20% per cycle), and atmosphere_zone_shell on (R_c 12.0, 1e-14 rho_c; C-270b/d). The coarse
+#   hole must be re-refined before the first return (C-264's design; not implemented yet). Tested at P18; P10 untested.
+# PRODUCTION BINARY (user 2026-11-24, R-278 addendum item 5: merge wip/init-solve, init_mg_max_vcycles = 200 in new decks):
+#   GPU, proj/tde 3c9ce856 (= 49890a15 + wip/init-solve c69af373; src tree identical to c69af373), home_builds/athenak_tde/
+#   athena_tde_prod_gpu_3c9ce856 (sha256 7d2daa3a; copy of build_gpu_pe2626_ptde_init/src/athena, the c293 gate binary).
+#   Default (40) bitwise with 49890a15 on GPU: c293 GD vs c290 new, 2 hst + 45 dumps, 0 differ. init_mg_max_vcycles below
+#   NEEDS proj/tde >= 3c9ce856: an older binary ignores it silently. Previous production binary:
+# PRODUCTION BINARY (user 2026-11-22, "merge wip/r273 into proj/tde and rebuild the production binary"): GPU, proj/tde
+#   49890a15 (= 925698c2 + R-273 items 3, 7b, 9, 4 + the restart-header fix), home_builds/athenak_tde/
+#   athena_tde_prod_gpu_49890a15 (sha256 c28a1887; copy of build_gpu_pe2626_ptde_prod49/src/athena). On this deck it is
+#   bitwise with the previous production binary 925698c2 (769ee982) on GPU: c290 job 9117881, 40 cycles, 2 hst + 45 dumps,
+#   0 differ, MGLOG identical. The atm_ceiling keys below NEED proj/tde >= 925698c2: an older binary ignores them silently.
 # proj/tde production deck rp18 (P18): c134_pilots/P18_r82/parfile.par + the R-223 production settings (C-187)
 # D2 (R-140 item 2, user-approved 2026-10-26): the +-64 vs +-128 box check. P128 = c110_2x2/CD.par (rp10, comoving,
 # production DE, L4-equivalent, base8 6ea832af, GPU IPC off) with the box doubled to +-128: root nx unchanged (128),
@@ -127,7 +139,7 @@ method = user           # dispatches to TDERefineTracker (dyngr_tov.cpp), enroll
 # (R_*=0.677) would sit under-resolved (same reasoning as cfc_tde_wd_imbh_amr.
 # athinput). TDERefineTracker maintains/moves both boxes thereafter.
 <refined_region1>
-level = 5  # D2 (was 4): puncture, fixed at the origin
+level = 3  # coarse hole (user 2026-11-25; was 5 = dx 1/16): puncture seed box at dx 1/4
 x1min = -84.0
 x1max = -80.0
 x2min = -2.0
@@ -189,6 +201,12 @@ dexcise     = 1.0e-24   # = <mhd> dfloor
 texcise     = 1.0e-22   # = <mhd> tfloor
 
 <mhd>
+atm_ceiling = true               # R-270/R-271 (user 2026-11-22; tests C-253..C-255): cells with rho < 100 dfloor
+atm_ceiling_factor = 100.0       #   (absolute band) reset to a cold atmosphere at grid rest; D kept bitwise; ATMCEIL ledger
+atm_ceiling_K = 1.2346626297e-2  #   P = max(P(rho, tfloor), K rho^Gamma), K = the star's adiabat K0 (B.1)
+atm_ceiling_vmax = 0.9           #   grid-rest velocity cap (as atmosphere_zone_vmax)
+atm_ceiling_alarm_mass = 1.0e-11 #   ATMCEIL_ALARM when the mass in [1, 1e3) x the threshold exceeds this (~1.3e-7 M*;
+                                 #   post-disruption atmosphere alone is ~4e-14 there, C-255)
 mass_closure = true          # R-114 MCLOSE: itemized rest-mass closure per segment (needs proj/tde >= 4e3bbf20)
 mass_closure_mstar = 7.5e-5   # M* in code units (R-114: 1e-10 M* = 7.5e-15)
 mass_closure_tol = 1.0e-10    # pass: |R| <= tol M* per segment
@@ -236,6 +254,9 @@ atmosphere_zone_radius = 6   # min(6, 0.5 r_p)
 atmosphere_zone_rho = 3.24e-14    # 1e-10 rho_c
 atmosphere_zone_vmax = 0.9
 atmosphere_zone_tier3 = true      # R-058 §3 rule (R-063 §3); tier3_rho default 1e-16 rho_c
+atmosphere_zone_shell = true      # R-278 item 2 (user 2026-11-25): zone mode 3, cold grid-rest reset with D kept
+atmosphere_zone_shell_radius = 12.0  # r_s <= r < R_c (<= r_p - 3 R*)
+atmosphere_zone_shell_rho = 3.24e-18   # 1e-14 rho_c
 mass_ledger = true   # R-076 item 6: closure row (<= 1e-10 M* per segment)
 
 <adm>
@@ -251,12 +272,13 @@ mg_regrid_threshold = 1.0e-7
 mg_log = 1                # MGLOG per solve
 init_verbose = true
 init_omega   = 1.0
+init_mg_max_vcycles = 200  # R-278 item 5 / C-261: InitializeMetric MG cap (default 40); fresh starts only, restarts never call it
 # Same production-validated CFC solver settings as the parent fixture (see its
 # header for the full measurement trail): mg_threshold/mg_poisson_threshold=1e-8,
 # mg_poisson_mporder=2, mg_npresmooth/npostsmooth=2, mg_norm=rms (R3). Unrelated to
 # the velocity boost -- accuracy of these settings is independent of star_vel_x2.
-mg_threshold   = 1.0e-8
-mg_poisson_threshold = 1.0e-8
+mg_threshold   = 1.0e-10   # C-270c (user 2026-11-25; was 1e-8)
+mg_poisson_threshold = 1.0e-10   # C-270c (user 2026-11-25; was 1e-8)
 mg_poisson_mporder = 2
 mg_npresmooth  = 2
 mg_npostsmooth = 2
@@ -315,7 +337,7 @@ amr_condition   = tde_track   # enrolls TDERefineTracker -- THE feature this
                                 # fixture exists to test.
 amr_radius_bh   = 2.0          # fine box around the fixed puncture
 amr_density_frac = 1.0e-2      # debris region: rho > amr_density_frac*rho_max
-amr_level_bh = 5   # D2 (was 4): finest dx 1/16 unchanged
+amr_level_bh = 3   # coarse hole (user 2026-11-25; was 5): dx 1/4 around the puncture (C-268, C-270c)
 amr_level_debris = 5   # D2 (was 4)
 amr_pin_level = 1   # c133 (R-145 item 2): dx 1 pinned over |x_i| < 64
 amr_pin_box = 64.0

@@ -123,7 +123,7 @@ nx3  = 16
 
 <mesh_refinement>
 refinement          = adaptive  # was static -- see header note on the SetNeighbors risk
-max_nmb_per_rank    = 300
+max_nmb_per_rank    = 700   # C-296: L32T's (C-202: 2.6 GB + 54 MiB x 700 = 40 GB/tile); 300 (L32Q, to C1 only) stopped c327 at t = 766 (310/rank)
 num_levels          = 7         # D2: +1 level (finest dx 1/16 unchanged)
 refinement_interval = 1
 ncycle_check        = 1         # check every cycle -- the star moves far less than

@@ -218,8 +218,9 @@ class Z4c {
     // Value of chi to specify the excision region for constraint evaluation
     Real excise_chi;
     // Cartoon: mode (derived from the coord, D-014), Kreiss-Oliger dissipation in the
-    // Cartoon direction (SACRA-2D has none), and the number of Lagrange interpolation
-    // points (2ng+1, chat/0004).
+    // Cartoon direction (<z4c> cartoon_ydiss, default false as in SACRA-2D; M2d T6 found
+    // true changes the results by ~0.2x the truncation error, D-027), and the number of
+    // Lagrange interpolation points (2ng+1, chat/0004).
     CartoonMode cartoon;
     bool cartoon_ydiss;
     int cartoon_npt;

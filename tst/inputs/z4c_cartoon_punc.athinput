@@ -64,7 +64,8 @@ num_horizons = 1
 ntheta = 16             # nphi = 2*ntheta (chat/0016)
 lmax = 8
 use_puncture_0 = -1
-initial_radius_0 = 0.6  # r_h = M/2 at t = 0
+initial_radius_0 = 0.6  # r_h = M/2 at t = 0. At dx = M/8 (r_h = 4 cells) the t = 0 search
+                        # fails for ng = 3, 4 (NaN row) and succeeds from 0.5M: resolution
 center_x_0 = 0.0        # mesh coordinates; under Cartoon the center is on mesh x2
 center_y_0 = 0.0
 center_z_0 = 0.0
